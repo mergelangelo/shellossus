@@ -444,11 +444,15 @@ function Format-ByteSize {
     param([long]$Bytes)
     if ($Bytes -lt 1024) { return "${Bytes}B" }
     if ($Bytes -lt 1048576) {
-        $kb = [int](($Bytes * 10 + 512) / 1024)
-        return ('{0}.{1}KB' -f [int]($kb / 10), ($kb % 10))
+        $kb = [int](($Bytes * 10) / 1024)
+        $frac = $kb % 10
+        $whole = ($kb - $frac) / 10
+        return "${whole}.${frac}KB"
     }
-    $mb = [int](($Bytes * 10 + 524288) / 1048576)
-    return ('{0}.{1}MB' -f [int]($mb / 10), ($mb % 10))
+    $mb = [int](($Bytes * 10) / 1048576)
+    $fracMb = $mb % 10
+    $wholeMb = ($mb - $fracMb) / 10
+    return "${wholeMb}.${fracMb}MB"
 }
 
 function Invoke-TruncateLine {
