@@ -118,6 +118,7 @@ function Format-MarkdownTable {
 
 function Write-AgentReply {
     param([string]$Content)
+    if ($script:OutputMode -eq 'json') { return }
     Write-Host ("`n" + $script:Gm.BoldGreen + 'H: ' + $script:Gm.Reset) -NoNewline
     $inCode = $false
     $first = $true
@@ -184,7 +185,7 @@ function Write-AgentReply {
 
 function Write-AgentReasoning {
     param([string]$Text)
-    if (-not $Text -or $script:ShowReasoning -eq 'hide') { return }
+    if (-not $Text -or $script:ShowReasoning -eq 'hide' -or $script:OutputMode -eq 'json') { return }
     $lines = @($Text.Trim() -split "`r?`n")
     if ($script:ShowReasoning -eq 'full' -or $lines.Count -le 3) {
         Write-Host ("`n" + $script:Gm.Grey0 + '  [reasoning]' + $script:Gm.Reset)

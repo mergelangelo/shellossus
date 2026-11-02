@@ -581,13 +581,145 @@ try {
     $htmlContent = Get-Content -LiteralPath $exportedHtml -Raw -Encoding UTF8
     Assert-True ($htmlContent.Contains('<!DOCTYPE html>') -and $htmlContent.Contains('Branch A reply')) 'Export-AgentSessionHtml failed.'
 
+    # Regression 1: Session tree preserves context compaction when switching to current leaf.
+    function Invoke-WebRequest {
+        param($Uri, $Method, $Headers, $ContentType, $Body, $TimeoutSec, $ErrorAction, [switch]$UseBasicParsing, $OutFile)
+        $resp = @{ choices = @(@{ finish_reason = 'stop'; message = @{ content = '## Goal`nCompacted goal summary' } }) } | ConvertTo-Json -Depth 10 -Compress
+        Set-Content -LiteralPath $OutFile -Value $resp -Encoding UTF8 -NoNewline
+    }
+    $compTreeState = @{
+        session_id = 'sess-comp-tree'
+        workspace = $workspacePath
+        model = 'test-model'
+        messages = @(
+            @{ role = 'system'; content = 'sys' },
+            @{ role = 'user'; content = 'old user 1' },
+            @{ role = 'assistant'; content = 'old assistant 1' },
+            @{ role = 'user'; content = 'recent user 2' },
+            @{ role = 'assistant'; content = 'recent assistant 2' }
+        )
+    }
+    Ensure-SessionTree -State $compTreeState
+    $compOk = Invoke-AgentCompact -State $compTreeState -Endpoint 'https://example.invalid/v1/chat/completions' -ModelId 'test-model' -ApiKey 'fake' -KeepRecent 2
+    Assert-True ($compOk -and $compTreeState.messages[1].content.StartsWith('[Compacted Conversation Summary]')) 'Compaction before tree switch failed.'
+    $leafAfterCompact = $compTreeState.leaf_id
+    $lastMsgIdAfterCompact = $compTreeState.messages[-1].id
+    Switch-SessionBranch -State $compTreeState -TargetId $leafAfterCompact | Out-Null
+    Assert-True ($compTreeState.messages.Count -eq 4 -and $compTreeState.messages[1].content.StartsWith('[Compacted Conversation Summary]')) 'Switch-SessionBranch to leaf_id lost compaction summary.'
+    Switch-SessionBranch -State $compTreeState -TargetId $lastMsgIdAfterCompact | Out-Null
+    Assert-True ($compTreeState.messages.Count -eq 4 -and $compTreeState.messages[1].content.StartsWith('[Compacted Conversation Summary]')) 'Switch-SessionBranch to last message id lost compaction summary.'
+    $compSessFile = Join-Path $treeSessionDir 'comp-tree.jsonl'
+    Save-AgentSession -SessionFile $compSessFile -State $compTreeState -Workspace $workspacePath -Model 'test-model'
+    $resumedCompState = @{ session_id = ''; workspace = $workspacePath; model = ''; messages = @() }
+    Invoke-SessionResume -SessionFile $compSessFile -State $resumedCompState -CurrentWorkspace $workspacePath | Out-Null
+    Switch-SessionBranch -State $resumedCompState -TargetId $resumedCompState.leaf_id | Out-Null
+    Assert-True ($resumedCompState.messages.Count -eq 4 -and $resumedCompState.messages[1].content.StartsWith('[Compacted Conversation Summary]')) 'Resumed session lost compaction summary after Switch-SessionBranch.'
+
+    # Regression 2: /tree and /fork reject switching to an unfinished tool_calls message.
+    $tcTreeState = @{
+        session_id = 'sess-tc-bound'
+        workspace = $workspacePath
+        model = 'test-model'
+        messages = @(
+            @{ role = 'system'; content = 'sys' },
+            @{ role = 'user'; content = 'list files please' },
+            @{ role = 'assistant'; content = ''; tool_calls = @(@{ id = 'tc_1'; type = 'function'; function = @{ name = 'list_files'; arguments = '{"path":"."}' } }) },
+            @{ role = 'tool'; tool_call_id = 'tc_1'; content = '{"entries":[]}' },
+            @{ role = 'assistant'; content = 'done listing' }
+        )
+    }
+    Ensure-SessionTree -State $tcTreeState
+    $unfinishedTcEntryId = $tcTreeState.messages[2].id
+    $completedToolEntryId = $tcTreeState.messages[3].id
+    $tcSwitchThrew = $false
+    try {
+        Switch-SessionBranch -State $tcTreeState -TargetId $unfinishedTcEntryId | Out-Null
+    }
+    catch {
+        if ($_.Exception.Message -like '*incomplete tool_calls*') { $tcSwitchThrew = $true }
+    }
+    Assert-True ($tcSwitchThrew -and $tcTreeState.messages.Count -eq 5) 'Switch-SessionBranch allowed switching to an unfinished tool_calls entry.'
+    $tcForkThrew = $false
+    try {
+        Invoke-SessionFork -State $tcTreeState -SessionDir $treeSessionDir -EntryId $unfinishedTcEntryId | Out-Null
+    }
+    catch {
+        if ($_.Exception.Message -like '*incomplete tool_calls*') { $tcForkThrew = $true }
+    }
+    Assert-True $tcForkThrew 'Invoke-SessionFork allowed forking at an unfinished tool_calls entry.'
+    Switch-SessionBranch -State $tcTreeState -TargetId $completedToolEntryId | Out-Null
+    Assert-True ($tcTreeState.messages.Count -eq 4 -and $tcTreeState.messages[-1].role -eq 'tool') 'Switch-SessionBranch failed to allow switching to completed tool result.'
+
+    # Regression 3: JSON mode (-Mode json) emits only pure JSONL without plain-text tool logs or Read-Host prompts.
+    $capturedHostLines = @()
+    function Write-Host {
+        param([Parameter(Position = 0, ValueFromRemainingArguments = $true)]$Object, [switch]$NoNewline, $ForegroundColor, $BackgroundColor)
+        $text = ($Object | ForEach-Object { [string]$_ }) -join ' '
+        $script:capturedHostLines += $text
+    }
+    $script:OutputMode = 'json'
+    try {
+        $script:capturedHostLines = @()
+        $jsonListCall = @{ id = 'j-list'; function = @{ name = 'list_files'; arguments = '{"path":"."}' } }
+        $jsonListRes = Invoke-AgentTool -Root $workspacePath -Call $jsonListCall | ConvertFrom-Json
+        Assert-True ($null -ne $jsonListRes.entries -and $script:capturedHostLines.Count -eq 0) 'Invoke-AgentTool emitted plain-text Write-Host output in JSON mode.'
+        $script:AgentPermission = 'Ask'
+        $jsonWriteCall = @{ id = 'j-write'; function = @{ name = 'write_file'; arguments = '{"path":"json-blocked.txt","content":"x"}' } }
+        $jsonWriteRes = Invoke-AgentTool -Root $workspacePath -Call $jsonWriteCall | ConvertFrom-Json
+        Assert-True ($jsonWriteRes.status -eq 'cancelled' -and $script:capturedHostLines.Count -eq 0) 'write_file in Ask+JSON mode did not cancel cleanly or emitted plain text.'
+        $script:turnStep = 0
+        function Invoke-WebRequest {
+            param($Uri, $Method, $Headers, $ContentType, $Body, $TimeoutSec, $ErrorAction, [switch]$UseBasicParsing, $OutFile)
+            $script:turnStep++
+            if ($script:turnStep -eq 1) {
+                $r = @{ choices = @(@{ finish_reason = 'tool_calls'; message = @{
+                    content = ''
+                    tool_calls = @(@{ id = 'jtc1'; type = 'function'; function = @{ name = 'list_files'; arguments = '{"path":"."}' } })
+                } }) } | ConvertTo-Json -Depth 10 -Compress
+            }
+            else {
+                $r = @{ choices = @(@{ finish_reason = 'stop'; message = @{ content = 'JSON turn complete.' } }) } | ConvertTo-Json -Depth 10 -Compress
+            }
+            Set-Content -LiteralPath $OutFile -Value $r -Encoding UTF8 -NoNewline
+        }
+        $script:capturedHostLines = @()
+        $jsonTurnState = @{ messages = @(@{ role = 'system'; content = 'sys' }, @{ role = 'user'; content = 'go' }) }
+        Invoke-AgentTurn -State $jsonTurnState -Endpoint 'https://example.invalid/v1/chat/completions' -ModelId 'test-model' -ApiKey 'fake' -Root $workspacePath -Steps 4
+        Assert-True ($script:capturedHostLines.Count -ge 4) 'Invoke-AgentTurn emitted no JSON events in JSON mode.'
+        foreach ($jLine in $script:capturedHostLines) {
+            $parsedEv = $jLine | ConvertFrom-Json -ErrorAction Stop
+            Assert-True ([bool]$parsedEv.type) "Non-JSON event line emitted in JSON mode: $jLine"
+        }
+    }
+    finally {
+        $script:OutputMode = 'text'
+        Remove-Item Function:\Write-Host -ErrorAction SilentlyContinue
+    }
+
+    # Regression 4: Parent directory .gitignore rules apply when searching from a child directory (path = "a/b").
+    $dirA = Join-Path $workspacePath 'a'
+    $dirAB = Join-Path $dirA 'b'
+    New-Item -ItemType Directory -Path $dirAB -Force | Out-Null
+    Set-Content -LiteralPath (Join-Path $dirA '.gitignore') -Value '*.log' -Encoding UTF8
+    Set-Content -LiteralPath (Join-Path $dirAB 'private.log') -Value 'secret log token' -Encoding UTF8
+    Set-Content -LiteralPath (Join-Path $dirAB 'keep.txt') -Value 'public log token' -Encoding UTF8
+    $findSubCall = @{ id = 'f-sub'; function = @{ name = 'find_files'; arguments = '{"path":"a/b","pattern":"*"}' } }
+    $findSubRes = Invoke-AgentTool -Root $workspacePath -Call $findSubCall | ConvertFrom-Json
+    $findSubPaths = @($findSubRes.matches | ForEach-Object { $_.path })
+    Assert-True (($findSubPaths -contains 'a/b/keep.txt') -and (-not ($findSubPaths -contains 'a/b/private.log'))) 'Parent directory .gitignore was ignored when find_files started in a/b.'
+    $grepSubCall = @{ id = 'g-sub'; function = @{ name = 'grep_files'; arguments = '{"path":"a/b","pattern":"token"}' } }
+    $grepSubRes = Invoke-AgentTool -Root $workspacePath -Call $grepSubCall | ConvertFrom-Json
+    $grepSubPaths = @($grepSubRes.matches | ForEach-Object { $_.path })
+    Assert-True (($grepSubPaths -contains 'a/b/keep.txt') -and (-not ($grepSubPaths -contains 'a/b/private.log'))) 'Parent directory .gitignore was ignored when grep_files started in a/b.'
+
     # Truncated model response (finish_reason=length) is rejected before accepting message or running tools.
-    function Invoke-RestMethod {
-        param($Uri, $Method, $Headers, $ContentType, $Body, $TimeoutSec, $ErrorAction)
-        return @{ choices = @(@{ finish_reason = 'length'; message = @{
+    function Invoke-WebRequest {
+        param($Uri, $Method, $Headers, $ContentType, $Body, $TimeoutSec, $ErrorAction, [switch]$UseBasicParsing, $OutFile)
+        $resp = @{ choices = @(@{ finish_reason = 'length'; message = @{
             content = 'Partial reply...'
             tool_calls = @(@{ id = 'bad'; type = 'function'; function = @{ name = 'write_file'; arguments = '{"path":"should-not-exist.txt","content":"x"}' } })
-        } }) }
+        } }) } | ConvertTo-Json -Depth 10 -Compress
+        Set-Content -LiteralPath $OutFile -Value $resp -Encoding UTF8 -NoNewline
     }
     $truncState = @{ messages = @(@{ role = 'user'; content = 'Hi' }) }
     $lengthThrew = $false
@@ -688,6 +820,11 @@ try {
     Assert-True ($clTrunc.truncated -and $clTrunc.content -eq "a`nb") 'ConstrainedLanguage Invoke-TruncateHead failed.'
     $clTreeNodes = @(Get-SessionTree -State $reloadedTreeState)
     Assert-True ($clTreeNodes.Count -eq 3) 'ConstrainedLanguage Get-SessionTree failed.'
+    Switch-SessionBranch -State $resumedCompState -TargetId $resumedCompState.leaf_id | Out-Null
+    Assert-True ($resumedCompState.messages[1].content.StartsWith('[Compacted Conversation Summary]')) 'ConstrainedLanguage compaction branch switch failed.'
+    $clFindSub = Invoke-AgentTool -Root $workspacePath -Call $findSubCall | ConvertFrom-Json
+    $clFindPaths = @($clFindSub.matches | ForEach-Object { $_.path })
+    Assert-True (($clFindPaths -contains 'a/b/keep.txt') -and (-not ($clFindPaths -contains 'a/b/private.log'))) 'ConstrainedLanguage parent .gitignore in find_files failed.'
     $clHtmlPath = Join-Path $testRoot 'cl-export.html'
     $null = Export-AgentSessionHtml -State $reloadedTreeState -OutputPath $clHtmlPath
     Assert-True (Test-Path -LiteralPath $clHtmlPath) 'ConstrainedLanguage Export-AgentSessionHtml failed.'
