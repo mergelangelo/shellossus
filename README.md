@@ -1,7 +1,9 @@
-# h-agent
+# h-agent — Zero Dependencies. One Script. Full Agent Power.
+### 100% Native PowerShell Agent for Windows PowerShell 5.1+
 
-Minimalist terminal coding agent for **Windows PowerShell 5.1+** and any OpenAI-compatible Chat Completions API.
-Zero external dependencies: no Python, no Node.js, no Bash, no PowerShell Gallery modules. Designed to run in standard desktops as well as restricted enterprise / Citrix / VDI environments (including PowerShell `ConstrainedLanguage` mode).
+**No Python. No Node.js. No external modules or binaries.** While other agents demand heavy runtimes, `h-agent` runs out of the box on every Windows machine.
+
+Drop a single `.ps1` file onto any Windows desktop or server and connect to any OpenAI-compatible API (cloud, local Ollama/vLLM, or internal corporate gateway).
 
 ## Key Features
 
