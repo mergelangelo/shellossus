@@ -83,6 +83,7 @@ h-agent -Prompt "Explain @src/Tools.ps1" # Single-shot non-interactive mode
 
 ```text
 .
+├── CONSTITUTION.md     # Foundational principles, architectural laws, and invariants
 ├── h-agent.ps1         # Standalone single-file distribution (built from src/*.ps1)
 ├── build.ps1           # Bundler and sync verifier (.\build.ps1 / .\build.ps1 -Check)
 ├── install.ps1         # PowerShell profile launcher installer
@@ -93,7 +94,8 @@ h-agent -Prompt "Explain @src/Tools.ps1" # Single-shot non-interactive mode
 │   ├── Context.ps1     # System prompt builder, skills, templates, sessions, compaction
 │   └── Cli.ps1         # Agent turn loop, retry/overflow recovery, interactive REPL
 ├── tests/
-│   └── smoke.ps1       # Automated test suite (includes ConstrainedLanguage checks)
+│   ├── smoke.ps1       # Test runner (.\build.ps1 -Check + all *.Tests.ps1 suites)
+│   └── *.Tests.ps1     # Modular suites (Config, Theme, Tools, Context, Cli, ConstrainedLanguage)
 ├── docs/
 │   ├── architecture.md # Internal design, module boundaries, and build pipeline
 │   ├── security.md     # Permission model, workspace isolation, and enterprise notes
@@ -112,6 +114,7 @@ Edit modular files under [`src/`](src/), rebuild [`h-agent.ps1`](h-agent.ps1), a
 
 ## Documentation
 
+- [The Constitution of `h-agent`](CONSTITUTION.md)
 - [Architecture & Build Pipeline](docs/architecture.md)
 - [Security, Permissions & Enterprise Guide](docs/security.md)
 - [Customization: AGENTS.md, Skills & Prompt Templates](docs/customization.md)
