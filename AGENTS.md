@@ -1,5 +1,6 @@
 # Repository Guidelines for Coding Agents
 
+0. **Supreme Law:** Read and uphold [`CONSTITUTION.md`](CONSTITUTION.md) before proposing or implementing any change.
 1. **Target Runtime:** Windows PowerShell 5.1 and PowerShell `ConstrainedLanguage` mode.
    - Do not use external modules or binaries.
    - Avoid `.NET` static method invocations or object method calls that are blocked in `ConstrainedLanguage` (prefer native PowerShell operators and built-in cmdlets).
