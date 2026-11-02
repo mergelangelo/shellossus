@@ -120,6 +120,246 @@ try {
     }
     Assert-True ($compactLengthThrew -and $compactTruncState.messages.Count -eq 5) 'Invoke-AgentCompact accepted a truncated summary with finish_reason=length.'
 
+    # MaxSteps default (50), step limit tracking, /continue (Invoke-AgentContinue), and mid-turn auto-compaction.
+    Assert-True ($MaxSteps -eq 50) "Expected default MaxSteps=50, got $MaxSteps."
+    $emptyContState = @{ messages = @(@{ role = 'system'; content = 'sys' }) }
+    Assert-True (-not (Invoke-AgentContinue -State $emptyContState -Endpoint 'https://example.invalid/v1/chat/completions' -ModelId 'test-model' -ApiKey 'fake' -Root $workspacePath -Steps 2)) 'Invoke-AgentContinue should return false when there is no conversation to continue.'
+
+    $script:contTurnStep = 0
+    function Invoke-WebRequest {
+        param($Uri, $Method, $Headers, $ContentType, $Body, $TimeoutSec, $ErrorAction, [switch]$UseBasicParsing, $OutFile)
+        $script:contTurnStep++
+        if ($script:contTurnStep -le 2) {
+            $limVal = $script:contTurnStep * 10
+            $resp = @{ choices = @(@{ finish_reason = 'tool_calls'; message = @{
+                content = ''
+                tool_calls = @(@{ id = "ct-$($script:contTurnStep)"; type = 'function'; function = @{ name = 'list_files'; arguments = "{`"path`":`".`",`"limit`":$limVal}" } })
+            } }) } | ConvertTo-Json -Depth 10 -Compress
+        }
+        else {
+            $resp = @{ choices = @(@{ finish_reason = 'stop'; message = @{ content = 'Continued and finished.' } }) } | ConvertTo-Json -Depth 10 -Compress
+        }
+        Set-Content -LiteralPath $OutFile -Value $resp -Encoding UTF8 -NoNewline
+    }
+    $contState = @{ messages = @(@{ role = 'system'; content = 'sys' }, @{ role = 'user'; content = 'Multi-step task' }) }
+    Invoke-AgentTurn -State $contState -Endpoint 'https://example.invalid/v1/chat/completions' -ModelId 'test-model' -ApiKey 'fake' -Root $workspacePath -Steps 2
+    Assert-True ([bool]$contState.step_limit_reached) 'Expected step_limit_reached=true after hitting step limit.'
+    Assert-True ($contState.messages[-1].role -eq 'tool') 'Expected last message to be tool output when step limit is reached.'
+    $contRes = Invoke-AgentContinue -State $contState -Endpoint 'https://example.invalid/v1/chat/completions' -ModelId 'test-model' -ApiKey 'fake' -Root $workspacePath -Steps 2
+    Assert-True ($contRes -and (-not $contState.step_limit_reached) -and $contState.messages[-1].content -eq 'Continued and finished.') 'Invoke-AgentContinue failed to resume after step limit.'
+    $userMsgCount = @($contState.messages | Where-Object { $_.role -eq 'user' }).Count
+    Assert-True ($userMsgCount -eq 1) 'Invoke-AgentContinue after tool_calls should not inject a redundant user message.'
+
+    # Invoke-AgentContinue after an assistant stop message appends 'Continue.' user prompt.
+    $contRes2 = Invoke-AgentContinue -State $contState -Endpoint 'https://example.invalid/v1/chat/completions' -ModelId 'test-model' -ApiKey 'fake' -Root $workspacePath -Steps 2
+    $userMsgsAfter = @($contState.messages | Where-Object { $_.role -eq 'user' })
+    Assert-True ($contRes2 -and $userMsgsAfter.Count -eq 2 -and $userMsgsAfter[-1].content -eq 'Continue.') 'Invoke-AgentContinue after assistant stop should append Continue. user prompt.'
+
+    # Mid-turn proactive auto-compaction when context exceeds 60k chars across steps.
+    $bigFiller = 'X' * 32000
+    $midCompactState = @{
+        messages = @(
+            @{ role = 'system'; content = 'sys' },
+            @{ role = 'user'; content = $bigFiller },
+            @{ role = 'assistant'; content = $bigFiller },
+            @{ role = 'user'; content = 'run step' }
+        )
+    }
+    $script:midStepReq = 0
+    function Invoke-WebRequest {
+        param($Uri, $Method, $Headers, $ContentType, $Body, $TimeoutSec, $ErrorAction, [switch]$UseBasicParsing, $OutFile)
+        $script:midStepReq++
+        $parsedBody = $Body | ConvertFrom-Json
+        if ($parsedBody.messages[0].content -like '*context compaction assistant*') {
+            $resp = @{ choices = @(@{ finish_reason = 'stop'; message = @{ content = "## Goal`nMid-turn compacted." } }) } | ConvertTo-Json -Depth 10 -Compress
+        }
+        elseif ($script:midStepReq -eq 1) {
+            $resp = @{ choices = @(@{ finish_reason = 'tool_calls'; message = @{
+                content = ''
+                tool_calls = @(@{ id = 'mc-1'; type = 'function'; function = @{ name = 'list_files'; arguments = '{"path":"."}' } })
+            } }) } | ConvertTo-Json -Depth 10 -Compress
+        }
+        else {
+            $resp = @{ choices = @(@{ finish_reason = 'stop'; message = @{ content = 'Done after mid-turn compact.' } }) } | ConvertTo-Json -Depth 10 -Compress
+        }
+        Set-Content -LiteralPath $OutFile -Value $resp -Encoding UTF8 -NoNewline
+    }
+    Invoke-AgentTurn -State $midCompactState -Endpoint 'https://example.invalid/v1/chat/completions' -ModelId 'test-model' -ApiKey 'fake' -Root $workspacePath -Steps 3
+    Assert-True ($midCompactState.messages[1].content.StartsWith('[Compacted Conversation Summary]') -and $midCompactState.messages[-1].content -eq 'Done after mid-turn compact.') 'Mid-turn proactive auto-compaction did not trigger inside Invoke-AgentTurn.'
+
+    # Live waiting spinner/timer (Wait-AgentProcessWithSpinner) in text mode vs silent in JSON mode.
+    $script:spinnerLines = @()
+    $script:fakeProc = @{ Id = 0; HasExited = $false; ExitCode = 0 }
+    $script:sleepCount = 0
+    function Write-Host {
+        param([Parameter(Position = 0, ValueFromRemainingArguments = $true)]$Object, [switch]$NoNewline, $ForegroundColor, $BackgroundColor)
+        $text = ($Object | ForEach-Object { [string]$_ }) -join ' '
+        $script:spinnerLines += $text
+    }
+    function Start-Sleep {
+        param($Seconds, $Milliseconds)
+        $script:sleepCount++
+        if ($script:sleepCount -ge 2) { $script:fakeProc.HasExited = $true }
+    }
+    try {
+        $script:OutputMode = 'text'
+        Wait-AgentProcessWithSpinner -Process $script:fakeProc -StatusLabel '[step 1/50] Waiting for test-model' -TimeoutSec 30 -PollMs 10
+        Assert-True ($script:spinnerLines.Count -ge 3) 'Expected spinner frames and clear line in text mode.'
+        Assert-True ([bool]($script:spinnerLines | Where-Object { $_ -like '*Waiting for test-model*' })) 'Spinner did not render status label.'
+        Assert-True ($script:spinnerLines[-1] -match '^\r +\r$') 'Spinner did not clear status line upon completion.'
+
+        $script:spinnerLines = @()
+        $script:sleepCount = 0
+        $script:fakeProc.HasExited = $false
+        $script:OutputMode = 'json'
+        Wait-AgentProcessWithSpinner -Process $script:fakeProc -StatusLabel '[step 1/50] Waiting for test-model' -TimeoutSec 30 -PollMs 10
+        Assert-True ($script:spinnerLines.Count -eq 0) 'Wait-AgentProcessWithSpinner emitted output in JSON mode.'
+    }
+    finally {
+        $script:OutputMode = 'text'
+        Remove-Item Function:\Write-Host -ErrorAction SilentlyContinue
+        Remove-Item Function:\Start-Sleep -ErrorAction SilentlyContinue
+    }
+
+    # Scenario: AutoEdit -> ReadOnly -> Ask synchronization, diagnostics, and real write preview/confirmation in Ask.
+    $script:Diagnostics = $true
+    $script:AgentPermission = 'AutoEdit'
+    $modeSwitchState = @{
+        messages = @(
+            @{ role = 'system'; content = (Build-SystemPrompt -Root $workspacePath -ConfigDir '') }
+        )
+    }
+    $script:modeStep = 0
+    $script:capturedPayloads = @()
+    function Invoke-WebRequest {
+        param($Uri, $Method, $Headers, $ContentType, $Body, $TimeoutSec, $ErrorAction, [switch]$UseBasicParsing, $OutFile)
+        $script:modeStep++
+        $parsed = $Body | ConvertFrom-Json
+        $script:capturedPayloads += $parsed
+        if ($script:modeStep -eq 1) {
+            $resp = @{ choices = @(@{ finish_reason = 'tool_calls'; message = @{
+                content = ''
+                tool_calls = @(@{ id = 'ae-w1'; type = 'function'; function = @{ name = 'write_file'; arguments = '{"path":"mode-test.txt","content":"v1-autoedit","overwrite":true}' } })
+            } }) } | ConvertTo-Json -Depth 10 -Compress
+        }
+        elseif ($script:modeStep -eq 2) {
+            $resp = @{ choices = @(@{ finish_reason = 'stop'; message = @{ content = 'Wrote mode-test.txt in AutoEdit.' } }) } | ConvertTo-Json -Depth 10 -Compress
+        }
+        elseif ($script:modeStep -eq 3) {
+            $resp = @{ choices = @(@{ finish_reason = 'stop'; message = @{ content = 'Cannot modify files in ReadOnly mode.' } }) } | ConvertTo-Json -Depth 10 -Compress
+        }
+        elseif ($script:modeStep -eq 4) {
+            $resp = @{ choices = @(@{ finish_reason = 'tool_calls'; message = @{
+                content = ''
+                tool_calls = @(@{ id = 'ask-w1'; type = 'function'; function = @{ name = 'write_file'; arguments = '{"path":"mode-test.txt","content":"v2-ask-confirmed","overwrite":true}' } })
+            } }) } | ConvertTo-Json -Depth 10 -Compress
+        }
+        else {
+            $resp = @{ choices = @(@{ finish_reason = 'stop'; message = @{ content = 'Updated mode-test.txt after WRITE confirmation.' } }) } | ConvertTo-Json -Depth 10 -Compress
+        }
+        Set-Content -LiteralPath $OutFile -Value $resp -Encoding UTF8 -NoNewline
+    }
+    function Read-Host {
+        param($Prompt)
+        return 'WRITE'
+    }
+    try {
+        # 1. AutoEdit turn writes file without confirmation.
+        $modeSwitchState.messages += @{ role = 'user'; content = 'Create mode-test.txt' }
+        Invoke-AgentTurn -State $modeSwitchState -Endpoint 'https://example.invalid/v1/chat/completions' -ModelId 'test-model' -ApiKey 'fake' -Root $workspacePath -Steps 4
+        Assert-True ((Get-Content -LiteralPath (Join-Path $workspacePath 'mode-test.txt') -Raw -Encoding UTF8) -eq 'v1-autoedit') 'AutoEdit write failed.'
+        Assert-True ($modeSwitchState.last_diagnostics.permission -eq 'AutoEdit' -and ($modeSwitchState.last_diagnostics.tools -contains 'write_file')) 'Diagnostics did not record AutoEdit capabilities.'
+
+        # 2. Switch to ReadOnly: tools and system prompt must exclude write_file/edit_file/run_command.
+        $script:AgentPermission = 'ReadOnly'
+        Sync-AgentCapabilities -State $modeSwitchState -RecordTransition | Out-Null
+        $modeSwitchState.messages += @{ role = 'user'; content = 'Update mode-test.txt in ReadOnly' }
+        Invoke-AgentTurn -State $modeSwitchState -Endpoint 'https://example.invalid/v1/chat/completions' -ModelId 'test-model' -ApiKey 'fake' -Root $workspacePath -Steps 4
+        $roPayload = $script:capturedPayloads[2]
+        $roToolNames = @($roPayload.tools | ForEach-Object { $_.function.name })
+        Assert-True ($roToolNames.Count -eq 4 -and ($roToolNames -notcontains 'write_file') -and $roPayload.messages[0].content.Contains('Permission mode: ReadOnly.')) 'ReadOnly turn payload was out of sync with active permission.'
+
+        # 3. Switch to Ask: write_file is restored, transition notice replaces ReadOnly notice, and real write with WRITE confirmation succeeds.
+        $script:AgentPermission = 'Ask'
+        Sync-AgentCapabilities -State $modeSwitchState -RecordTransition | Out-Null
+        $modeSwitchState.messages += @{ role = 'user'; content = 'Now update mode-test.txt in Ask mode' }
+        Invoke-AgentTurn -State $modeSwitchState -Endpoint 'https://example.invalid/v1/chat/completions' -ModelId 'test-model' -ApiKey 'fake' -Root $workspacePath -Steps 4
+        $askPayload = $script:capturedPayloads[3]
+        $askToolNames = @($askPayload.tools | ForEach-Object { $_.function.name })
+        $capNoticesInAsk = @($askPayload.messages | Where-Object { $_.role -eq 'user' -and $_.content -like '[Capability State Change]*' })
+        Assert-True (($askToolNames -contains 'write_file') -and $askPayload.messages[0].content.Contains('Permission mode: Ask.') -and $capNoticesInAsk.Count -eq 1 -and $capNoticesInAsk[0].content.Contains('Permission mode is now Ask.')) 'Ask turn payload did not synchronize tools, system prompt, or single transition notice.'
+        Assert-True ((Get-Content -LiteralPath (Join-Path $workspacePath 'mode-test.txt') -Raw -Encoding UTF8) -eq 'v2-ask-confirmed') 'Ask mode turn did not perform real confirmed write.'
+    }
+    finally {
+        $script:Diagnostics = $false
+        $script:AgentPermission = 'Ask'
+        Remove-Item Function:\Read-Host -ErrorAction SilentlyContinue
+    }
+
+    # Repetition / loop detector:
+    # (a) Read -> Edit -> Read is allowed because edit mutates workspace state.
+    $script:AgentPermission = 'AutoEdit'
+    Set-Content -LiteralPath (Join-Path $workspacePath 'loop-check.txt') -Value 'before' -Encoding UTF8 -NoNewline
+    $script:rerStep = 0
+    function Invoke-WebRequest {
+        param($Uri, $Method, $Headers, $ContentType, $Body, $TimeoutSec, $ErrorAction, [switch]$UseBasicParsing, $OutFile)
+        $script:rerStep++
+        if ($script:rerStep -eq 1) {
+            $resp = @{ choices = @(@{ finish_reason = 'tool_calls'; message = @{
+                content = ''
+                tool_calls = @(@{ id = 'r1'; type = 'function'; function = @{ name = 'read_file'; arguments = '{"path":"loop-check.txt"}' } })
+            } }) } | ConvertTo-Json -Depth 10 -Compress
+        }
+        elseif ($script:rerStep -eq 2) {
+            $resp = @{ choices = @(@{ finish_reason = 'tool_calls'; message = @{
+                content = ''
+                tool_calls = @(@{ id = 'e1'; type = 'function'; function = @{ name = 'edit_file'; arguments = '{"path":"loop-check.txt","old_text":"before","new_text":"after"}' } })
+            } }) } | ConvertTo-Json -Depth 10 -Compress
+        }
+        elseif ($script:rerStep -eq 3) {
+            $resp = @{ choices = @(@{ finish_reason = 'tool_calls'; message = @{
+                content = ''
+                tool_calls = @(@{ id = 'r2'; type = 'function'; function = @{ name = 'read_file'; arguments = '{"path":"loop-check.txt"}' } })
+            } }) } | ConvertTo-Json -Depth 10 -Compress
+        }
+        else {
+            $resp = @{ choices = @(@{ finish_reason = 'stop'; message = @{ content = 'Read-Edit-Read completed.' } }) } | ConvertTo-Json -Depth 10 -Compress
+        }
+        Set-Content -LiteralPath $OutFile -Value $resp -Encoding UTF8 -NoNewline
+    }
+    $rerState = @{ messages = @(@{ role = 'system'; content = 'sys' }, @{ role = 'user'; content = 'edit and verify' }) }
+    Invoke-AgentTurn -State $rerState -Endpoint 'https://example.invalid/v1/chat/completions' -ModelId 'test-model' -ApiKey 'fake' -Root $workspacePath -Steps 6 -MaxRepeatCalls 2
+    Assert-True ((-not $rerState.loop_detected) -and $rerState.messages[-1].content -eq 'Read-Edit-Read completed.') 'Read after edit was falsely flagged as a loop.'
+
+    # (b) Repeated identical calls without state change warn first, then stop turn cleanly while preserving earlier edits.
+    $script:loopStep = 0
+    function Invoke-WebRequest {
+        param($Uri, $Method, $Headers, $ContentType, $Body, $TimeoutSec, $ErrorAction, [switch]$UseBasicParsing, $OutFile)
+        $script:loopStep++
+        if ($script:loopStep -eq 1) {
+            $resp = @{ choices = @(@{ finish_reason = 'tool_calls'; message = @{
+                content = ''
+                tool_calls = @(@{ id = 'lw-1'; type = 'function'; function = @{ name = 'write_file'; arguments = '{"path":"preserved-edit.txt","content":"keep-me","overwrite":true}' } })
+            } }) } | ConvertTo-Json -Depth 10 -Compress
+        }
+        else {
+            $resp = @{ choices = @(@{ finish_reason = 'tool_calls'; message = @{
+                content = ''
+                tool_calls = @(@{ id = "lr-$($script:loopStep)"; type = 'function'; function = @{ name = 'read_file'; arguments = '{"path":"loop-check.txt"}' } })
+            } }) } | ConvertTo-Json -Depth 10 -Compress
+        }
+        Set-Content -LiteralPath $OutFile -Value $resp -Encoding UTF8 -NoNewline
+    }
+    $loopState = @{ messages = @(@{ role = 'system'; content = 'sys' }, @{ role = 'user'; content = 'loop test' }) }
+    Invoke-AgentTurn -State $loopState -Endpoint 'https://example.invalid/v1/chat/completions' -ModelId 'test-model' -ApiKey 'fake' -Root $workspacePath -Steps 10
+    Assert-True ([bool]$loopState.loop_detected -and $loopState.repeated_tool -eq 'read_file') 'Repetition detector did not stop identical tool loop.'
+    Assert-True ($script:loopStep -eq 5) "Expected loop to stop on 4th identical read_file call (step 5 total with default MaxRepeatCalls=3), got $($script:loopStep)."
+    $toolOutputs = @($loopState.messages | Where-Object { $_.role -eq 'tool' } | ForEach-Object { $_.content | ConvertFrom-Json })
+    Assert-True ($toolOutputs[3].status -eq 'repeated_call_warning' -and $toolOutputs[4].status -eq 'loop_detected') 'Expected repeated_call_warning on 3rd identical call followed by loop_detected on 4th.'
+    Assert-True ((Test-Path -LiteralPath (Join-Path $workspacePath 'preserved-edit.txt')) -and ((Get-Content -LiteralPath (Join-Path $workspacePath 'preserved-edit.txt') -Raw -Encoding UTF8) -eq 'keep-me')) 'Earlier completed write in turn was lost when loop stopped.'
+    Assert-True (Test-ValidConversationBoundary -Messages $loopState.messages) 'Conversation boundary invalid after loop stop.'
+    $script:AgentPermission = 'Ask'
+
     # Installer: first install, reinstall, shortcuts, conflict detection (alias, function, executable),
     # profile preservation & backup, h-agent block migration, and paths with spaces + argument forwarding.
     $profileFile = Join-Path $testRoot 'profile.ps1'

@@ -18,7 +18,8 @@ param(
     [string]$Model = $env:SHELLOSSUS_MODEL,
     [string]$Workspace = '.',
     [string]$ConfigPath = "$env:USERPROFILE\.shellossus\.env",
-    [int]$MaxSteps = 8,
+    [int]$MaxSteps = 50,
+    [int]$MaxRepeatCalls = 3,
     [string]$Permission = 'Ask',
     [string]$ReasoningEffort = '',
     [string]$Prompt = '',
@@ -36,6 +37,7 @@ param(
     [switch]$NoPromptTemplates,
     [switch]$NoContextFiles,
     [switch]$HideReasoning,
+    [switch]$Diagnostics,
     [switch]$Continue,
     [switch]$Setup,
     [switch]$LibraryOnly

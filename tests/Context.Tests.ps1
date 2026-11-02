@@ -219,6 +219,34 @@ try {
     Assert-True $tcForkThrew 'Invoke-SessionFork allowed forking at an unfinished tool_calls entry.'
     Switch-SessionBranch -State $tcTreeState -TargetId $completedToolEntryId | Out-Null
     Assert-True ($tcTreeState.messages.Count -eq 4 -and $tcTreeState.messages[-1].role -eq 'tool') 'Switch-SessionBranch failed to allow switching to completed tool result.'
+
+    # Dynamic <capabilities> block in Build-SystemPrompt and Sync-AgentCapabilities across mode switches without notice bloat.
+    $script:AgentPermission = 'ReadOnly'
+    $roSys = Build-SystemPrompt -Root $workspacePath -ConfigDir ''
+    Assert-True ($roSys.Contains('Permission mode: ReadOnly.') -and $roSys.Contains('Available tools: list_files, read_file, find_files, grep_files.') -and $roSys.Contains('File modification and shell execution are unavailable.')) 'Build-SystemPrompt in ReadOnly mode did not render expected dynamic <capabilities> block.'
+    Assert-True ($roSys.Contains('Environment: OS=') -and $roSys.Contains('Command shell (run_command):') -and $roSys.Contains('Get-Command') -and $roSys.Contains($workspacePath)) 'Build-SystemPrompt missing environment, run_command shell, workspace, or Get-Command guidance.'
+    Assert-True (-not $roSys.Contains('Available tools: list_files, read_file, find_files, grep_files, write_file')) 'ReadOnly system prompt listed write_file as available.'
+
+    $script:AgentPermission = 'AutoEdit'
+    $syncState = @{
+        workspace = $workspacePath
+        messages = @(
+            @{ role = 'system'; content = (Build-SystemPrompt -Root $workspacePath -ConfigDir '') },
+            @{ role = 'user'; content = 'Write file' },
+            @{ role = 'assistant'; content = 'Wrote file in AutoEdit.' }
+        )
+    }
+    $script:AgentPermission = 'ReadOnly'
+    $sync1 = Sync-AgentCapabilities -State $syncState -RecordTransition
+    Assert-True ($sync1.prompt_updated -and $sync1.consistent -and $syncState.messages[0].content.Contains('Permission mode: ReadOnly.')) 'Sync-AgentCapabilities did not update system prompt to ReadOnly.'
+    $notices1 = @($syncState.messages | Where-Object { $_.role -eq 'user' -and $_.content -like '[Capability State Change]*' })
+    Assert-True ($notices1.Count -eq 1 -and $notices1[0].content.Contains('Permission mode is now ReadOnly.')) 'Expected exactly one capability transition notice after switching to ReadOnly.'
+
+    $script:AgentPermission = 'Ask'
+    $sync2 = Sync-AgentCapabilities -State $syncState -RecordTransition
+    $notices2 = @($syncState.messages | Where-Object { $_.role -eq 'user' -and $_.content -like '[Capability State Change]*' })
+    Assert-True ($sync2.prompt_updated -and $sync2.consistent -and $syncState.messages[0].content.Contains('Permission mode: Ask.') -and $notices2.Count -eq 1 -and $notices2[0].content.Contains('Permission mode is now Ask.')) 'Repeated permission changes accumulated multiple capability notices or failed to update to Ask.'
+    Assert-True ($compTreeState.messages[0].content.Contains('<capabilities>') -and $compTreeState.messages[0].content.Contains('Get-Command') -and $resumedCompState.messages[0].content.Contains('<capabilities>')) 'Capabilities and environment block was not preserved across compaction and session resume.'
 }
 finally {
     Remove-TestEnvironment -Env $envData

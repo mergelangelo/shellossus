@@ -336,7 +336,24 @@ try {
     $script:EnabledTools = @('read', 'grep')
     $filteredTools = @(Get-AgentTools)
     Assert-True ($filteredTools.Count -eq 2) 'Tool filtering via $script:EnabledTools failed.'
+    $capFiltered = Get-AgentCapabilities
+    Assert-True ($capFiltered.tool_names.Count -eq 2 -and ($capFiltered.tool_names -join ',') -eq 'read_file,grep_files' -and (-not $capFiltered.can_write) -and (-not $capFiltered.can_exec)) 'Get-AgentCapabilities did not reflect $script:EnabledTools.'
     $script:EnabledTools = @()
+    $script:AgentPermission = 'ReadOnly'
+    $capRo = Get-AgentCapabilities
+    Assert-True ($capRo.permission -eq 'ReadOnly' -and $capRo.tool_names.Count -eq 4 -and (-not $capRo.can_write) -and (-not $capRo.can_exec)) 'Get-AgentCapabilities in ReadOnly mode failed.'
+    $script:AgentPermission = 'AutoEdit'
+    $capAe = Get-AgentCapabilities
+    Assert-True ($capAe.permission -eq 'AutoEdit' -and $capAe.can_write -and (-not $capAe.write_requires_confirmation) -and $capAe.exec_requires_confirmation) 'Get-AgentCapabilities in AutoEdit mode failed.'
+    $script:NoTools = $true
+    $capNoTools = Get-AgentCapabilities
+    Assert-True ($capNoTools.no_tools -and $capNoTools.tool_names.Count -eq 0 -and $capNoTools.tools.Count -eq 0) 'Get-AgentCapabilities with $script:NoTools failed.'
+    $script:NoTools = $false
+    $script:AgentPermission = 'Ask'
+    $envInfo = Get-AgentEnvironment -Root $workspacePath
+    Assert-True ([bool]$envInfo.os -and [bool]$envInfo.ps_version -and ($envInfo.shell_exe -in @('powershell', 'pwsh')) -and [bool]$envInfo.shell_version -and $envInfo.workspace -eq (Get-Item -LiteralPath $workspacePath -Force).FullName) 'Get-AgentEnvironment did not return expected OS, PowerShell, shell, and workspace metadata.'
+    $capWithEnv = Get-AgentCapabilities -Root $workspacePath
+    Assert-True ($capWithEnv.environment.shell_exe -eq $envInfo.shell_exe -and $capWithEnv.environment.workspace -eq $envInfo.workspace) 'Get-AgentCapabilities did not include environment metadata.'
 
     $ignoreTestDir = Join-Path $workspacePath 'igtest'
     New-Item -ItemType Directory -Path (Join-Path $ignoreTestDir 'build') -Force | Out-Null
@@ -372,6 +389,27 @@ try {
     $grepSubRes = Invoke-AgentTool -Root $workspacePath -Call $grepSubCall | ConvertFrom-Json
     $grepSubPaths = @($grepSubRes.matches | ForEach-Object { $_.path })
     Assert-True (($grepSubPaths -contains 'a/b/keep.txt') -and (-not ($grepSubPaths -contains 'a/b/private.log'))) 'Parent directory .gitignore was ignored when grep_files started in a/b.'
+
+    # Combined regex segments (Compress-IgnoreRules) and directory pruning before entry (.venv / build).
+    $pruneDir = Join-Path $workspacePath 'prunetest'
+    $venvSub = Join-Path (Join-Path $pruneDir '.venv') 'lib\site-packages\pkg'
+    $srcSub = Join-Path $pruneDir 'src'
+    New-Item -ItemType Directory -Path $venvSub -Force | Out-Null
+    New-Item -ItemType Directory -Path $srcSub -Force | Out-Null
+    Set-Content -LiteralPath (Join-Path $pruneDir '.gitignore') -Value @('.venv/', '*.tmp', '*.bak') -Encoding UTF8
+    Set-Content -LiteralPath (Join-Path (Join-Path $pruneDir '.venv') '.gitignore') -Value '!leaked.py' -Encoding UTF8
+    Set-Content -LiteralPath (Join-Path $venvSub 'leaked.py') -Value 'PRUNE_TOKEN_123' -Encoding UTF8
+    Set-Content -LiteralPath (Join-Path $srcSub 'app.py') -Value 'PRUNE_TOKEN_123' -Encoding UTF8
+    Set-Content -LiteralPath (Join-Path $srcSub 'scratch.tmp') -Value 'PRUNE_TOKEN_123' -Encoding UTF8
+    $compressedRules = @(Get-WorkspaceIgnoreRules -Root $pruneDir -SearchPath $pruneDir)
+    Assert-True ($compressedRules.Count -eq 1 -and $compressedRules[0].combined -eq $true) 'Positive-only .gitignore rules should be compressed into a single combined regex segment.'
+    $pruneFindCall = @{ id = 'p-find'; function = @{ name = 'find_files'; arguments = '{"path":"prunetest","pattern":"*.py"}' } }
+    $pruneFindRes = Invoke-AgentTool -Root $workspacePath -Call $pruneFindCall | ConvertFrom-Json
+    Assert-True ($pruneFindRes.count -eq 1 -and $pruneFindRes.files[0].relative_path -eq 'src/app.py') 'Pruned directory .venv was entered during find_files.'
+    $pruneGrepCall = @{ id = 'p-grep'; function = @{ name = 'grep_files'; arguments = '{"path":"prunetest","pattern":"PRUNE_TOKEN_123"}' } }
+    $pruneGrepRes = Invoke-AgentTool -Root $workspacePath -Call $pruneGrepCall | ConvertFrom-Json
+    Assert-True ($pruneGrepRes.matches.Count -eq 1 -and $pruneGrepRes.matches[0].file -eq 'src/app.py') 'Pruned directory .venv or ignored .tmp file was scanned during grep_files.'
+    Remove-Item -LiteralPath $pruneDir -Recurse -Force
 }
 finally {
     Remove-TestEnvironment -Env $envData
