@@ -31,6 +31,12 @@ try {
     $result = Invoke-AgentTool -Root $workspacePath -Call $call | ConvertFrom-Json
     Assert-True $result.truncated 'Long file was not marked truncated.'
     Assert-True (($result.text -split "`n").Count -eq 300) 'Line limit failed.'
+    $call.function.arguments = '{"path":"long.txt","start_line":301}'
+    $result = Invoke-AgentTool -Root $workspacePath -Call $call | ConvertFrom-Json
+    Assert-True (-not $result.truncated) 'Tail read should not be marked truncated.'
+    Assert-True ($result.start_line -eq 301) 'start_line was not returned.'
+    $tailLines = @($result.text -split "`n")
+    Assert-True ($tailLines.Count -eq 50 -and $tailLines[0] -eq '301' -and $tailLines[-1] -eq '350') 'start_line offset read failed.'
 
     # Config is parsed as data; embedded PowerShell expressions stay literal.
     $configPath = Join-Path $testRoot '.env'
@@ -50,6 +56,22 @@ try {
     $call.function.arguments = '{"path":".env"}'
     $result = Invoke-AgentTool -Root $workspacePath -Call $call | ConvertFrom-Json
     Assert-True ([bool]$result.error) 'Agent must not read .env.'
+    $customCfg = Join-Path $workspacePath 'custom.cfg'
+    Set-Content -LiteralPath $customCfg -Value 'H_AGENT_API_KEY="secret"' -Encoding UTF8
+    $script:AgentConfigPath = Format-ConfigPath -Path (Join-Path $workspacePath '.\custom.cfg')
+    $call.function.arguments = '{"path":"custom.cfg"}'
+    $result = Invoke-AgentTool -Root $workspacePath -Call $call | ConvertFrom-Json
+    Assert-True ($result.error -like '*credential*') 'Agent must not read custom ConfigPath.'
+
+    Set-Content -LiteralPath (Join-Path $workspacePath '.gitignore') -Value '*.log' -Encoding UTF8
+    Set-Content -LiteralPath (Join-Path $workspacePath '.env.example') -Value 'H_AGENT_MODEL=""' -Encoding UTF8
+    $call.function.name = 'list_files'
+    $call.function.arguments = '{"path":"."}'
+    $listing = Invoke-AgentTool -Root $workspacePath -Call $call | ConvertFrom-Json
+    Assert-True ($listing.entries.Name -contains '.gitignore') 'list_files missed .gitignore.'
+    Assert-True ($listing.entries.Name -contains '.env.example') 'list_files missed .env.example.'
+    Assert-True ($listing.entries.Name -notcontains '.env') 'list_files exposed .env.'
+    Assert-True ($listing.entries.Name -notcontains 'custom.cfg') 'list_files exposed custom ConfigPath.'
 
     $script:approval = ''
     $script:prompts = 0
@@ -72,6 +94,13 @@ try {
     $result = Invoke-AgentTool -Root $workspacePath -Call $call | ConvertFrom-Json
     Assert-True ([bool]$result.error) 'Outside write was allowed.'
     Assert-True (-not (Test-Path (Join-Path $testRoot 'escape.txt'))) 'Outside file was created.'
+    $call.function.arguments = '{"path":"../outside.txt","content":"bad"}'
+    $result = Invoke-AgentTool -Root $workspacePath -Call $call | ConvertFrom-Json
+    Assert-True ($result.error -like '*outside*') 'Existing outside file leaked existence instead of failing boundary check.'
+    $script:AgentConfigPath = Format-ConfigPath -Path (Join-Path $workspacePath '.\uncreated.cfg')
+    $call.function.arguments = '{"path":"uncreated.cfg","content":"bad"}'
+    $result = Invoke-AgentTool -Root $workspacePath -Call $call | ConvertFrom-Json
+    Assert-True ($result.error -like '*credential*') 'Agent must not write custom ConfigPath.'
     $call.function.name = 'edit_file'
     $call.function.arguments = '{"path":"created.txt","old_text":"first","new_text":"second"}'
     $result = Invoke-AgentTool -Root $workspacePath -Call $call | ConvertFrom-Json
@@ -82,6 +111,13 @@ try {
     $call.function.arguments = '{"path":"created.txt","old_text":"missing","new_text":"bad"}'
     $result = Invoke-AgentTool -Root $workspacePath -Call $call | ConvertFrom-Json
     Assert-True ([bool]$result.error) 'Missing edit match was accepted.'
+    Set-Content -LiteralPath (Join-Path $workspacePath 'crlf.txt') -Value "line1`r`nline2`r`nline3" -Encoding UTF8 -NoNewline
+    $call.function.arguments = '{"path":"crlf.txt","old_text":"line1\nline2","new_text":"row1\nrow2"}'
+    $result = Invoke-AgentTool -Root $workspacePath -Call $call | ConvertFrom-Json
+    Assert-True ($result.status -eq 'written') 'Multi-line CRLF edit failed.'
+    Remove-Item -LiteralPath $result.backup -Force
+    $crlfAfter = Get-Content -LiteralPath (Join-Path $workspacePath 'crlf.txt') -Raw -Encoding UTF8
+    Assert-True ($crlfAfter -eq "row1`r`nrow2`r`nline3") 'CRLF line endings were not preserved after edit.'
 
     # Exercise the agent/tool/API round trip without any network or real key.
     $script:requests = 0
@@ -127,12 +163,18 @@ try {
     # Reload the implementation in ConstrainedLanguage and repeat file reading.
     $ExecutionContext.SessionState.LanguageMode = 'ConstrainedLanguage'
     . "$PSScriptRoot\..\h-agent.ps1" -LibraryOnly
-    $call = @{ id = 'cl'; function = @{ name = 'read_file'; arguments = '{"path":"hello.txt"}' } }
+    $call = @{ id = 'cl'; function = @{ name = 'read_file'; arguments = '{"path":"long.txt","start_line":301}' } }
     $result = Invoke-AgentTool -Root $workspacePath -Call $call | ConvertFrom-Json
-    Assert-True ($result.text -eq 'hello') 'ConstrainedLanguage file read failed.'
+    Assert-True ($result.start_line -eq 301 -and (-not $result.truncated)) 'ConstrainedLanguage file read failed.'
     $call = @{ id = 'cl-write'; function = @{ name = 'write_file'; arguments = '{"path":"constrained.txt","content":"ok"}' } }
     $result = Invoke-AgentTool -Root $workspacePath -Call $call | ConvertFrom-Json
     Assert-True ($result.status -eq 'written') 'ConstrainedLanguage creation failed.'
+    $call = @{ id = 'cl-edit'; function = @{ name = 'edit_file'; arguments = '{"path":"crlf.txt","old_text":"row2\nline3","new_text":"row2\nrow3"}' } }
+    $result = Invoke-AgentTool -Root $workspacePath -Call $call | ConvertFrom-Json
+    Assert-True ($result.status -eq 'written') 'ConstrainedLanguage CRLF edit failed.'
+    Remove-Item -LiteralPath $result.backup -Force
+    $errText = Format-AgentError -ErrorRecord @{ Exception = @{ Message = 'HTTP 400' }; ErrorDetails = @{ Message = '{"error":{"message":"Bad model"}}' } }
+    Assert-True ($errText -eq 'HTTP 400 (Bad model)') 'ConstrainedLanguage error formatting failed.'
     Save-AgentConfig -Path $configPath -Config $loadedConfig
     $constrainedConfig = Read-AgentConfig -Path $configPath
     Assert-True ($constrainedConfig.H_AGENT_API_KEY -eq $loadedConfig.H_AGENT_API_KEY) 'ConstrainedLanguage config roundtrip failed.'
