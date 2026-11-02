@@ -1,13 +1,13 @@
 # Customization Guide
 
-`h-agent` supports project-level and user-level customization: project instructions (`AGENTS.md`, `CLAUDE.md`), system prompt overrides (`SYSTEM.md` / `APPEND_SYSTEM.md`), domain skills (`SKILL.md`), and reusable prompt templates (`/template`).
+`shellossus` supports project-level and user-level customization: project instructions (`AGENTS.md`, `CLAUDE.md`), system prompt overrides (`SYSTEM.md` / `APPEND_SYSTEM.md`), domain skills (`SKILL.md`), and reusable prompt templates (`/template`).
 
 ---
 
 ## 1. Project Instructions (`AGENTS.md`)
 
-`h-agent` automatically loads `AGENTS.md` from:
-1. `%USERPROFILE%\.h-agent\AGENTS.md` (global user rules)
+`shellossus` automatically loads `AGENTS.md` from:
+1. `%USERPROFILE%\.shellossus\AGENTS.md` (global user rules)
 2. `<workspace>\AGENTS.md` (project-specific rules)
 
 Use `AGENTS.md` to document coding conventions, build/test commands, database dialects, or architecture constraints.
@@ -17,17 +17,17 @@ Use `AGENTS.md` to document coding conventions, build/test commands, database di
 ## 2. System Prompt Overrides (`SYSTEM.md` & `APPEND_SYSTEM.md`)
 
 - **Replace the base system prompt (`SYSTEM.md`):**
-  Place a `SYSTEM.md` file in `<workspace>\.h-agent\SYSTEM.md` or `%USERPROFILE%\.h-agent\SYSTEM.md`.
+  Place a `SYSTEM.md` file in `<workspace>\.shellossus\SYSTEM.md` or `%USERPROFILE%\.shellossus\SYSTEM.md`.
 - **Append to the system prompt (`APPEND_SYSTEM.md`):**
-  Place an `APPEND_SYSTEM.md` file in `%USERPROFILE%\.h-agent\APPEND_SYSTEM.md` or `<workspace>\.h-agent\APPEND_SYSTEM.md`. Both global and workspace append files are combined in order.
+  Place an `APPEND_SYSTEM.md` file in `%USERPROFILE%\.shellossus\APPEND_SYSTEM.md` or `<workspace>\.shellossus\APPEND_SYSTEM.md`. Both global and workspace append files are combined in order.
 
 ---
 
 ## 3. Domain Skills (`skills/*/SKILL.md`)
 
-Skills let you package specialized domain instructions (e.g., SQL optimization rules, internal API conventions, PowerShell 5.1 constraints) without bloating every prompt. At startup, `h-agent` scans:
-- `%USERPROFILE%\.h-agent\skills\*\SKILL.md` (global skills)
-- `<workspace>\.h-agent\skills\*\SKILL.md` (workspace hidden skills)
+Skills let you package specialized domain instructions (e.g., SQL optimization rules, internal API conventions, PowerShell 5.1 constraints) without bloating every prompt. At startup, `shellossus` scans:
+- `%USERPROFILE%\.shellossus\skills\*\SKILL.md` (global skills)
+- `<workspace>\.shellossus\skills\*\SKILL.md` (workspace hidden skills)
 - `<workspace>\skills\*\SKILL.md` (workspace skills)
 
 Only the skill's `name`, `description`, and path are injected into the system prompt catalog. When a task matches a skill, the model reads the full `SKILL.md` on demand using `read_file`.
@@ -48,14 +48,14 @@ See [`examples/skills/powershell-51/SKILL.md`](../examples/skills/powershell-51/
 
 ---
 
-## 4. Prompt Templates (`.h-agent/prompts/*.md`)
+## 4. Prompt Templates (`.shellossus/prompts/*.md`)
 
-Create Markdown files in `<workspace>\.h-agent\prompts\<name>.md` or `%USERPROFILE%\.h-agent\prompts\<name>.md` to define reusable slash commands.
+Create Markdown files in `<workspace>\.shellossus\prompts\<name>.md` or `%USERPROFILE%\.shellossus\prompts\<name>.md` to define reusable slash commands.
 
 - Invoke a template in interactive mode or via `-Prompt` by typing `/<name> [arguments]`.
 - If the template contains `$ARGUMENTS`, it is replaced with the arguments passed after `/<name>`. Otherwise, arguments are appended to the end of the template.
 
-Example `.h-agent/prompts/review.md`:
+Example `.shellossus/prompts/review.md`:
 
 ```markdown
 Review the following files for bugs, edge cases, and security issues:

@@ -14,10 +14,10 @@ $modules = @(
 
 $header = @'
 param(
-    [string]$BaseUrl = $env:H_AGENT_BASE_URL,
-    [string]$Model = $env:H_AGENT_MODEL,
+    [string]$BaseUrl = $env:SHELLOSSUS_BASE_URL,
+    [string]$Model = $env:SHELLOSSUS_MODEL,
     [string]$Workspace = '.',
-    [string]$ConfigPath = "$env:USERPROFILE\.h-agent\.env",
+    [string]$ConfigPath = "$env:USERPROFILE\.shellossus\.env",
     [int]$MaxSteps = 8,
     [string]$Permission = 'Ask',
     [string]$ReasoningEffort = '',
@@ -57,7 +57,7 @@ foreach ($mod in $modules) {
 }
 
 $assembled = ($parts -join "`n`n") + "`n"
-$targetPath = Join-Path $PSScriptRoot 'h-agent.ps1'
+$targetPath = Join-Path $PSScriptRoot 'shellossus.ps1'
 
 if ($Check) {
     if (-not (Test-Path -LiteralPath $targetPath)) {
@@ -65,9 +65,9 @@ if ($Check) {
     }
     $existing = (Get-Content -LiteralPath $targetPath -Raw -Encoding UTF8 -ErrorAction Stop).Replace("`r`n", "`n")
     if ($existing -cne $assembled) {
-        throw 'h-agent.ps1 is out of sync with src/*.ps1. Run .\build.ps1 to regenerate.'
+        throw 'shellossus.ps1 is out of sync with src/*.ps1. Run .\build.ps1 to regenerate.'
     }
-    Write-Host 'build.ps1 -Check passed: h-agent.ps1 matches src/*.ps1.'
+    Write-Host 'build.ps1 -Check passed: shellossus.ps1 matches src/*.ps1.'
     return
 }
 

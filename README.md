@@ -1,7 +1,7 @@
 # Zero Dependencies. One Script. Full Agent Power.
 ### 100% Native PowerShell Agent for Windows PowerShell 5.1+
 
-**No Python. No Node.js. No external modules or binaries.** While other agents demand heavy runtimes, `h-agent` runs out of the box on every Windows machine.
+**No Python. No Node.js. No external modules or binaries.** While other agents demand heavy runtimes, `shellossus` runs out of the box on every Windows machine.
 
 Drop a single `.ps1` file onto any Windows desktop or server and connect to any OpenAI-compatible API (cloud, local Ollama/vLLM, or internal corporate gateway).
 
@@ -16,37 +16,37 @@ Drop a single `.ps1` file onto any Windows desktop or server and connect to any 
 | **Smart Context Compaction** | Iterative structured handoffs (`/compact [focus]`) with cumulative `<read-files>` / `<modified-files>` tracking and automatic context-overflow recovery |
 | **Context & Extensibility** | Auto-loads `AGENTS.md`, `CLAUDE.md`, `SYSTEM.md`, `APPEND_SYSTEM.md`, `skills/*/SKILL.md` (`/skill:name`), `/<template>` prompts (`$1`, `$@`, `${1:-default}`), `@file` attachments, and `!cmd` / `!!cmd` |
 | **TrueColor Terminal UI** | `sainnhe/gruvbox-material` (dark medium) palette with Markdown headings, lists, code blocks, auto-aligned tables, collapsible `reasoning` blocks, and `-Mode json` event streaming |
-| **Enterprise & Lockdown Ready** | Pure ASCII single-script distribution (`h-agent.ps1`), NTFS junction/symlink boundary protection, `.env` secret blocking, and full `ConstrainedLanguage` mode compatibility |
+| **Enterprise & Lockdown Ready** | Pure ASCII single-script distribution (`shellossus.ps1`), NTFS junction/symlink boundary protection, `.env` secret blocking, and full `ConstrainedLanguage` mode compatibility |
 
 ## Quick Start
 
 ### 1. Install Launcher (One-Time)
 
-Clone the repository or copy [`h-agent.ps1`](h-agent.ps1) and [`install.ps1`](install.ps1) into a permanent folder (e.g. `C:\Users\YOU\Tools\h-agent`), then run:
+Clone the repository or copy [`shellossus.ps1`](shellossus.ps1) and [`install.ps1`](install.ps1) into a permanent folder (e.g. `C:\Users\YOU\Tools\shellossus`), then run:
 
 ```powershell
 .\install.ps1
 ```
 
-Open a new PowerShell window and configure your API endpoint, model ID, and key (stored in `%USERPROFILE%\.h-agent\.env`, outside your project):
+Open a new PowerShell window and configure your API endpoint, model ID, and key (stored in `%USERPROFILE%\.shellossus\.env`, outside your project):
 
 ```powershell
-h-agent -Setup
+shellossus -Setup
 ```
 
 ### 2. Run in Any Project
 
 ```powershell
 cd C:\path\to\project
-h-agent
+shellossus
 ```
 
 Common launch flags:
 
 ```powershell
-h-agent -Continue                        # Resume latest session for current workspace
-h-agent -Permission AutoEdit             # Edit files without prompting; ask before shell commands
-h-agent -Prompt "Explain @src/Tools.ps1" # Single-shot non-interactive mode
+shellossus -Continue                        # Resume latest session for current workspace
+shellossus -Permission AutoEdit             # Edit files without prompting; ask before shell commands
+shellossus -Prompt "Explain @src/Tools.ps1" # Single-shot non-interactive mode
 ```
 
 ## Interactive Commands
@@ -74,17 +74,17 @@ h-agent -Prompt "Explain @src/Tools.ps1" # Single-shot non-interactive mode
 | `/save [name]` | Save current session (optionally under a custom filename) |
 | `/new` (`/clear`) | Start a fresh session |
 | `/skill:<name> [args]` | Invoke a skill directly with arguments |
-| `/<template> [args]` | Expand a prompt template from `.h-agent/prompts/<name>.md` (`$1`, `$@`, `${1:-default}`, `${@:2}`) |
+| `/<template> [args]` | Expand a prompt template from `.shellossus/prompts/<name>.md` (`$1`, `$@`, `${1:-default}`, `${@:2}`) |
 | `@path/to/file` | Attach a workspace file inline into your prompt |
 | `!cmd` / `!!cmd` | Execute a shell command (`!` appends output to context; `!!` is local-only) |
-| `/exit` (`/quit`) | Quit `h-agent` |
+| `/exit` (`/quit`) | Quit `shellossus` |
 
 ## Repository Structure
 
 ```text
 .
 ├── CONSTITUTION.md     # Project constitution: core principles, safety guarantees, and invariants
-├── h-agent.ps1         # Standalone single-file distribution (built from src/*.ps1)
+├── shellossus.ps1      # Standalone single-file distribution (built from src/*.ps1)
 ├── build.ps1           # Bundler and sync verifier (.\build.ps1 / .\build.ps1 -Check)
 ├── install.ps1         # PowerShell profile launcher installer
 ├── src/
@@ -105,7 +105,7 @@ h-agent -Prompt "Explain @src/Tools.ps1" # Single-shot non-interactive mode
 
 ## Development & Testing
 
-Edit modular files under [`src/`](src/), rebuild [`h-agent.ps1`](h-agent.ps1), and run the smoke test suite:
+Edit modular files under [`src/`](src/), rebuild [`shellossus.ps1`](shellossus.ps1), and run the smoke test suite:
 
 ```powershell
 .\build.ps1

@@ -1,13 +1,13 @@
 # Architecture & Build Pipeline
 
-`h-agent` uses a dual-distribution architecture: developers maintain clean, modular source files in [`src/`](../src/), while [`build.ps1`](../build.ps1) bundles them into the standalone [`h-agent.ps1`](../h-agent.ps1) in the repository root. This gives contributors small, focused modules while allowing enterprise / Citrix / VDI users to copy a single zero-dependency `.ps1` file.
+`shellossus` uses a dual-distribution architecture: developers maintain clean, modular source files in [`src/`](../src/), while [`build.ps1`](../build.ps1) bundles them into the standalone [`shellossus.ps1`](../shellossus.ps1) in the repository root. This gives contributors small, focused modules while allowing enterprise / Citrix / VDI users to copy a single zero-dependency `.ps1` file.
 
 ---
 
 ## Module Breakdown
 
 ### 1. [`src/Config.ps1`](../src/Config.ps1)
-- **Configuration I/O (`Read-AgentConfig`, `Save-AgentConfig`):** Parses and writes `H_AGENT_*` key-value pairs as pure data without ever evaluating PowerShell expressions.
+- **Configuration I/O (`Read-AgentConfig`, `Save-AgentConfig`):** Parses and writes `SHELLOSSUS_*` key-value pairs as pure data without ever evaluating PowerShell expressions.
 - **Boundary & Secret Enforcement (`Resolve-AgentPath`, `Test-IsSecretFile`):**
   - Resolves workspace-relative paths against the workspace root.
   - Rejects any path outside the workspace root (with a narrow read-only exception for registered global `SKILL.md` files when `-AllowRegisteredSkill` is passed by `read_file`).
@@ -35,13 +35,13 @@
   - Checks `after_content` on disk before restoring so manual edits made by the user after an agent turn are never overwritten.
   - Preserves the backup file and throws an explicit error if restoration fails.
 - **Isolated Shell Execution (`Invoke-ShellCommand`, `Invoke-AgentCommand`):**
-  - Scrubs `H_AGENT_API_KEY` and `OPENAI_API_KEY` from the child environment.
+  - Scrubs `SHELLOSSUS_API_KEY` and `OPENAI_API_KEY` from the child environment.
   - Uses `Start-Process` with `-RedirectStandardOutput` and `-RedirectStandardError` to stream output directly to temporary disk files without buffering large outputs in RAM.
   - Enforces a configurable timeout (`Wait-Process -Timeout`, default 60s) and terminates hung processes via `Stop-Process -Force`.
 
 ### 4. [`src/Context.ps1`](../src/Context.ps1)
 - **System Prompt Assembly (`Build-SystemPrompt`, `Get-AgentsContext`, `Get-SkillsCatalog`):** Combines base instructions, `SYSTEM.md` overrides, `APPEND_SYSTEM.md` additions, `AGENTS.md` project rules, and discovered `SKILL.md` descriptors.
-- **Prompt Templates & `@file` Expansion (`Resolve-PromptTemplate`, `Expand-UserPrompt`):** Expands `/<template>` files from `.h-agent/prompts/` and attaches workspace files referenced via `@path/to/file`.
+- **Prompt Templates & `@file` Expansion (`Resolve-PromptTemplate`, `Expand-UserPrompt`):** Expands `/<template>` files from `.shellossus/prompts/` and attaches workspace files referenced via `@path/to/file`.
 - **Project-Scoped Sessions (`Save-AgentSession`, `Get-AgentSessionMeta`, `Read-AgentSession`, `Find-ProjectSession`):**
   - Writes a `session_meta` JSON header on line 1 (`version`, `id`, `workspace`, `model`, `updated_at`) followed by message records.
   - Saves atomically via a temporary file and `Move-Item -Force`.
@@ -60,8 +60,8 @@
 ## Build & Verification Pipeline
 
 1. Edit source modules in `src/*.ps1`.
-2. Run `.\build.ps1` to generate `h-agent.ps1` (pure ASCII, LF-normalized).
+2. Run `.\build.ps1` to generate `shellossus.ps1` (pure ASCII, LF-normalized).
 3. Run `.\tests\smoke.ps1`, which:
-   - Calls `.\build.ps1 -Check` to ensure `h-agent.ps1` matches `src/*.ps1`.
+   - Calls `.\build.ps1 -Check` to ensure `shellossus.ps1` matches `src/*.ps1`.
    - Executes modular test suites (`Config.Tests.ps1`, `Theme.Tests.ps1`, `Tools.Tests.ps1`, `Context.Tests.ps1`, `Cli.Tests.ps1`) with isolated temporary workspaces.
    - Runs `ConstrainedLanguage.Tests.ps1` to verify core operations under PowerShell `ConstrainedLanguage` mode.

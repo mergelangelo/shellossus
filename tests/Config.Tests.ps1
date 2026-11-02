@@ -9,14 +9,14 @@ try {
     # Config is parsed as data; embedded PowerShell expressions stay literal.
     $configPath = Join-Path $testRoot '.env'
     Save-AgentConfig -Path $configPath -Config @{
-        H_AGENT_BASE_URL = 'https://example.invalid/v1'
-        H_AGENT_MODEL = 'test-model'
-        H_AGENT_API_KEY = 'fake=key#$(throw injected)'
-        H_AGENT_WORKSPACE = 'C:\folder with spaces'
+        SHELLOSSUS_BASE_URL = 'https://example.invalid/v1'
+        SHELLOSSUS_MODEL = 'test-model'
+        SHELLOSSUS_API_KEY = 'fake=key#$(throw injected)'
+        SHELLOSSUS_WORKSPACE = 'C:\folder with spaces'
     }
     $loadedConfig = Read-AgentConfig -Path $configPath
-    Assert-True ($loadedConfig.H_AGENT_API_KEY -eq 'fake=key#$(throw injected)') 'Config value was corrupted or evaluated.'
-    Assert-True ($loadedConfig.H_AGENT_WORKSPACE -eq 'C:\folder with spaces') 'Config path changed.'
+    Assert-True ($loadedConfig.SHELLOSSUS_API_KEY -eq 'fake=key#$(throw injected)') 'Config value was corrupted or evaluated.'
+    Assert-True ($loadedConfig.SHELLOSSUS_WORKSPACE -eq 'C:\folder with spaces') 'Config path changed.'
     $absentConfig = Read-AgentConfig -Path (Join-Path $testRoot 'missing.env')
     Assert-True ($absentConfig.Count -eq 0) 'Missing config should produce empty settings.'
 
@@ -27,7 +27,7 @@ try {
     Assert-True ([bool]$result.error) 'Agent must not read .env.'
 
     $customCfg = Join-Path $workspacePath 'custom.cfg'
-    Set-Content -LiteralPath $customCfg -Value 'H_AGENT_API_KEY="secret"' -Encoding UTF8
+    Set-Content -LiteralPath $customCfg -Value 'SHELLOSSUS_API_KEY="secret"' -Encoding UTF8
     $script:AgentConfigPath = Format-ConfigPath -Path (Join-Path $workspacePath '.\custom.cfg')
     $call.function.arguments = '{"path":"custom.cfg"}'
     $result = Invoke-AgentTool -Root $workspacePath -Call $call | ConvertFrom-Json
