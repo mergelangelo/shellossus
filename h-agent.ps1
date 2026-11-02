@@ -388,6 +388,7 @@ function Get-AgentTools {
             $description = 'Read a UTF-8 text file: up to 300 lines and 20000 characters, maximum file size 1 MiB. Returns total_lines and pagination metadata.'
             $properties.start_line = @{ type = 'integer'; description = 'Optional 1-based first line to read (default 1).' }
             $properties.max_lines = @{ type = 'integer'; description = 'Optional maximum number of lines to read (1..300, default 300).' }
+            $properties.start_char = @{ type = 'integer'; description = 'Optional 1-based character offset within start_line for reading long lines (default 1).' }
         }
         @{
             type = 'function'
@@ -431,6 +432,7 @@ function Get-AgentTools {
                     case_sensitive = @{ type = 'boolean'; description = 'Set true for case-sensitive matching.' }
                     include = @{ type = 'string'; description = 'Optional file name wildcard filter, e.g. *.sql or *.ps1.' }
                     context_lines = @{ type = 'integer'; description = 'Optional surrounding context lines (0..5).' }
+                    file_offset = @{ type = 'integer'; description = 'Optional 0-based file offset to continue searching when truncated by max_files (default 0).' }
                 }
                 required = @('path', 'pattern')
             }
@@ -501,7 +503,7 @@ function Test-AgentToolArguments {
         }
         read_file = @{
             required = @('path')
-            types = @{ path = 'string'; start_line = 'integer'; max_lines = 'integer' }
+            types = @{ path = 'string'; start_line = 'integer'; max_lines = 'integer'; start_char = 'integer' }
         }
         find_files = @{
             required = @('path', 'pattern')
@@ -509,7 +511,7 @@ function Test-AgentToolArguments {
         }
         grep_files = @{
             required = @('path', 'pattern')
-            types = @{ path = 'string'; pattern = 'string'; literal = 'boolean'; case_sensitive = 'boolean'; include = 'string'; context_lines = 'integer' }
+            types = @{ path = 'string'; pattern = 'string'; literal = 'boolean'; case_sensitive = 'boolean'; include = 'string'; context_lines = 'integer'; file_offset = 'integer' }
         }
         write_file = @{
             required = @('path', 'content')
@@ -979,46 +981,69 @@ function Invoke-AgentUndo {
     if (-not $UndoEntry) { return }
     $writes = @($UndoEntry.writes)
     $preflightErrors = @()
+    $expectedByPath = @{}
     for ($i = $writes.Count - 1; $i -ge 0; $i--) {
         $w = $writes[$i]
         if (-not $w -or $w.undone) { continue }
+        $fullKey = [string]$w.full_path
+        $isLatestForPath = (-not $expectedByPath.ContainsKey($fullKey))
         if ($w.action -eq 'modified') {
             if (-not $w.backup -or -not (Test-Path -LiteralPath $w.backup)) {
                 $preflightErrors += "Backup file missing for $($w.rel_path)."
                 continue
             }
-            if (Test-Path -LiteralPath $w.full_path) {
-                $targetItem = Get-Item -LiteralPath $w.full_path -Force -ErrorAction SilentlyContinue
-                if ($targetItem -and $targetItem.PSIsContainer) {
-                    $preflightErrors += "Target path $($w.rel_path) is now a directory."
-                    continue
-                }
-                if ($null -ne $w.after_content) {
-                    $diskNow = Get-Content -LiteralPath $w.full_path -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
-                    if ($null -eq $diskNow) { $diskNow = '' }
-                    if (($diskNow -cne $w.after_content) -and ($null -eq $w.before_content -or $diskNow -cne $w.before_content)) {
-                        $preflightErrors += "File $($w.rel_path) was modified after the agent write; refusing to overwrite manual changes (backup kept at $($w.backup))."
+            if ($isLatestForPath) {
+                if (Test-Path -LiteralPath $w.full_path) {
+                    $targetItem = Get-Item -LiteralPath $w.full_path -Force -ErrorAction SilentlyContinue
+                    if ($targetItem -and $targetItem.PSIsContainer) {
+                        $preflightErrors += "Target path $($w.rel_path) is now a directory."
                         continue
+                    }
+                    if ($null -ne $w.after_content) {
+                        $diskNow = Get-Content -LiteralPath $w.full_path -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
+                        if ($null -eq $diskNow) { $diskNow = '' }
+                        if (($diskNow -cne $w.after_content) -and ($null -eq $w.before_content -or $diskNow -cne $w.before_content)) {
+                            $preflightErrors += "File $($w.rel_path) was modified after the agent write; refusing to overwrite manual changes (backup kept at $($w.backup))."
+                            continue
+                        }
                     }
                 }
             }
+            else {
+                $expectedAfter = $expectedByPath[$fullKey]
+                if ($null -ne $expectedAfter -and $null -ne $w.after_content -and ($w.after_content -cne $expectedAfter)) {
+                    $preflightErrors += "Undo chain mismatch for $($w.rel_path)."
+                    continue
+                }
+            }
+            $expectedByPath[$fullKey] = $w.before_content
         }
         elseif ($w.action -eq 'created') {
-            if (Test-Path -LiteralPath $w.full_path) {
-                $targetItem = Get-Item -LiteralPath $w.full_path -Force -ErrorAction SilentlyContinue
-                if ($targetItem -and $targetItem.PSIsContainer) {
-                    $preflightErrors += "Created path $($w.rel_path) is now a directory."
-                    continue
-                }
-                if ($null -ne $w.after_content) {
-                    $diskNow = Get-Content -LiteralPath $w.full_path -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
-                    if ($null -eq $diskNow) { $diskNow = '' }
-                    if ($diskNow -cne $w.after_content) {
-                        $preflightErrors += "Created file $($w.rel_path) was modified after creation; refusing to delete manual changes."
+            if ($isLatestForPath) {
+                if (Test-Path -LiteralPath $w.full_path) {
+                    $targetItem = Get-Item -LiteralPath $w.full_path -Force -ErrorAction SilentlyContinue
+                    if ($targetItem -and $targetItem.PSIsContainer) {
+                        $preflightErrors += "Created path $($w.rel_path) is now a directory."
                         continue
+                    }
+                    if ($null -ne $w.after_content) {
+                        $diskNow = Get-Content -LiteralPath $w.full_path -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
+                        if ($null -eq $diskNow) { $diskNow = '' }
+                        if ($diskNow -cne $w.after_content) {
+                            $preflightErrors += "Created file $($w.rel_path) was modified after creation; refusing to delete manual changes."
+                            continue
+                        }
                     }
                 }
             }
+            else {
+                $expectedAfter = $expectedByPath[$fullKey]
+                if ($null -ne $expectedAfter -and $null -ne $w.after_content -and ($w.after_content -cne $expectedAfter)) {
+                    $preflightErrors += "Undo chain mismatch for $($w.rel_path)."
+                    continue
+                }
+            }
+            $expectedByPath[$fullKey] = $null
         }
     }
     if ($preflightErrors.Count -gt 0) {
@@ -1116,30 +1141,38 @@ function Invoke-AgentTool {
                 $ctxLines = [int]$arguments.context_lines
                 if ($ctxLines -lt 0 -or $ctxLines -gt 5) { throw 'context_lines must be between 0 and 5.' }
             }
-            $targetFiles = @()
+            $fileOffset = 0
+            if ($null -ne $arguments.file_offset) {
+                $fileOffset = [int]$arguments.file_offset
+                if ($fileOffset -lt 0) { throw 'file_offset must be at least 0.' }
+            }
+            $allCandidateFiles = @()
             if ($item.PSIsContainer) {
-                foreach ($child in @(Get-ChildItem -LiteralPath $path -Recurse -Force -File -ErrorAction SilentlyContinue)) {
+                foreach ($child in @(Get-ChildItem -LiteralPath $path -Recurse -Force -File -ErrorAction SilentlyContinue | Sort-Object FullName)) {
                     if (($child.Attributes -band 1024) -ne 0) { continue }
                     if ($child.FullName -match '[/\\](\.git|node_modules)([/\\]|$)') { continue }
                     if (Test-IsSecretFile $child) { continue }
                     if ($includeFilter -and ($child.Name -notlike $includeFilter)) { continue }
-                    if ($child.Length -le 1MB) { $targetFiles += $child.FullName }
-                    if ($targetFiles.Count -ge 500) { break }
+                    if ($child.Length -le 1MB) { $allCandidateFiles += $child.FullName }
                 }
             }
             else {
                 if ($item.Length -gt 1MB) { throw 'File exceeds 1 MiB.' }
-                $targetFiles = @($item.FullName)
+                $allCandidateFiles = @($item.FullName)
             }
+            $totalFiles = $allCandidateFiles.Count
+            $targetFiles = @($allCandidateFiles | Select-Object -Skip $fileOffset -First 500)
+            $filesScanned = $targetFiles.Count
+            $fileLimitReached = (($fileOffset + $filesScanned) -lt $totalFiles)
             $hits = @()
-            $truncated = $false
+            $matchLimitReached = $false
             if ($targetFiles.Count -gt 0) {
                 $selParams = @{ LiteralPath = $targetFiles; Pattern = $arguments.pattern; Encoding = 'UTF8'; ErrorAction = 'Stop' }
                 if ($isLiteral) { $selParams.SimpleMatch = $true }
                 if ($isCaseSensitive) { $selParams.CaseSensitive = $true }
                 if ($ctxLines -gt 0) { $selParams.Context = @($ctxLines, $ctxLines) }
                 foreach ($m in @(Select-String @selParams)) {
-                    if ($hits.Count -ge 100) { $truncated = $true; break }
+                    if ($hits.Count -ge 100) { $matchLimitReached = $true; break }
                     $lineText = [string]$m.Line
                     if ($lineText.Length -gt 300) { $lineText = $lineText.Substring(0, 300) + '...' }
                     $hitObj = @{
@@ -1153,7 +1186,28 @@ function Invoke-AgentTool {
                     $hits += $hitObj
                 }
             }
-            return (@{ matches = $hits; truncated = $truncated } | ConvertTo-Json -Depth 5 -Compress)
+            $truncated = ($fileLimitReached -or $matchLimitReached)
+            $truncReason = if ($matchLimitReached -and $fileLimitReached) {
+                'max_matches_and_max_files'
+            }
+            elseif ($matchLimitReached) {
+                'max_matches'
+            }
+            elseif ($fileLimitReached) {
+                'max_files'
+            }
+            else {
+                $null
+            }
+            $nextFileOffset = if ($fileLimitReached) { $fileOffset + $filesScanned } else { $null }
+            return (@{
+                matches = $hits
+                truncated = $truncated
+                truncation_reason = $truncReason
+                files_scanned = $filesScanned
+                total_files = $totalFiles
+                next_file_offset = $nextFileOffset
+            } | ConvertTo-Json -Depth 5 -Compress)
         }
         if ($item.PSIsContainer) { throw 'Expected a text file.' }
         if ($item.Length -gt 1MB) { throw 'File exceeds 1 MiB.' }
@@ -1162,6 +1216,11 @@ function Invoke-AgentTool {
             $startLine = [int]$arguments.start_line
             if ($startLine -lt 1) { throw 'start_line must be at least 1.' }
         }
+        $startChar = 1
+        if ($null -ne $arguments.start_char) {
+            $startChar = [int]$arguments.start_char
+            if ($startChar -lt 1) { throw 'start_char must be at least 1.' }
+        }
         $maxLines = 300
         if ($null -ne $arguments.max_lines) {
             $maxLines = [int]$arguments.max_lines
@@ -1169,20 +1228,70 @@ function Invoke-AgentTool {
         }
         $allLines = @(Get-Content -LiteralPath $path -Encoding UTF8 -ErrorAction Stop)
         $totalLines = $allLines.Count
-        $skip = $startLine - 1
-        $selected = @($allLines | Select-Object -Skip $skip -First $maxLines)
-        $text = $selected -join "`n"
-        $endLine = if ($selected.Count -gt 0) { $startLine + $selected.Count - 1 } else { $startLine }
-        $truncated = ($endLine -lt $totalLines)
-        if ($text.Length -gt 20000) { $text = $text.Substring(0, 20000); $truncated = $true }
-        $nextStart = if ($truncated -and $endLine -lt $totalLines) { $endLine + 1 } else { $null }
+        $charBudget = 20000
+        if ($totalLines -eq 0 -or $startLine -gt $totalLines) {
+            return (@{
+                text = ''
+                start_line = $startLine
+                start_char = $startChar
+                end_line = $totalLines
+                total_lines = $totalLines
+                truncated = $false
+                next_start_line = $null
+                next_start_char = $null
+            } | ConvertTo-Json -Compress)
+        }
+        $limitIdx = $startLine - 1 + $maxLines - 1
+        if ($limitIdx -ge $totalLines) { $limitIdx = $totalLines - 1 }
+        $pageLines = @()
+        $currentLen = 0
+        $endLine = $startLine - 1
+        $truncated = $false
+        $nextStartLine = $null
+        $nextStartChar = $null
+        for ($i = $startLine - 1; $i -le $limitIdx; $i++) {
+            $lineStr = [string]$allLines[$i]
+            if ($i -eq ($startLine - 1) -and $startChar -gt 1) {
+                if ($startChar -gt ($lineStr.Length + 1)) {
+                    $lineStr = ''
+                }
+                else {
+                    $lineStr = $lineStr.Substring($startChar - 1)
+                }
+            }
+            if ($pageLines.Count -eq 0 -and $lineStr.Length -gt $charBudget) {
+                $pageLines += $lineStr.Substring(0, $charBudget)
+                $endLine = $i + 1
+                $truncated = $true
+                $nextStartLine = $i + 1
+                $nextStartChar = $startChar + $charBudget
+                break
+            }
+            $addedLen = if ($pageLines.Count -eq 0) { $lineStr.Length } else { 1 + $lineStr.Length }
+            if (($currentLen + $addedLen) -gt $charBudget) {
+                $truncated = $true
+                $nextStartLine = $i + 1
+                $nextStartChar = $null
+                break
+            }
+            $pageLines += $lineStr
+            $currentLen += $addedLen
+            $endLine = $i + 1
+        }
+        if (-not $truncated -and $endLine -lt $totalLines) {
+            $truncated = $true
+            $nextStartLine = $endLine + 1
+            $nextStartChar = $null
+        }
         return (@{
-            text = $text
+            text = ($pageLines -join "`n")
             start_line = $startLine
+            start_char = $startChar
             end_line = $endLine
             total_lines = $totalLines
             truncated = $truncated
-            next_start_line = $nextStart
+            next_start_line = $nextStartLine
+            next_start_char = $nextStartChar
         } | ConvertTo-Json -Compress)
     }
     catch { return (@{ error = $_.Exception.Message } | ConvertTo-Json -Compress) }

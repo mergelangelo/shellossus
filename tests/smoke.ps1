@@ -320,6 +320,73 @@ try {
     Assert-True ((Get-Content -LiteralPath (Join-Path $workspacePath 'manual-guard-1.txt') -Raw -Encoding UTF8) -eq 'v1-a') 'Retry undo did not restore first file.'
     Assert-True ((Get-Content -LiteralPath (Join-Path $workspacePath 'manual-guard-2.txt') -Raw -Encoding UTF8) -eq 'v1-b') 'Retry undo did not preserve second file.'
 
+    # Multi-step /undo on the same file within a single turn:
+    # 1) write_file (create) -> edit_file -> /undo removes the created file and intermediate backup.
+    $script:CurrentTurnWrites = @()
+    $call.function.name = 'write_file'
+    $call.function.arguments = '{"path":"chain-create.txt","content":"step1"}'
+    $cc1 = Invoke-AgentTool -Root $workspacePath -Call $call | ConvertFrom-Json
+    $call.function.name = 'edit_file'
+    $call.function.arguments = '{"path":"chain-create.txt","old_text":"step1","new_text":"step2"}'
+    $cc2 = Invoke-AgentTool -Root $workspacePath -Call $call | ConvertFrom-Json
+    Assert-True ($cc1.status -eq 'written' -and $cc2.status -eq 'written') 'Setup for create+edit undo test failed.'
+    $ccUndoEntry = @{ messages = @(@{ role = 'system'; content = 'sys' }); writes = @($script:CurrentTurnWrites) }
+    $ccState = @{ messages = @(@{ role = 'system'; content = 'sys' }, @{ role = 'user'; content = 'create and edit' }) }
+    Invoke-AgentUndo -State $ccState -UndoEntry $ccUndoEntry
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $workspacePath 'chain-create.txt'))) 'Undo of create+edit did not remove the created file.'
+    Assert-True (-not (Test-Path -LiteralPath $cc2.backup)) 'Undo of create+edit left intermediate backup behind.'
+    # 2) edit_file -> edit_file -> /undo restores the original content before the first edit.
+    Set-Content -LiteralPath (Join-Path $workspacePath 'chain-edit.txt') -Value 'orig-0' -Encoding UTF8 -NoNewline
+    $script:CurrentTurnWrites = @()
+    $call.function.name = 'edit_file'
+    $call.function.arguments = '{"path":"chain-edit.txt","old_text":"orig-0","new_text":"edit-1"}'
+    $ce1 = Invoke-AgentTool -Root $workspacePath -Call $call | ConvertFrom-Json
+    $call.function.arguments = '{"path":"chain-edit.txt","old_text":"edit-1","new_text":"edit-2"}'
+    $ce2 = Invoke-AgentTool -Root $workspacePath -Call $call | ConvertFrom-Json
+    Assert-True ($ce1.status -eq 'written' -and $ce2.status -eq 'written') 'Setup for edit+edit undo test failed.'
+    $ceUndoEntry = @{ messages = @(@{ role = 'system'; content = 'sys' }); writes = @($script:CurrentTurnWrites) }
+    $ceState = @{ messages = @(@{ role = 'system'; content = 'sys' }, @{ role = 'user'; content = 'two edits' }) }
+    Invoke-AgentUndo -State $ceState -UndoEntry $ceUndoEntry
+    Assert-True ((Get-Content -LiteralPath (Join-Path $workspacePath 'chain-edit.txt') -Raw -Encoding UTF8) -eq 'orig-0') 'Undo of two sequential edits did not restore original content.'
+    Assert-True ((-not (Test-Path -LiteralPath $ce1.backup)) -and (-not (Test-Path -LiteralPath $ce2.backup))) 'Undo of two sequential edits left backup files behind.'
+
+    # read_file respects 20,000-char limit without skipping lines and supports start_char for >20,000-char single lines.
+    $lines350 = 1..350 | ForEach-Object { ('L{0:D3}_' -f $_) + ('x' * 95) }
+    Set-Content -LiteralPath (Join-Path $workspacePath 'lines350.txt') -Value ($lines350 -join "`n") -Encoding UTF8 -NoNewline
+    $call.function.name = 'read_file'
+    $call.function.arguments = '{"path":"lines350.txt","start_line":1}'
+    $rf1 = Invoke-AgentTool -Root $workspacePath -Call $call | ConvertFrom-Json
+    Assert-True ($rf1.truncated -and $rf1.end_line -lt 300 -and $rf1.next_start_line -eq ($rf1.end_line + 1) -and $null -eq $rf1.next_start_char) 'read_file did not adjust end_line/next_start_line when hitting 20,000-char limit.'
+    $call.function.arguments = ('{{"path":"lines350.txt","start_line":{0}}}' -f $rf1.next_start_line)
+    $rf2 = Invoke-AgentTool -Root $workspacePath -Call $call | ConvertFrom-Json
+    $combinedLines = @($rf1.text -split "`n") + @($rf2.text -split "`n")
+    Assert-True ($combinedLines.Count -eq 350 -and $combinedLines[0].StartsWith('L001_') -and $combinedLines[183].StartsWith('L184_') -and $combinedLines[349].StartsWith('L350_')) 'read_file skipped or truncated lines across 20,000-char pagination.'
+    $longLine25k = ('A' * 20000) + ('B' * 5000)
+    Set-Content -LiteralPath (Join-Path $workspacePath 'longline25k.txt') -Value $longLine25k -Encoding UTF8 -NoNewline
+    $call.function.arguments = '{"path":"longline25k.txt","start_line":1}'
+    $ll1 = Invoke-AgentTool -Root $workspacePath -Call $call | ConvertFrom-Json
+    Assert-True ($ll1.truncated -and $ll1.text.Length -eq 20000 -and $ll1.end_line -eq 1 -and $ll1.next_start_line -eq 1 -and $ll1.next_start_char -eq 20001) 'read_file did not return next_start_char for >20,000-char line.'
+    $call.function.arguments = '{"path":"longline25k.txt","start_line":1,"start_char":20001}'
+    $ll2 = Invoke-AgentTool -Root $workspacePath -Call $call | ConvertFrom-Json
+    Assert-True ((-not $ll2.truncated) -and $ll2.text.Length -eq 5000 -and ($ll1.text + $ll2.text) -eq $longLine25k) 'read_file failed to resume mid-line with start_char.'
+
+    # grep_files reports truncated=true and next_file_offset when hitting 500-file scan limit.
+    $grepDir501 = Join-Path $workspacePath 'grep501'
+    New-Item -ItemType Directory -Path $grepDir501 -Force | Out-Null
+    1..500 | ForEach-Object {
+        $fname = Join-Path $grepDir501 ('f{0:D4}.txt' -f $_)
+        Set-Content -LiteralPath $fname -Value 'haystack' -Encoding UTF8 -NoNewline
+    }
+    Set-Content -LiteralPath (Join-Path $grepDir501 'f0501.txt') -Value 'NEEDLE_501' -Encoding UTF8 -NoNewline
+    $call.function.name = 'grep_files'
+    $call.function.arguments = '{"path":"grep501","pattern":"NEEDLE_501","literal":true}'
+    $g501Page1 = Invoke-AgentTool -Root $workspacePath -Call $call | ConvertFrom-Json
+    Assert-True ($g501Page1.matches.Count -eq 0 -and $g501Page1.truncated -eq $true -and $g501Page1.truncation_reason -eq 'max_files' -and $g501Page1.files_scanned -eq 500 -and $g501Page1.total_files -eq 501 -and $g501Page1.next_file_offset -eq 500) 'grep_files did not report file-limit truncation on 501 files.'
+    $call.function.arguments = '{"path":"grep501","pattern":"NEEDLE_501","literal":true,"file_offset":500}'
+    $g501Page2 = Invoke-AgentTool -Root $workspacePath -Call $call | ConvertFrom-Json
+    Assert-True ($g501Page2.matches.Count -eq 1 -and $g501Page2.truncated -eq $false -and $g501Page2.files_scanned -eq 1) 'grep_files failed to find match in 501st file using file_offset.'
+    Remove-Item -LiteralPath $grepDir501 -Recurse -Force
+
     # Large file (>20,000 chars) edit_file works without hitting preview limit.
     $largePrefix = ('A' * 15000) + "`r`n"
     $largeSuffix = "`r`n" + ('B' * 15000)
@@ -508,6 +575,17 @@ try {
     $clBatch = Invoke-AgentTool -Root $workspacePath -Call $call | ConvertFrom-Json
     Assert-True ($clBatch.status -eq 'written' -and $clBatch.edits_applied -eq 2) 'ConstrainedLanguage batch edit_file failed.'
     Remove-Item -LiteralPath $clBatch.backup -Force
+    $script:CurrentTurnWrites = @()
+    $call = @{ id = 'cl-u1'; function = @{ name = 'write_file'; arguments = '{"path":"cl-undo-chain.txt","content":"a"}' } }
+    $null = Invoke-AgentTool -Root $workspacePath -Call $call | ConvertFrom-Json
+    $call = @{ id = 'cl-u2'; function = @{ name = 'edit_file'; arguments = '{"path":"cl-undo-chain.txt","old_text":"a","new_text":"b"}' } }
+    $null = Invoke-AgentTool -Root $workspacePath -Call $call | ConvertFrom-Json
+    $clUndoState = @{ messages = @(@{ role = 'user'; content = 'u' }) }
+    Invoke-AgentUndo -State $clUndoState -UndoEntry @{ messages = @(); writes = @($script:CurrentTurnWrites) }
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $workspacePath 'cl-undo-chain.txt'))) 'ConstrainedLanguage multi-step Invoke-AgentUndo failed.'
+    $call = @{ id = 'cl-ll'; function = @{ name = 'read_file'; arguments = '{"path":"longline25k.txt","start_line":1,"start_char":20001}' } }
+    $clLl = Invoke-AgentTool -Root $workspacePath -Call $call | ConvertFrom-Json
+    Assert-True ($clLl.text.Length -eq 5000 -and (-not $clLl.truncated)) 'ConstrainedLanguage read_file start_char failed.'
     $script:AgentPermission = 'Ask'
     Write-AgentReasoning -Text "Step 1`nStep 2`nStep 3`nStep 4"
     Write-AgentReply -Content "# Title`n## Subtitle`n> quote`n- **item** with ``code```n| A | B |`n|---|---|`n| 1 | 2 |`n``````sql`nSELECT 1;`n``````"
