@@ -1,6 +1,8 @@
 # Configuration, path validation, and security boundary helpers.
 # Windows PowerShell 5.1 and ConstrainedLanguage compatible.
 
+$script:RegisteredSkills = @{}
+
 function Read-AgentConfig {
     param([string]$Path)
     $config = @{}
@@ -84,26 +86,58 @@ function Test-IsSecretFile {
 
 function Get-WorkspaceRelativePath {
     param([string]$Root, [string]$FullPath)
-    $prefix = (Get-Item -LiteralPath $Root -Force).FullName.TrimEnd('\') + '\'
+    $rootNorm = (Get-Item -LiteralPath $Root -Force).FullName.TrimEnd('\').TrimEnd('/')
     $resolvedFull = if (Test-Path -LiteralPath $FullPath) { (Get-Item -LiteralPath $FullPath -Force).FullName } else { $FullPath }
-    if ($resolvedFull.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) {
-        return $resolvedFull.Substring($prefix.Length).Replace('\', '/')
+    if ($resolvedFull.StartsWith($rootNorm + '\', [StringComparison]::OrdinalIgnoreCase) -or
+        $resolvedFull.StartsWith($rootNorm + '/', [StringComparison]::OrdinalIgnoreCase)) {
+        return $resolvedFull.Substring($rootNorm.Length + 1).Replace('\', '/')
     }
     return $FullPath
 }
 
 function Resolve-AgentPath {
-    param([string]$Root, [string]$RelativePath)
+    param([string]$Root, [string]$RelativePath, [switch]$AllowRegisteredSkill)
     if (-not $RelativePath) { $RelativePath = '.' }
+    if ($AllowRegisteredSkill -and $script:RegisteredSkills -and $script:RegisteredSkills.Count -gt 0) {
+        $skillTarget = $null
+        if ($script:RegisteredSkills.ContainsKey($RelativePath)) {
+            $skillTarget = $script:RegisteredSkills[$RelativePath]
+        }
+        elseif (Test-Path -LiteralPath $RelativePath) {
+            $candFull = (Get-Item -LiteralPath $RelativePath -Force -ErrorAction SilentlyContinue).FullName
+            if ($candFull -and $script:RegisteredSkills.ContainsKey($candFull)) {
+                $skillTarget = $script:RegisteredSkills[$candFull]
+            }
+        }
+        if ($skillTarget -and (Test-Path -LiteralPath $skillTarget)) {
+            $skillItem = Get-Item -LiteralPath $skillTarget -Force -ErrorAction Stop
+            if ($skillItem.PSProvider.Name -ne 'FileSystem' -or $skillItem.PSIsContainer) { throw 'Invalid skill file.' }
+            if (Test-IsSecretFile $skillItem) { throw 'Agent tools cannot access credential configuration files.' }
+            $cursor = $skillItem
+            while ($null -ne $cursor) {
+                if (($cursor.Attributes -band 1024) -ne 0) { throw 'Reparse points are not allowed.' }
+                if ($cursor.PSIsContainer) { $cursor = $cursor.Parent }
+                else { $cursor = $cursor.Directory }
+            }
+            return $skillItem.FullName
+        }
+    }
     $rootItem = Get-Item -LiteralPath $Root -Force -ErrorAction Stop
-    $item = Get-Item -LiteralPath (Join-Path $rootItem.FullName $RelativePath) -Force -ErrorAction Stop
+    $targetCandidate = if ($RelativePath -match '^([a-zA-Z]:[/\\]|[/\\])') {
+        $RelativePath
+    }
+    else {
+        Join-Path $rootItem.FullName $RelativePath
+    }
+    $item = Get-Item -LiteralPath $targetCandidate -Force -ErrorAction Stop
     if ($item.PSProvider.Name -ne 'FileSystem') { throw 'Only filesystem paths are supported.' }
     if (Test-IsSecretFile $item) {
         throw 'Agent tools cannot access credential configuration files.'
     }
-    $prefix = $rootItem.FullName.TrimEnd('\') + '\'
+    $prefix = $rootItem.FullName.TrimEnd('\').TrimEnd('/')
     if (($item.FullName -ne $rootItem.FullName) -and
-        (-not $item.FullName.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase))) {
+        (-not $item.FullName.StartsWith($prefix + '\', [StringComparison]::OrdinalIgnoreCase)) -and
+        (-not $item.FullName.StartsWith($prefix + '/', [StringComparison]::OrdinalIgnoreCase))) {
         throw 'Path is outside the workspace.'
     }
     # Reject junctions/symlinks, including those in workspace ancestors.

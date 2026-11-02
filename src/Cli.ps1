@@ -1,4 +1,4 @@
-# Agent turn loop (HTTP retries, overflow auto-compaction, tool dispatch) and interactive CLI REPL.
+# Agent turn loop (HTTP retries, finish_reason check, overflow auto-compaction, tool dispatch) and interactive CLI REPL.
 
 function Invoke-AgentTurn {
     param($State, [string]$Endpoint, [string]$ModelId, [string]$ApiKey, [string]$Root, [int]$Steps)
@@ -56,8 +56,13 @@ function Invoke-AgentTurn {
             Remove-Item -LiteralPath $tempResponse.FullName -Force -ErrorAction SilentlyContinue
         }
         if ($null -eq $reply) { continue }
-        $message = $reply.choices[0].message
-        if (-not $message) { throw 'API returned no assistant message.' }
+        $choice = $reply.choices[0]
+        if (-not $choice -or -not $choice.message) { throw 'API returned no assistant message.' }
+        $finishReason = [string]$choice.finish_reason
+        if ($finishReason -and ($finishReason -notin @('stop', 'tool_calls'))) {
+            throw "Incomplete model response (finish_reason=$finishReason)."
+        }
+        $message = $choice.message
         $assistant = @{ role = 'assistant'; content = $message.content }
         if ($message.reasoning_content) {
             $assistant.reasoning_content = $message.reasoning_content
@@ -138,17 +143,23 @@ if (-not $LibraryOnly) {
     if (-not $agentKey) { throw 'API key is required.' }
     $configDir = Split-Path $script:AgentConfigPath -Parent
     $sessionDir = Join-Path $configDir 'sessions'
-    $sessionFile = Join-Path $sessionDir ('session-' + (Get-Date -Format 'yyyyMMdd-HHmmss') + '.jsonl')
+    $sessionId = 'sess-' + (Get-Date -Format 'yyyyMMdd-HHmmss') + '-' + (Get-Random -Minimum 100000 -Maximum 999999)
+    $sessionFile = Join-Path $sessionDir ($sessionId + '.jsonl')
     $fullSystemPrompt = Build-SystemPrompt -Root $rootPath -ConfigDir $configDir
     $system = @{ role = 'system'; content = $fullSystemPrompt }
-    $state = @{ messages = @($system) }
+    $state = @{
+        session_id = $sessionId
+        workspace = $rootPath
+        model = $Model
+        messages = @($system)
+    }
     $undoStack = @()
     $lastFailedQuestion = ''
-    if ($Continue -and (Test-Path -LiteralPath $sessionDir)) {
-        $latest = Get-ChildItem -LiteralPath $sessionDir -Filter '*.jsonl' -File -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1
-        if ($latest) {
-            $sessionFile = $latest.FullName
-            $state.messages = @(Read-AgentSession -SessionFile $sessionFile)
+    if ($Continue) {
+        $latestProjectSession = Find-ProjectSession -SessionDir $sessionDir -Workspace $rootPath
+        if ($latestProjectSession) {
+            $sessionFile = $latestProjectSession
+            $state.messages = @(Read-AgentSession -SessionFile $sessionFile -State $state)
         }
     }
     try {
@@ -158,7 +169,7 @@ if (-not $LibraryOnly) {
             $expandedPrompt = Expand-UserPrompt -Root $rootPath -Prompt $effectivePrompt
             $state.messages += @{ role = 'user'; content = $expandedPrompt }
             Invoke-AgentTurn -State $state -Endpoint $endpoint -ModelId $Model -ApiKey $agentKey -Root $rootPath -Steps $MaxSteps
-            Save-AgentSession -SessionFile $sessionFile -State $state
+            Save-AgentSession -SessionFile $sessionFile -State $state -Workspace $rootPath -Model $Model
             return
         }
         Write-Host ($script:Gm.OscInit + $script:Gm.BoldGreen + "h-agent | model: $Model | permission: $($script:AgentPermission) | workspace: $rootPath" + $script:Gm.Reset)
@@ -174,9 +185,13 @@ if (-not $LibraryOnly) {
             $trimmedQ = $question.Trim()
             if ($trimmedQ -eq '/exit') { break }
             if ($trimmedQ -eq '/clear' -or $trimmedQ -eq '/new') {
+                $newId = 'sess-' + (Get-Date -Format 'yyyyMMdd-HHmmss') + '-' + (Get-Random -Minimum 100000 -Maximum 999999)
+                $state.session_id = $newId
+                $state.workspace = $rootPath
+                $state.model = $Model
                 $state.messages = @($system)
                 $undoStack = @()
-                $sessionFile = Join-Path $sessionDir ('session-' + (Get-Date -Format 'yyyyMMdd-HHmmss') + '.jsonl')
+                $sessionFile = Join-Path $sessionDir ($newId + '.jsonl')
                 Write-Host ($script:Gm.Grey1 + 'Started a new conversation session.' + $script:Gm.Reset)
                 continue
             }
@@ -246,7 +261,7 @@ if (-not $LibraryOnly) {
                     if ($nameArg -notmatch '\.jsonl$') { $nameArg += '.jsonl' }
                     $sessionFile = Join-Path $sessionDir (Split-Path $nameArg -Leaf)
                 }
-                Save-AgentSession -SessionFile $sessionFile -State $state
+                Save-AgentSession -SessionFile $sessionFile -State $state -Workspace $rootPath -Model $Model
                 Write-Host ($script:Gm.Green + "  Saved session: $sessionFile" + $script:Gm.Reset)
                 continue
             }
@@ -256,11 +271,16 @@ if (-not $LibraryOnly) {
                     continue
                 }
                 $lastUndo = $undoStack[$undoStack.Count - 1]
-                if ($undoStack.Count -eq 1) { $undoStack = @() }
-                else { $undoStack = @($undoStack[0..($undoStack.Count - 2)]) }
-                Invoke-AgentUndo -State $state -UndoEntry $lastUndo
-                Save-AgentSession -SessionFile $sessionFile -State $state
-                Write-Host ($script:Gm.Green + '  Reverted last turn and restored disk state.' + $script:Gm.Reset)
+                try {
+                    Invoke-AgentUndo -State $state -UndoEntry $lastUndo
+                    if ($undoStack.Count -eq 1) { $undoStack = @() }
+                    else { $undoStack = @($undoStack[0..($undoStack.Count - 2)]) }
+                    Save-AgentSession -SessionFile $sessionFile -State $state -Workspace $rootPath -Model $Model
+                    Write-Host ($script:Gm.Green + '  Reverted last turn and restored disk state.' + $script:Gm.Reset)
+                }
+                catch {
+                    Write-Host ($script:Gm.Red + '  ' + $_.Exception.Message + $script:Gm.Reset)
+                }
                 continue
             }
             if ($trimmedQ -eq '/status' -or $trimmedQ -eq '/tokens') {
@@ -272,6 +292,7 @@ if (-not $LibraryOnly) {
             if ($trimmedQ -match '^/model(?:\s+(.+))?$') {
                 if ($Matches[1]) {
                     $Model = $Matches[1].Trim()
+                    $state.model = $Model
                     Write-Host ($script:Gm.Green + "  Model switched to: $Model" + $script:Gm.Reset)
                 }
                 else {
@@ -283,7 +304,7 @@ if (-not $LibraryOnly) {
                 $focus = if ($Matches[1]) { $Matches[1].Trim() } else { '' }
                 try {
                     if (Invoke-AgentCompact -State $state -Endpoint $endpoint -ModelId $Model -ApiKey $agentKey -Focus $focus) {
-                        Save-AgentSession -SessionFile $sessionFile -State $state
+                        Save-AgentSession -SessionFile $sessionFile -State $state -Workspace $rootPath -Model $Model
                         $st = Get-ContextStats -State $state
                         Write-Host ($script:Gm.Green + "  Context compacted (~$($st.est_tokens) tokens remaining)." + $script:Gm.Reset)
                     }
@@ -303,7 +324,9 @@ if (-not $LibraryOnly) {
                 }
                 $list = @(Get-ChildItem -LiteralPath $sessionDir -Filter '*.jsonl' -File | Sort-Object LastWriteTime -Descending | Select-Object -First 15)
                 for ($i = 0; $i -lt $list.Count; $i++) {
-                    Write-Host ($script:Gm.Yellow + ("  [{0}] " -f ($i + 1)) + $script:Gm.Fg + $list[$i].Name + $script:Gm.Grey1 + (" ({0})" -f $list[$i].LastWriteTime.ToString('yyyy-MM-dd HH:mm')) + $script:Gm.Reset)
+                    $meta = Get-AgentSessionMeta -SessionFile $list[$i].FullName
+                    $wsInfo = if ($meta -and $meta.workspace) { " [$($meta.workspace)]" } else { '' }
+                    Write-Host ($script:Gm.Yellow + ("  [{0}] " -f ($i + 1)) + $script:Gm.Fg + $list[$i].Name + $script:Gm.Grey1 + (" ({0}){1}" -f $list[$i].LastWriteTime.ToString('yyyy-MM-dd HH:mm'), $wsInfo) + $script:Gm.Reset)
                 }
                 continue
             }
@@ -324,7 +347,7 @@ if (-not $LibraryOnly) {
                     if (Test-Path -LiteralPath $cand) { $chosen = $cand }
                 }
                 if ($chosen) {
-                    $state.messages = @(Read-AgentSession -SessionFile $chosen)
+                    $state.messages = @(Read-AgentSession -SessionFile $chosen -State $state)
                     $sessionFile = $chosen
                     if ($PSBoundParameters.Keys -notcontains 'Permission') { $script:AgentPermission = 'Ask' }
                     Write-Host ($script:Gm.Green + "  Resumed session: $sessionFile ($($state.messages.Count) messages, permission=$($script:AgentPermission))" + $script:Gm.Reset)
@@ -362,7 +385,7 @@ if (-not $LibraryOnly) {
                     Write-Host ($script:Gm.Grey1 + "  [exit $($res.exit_code)]" + $script:Gm.Reset)
                     if (-not $localOnly) {
                         $state.messages += @{ role = 'user'; content = ("[Shell command `$cmdStr` exit=$($res.exit_code)]`n" + $res.output) }
-                        Save-AgentSession -SessionFile $sessionFile -State $state
+                        Save-AgentSession -SessionFile $sessionFile -State $state -Workspace $rootPath -Model $Model
                         Write-Host ($script:Gm.Aqua + '  (Output added to conversation context)' + $script:Gm.Reset)
                     }
                 }
@@ -384,11 +407,17 @@ if (-not $LibraryOnly) {
                 Invoke-AgentTurn -State $state -Endpoint $endpoint -ModelId $Model -ApiKey $agentKey -Root $rootPath -Steps $MaxSteps
                 $lastFailedQuestion = ''
                 $undoStack += @{ messages = $beforeTurn; writes = @($script:CurrentTurnWrites) }
-                Save-AgentSession -SessionFile $sessionFile -State $state
+                Save-AgentSession -SessionFile $sessionFile -State $state -Workspace $rootPath -Model $Model
             }
             catch {
                 $lastFailedQuestion = $question
-                Invoke-AgentUndo -State $state -UndoEntry @{ messages = $beforeTurn; writes = @($script:CurrentTurnWrites) }
+                $state.messages = $beforeTurn
+                try {
+                    Invoke-AgentUndo -State $state -UndoEntry @{ messages = $beforeTurn; writes = @($script:CurrentTurnWrites) }
+                }
+                catch {
+                    Write-Host ($script:Gm.Red + 'Rollback warning: ' + $_.Exception.Message + $script:Gm.Reset)
+                }
                 Write-Host ($script:Gm.Red + 'Request failed; turn rolled back (use /retry to resend): ' + (Format-AgentError -ErrorRecord $_) + $script:Gm.Reset)
             }
         }

@@ -248,27 +248,114 @@ try {
     $ctxGrep = Invoke-AgentTool -Root $workspacePath -Call $call | ConvertFrom-Json
     Assert-True ($ctxGrep.matches.Count -eq 1 -and $ctxGrep.matches[0].context.Count -ge 2) 'grep_files include/context_lines failed.'
 
-    # Session JSONL persistence roundtrip.
-    $sessionFile = Join-Path $testRoot 'sessions\test.jsonl'
+    # Session JSONL persistence roundtrip and project-scoped session lookup.
+    $sessionDirTest = Join-Path $testRoot 'sessions'
+    $sessionFile = Join-Path $sessionDirTest 'test-ws1.jsonl'
+    $otherWs = Join-Path $testRoot 'other-workspace'
+    New-Item -ItemType Directory -Path $otherWs -Force | Out-Null
     $sampleState = @{ messages = @(
         @{ role = 'system'; content = 'sys' },
         @{ role = 'user'; content = 'hi' },
         @{ role = 'assistant'; content = 'hello' }
     ) }
-    Save-AgentSession -SessionFile $sessionFile -State $sampleState
-    $restoredMsgs = @(Read-AgentSession -SessionFile $sessionFile)
-    Assert-True ($restoredMsgs.Count -eq 3 -and $restoredMsgs[2].content -eq 'hello') 'Session JSONL roundtrip failed.'
+    Save-AgentSession -SessionFile $sessionFile -State $sampleState -Workspace $workspacePath -Model 'model-a' -SessionId 'sid-1'
+    $meta1 = Get-AgentSessionMeta -SessionFile $sessionFile
+    Assert-True ($meta1.version -eq 1 -and $meta1.id -eq 'sid-1' -and $meta1.model -eq 'model-a') 'Session metadata header missing or invalid.'
+    $restoredState = @{}
+    $restoredMsgs = @(Read-AgentSession -SessionFile $sessionFile -State $restoredState)
+    Assert-True ($restoredMsgs.Count -eq 3 -and $restoredMsgs[2].content -eq 'hello' -and $restoredState.session_id -eq 'sid-1') 'Session JSONL roundtrip failed.'
+    Start-Sleep -Milliseconds 50
+    $otherSessionFile = Join-Path $sessionDirTest 'test-ws2.jsonl'
+    Save-AgentSession -SessionFile $otherSessionFile -State $sampleState -Workspace $otherWs -Model 'model-b' -SessionId 'sid-2'
+    $foundWs1 = Find-ProjectSession -SessionDir $sessionDirTest -Workspace $workspacePath
+    Assert-True ($foundWs1 -eq (Get-Item -LiteralPath $sessionFile -Force).FullName) 'Find-ProjectSession did not select the current workspace session.'
+
+    # Failed /undo preserves backup and refuses to overwrite manual edits made after agent write.
+    $script:AgentPermission = 'AutoEdit'
+    $script:CurrentTurnWrites = @()
+    Set-Content -LiteralPath (Join-Path $workspacePath 'manual-guard.txt') -Value 'v1' -Encoding UTF8 -NoNewline
+    $call.function.name = 'edit_file'
+    $call.function.arguments = '{"path":"manual-guard.txt","old_text":"v1","new_text":"v2"}'
+    $mgRes = Invoke-AgentTool -Root $workspacePath -Call $call | ConvertFrom-Json
+    Assert-True ($mgRes.status -eq 'written' -and (Test-Path -LiteralPath $mgRes.backup)) 'Setup for undo guard test failed.'
+    Set-Content -LiteralPath (Join-Path $workspacePath 'manual-guard.txt') -Value 'v3-manual-user-edit' -Encoding UTF8 -NoNewline
+    $mgUndoEntry = @{ messages = @(@{ role = 'system'; content = 'sys' }); writes = @($script:CurrentTurnWrites) }
+    $mgState = @{ messages = @(@{ role = 'system'; content = 'sys' }, @{ role = 'user'; content = 'edit' }) }
+    $undoThrew = $false
+    try {
+        Invoke-AgentUndo -State $mgState -UndoEntry $mgUndoEntry
+    }
+    catch {
+        $undoThrew = $true
+    }
+    Assert-True $undoThrew 'Invoke-AgentUndo must throw when manual edits would be overwritten.'
+    Assert-True (Test-Path -LiteralPath $mgRes.backup) 'Failed undo deleted the backup file.'
+    Assert-True ((Get-Content -LiteralPath (Join-Path $workspacePath 'manual-guard.txt') -Raw -Encoding UTF8) -eq 'v3-manual-user-edit') 'Undo overwrote manual user edits.'
+    Remove-Item -LiteralPath $mgRes.backup -Force
+
+    # Large file (>20,000 chars) edit_file works without hitting preview limit.
+    $largePrefix = ('A' * 15000) + "`r`n"
+    $largeSuffix = "`r`n" + ('B' * 15000)
+    Set-Content -LiteralPath (Join-Path $workspacePath 'large.txt') -Value ($largePrefix + 'TARGET_LINE' + $largeSuffix) -Encoding UTF8 -NoNewline
+    $call.function.name = 'edit_file'
+    $call.function.arguments = '{"path":"large.txt","old_text":"TARGET_LINE","new_text":"REPLACED_LINE"}'
+    $largeEdit = Invoke-AgentTool -Root $workspacePath -Call $call | ConvertFrom-Json
+    Assert-True ($largeEdit.status -eq 'written') 'Editing a file larger than 20,000 chars failed.'
+    Remove-Item -LiteralPath $largeEdit.backup -Force
+    $largeAfter = Get-Content -LiteralPath (Join-Path $workspacePath 'large.txt') -Raw -Encoding UTF8
+    Assert-True ($largeAfter.Length -gt 30000 -and $largeAfter.Contains('REPLACED_LINE')) 'Large file content corrupted after edit.'
+
+    # Strict tool argument validation (reject string "false" for boolean, unknown parameters, missing required).
+    $call.function.name = 'write_file'
+    $call.function.arguments = '{"path":"created.txt","content":"bad","overwrite":"false"}'
+    $badBool = Invoke-AgentTool -Root $workspacePath -Call $call | ConvertFrom-Json
+    Assert-True ($badBool.error -like '*must be a boolean*') 'String "false" was coerced to boolean instead of rejected.'
+    $call.function.name = 'list_files'
+    $call.function.arguments = '{"path":".","extra_field":1}'
+    $badUnknown = Invoke-AgentTool -Root $workspacePath -Call $call | ConvertFrom-Json
+    Assert-True ($badUnknown.error -like '*Unknown argument*') 'Unknown tool argument was not rejected.'
+
+    # Global skills in ConfigDir/skills can be read via read_file, while writes outside workspace stay blocked.
+    $globalCfgDir = Join-Path $testRoot 'global-cfg'
+    $globalSkillDir = Join-Path $globalCfgDir 'skills\corp-standard'
+    New-Item -ItemType Directory -Path $globalSkillDir -Force | Out-Null
+    $globalSkillPath = Join-Path $globalSkillDir 'SKILL.md'
+    Set-Content -LiteralPath $globalSkillPath -Value "---`nname: corp-standard`ndescription: Global skill`n---`nGlobal rules body." -Encoding UTF8
+    $sysWithGlobal = Build-SystemPrompt -Root $workspacePath -ConfigDir $globalCfgDir
+    Assert-True ($sysWithGlobal.Contains('corp-standard')) 'Global skill was not listed in system prompt.'
+    $call.function.name = 'read_file'
+    $call.function.arguments = (@{ path = $globalSkillPath } | ConvertTo-Json -Compress)
+    $readGlobalSkill = Invoke-AgentTool -Root $workspacePath -Call $call | ConvertFrom-Json
+    Assert-True ($readGlobalSkill.text -like '*Global rules body*') 'Global skill could not be read via read_file.'
+    $call.function.name = 'edit_file'
+    $call.function.arguments = (@{ path = $globalSkillPath; old_text = 'Global'; new_text = 'Hacked' } | ConvertTo-Json -Compress)
+    $editGlobalSkill = Invoke-AgentTool -Root $workspacePath -Call $call | ConvertFrom-Json
+    Assert-True ($editGlobalSkill.error -like '*outside*') 'Editing global skill outside workspace must be blocked.'
+
+    # Command timeout terminates hanging process and returns timed_out status.
+    $script:AgentPermission = 'Auto'
+    $call.function.name = 'run_command'
+    $call.function.arguments = '{"command":"Start-Sleep -Seconds 10","timeout_sec":1}'
+    $timeoutRes = Invoke-AgentTool -Root $workspacePath -Call $call | ConvertFrom-Json
+    Assert-True ($timeoutRes.status -eq 'timed_out' -and $timeoutRes.timed_out -eq $true) 'Hanging run_command was not terminated on timeout.'
+    $script:AgentPermission = 'Ask'
+    $script:approval = 'WRITE'
 
     # Exercise the agent/tool/API round trip without any network or real key.
     $script:requests = 0
+    $script:lastCompactBody = ''
     function Invoke-RestMethod {
         param($Uri, $Method, $Headers, $ContentType, $Body, $TimeoutSec, $ErrorAction)
         $script:requests++
         $payload = $Body | ConvertFrom-Json
         Assert-True ($Method -eq 'Post') 'Expected POST.'
         Assert-True ($payload.model -eq 'test-model') 'Wrong model.'
+        if ($payload.messages[0].content -like '*compaction assistant*') {
+            $script:lastCompactBody = $Body
+            return @{ choices = @(@{ finish_reason = 'stop'; message = @{ content = "## Goal`nTest summary" } }) }
+        }
         if ($script:requests -eq 1) {
-            return @{ choices = @(@{ message = @{
+            return @{ choices = @(@{ finish_reason = 'tool_calls'; message = @{
                 content = $null
                 reasoning_content = 'Inspect directory.'
                 tool_calls = @(@{ id = 't1'; type = 'function'; function = @{ name = 'list_files'; arguments = '{"path":"."}' } })
@@ -278,7 +365,7 @@ try {
         Assert-True ($last.role -eq 'tool' -and $last.tool_call_id -eq 't1') 'Missing tool response.'
         $listing = $last.content | ConvertFrom-Json
         Assert-True ($listing.entries.Name -contains 'hello.txt') 'Tool result missing file.'
-        return @{ choices = @(@{ message = @{ content = 'Files inspected.' } }) }
+        return @{ choices = @(@{ finish_reason = 'stop'; message = @{ content = 'Files inspected.' } }) }
     }
     # Match the UTF-8 response-file transport, with no real HTTP request.
     function Invoke-WebRequest {
@@ -290,6 +377,38 @@ try {
     Invoke-AgentTurn -State $state -Endpoint 'https://example.invalid/v1/chat/completions' -ModelId 'test-model' -ApiKey 'fake' -Root $workspacePath -Steps 3
     Assert-True ($script:requests -eq 2) 'Expected two API calls.'
     Assert-True ($state.messages[-1].content -eq 'Files inspected.') 'Missing final answer.'
+
+    # Invoke-AgentCompact includes tool call names, arguments (e.g. file paths), and tool results in summary prompt.
+    $compactState = @{ messages = @(
+        @{ role = 'system'; content = 'sys' },
+        @{ role = 'user'; content = 'Update query' },
+        @{ role = 'assistant'; content = $null; tool_calls = @(@{ id = 'tc9'; type = 'function'; function = @{ name = 'edit_file'; arguments = '{"path":"important-query.sql","old_text":"SELECT 1","new_text":"SELECT 2"}' } }) },
+        @{ role = 'tool'; tool_call_id = 'tc9'; content = '{"status":"written","path":"important-query.sql"}' },
+        @{ role = 'assistant'; content = 'Updated query.' },
+        @{ role = 'user'; content = 'Recent question' },
+        @{ role = 'assistant'; content = 'Recent answer' }
+    ) }
+    $didCompact = Invoke-AgentCompact -State $compactState -Endpoint 'https://example.invalid/v1/chat/completions' -ModelId 'test-model' -ApiKey 'fake' -KeepRecent 2
+    Assert-True ($didCompact -and $script:lastCompactBody.Contains('edit_file') -and $script:lastCompactBody.Contains('important-query.sql')) 'Compaction dropped tool call name or file path.'
+
+    # Truncated model response (finish_reason=length) is rejected before accepting message or running tools.
+    function Invoke-RestMethod {
+        param($Uri, $Method, $Headers, $ContentType, $Body, $TimeoutSec, $ErrorAction)
+        return @{ choices = @(@{ finish_reason = 'length'; message = @{
+            content = 'Partial reply...'
+            tool_calls = @(@{ id = 'bad'; type = 'function'; function = @{ name = 'write_file'; arguments = '{"path":"should-not-exist.txt","content":"x"}' } })
+        } }) }
+    }
+    $truncState = @{ messages = @(@{ role = 'user'; content = 'Hi' }) }
+    $lengthThrew = $false
+    try {
+        Invoke-AgentTurn -State $truncState -Endpoint 'https://example.invalid/v1/chat/completions' -ModelId 'test-model' -ApiKey 'fake' -Root $workspacePath -Steps 2
+    }
+    catch {
+        if ($_.Exception.Message -like '*finish_reason=length*') { $lengthThrew = $true }
+    }
+    Assert-True $lengthThrew 'Truncated response (finish_reason=length) was not rejected.'
+    Assert-True ($truncState.messages.Count -eq 1 -and (-not (Test-Path -LiteralPath (Join-Path $workspacePath 'should-not-exist.txt')))) 'Truncated response modified state or executed tool.'
 
     # Installer preserves profile contents and replaces its own block on rerun.
     $profileFile = Join-Path $testRoot 'profile.ps1'
@@ -330,8 +449,16 @@ try {
     Assert-True ($plainTable[2] -eq '| a   | bold |') 'Table cell markdown stripping or padding failed.'
     $inlineOut = Format-MarkdownInline -Text 'Hello **world** and `SELECT *`'
     Assert-True ($inlineOut.Contains('38;2;231;138;78') -and (-not $inlineOut.Contains('**')) -and (-not $inlineOut.Contains('`'))) 'Gruvbox Material inline markdown formatting failed.'
-    $clSys = Build-SystemPrompt -Root $workspacePath -ConfigDir ''
-    Assert-True ($clSys.Contains('sql-tuning')) 'ConstrainedLanguage Build-SystemPrompt failed.'
+    $clSys = Build-SystemPrompt -Root $workspacePath -ConfigDir $globalCfgDir
+    Assert-True ($clSys.Contains('sql-tuning') -and $clSys.Contains('corp-standard')) 'ConstrainedLanguage Build-SystemPrompt failed.'
+    $call = @{ id = 'cl-skill'; function = @{ name = 'read_file'; arguments = (@{ path = $globalSkillPath } | ConvertTo-Json -Compress) } }
+    $clSkillRes = Invoke-AgentTool -Root $workspacePath -Call $call | ConvertFrom-Json
+    Assert-True ($clSkillRes.text -like '*Global rules body*') 'ConstrainedLanguage global skill read failed.'
+    $call = @{ id = 'cl-bad-bool'; function = @{ name = 'write_file'; arguments = '{"path":"constrained.txt","content":"no","overwrite":"false"}' } }
+    $clBadBool = Invoke-AgentTool -Root $workspacePath -Call $call | ConvertFrom-Json
+    Assert-True ($clBadBool.error -like '*must be a boolean*') 'ConstrainedLanguage boolean validation failed.'
+    $clFoundSess = Find-ProjectSession -SessionDir $sessionDirTest -Workspace $workspacePath
+    Assert-True ($clFoundSess -eq (Get-Item -LiteralPath $sessionFile -Force).FullName) 'ConstrainedLanguage Find-ProjectSession failed.'
     $clMatch = Find-EditMatch -Content "one   `r`ntwo" -OldText "one`ntwo"
     Assert-True ($clMatch.index -eq 0 -and $clMatch.length -eq 11) 'ConstrainedLanguage Find-EditMatch failed.'
     $script:AgentPermission = 'AutoEdit'
