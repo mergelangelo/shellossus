@@ -1,6 +1,6 @@
 # Customization Guide
 
-`h-agent` supports project-level and user-level customization inspired by `pi-coding-agent`: project instructions (`AGENTS.md`), system prompt overrides (`SYSTEM.md` / `APPEND_SYSTEM.md`), domain skills (`SKILL.md`), and reusable prompt templates (`/template`).
+`h-agent` supports project-level and user-level customization: project instructions (`AGENTS.md`, `CLAUDE.md`), system prompt overrides (`SYSTEM.md` / `APPEND_SYSTEM.md`), domain skills (`SKILL.md`), and reusable prompt templates (`/template`).
 
 ---
 

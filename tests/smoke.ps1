@@ -501,7 +501,7 @@ try {
     Assert-True ($didIterativeCompact -and $script:lastCompactBody.Contains('<previous-summary>')) 'Iterative compaction did not pass <previous-summary>.'
     Assert-True ($compactState.messages[1].content.Contains('<read-files>') -and $compactState.messages[1].content.Contains('schema.sql') -and $compactState.messages[1].content.Contains('important-query.sql')) 'Iterative compaction lost cumulative file operations.'
 
-    # Pi port: Truncation helpers (Invoke-TruncateHead, Invoke-TruncateTail, Invoke-TruncateLine, Format-ByteSize).
+    # Truncation helpers (Invoke-TruncateHead, Invoke-TruncateTail, Invoke-TruncateLine, Format-ByteSize).
     Assert-True ((Format-ByteSize -Bytes 1536) -eq '1.5KB') 'Format-ByteSize failed.'
     $headRes = Invoke-TruncateHead -Content ("line1`nline2`nline3`nline4") -MaxLines 2 -MaxBytes 1000
     Assert-True ($headRes.truncated -and $headRes.truncated_by -eq 'lines' -and $headRes.output_lines -eq 2 -and $headRes.content -eq "line1`nline2") 'Invoke-TruncateHead lines limit failed.'
@@ -510,7 +510,7 @@ try {
     $lineTrunc = Invoke-TruncateLine -Line ('x' * 600) -MaxChars 500
     Assert-True ($lineTrunc.was_truncated -and $lineTrunc.text.EndsWith('... [truncated]')) 'Invoke-TruncateLine failed.'
 
-    # Pi port: .gitignore / .ignore with negation (!) and path globs in find_files and grep_files.
+    # .gitignore / .ignore with negation (!) and path globs in find_files and grep_files.
     $ignoreTestDir = Join-Path $workspacePath 'igtest'
     New-Item -ItemType Directory -Path (Join-Path $ignoreTestDir 'build') -Force | Out-Null
     New-Item -ItemType Directory -Path (Join-Path $ignoreTestDir 'sub') -Force | Out-Null
@@ -530,7 +530,7 @@ try {
     Assert-True ($igGrep.matches.Count -eq 1 -and $igGrep.matches[0].file -eq 'keep.log') '.gitignore filtering in grep_files failed.'
     Remove-Item -LiteralPath $ignoreTestDir -Recurse -Force
 
-    # Pi port: Format-EditArguments (oldText/newText camelCase and JSON-string edits) + Tool filtering.
+    # Format-EditArguments (oldText/newText camelCase and JSON-string edits) + Tool filtering.
     $normArgs = Format-EditArguments -ArgsObj ([pscustomobject]@{ path = 'hello.txt'; oldText = 'a'; newText = 'b'; edits = '[{"oldText":"x","newText":"y"}]' })
     Assert-True ($normArgs.old_text -eq 'a' -and $normArgs.new_text -eq 'b' -and $normArgs.edits[0].old_text -eq 'x' -and $normArgs.edits[0].new_text -eq 'y') 'Format-EditArguments camelCase / JSON edits normalization failed.'
     $script:EnabledTools = @('read', 'grep')
@@ -538,13 +538,13 @@ try {
     Assert-True ($filteredTools.Count -eq 2) 'Tool filtering via $script:EnabledTools failed.'
     $script:EnabledTools = @()
 
-    # Pi port: Expand-TemplateArgs ($1, $@, $ARGUMENTS, ${2:-default}, ${@:2}, ${@:1:2}, non-recursive) & /skill:name.
+    # Expand-TemplateArgs ($1, $@, $ARGUMENTS, ${2:-default}, ${@:2}, ${@:1:2}, non-recursive) & /skill:name.
     $tplOut = Expand-TemplateArgs -Content 'A=$1 B=${2:-fallback} ALL=$@ SLICE=${@:2} LEN=${@:1:2}' -ArgsString '"hello $2" world three'
     Assert-True ($tplOut -eq 'A=hello $2 B=world ALL=hello $2 world three SLICE=world three LEN=hello $2 world') 'Expand-TemplateArgs bash-style positional/slice/default substitution failed.'
     $skillCmdOut = Resolve-PromptTemplate -Root $workspacePath -ConfigDir $globalCfgDir -InputText '/skill:sql-tuning orders_table'
     Assert-True ($skillCmdOut.Contains('<skill name="sql-tuning"') -and $skillCmdOut.Contains('User: orders_table')) '/skill:name command expansion failed.'
 
-    # Pi port: Session Tree, Branch Switching, Session Forking, and HTML Export.
+    # Session Tree, Branch Switching, Session Forking, and HTML Export.
     $treeSessionDir = Join-Path $testRoot 'tree-sessions'
     New-Item -ItemType Directory -Path $treeSessionDir -Force | Out-Null
     $treeSessionFile = Join-Path $treeSessionDir 'tree-test.jsonl'

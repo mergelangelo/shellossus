@@ -16,7 +16,7 @@ Drop a single `.ps1` file onto any Windows desktop or server and connect to any 
   | `AutoEdit` | Allowed | Auto-approved (with backup) | Prompts `RUN` |
   | `Auto` | Allowed | Auto-approved (with backup) | Auto-approved |
 - **Atomic Writes & Disk `/undo`:** Staged writes via temporary files with verification, colored diff previews, automatic backups, manual-edit conflict detection, and full disk rollback via `/undo`.
-- **Pi-style Context & Extensibility:** Auto-loads `AGENTS.md`, `SYSTEM.md`, `APPEND_SYSTEM.md`, workspace/global `skills/*/SKILL.md`, custom `/<template>` prompts, `@file` inline attachments, and `!cmd` / `!!cmd` shell shortcuts.
+- **Project Context & Extensibility:** Auto-loads `AGENTS.md`, `CLAUDE.md`, `SYSTEM.md`, `APPEND_SYSTEM.md`, workspace/global `skills/*/SKILL.md`, custom `/<template>` prompts, `@file` inline attachments, and `!cmd` / `!!cmd` shell shortcuts.
 - **Project-Scoped Sessions & Compaction:** Atomic `.jsonl` session storage tied to each workspace (`-Continue`, `/sessions`, `/resume`, `/save`, `/new`) and structured context compaction (`/compact [focus]` + automatic context-overflow recovery).
 - **TrueColor Terminal UI:** Exact `sainnhe/gruvbox-material` (dark medium) palette with Markdown headings, lists, code blocks, auto-aligned tables, and collapsible `reasoning` blocks.
 

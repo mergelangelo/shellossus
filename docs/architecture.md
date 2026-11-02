@@ -2,10 +2,6 @@
 
 `h-agent` uses a dual-distribution architecture: developers maintain clean, modular source files in [`src/`](../src/), while [`build.ps1`](../build.ps1) bundles them into the standalone [`h-agent.ps1`](../h-agent.ps1) in the repository root. This gives contributors small, focused modules while allowing enterprise / Citrix / VDI users to copy a single zero-dependency `.ps1` file.
 
-## Pi Reference Baseline
-
-Core agent mechanisms (truncation, pagination, ignore rules, prompt templates, skills XML, session tree/forking/HTML export, and iterative compaction with file-operation tracking) are ported from **[`earendil-works/pi` (`packages/coding-agent`, commit `642e30b`)](https://github.com/earendil-works/pi/tree/642e30b/packages/coding-agent)** and adapted for zero-dependency Windows PowerShell 5.1 + `ConstrainedLanguage` mode, layered with `h-agent`'s permission engine (`ReadOnly`, `Ask`, `AutoEdit`, `Auto`), secret file protection, and two-phase transactional disk `/undo`.
-
 ---
 
 ## Module Breakdown
