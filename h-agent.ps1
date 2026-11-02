@@ -303,6 +303,7 @@ function Format-MarkdownTable {
 
 function Write-AgentReply {
     param([string]$Content)
+    if ($script:OutputMode -eq 'json') { return }
     Write-Host ("`n" + $script:Gm.BoldGreen + 'H: ' + $script:Gm.Reset) -NoNewline
     $inCode = $false
     $first = $true
@@ -369,7 +370,7 @@ function Write-AgentReply {
 
 function Write-AgentReasoning {
     param([string]$Text)
-    if (-not $Text -or $script:ShowReasoning -eq 'hide') { return }
+    if (-not $Text -or $script:ShowReasoning -eq 'hide' -or $script:OutputMode -eq 'json') { return }
     $lines = @($Text.Trim() -split "`r?`n")
     if ($script:ShowReasoning -eq 'full' -or $lines.Count -le 3) {
         Write-Host ("`n" + $script:Gm.Grey0 + '  [reasoning]' + $script:Gm.Reset)
@@ -390,6 +391,7 @@ function Write-AgentReasoning {
 
 $script:CurrentTurnWrites = @()
 $script:AgentPermission = 'Ask'
+$script:OutputMode = 'text'
 $script:ShowReasoning = 'compact'
 $script:ReasoningEffort = ''
 $script:NoTools = $false
@@ -718,16 +720,34 @@ function Get-WorkspaceIgnoreRules {
     param([string]$Root, [string]$SearchPath = '')
     $rules = @()
     if (-not $Root -or -not (Test-Path -LiteralPath $Root)) { return $rules }
-    $rootFull = (Get-Item -LiteralPath $Root -Force).FullName
-    $dirsToCheck = @($rootFull)
-    $scanBase = if ($SearchPath -and (Test-Path -LiteralPath $SearchPath)) { (Get-Item -LiteralPath $SearchPath -Force).FullName } else { $rootFull }
-    if ($scanBase -ne $rootFull -and (-not ($dirsToCheck -contains $scanBase))) {
-        $dirsToCheck += $scanBase
+    $rootFull = (Get-Item -LiteralPath $Root -Force).FullName.TrimEnd('\').TrimEnd('/')
+    $scanItem = if ($SearchPath -and (Test-Path -LiteralPath $SearchPath)) { Get-Item -LiteralPath $SearchPath -Force } else { Get-Item -LiteralPath $Root -Force }
+    $scanDir = if ($scanItem.PSIsContainer) { $scanItem.FullName.TrimEnd('\').TrimEnd('/') } else { (Split-Path $scanItem.FullName -Parent).TrimEnd('\').TrimEnd('/') }
+    $ancestorsRev = @()
+    $currDir = $scanDir
+    $guard = 0
+    while ($currDir -and ($currDir -ine $rootFull) -and ($guard -lt 100)) {
+        $guard++
+        $ancestorsRev += $currDir
+        $parentDir = Split-Path $currDir -Parent
+        if (-not $parentDir -or ($parentDir -ieq $currDir)) { break }
+        $currDir = $parentDir.TrimEnd('\').TrimEnd('/')
     }
-    foreach ($subDir in @(Get-ChildItem -LiteralPath $scanBase -Recurse -Force -Directory -ErrorAction SilentlyContinue)) {
-        if (($subDir.Attributes -band 1024) -ne 0) { continue }
-        if ($subDir.FullName -match '[/\\](\.git|node_modules)([/\\]|$)') { continue }
-        $dirsToCheck += $subDir.FullName
+    $dirsToCheck = @($rootFull)
+    for ($i = $ancestorsRev.Count - 1; $i -ge 0; $i--) {
+        if (-not ($dirsToCheck -contains $ancestorsRev[$i])) {
+            $dirsToCheck += $ancestorsRev[$i]
+        }
+    }
+    if ($scanItem.PSIsContainer) {
+        foreach ($subDir in @(Get-ChildItem -LiteralPath $scanDir -Recurse -Force -Directory -ErrorAction SilentlyContinue | Sort-Object FullName)) {
+            if (($subDir.Attributes -band 1024) -ne 0) { continue }
+            if ($subDir.FullName -match '[/\\](\.git|node_modules)([/\\]|$)') { continue }
+            $subFull = $subDir.FullName.TrimEnd('\').TrimEnd('/')
+            if (-not ($dirsToCheck -contains $subFull)) {
+                $dirsToCheck += $subFull
+            }
+        }
     }
     foreach ($d in $dirsToCheck) {
         $relDir = Get-WorkspaceRelativePath -Root $rootFull -FullPath $d
@@ -1162,12 +1182,19 @@ function Invoke-AgentCommand {
         $timeoutSec = [int]$Arguments.timeout_sec
         if ($timeoutSec -lt 1 -or $timeoutSec -gt 600) { throw 'timeout_sec must be between 1 and 600.' }
     }
-    Write-Host ("`n" + $script:Gm.BoldYellow + 'PROPOSED run_command (in ' + $Root + '):' + $script:Gm.Reset)
-    Write-Host ($script:Gm.Bg1 + $script:Gm.Yellow + '  ' + (Format-PreviewText $cmdText) + '  ' + $script:Gm.Reset)
+    if ($script:OutputMode -ne 'json') {
+        Write-Host ("`n" + $script:Gm.BoldYellow + 'PROPOSED run_command (in ' + $Root + '):' + $script:Gm.Reset)
+        Write-Host ($script:Gm.Bg1 + $script:Gm.Yellow + '  ' + (Format-PreviewText $cmdText) + '  ' + $script:Gm.Reset)
+    }
     if ($script:AgentPermission -eq 'Auto') {
-        Write-Host ($script:Gm.Aqua + '  [auto-approved by Auto mode]' + $script:Gm.Reset)
+        if ($script:OutputMode -ne 'json') {
+            Write-Host ($script:Gm.Aqua + '  [auto-approved by Auto mode]' + $script:Gm.Reset)
+        }
     }
     else {
+        if ($script:OutputMode -eq 'json') {
+            return (@{ status = 'cancelled'; message = 'Interactive confirmation is disabled in JSON mode. Use -Permission Auto to allow command execution.' } | ConvertTo-Json -Compress)
+        }
         Write-Host ($script:Gm.BoldYellow + 'Confirm: ' + $script:Gm.Fg) -NoNewline
         $approval = Read-Host 'Type RUN to execute this command; Enter cancels'
         Write-Host $script:Gm.Reset -NoNewline
@@ -1176,7 +1203,7 @@ function Invoke-AgentCommand {
         }
     }
     $res = Invoke-ShellCommand -Root $Root -Command $cmdText -TimeoutSec $timeoutSec
-    if ($res.output) {
+    if ($res.output -and $script:OutputMode -ne 'json') {
         $previewLines = @($res.output -split "`r?`n" | Select-Object -First 15)
         foreach ($pLine in $previewLines) {
             Write-Host ($script:Gm.Grey1 + '    ' + (Format-PreviewText $pLine) + $script:Gm.Reset)
@@ -1363,30 +1390,37 @@ function Invoke-AgentWrite {
     }
     if ($after.Length -gt 1MB -or ($null -ne $before -and $before.Length -gt 1MB)) { throw 'File content exceeds 1 MiB limit.' }
     if ($after -match '\x00' -or ($null -ne $before -and $before -match '\x00')) { throw 'Binary content is not supported.' }
-    Write-Host ("`n" + $script:Gm.BoldYellow + 'PROPOSED ' + $Name + ': ' + $path + $script:Gm.Reset)
-    if ($null -ne $before) {
-        $prevPrefix = Format-DiffSnippet -Text $prefixText -MaxChars 300 -KeepTail
-        $prevSuffix = Format-DiffSnippet -Text $suffixText -MaxChars 300
-        $prevOld = Format-DiffSnippet -Text $oldText -MaxChars 4000
-        $prevNew = Format-DiffSnippet -Text $newText -MaxChars 4000
-        Write-Host ($script:Gm.BoldRed + '--- BEFORE ---' + $script:Gm.Reset)
-        Write-Host ($script:Gm.Grey0 + $prevPrefix + $script:Gm.Reset) -NoNewline
-        Write-Host ($script:Gm.BgDiffRed + $script:Gm.Red + $prevOld + $script:Gm.Reset) -NoNewline
-        Write-Host ($script:Gm.Grey0 + $prevSuffix + $script:Gm.Reset)
-        Write-Host ($script:Gm.BoldGreen + '--- AFTER ---' + $script:Gm.Reset)
-        Write-Host ($script:Gm.Grey0 + $prevPrefix + $script:Gm.Reset) -NoNewline
-        Write-Host ($script:Gm.BgDiffGreen + $script:Gm.Green + $prevNew + $script:Gm.Reset) -NoNewline
-        Write-Host ($script:Gm.Grey0 + $prevSuffix + $script:Gm.Reset)
+    if ($script:OutputMode -ne 'json') {
+        Write-Host ("`n" + $script:Gm.BoldYellow + 'PROPOSED ' + $Name + ': ' + $path + $script:Gm.Reset)
+        if ($null -ne $before) {
+            $prevPrefix = Format-DiffSnippet -Text $prefixText -MaxChars 300 -KeepTail
+            $prevSuffix = Format-DiffSnippet -Text $suffixText -MaxChars 300
+            $prevOld = Format-DiffSnippet -Text $oldText -MaxChars 4000
+            $prevNew = Format-DiffSnippet -Text $newText -MaxChars 4000
+            Write-Host ($script:Gm.BoldRed + '--- BEFORE ---' + $script:Gm.Reset)
+            Write-Host ($script:Gm.Grey0 + $prevPrefix + $script:Gm.Reset) -NoNewline
+            Write-Host ($script:Gm.BgDiffRed + $script:Gm.Red + $prevOld + $script:Gm.Reset) -NoNewline
+            Write-Host ($script:Gm.Grey0 + $prevSuffix + $script:Gm.Reset)
+            Write-Host ($script:Gm.BoldGreen + '--- AFTER ---' + $script:Gm.Reset)
+            Write-Host ($script:Gm.Grey0 + $prevPrefix + $script:Gm.Reset) -NoNewline
+            Write-Host ($script:Gm.BgDiffGreen + $script:Gm.Green + $prevNew + $script:Gm.Reset) -NoNewline
+            Write-Host ($script:Gm.Grey0 + $prevSuffix + $script:Gm.Reset)
+        }
+        else {
+            Write-Host ($script:Gm.BoldGreen + '--- AFTER ---' + $script:Gm.Reset)
+            Write-Host ($script:Gm.BgDiffGreen + $script:Gm.Green + (Format-DiffSnippet -Text $after -MaxChars 4000) + $script:Gm.Reset)
+        }
+        Write-Host ($script:Gm.Grey0 + '--- END OF PREVIEW ---' + $script:Gm.Reset)
     }
-    else {
-        Write-Host ($script:Gm.BoldGreen + '--- AFTER ---' + $script:Gm.Reset)
-        Write-Host ($script:Gm.BgDiffGreen + $script:Gm.Green + (Format-DiffSnippet -Text $after -MaxChars 4000) + $script:Gm.Reset)
-    }
-    Write-Host ($script:Gm.Grey0 + '--- END OF PREVIEW ---' + $script:Gm.Reset)
     if ($script:AgentPermission -in @('AutoEdit', 'Auto')) {
-        Write-Host ($script:Gm.Aqua + '  [auto-approved by ' + $script:AgentPermission + ' mode]' + $script:Gm.Reset)
+        if ($script:OutputMode -ne 'json') {
+            Write-Host ($script:Gm.Aqua + '  [auto-approved by ' + $script:AgentPermission + ' mode]' + $script:Gm.Reset)
+        }
     }
     else {
+        if ($script:OutputMode -eq 'json') {
+            return (@{ status = 'cancelled'; message = 'Interactive confirmation is disabled in JSON mode. Use -Permission AutoEdit or Auto to allow file modifications.' } | ConvertTo-Json -Compress)
+        }
         Write-Host ($script:Gm.BoldYellow + 'Confirm: ' + $script:Gm.Fg) -NoNewline
         $approval = Read-Host 'Type WRITE to approve this file change; Enter cancels'
         Write-Host $script:Gm.Reset -NoNewline
@@ -1413,7 +1447,9 @@ function Invoke-AgentWrite {
                 throw 'Backup verification failed. No write performed.'
             }
             $backupPath = $backup.FullName
-            Write-Host ($script:Gm.Grey1 + 'Backup: ' + $backupPath + $script:Gm.Reset)
+            if ($script:OutputMode -ne 'json') {
+                Write-Host ($script:Gm.Grey1 + 'Backup: ' + $backupPath + $script:Gm.Reset)
+            }
             $script:CurrentTurnWrites += @{
                 action = 'modified'
                 full_path = $path
@@ -1537,12 +1573,16 @@ function Invoke-AgentUndo {
                 }
                 Remove-Item -LiteralPath $w.backup -Force -ErrorAction Stop
                 $w.undone = $true
-                Write-Host ($script:Gm.Aqua + '  [undo] Restored ' + $w.rel_path + $script:Gm.Reset)
+                if ($script:OutputMode -ne 'json') {
+                    Write-Host ($script:Gm.Aqua + '  [undo] Restored ' + $w.rel_path + $script:Gm.Reset)
+                }
             }
             elseif ($w.action -eq 'created') {
                 if (Test-Path -LiteralPath $w.full_path) {
                     Remove-Item -LiteralPath $w.full_path -Force -ErrorAction Stop
-                    Write-Host ($script:Gm.Aqua + '  [undo] Removed created file ' + $w.rel_path + $script:Gm.Reset)
+                    if ($script:OutputMode -ne 'json') {
+                        Write-Host ($script:Gm.Aqua + '  [undo] Removed created file ' + $w.rel_path + $script:Gm.Reset)
+                    }
                 }
                 $w.undone = $true
             }
@@ -1578,7 +1618,9 @@ function Invoke-AgentTool {
         $allowSkill = ($name -eq 'read_file')
         $path = Resolve-AgentPath -Root $Root -RelativePath $arguments.path -AllowRegisteredSkill:$allowSkill
         $item = Get-Item -LiteralPath $path -Force -ErrorAction Stop
-        Write-Host ($script:Gm.Yellow + ('  [{0}] ' -f $name) + $script:Gm.Grey1 + $arguments.path + $script:Gm.Reset)
+        if ($script:OutputMode -ne 'json') {
+            Write-Host ($script:Gm.Yellow + ('  [{0}] ' -f $name) + $script:Gm.Grey1 + $arguments.path + $script:Gm.Reset)
+        }
         if ($name -eq 'list_files') {
             if (-not $item.PSIsContainer) { throw 'Expected a directory.' }
             $maxEntries = 200
@@ -2163,7 +2205,9 @@ function Expand-UserPrompt {
                     $content = ($lines | Select-Object -First 300) -join "`n"
                     if ($content.Length -gt 20000) { $content = $content.Substring(0, 20000) }
                     $attachments += "<file path=`"$rel`">`n$content`n</file>"
-                    Write-Host ($script:Gm.Aqua + '  [@file] ' + $script:Gm.Grey1 + $rel + $script:Gm.Reset)
+                    if ($script:OutputMode -ne 'json') {
+                        Write-Host ($script:Gm.Aqua + '  [@file] ' + $script:Gm.Grey1 + $rel + $script:Gm.Reset)
+                    }
                 }
             }
             catch {}
@@ -2173,6 +2217,134 @@ function Expand-UserPrompt {
         return ($Prompt + "`n`n" + ($attachments -join "`n`n"))
     }
     return $Prompt
+}
+
+function Convert-TreeEntryToMessage {
+    param($Entry)
+    $msg = @{
+        id = [string]$Entry.id
+        parent_id = $Entry.parent_id
+        role = [string]$Entry.role
+        content = $Entry.content
+    }
+    if ($Entry.entry_type) { $msg.entry_type = [string]$Entry.entry_type }
+    if ($Entry.first_kept_entry_id) { $msg.first_kept_entry_id = [string]$Entry.first_kept_entry_id }
+    if ($Entry.reasoning_content) { $msg.reasoning_content = $Entry.reasoning_content }
+    if ($Entry.tool_calls) { $msg.tool_calls = @($Entry.tool_calls) }
+    if ($Entry.tool_call_id) { $msg.tool_call_id = [string]$Entry.tool_call_id }
+    return $msg
+}
+
+function Test-ValidConversationBoundary {
+    param([array]$Messages)
+    if (-not $Messages -or $Messages.Count -eq 0) { return $true }
+    $i = 0
+    while ($i -lt $Messages.Count) {
+        $m = $Messages[$i]
+        if ($m.role -eq 'assistant' -and $m.tool_calls -and @($m.tool_calls).Count -gt 0) {
+            $requiredIds = @()
+            foreach ($tc in @($m.tool_calls)) {
+                if ($tc -and $tc.id) { $requiredIds += [string]$tc.id }
+            }
+            $answeredIds = @{}
+            $j = $i + 1
+            while ($j -lt $Messages.Count -and $Messages[$j].role -eq 'tool') {
+                if ($Messages[$j].tool_call_id) {
+                    $answeredIds[[string]$Messages[$j].tool_call_id] = $true
+                }
+                $j++
+            }
+            foreach ($reqId in $requiredIds) {
+                if (-not $answeredIds.ContainsKey($reqId)) {
+                    return $false
+                }
+            }
+            $i = $j
+            continue
+        }
+        if ($m.role -eq 'tool') {
+            return $false
+        }
+        $i++
+    }
+    return $true
+}
+
+function Build-BranchContextMessages {
+    param($State, [string]$LeafId)
+    $sysMsg = if ($State.messages -and $State.messages.Count -gt 0 -and $State.messages[0].role -eq 'system') {
+        $State.messages[0]
+    }
+    else {
+        @{ role = 'system'; content = '' }
+    }
+    if (-not $LeafId) { return @($sysMsg) }
+    $byId = @{}
+    foreach ($te in @($State.tree_entries)) {
+        if ($te -and $te.id) { $byId[[string]$te.id] = $te }
+    }
+    if (-not $byId.ContainsKey($LeafId)) {
+        throw "Entry ID '$LeafId' not found in session tree."
+    }
+    $chainRev = @()
+    $curr = $byId[$LeafId]
+    $guard = 0
+    while ($null -ne $curr -and $guard -lt 5000) {
+        $guard++
+        $chainRev += $curr
+        if ($curr.parent_id -and $byId.ContainsKey([string]$curr.parent_id)) {
+            $curr = $byId[[string]$curr.parent_id]
+        }
+        else {
+            $curr = $null
+        }
+    }
+    $path = @()
+    for ($i = $chainRev.Count - 1; $i -ge 0; $i--) {
+        $path += $chainRev[$i]
+    }
+    $compIdx = -1
+    for ($i = 0; $i -lt $path.Count; $i++) {
+        if ($path[$i].entry_type -eq 'compaction') {
+            $compIdx = $i
+        }
+    }
+    if ($compIdx -lt 0) {
+        foreach ($te in @($State.tree_entries)) {
+            if ($te -and $te.entry_type -eq 'compaction' -and [string]$te.parent_id -eq $LeafId) {
+                $path += $te
+                $compIdx = $path.Count - 1
+                break
+            }
+        }
+    }
+    if ($compIdx -lt 0) {
+        $rebuilt = @($sysMsg)
+        foreach ($entry in $path) {
+            $rebuilt += (Convert-TreeEntryToMessage -Entry $entry)
+        }
+        return $rebuilt
+    }
+    $compEntry = $path[$compIdx]
+    $rebuilt = @($sysMsg, (Convert-TreeEntryToMessage -Entry $compEntry))
+    $firstKeptId = [string]$compEntry.first_kept_entry_id
+    if ($firstKeptId) {
+        $foundFirstKept = $false
+        for ($i = 0; $i -lt $compIdx; $i++) {
+            if ([string]$path[$i].id -eq $firstKeptId) {
+                $foundFirstKept = $true
+            }
+            if ($foundFirstKept -and $path[$i].entry_type -ne 'compaction') {
+                $rebuilt += (Convert-TreeEntryToMessage -Entry $path[$i])
+            }
+        }
+    }
+    for ($i = $compIdx + 1; $i -lt $path.Count; $i++) {
+        if ($path[$i].entry_type -ne 'compaction') {
+            $rebuilt += (Convert-TreeEntryToMessage -Entry $path[$i])
+        }
+    }
+    return $rebuilt
 }
 
 function Ensure-SessionTree {
@@ -2185,38 +2357,71 @@ function Ensure-SessionTree {
     foreach ($te in @($State.tree_entries)) {
         if ($te -and $te.id) { $existingById[[string]$te.id] = $te }
     }
-    $prevId = $null
+    $msgIdsInState = @{}
+    $lastExistingMsgId = $null
+    foreach ($m in @($State.messages)) {
+        if ($m.role -eq 'system') { continue }
+        if ($m.id) {
+            $mid = [string]$m.id
+            $msgIdsInState[$mid] = $true
+            $lastExistingMsgId = $mid
+            if (-not $existingById.ContainsKey($mid)) {
+                $entryCopy = @{
+                    id = $mid
+                    parent_id = $m.parent_id
+                    role = [string]$m.role
+                    content = $m.content
+                    timestamp = (Get-Date -Format 'yyyy-MM-ddTHH:mm:ssK')
+                }
+                if ($m.entry_type) { $entryCopy.entry_type = [string]$m.entry_type }
+                if ($m.first_kept_entry_id) { $entryCopy.first_kept_entry_id = [string]$m.first_kept_entry_id }
+                if ($m.reasoning_content) { $entryCopy.reasoning_content = $m.reasoning_content }
+                if ($m.tool_calls) { $entryCopy.tool_calls = @($m.tool_calls) }
+                if ($m.tool_call_id) { $entryCopy.tool_call_id = [string]$m.tool_call_id }
+                $State.tree_entries += $entryCopy
+                $existingById[$mid] = $entryCopy
+            }
+        }
+    }
+    $currLeaf = if ($State.leaf_id -and $msgIdsInState.ContainsKey([string]$State.leaf_id)) {
+        [string]$State.leaf_id
+    }
+    else {
+        $lastExistingMsgId
+    }
     $counter = $State.tree_entries.Count
     for ($i = 0; $i -lt $State.messages.Count; $i++) {
         $m = $State.messages[$i]
         if ($m.role -eq 'system') { continue }
-        if (-not $m.id) {
+        if ($m.id -and $existingById.ContainsKey([string]$m.id)) {
+            continue
+        }
+        $counter++
+        $newId = ('e{0:D4}' -f $counter)
+        while ($existingById.ContainsKey($newId)) {
             $counter++
             $newId = ('e{0:D4}' -f $counter)
-            while ($existingById.ContainsKey($newId)) {
-                $counter++
-                $newId = ('e{0:D4}' -f $counter)
-            }
-            $m.id = $newId
         }
-        $m.parent_id = $prevId
-        $prevId = [string]$m.id
-        if (-not $existingById.ContainsKey($prevId)) {
-            $entryCopy = @{
-                id = $prevId
-                parent_id = $m.parent_id
-                role = [string]$m.role
-                content = $m.content
-                timestamp = (Get-Date -Format 'yyyy-MM-ddTHH:mm:ssK')
-            }
-            if ($m.reasoning_content) { $entryCopy.reasoning_content = $m.reasoning_content }
-            if ($m.tool_calls) { $entryCopy.tool_calls = @($m.tool_calls) }
-            if ($m.tool_call_id) { $entryCopy.tool_call_id = [string]$m.tool_call_id }
-            $State.tree_entries += $entryCopy
-            $existingById[$prevId] = $entryCopy
+        $m.id = $newId
+        $m.parent_id = $currLeaf
+        $currLeaf = $newId
+        $msgIdsInState[$currLeaf] = $true
+        $entryCopy = @{
+            id = $currLeaf
+            parent_id = $m.parent_id
+            role = [string]$m.role
+            content = $m.content
+            timestamp = (Get-Date -Format 'yyyy-MM-ddTHH:mm:ssK')
         }
+        if ($m.entry_type) { $entryCopy.entry_type = [string]$m.entry_type }
+        if ($m.first_kept_entry_id) { $entryCopy.first_kept_entry_id = [string]$m.first_kept_entry_id }
+        if ($m.reasoning_content) { $entryCopy.reasoning_content = $m.reasoning_content }
+        if ($m.tool_calls) { $entryCopy.tool_calls = @($m.tool_calls) }
+        if ($m.tool_call_id) { $entryCopy.tool_call_id = [string]$m.tool_call_id }
+        $State.tree_entries += $entryCopy
+        $existingById[$currLeaf] = $entryCopy
     }
-    $State.leaf_id = $prevId
+    $State.leaf_id = $currLeaf
 }
 
 function Get-SessionTree {
@@ -2230,10 +2435,12 @@ function Get-SessionTree {
     foreach ($te in @($State.tree_entries)) {
         $preview = if ($te.content) { ([string]$te.content -replace '\s+', ' ').Trim() } elseif ($te.tool_calls) { '[tool_calls]' } else { '' }
         if ($preview.Length -gt 60) { $preview = $preview.Substring(0, 60) + '...' }
+        $roleLabel = if ($te.entry_type -eq 'compaction') { 'compaction' } else { [string]$te.role }
         $nodes += @{
             id = [string]$te.id
             parent_id = $te.parent_id
-            role = [string]$te.role
+            role = $roleLabel
+            entry_type = if ($te.entry_type) { [string]$te.entry_type } else { 'message' }
             preview = $preview
             active = [bool]$activeIds.ContainsKey([string]$te.id)
             is_leaf = ([string]$te.id -eq [string]$State.leaf_id)
@@ -2246,42 +2453,19 @@ function Switch-SessionBranch {
     param($State, [string]$TargetId)
     Ensure-SessionTree -State $State
     if (-not $TargetId) { throw 'Target entry ID is required.' }
-    $byId = @{}
+    $rebuilt = @(Build-BranchContextMessages -State $State -LeafId $TargetId)
+    if (-not (Test-ValidConversationBoundary -Messages $rebuilt)) {
+        throw "Cannot switch branch or fork at entry '$TargetId': incomplete tool_calls sequence (missing tool result)."
+    }
+    $effectiveLeaf = $TargetId
     foreach ($te in @($State.tree_entries)) {
-        if ($te -and $te.id) { $byId[[string]$te.id] = $te }
-    }
-    if (-not $byId.ContainsKey($TargetId)) {
-        throw "Entry ID '$TargetId' not found in session tree."
-    }
-    $chainRev = @()
-    $curr = $byId[$TargetId]
-    $guard = 0
-    while ($null -ne $curr -and $guard -lt 5000) {
-        $guard++
-        $msg = @{
-            id = [string]$curr.id
-            parent_id = $curr.parent_id
-            role = [string]$curr.role
-            content = $curr.content
+        if ($te -and $te.entry_type -eq 'compaction' -and [string]$te.parent_id -eq $TargetId) {
+            $effectiveLeaf = [string]$te.id
+            break
         }
-        if ($curr.reasoning_content) { $msg.reasoning_content = $curr.reasoning_content }
-        if ($curr.tool_calls) { $msg.tool_calls = @($curr.tool_calls) }
-        if ($curr.tool_call_id) { $msg.tool_call_id = [string]$curr.tool_call_id }
-        $chainRev += $msg
-        if ($curr.parent_id -and $byId.ContainsKey([string]$curr.parent_id)) {
-            $curr = $byId[[string]$curr.parent_id]
-        }
-        else {
-            $curr = $null
-        }
-    }
-    $sysMsg = if ($State.messages.Count -gt 0 -and $State.messages[0].role -eq 'system') { $State.messages[0] } else { @{ role = 'system'; content = '' } }
-    $rebuilt = @($sysMsg)
-    for ($i = $chainRev.Count - 1; $i -ge 0; $i--) {
-        $rebuilt += $chainRev[$i]
     }
     $State.messages = $rebuilt
-    $State.leaf_id = $TargetId
+    $State.leaf_id = $effectiveLeaf
     $State.undo_stack = @()
     return $State
 }
@@ -2332,6 +2516,8 @@ function Save-AgentSession {
                 role = [string]$te.role
                 content = $te.content
             }
+            if ($te.entry_type) { $bEntry.entry_type = [string]$te.entry_type }
+            if ($te.first_kept_entry_id) { $bEntry.first_kept_entry_id = [string]$te.first_kept_entry_id }
             if ($te.reasoning_content) { $bEntry.reasoning_content = $te.reasoning_content }
             if ($te.tool_calls) { $bEntry.tool_calls = @($te.tool_calls) }
             if ($te.tool_call_id) { $bEntry.tool_call_id = [string]$te.tool_call_id }
@@ -2392,6 +2578,7 @@ function Read-AgentSession {
                 $State.model = [string]$obj.model
                 if ($obj.name) { $State.session_name = [string]$obj.name }
                 if ($obj.parent_session) { $State.parent_session = [string]$obj.parent_session }
+                if ($obj.leaf_id) { $State.leaf_id = [string]$obj.leaf_id }
             }
             continue
         }
@@ -2404,6 +2591,8 @@ function Read-AgentSession {
                     role = [string]$obj.role
                     content = $obj.content
                 }
+                if ($obj.entry_type) { $bMsg.entry_type = [string]$obj.entry_type }
+                if ($obj.first_kept_entry_id) { $bMsg.first_kept_entry_id = [string]$obj.first_kept_entry_id }
                 if ($obj.reasoning_content) { $bMsg.reasoning_content = $obj.reasoning_content }
                 if ($obj.tool_calls) { $bMsg.tool_calls = @($obj.tool_calls) }
                 if ($obj.tool_call_id) { $bMsg.tool_call_id = [string]$obj.tool_call_id }
@@ -2414,6 +2603,8 @@ function Read-AgentSession {
         $msg = @{ role = [string]$obj.role; content = $obj.content }
         if ($obj.id) { $msg.id = [string]$obj.id }
         if ($obj.parent_id) { $msg.parent_id = [string]$obj.parent_id }
+        if ($obj.entry_type) { $msg.entry_type = [string]$obj.entry_type }
+        if ($obj.first_kept_entry_id) { $msg.first_kept_entry_id = [string]$obj.first_kept_entry_id }
         if ($obj.reasoning_content) { $msg.reasoning_content = $obj.reasoning_content }
         if ($obj.tool_calls) { $msg.tool_calls = @($obj.tool_calls) }
         if ($obj.tool_call_id) { $msg.tool_call_id = [string]$obj.tool_call_id }
@@ -2455,6 +2646,9 @@ function Invoke-SessionResume {
     $loadedMessages = @(Read-AgentSession -SessionFile $SessionFile -State $State)
     $State.messages = $loadedMessages
     Ensure-SessionTree -State $State
+    if ($State.leaf_id -and $State.tree_entries.Count -gt 0) {
+        $State.messages = @(Build-BranchContextMessages -State $State -LeafId $State.leaf_id)
+    }
     if ($CurrentWorkspace) {
         $State.workspace = if (Test-Path -LiteralPath $CurrentWorkspace) { (Get-Item -LiteralPath $CurrentWorkspace -Force).FullName } else { $CurrentWorkspace }
     }
@@ -2479,6 +2673,7 @@ function Invoke-SessionFork {
         parent_session = [string]$State.session_id
         workspace = $effWs
         model = $effMdl
+        leaf_id = $State.leaf_id
         messages = @($State.messages)
         tree_entries = @($State.tree_entries)
         undo_stack = @()
@@ -2486,6 +2681,9 @@ function Invoke-SessionFork {
     }
     if ($effId) {
         Switch-SessionBranch -State $forkState -TargetId $effId | Out-Null
+    }
+    elseif (-not (Test-ValidConversationBoundary -Messages $forkState.messages)) {
+        throw 'Cannot fork session: incomplete tool_calls sequence (missing tool result).'
     }
     $forkFile = Join-Path $SessionDir ($forkState.session_id + '.jsonl')
     Save-AgentSession -SessionFile $forkFile -State $forkState -Workspace $effWs -Model $effMdl -SessionId $forkState.session_id
@@ -2692,7 +2890,7 @@ function Get-CompactionFileOperations {
 function Invoke-AgentCompact {
     param($State, [string]$Endpoint, [string]$ModelId, [string]$ApiKey, [string]$Focus = '', [int]$KeepRecent = 4, [int]$KeepRecentTokens = 0)
     if ($State.messages.Count -le ($KeepRecent + 1)) { return $false }
-    $systemMsg = $State.messages[0]
+    Ensure-SessionTree -State $State
     $cutInfo = Find-CompactionCutPoint -Messages $State.messages -KeepRecent $KeepRecent -KeepRecentTokens $KeepRecentTokens
     $cutIndex = $cutInfo.cut_index
     if ($cutIndex -le 1) { return $false }
@@ -2774,9 +2972,29 @@ function Invoke-AgentCompact {
     $summaryText = $choice.message.content
     if (-not $summaryText) { throw 'Compaction returned empty summary.' }
     $finalSummary = $summaryText.Trim() + $fileOps.xml
-    $summaryMsg = @{ role = 'user'; content = ("[Compacted Conversation Summary]`n" + $finalSummary) }
-    $State.messages = @($systemMsg, $summaryMsg) + $recent
-    Ensure-SessionTree -State $State
+    $firstKeptId = if ($recent.Count -gt 0 -and $recent[0].id) { [string]$recent[0].id } else { '' }
+    $existingById = @{}
+    foreach ($te in @($State.tree_entries)) {
+        if ($te -and $te.id) { $existingById[[string]$te.id] = $true }
+    }
+    $counter = $State.tree_entries.Count + 1
+    $compId = ('e{0:D4}' -f $counter)
+    while ($existingById.ContainsKey($compId)) {
+        $counter++
+        $compId = ('e{0:D4}' -f $counter)
+    }
+    $compEntry = @{
+        id = $compId
+        parent_id = $State.leaf_id
+        entry_type = 'compaction'
+        first_kept_entry_id = $firstKeptId
+        role = 'user'
+        content = ("[Compacted Conversation Summary]`n" + $finalSummary)
+        timestamp = (Get-Date -Format 'yyyy-MM-ddTHH:mm:ssK')
+    }
+    $State.tree_entries += $compEntry
+    $State.leaf_id = $compId
+    $State.messages = @(Build-BranchContextMessages -State $State -LeafId $compId)
     return $true
 }
 

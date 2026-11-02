@@ -2,6 +2,7 @@
 
 $script:CurrentTurnWrites = @()
 $script:AgentPermission = 'Ask'
+$script:OutputMode = 'text'
 $script:ShowReasoning = 'compact'
 $script:ReasoningEffort = ''
 $script:NoTools = $false
@@ -330,16 +331,34 @@ function Get-WorkspaceIgnoreRules {
     param([string]$Root, [string]$SearchPath = '')
     $rules = @()
     if (-not $Root -or -not (Test-Path -LiteralPath $Root)) { return $rules }
-    $rootFull = (Get-Item -LiteralPath $Root -Force).FullName
-    $dirsToCheck = @($rootFull)
-    $scanBase = if ($SearchPath -and (Test-Path -LiteralPath $SearchPath)) { (Get-Item -LiteralPath $SearchPath -Force).FullName } else { $rootFull }
-    if ($scanBase -ne $rootFull -and (-not ($dirsToCheck -contains $scanBase))) {
-        $dirsToCheck += $scanBase
+    $rootFull = (Get-Item -LiteralPath $Root -Force).FullName.TrimEnd('\').TrimEnd('/')
+    $scanItem = if ($SearchPath -and (Test-Path -LiteralPath $SearchPath)) { Get-Item -LiteralPath $SearchPath -Force } else { Get-Item -LiteralPath $Root -Force }
+    $scanDir = if ($scanItem.PSIsContainer) { $scanItem.FullName.TrimEnd('\').TrimEnd('/') } else { (Split-Path $scanItem.FullName -Parent).TrimEnd('\').TrimEnd('/') }
+    $ancestorsRev = @()
+    $currDir = $scanDir
+    $guard = 0
+    while ($currDir -and ($currDir -ine $rootFull) -and ($guard -lt 100)) {
+        $guard++
+        $ancestorsRev += $currDir
+        $parentDir = Split-Path $currDir -Parent
+        if (-not $parentDir -or ($parentDir -ieq $currDir)) { break }
+        $currDir = $parentDir.TrimEnd('\').TrimEnd('/')
     }
-    foreach ($subDir in @(Get-ChildItem -LiteralPath $scanBase -Recurse -Force -Directory -ErrorAction SilentlyContinue)) {
-        if (($subDir.Attributes -band 1024) -ne 0) { continue }
-        if ($subDir.FullName -match '[/\\](\.git|node_modules)([/\\]|$)') { continue }
-        $dirsToCheck += $subDir.FullName
+    $dirsToCheck = @($rootFull)
+    for ($i = $ancestorsRev.Count - 1; $i -ge 0; $i--) {
+        if (-not ($dirsToCheck -contains $ancestorsRev[$i])) {
+            $dirsToCheck += $ancestorsRev[$i]
+        }
+    }
+    if ($scanItem.PSIsContainer) {
+        foreach ($subDir in @(Get-ChildItem -LiteralPath $scanDir -Recurse -Force -Directory -ErrorAction SilentlyContinue | Sort-Object FullName)) {
+            if (($subDir.Attributes -band 1024) -ne 0) { continue }
+            if ($subDir.FullName -match '[/\\](\.git|node_modules)([/\\]|$)') { continue }
+            $subFull = $subDir.FullName.TrimEnd('\').TrimEnd('/')
+            if (-not ($dirsToCheck -contains $subFull)) {
+                $dirsToCheck += $subFull
+            }
+        }
     }
     foreach ($d in $dirsToCheck) {
         $relDir = Get-WorkspaceRelativePath -Root $rootFull -FullPath $d
@@ -774,12 +793,19 @@ function Invoke-AgentCommand {
         $timeoutSec = [int]$Arguments.timeout_sec
         if ($timeoutSec -lt 1 -or $timeoutSec -gt 600) { throw 'timeout_sec must be between 1 and 600.' }
     }
-    Write-Host ("`n" + $script:Gm.BoldYellow + 'PROPOSED run_command (in ' + $Root + '):' + $script:Gm.Reset)
-    Write-Host ($script:Gm.Bg1 + $script:Gm.Yellow + '  ' + (Format-PreviewText $cmdText) + '  ' + $script:Gm.Reset)
+    if ($script:OutputMode -ne 'json') {
+        Write-Host ("`n" + $script:Gm.BoldYellow + 'PROPOSED run_command (in ' + $Root + '):' + $script:Gm.Reset)
+        Write-Host ($script:Gm.Bg1 + $script:Gm.Yellow + '  ' + (Format-PreviewText $cmdText) + '  ' + $script:Gm.Reset)
+    }
     if ($script:AgentPermission -eq 'Auto') {
-        Write-Host ($script:Gm.Aqua + '  [auto-approved by Auto mode]' + $script:Gm.Reset)
+        if ($script:OutputMode -ne 'json') {
+            Write-Host ($script:Gm.Aqua + '  [auto-approved by Auto mode]' + $script:Gm.Reset)
+        }
     }
     else {
+        if ($script:OutputMode -eq 'json') {
+            return (@{ status = 'cancelled'; message = 'Interactive confirmation is disabled in JSON mode. Use -Permission Auto to allow command execution.' } | ConvertTo-Json -Compress)
+        }
         Write-Host ($script:Gm.BoldYellow + 'Confirm: ' + $script:Gm.Fg) -NoNewline
         $approval = Read-Host 'Type RUN to execute this command; Enter cancels'
         Write-Host $script:Gm.Reset -NoNewline
@@ -788,7 +814,7 @@ function Invoke-AgentCommand {
         }
     }
     $res = Invoke-ShellCommand -Root $Root -Command $cmdText -TimeoutSec $timeoutSec
-    if ($res.output) {
+    if ($res.output -and $script:OutputMode -ne 'json') {
         $previewLines = @($res.output -split "`r?`n" | Select-Object -First 15)
         foreach ($pLine in $previewLines) {
             Write-Host ($script:Gm.Grey1 + '    ' + (Format-PreviewText $pLine) + $script:Gm.Reset)
@@ -975,30 +1001,37 @@ function Invoke-AgentWrite {
     }
     if ($after.Length -gt 1MB -or ($null -ne $before -and $before.Length -gt 1MB)) { throw 'File content exceeds 1 MiB limit.' }
     if ($after -match '\x00' -or ($null -ne $before -and $before -match '\x00')) { throw 'Binary content is not supported.' }
-    Write-Host ("`n" + $script:Gm.BoldYellow + 'PROPOSED ' + $Name + ': ' + $path + $script:Gm.Reset)
-    if ($null -ne $before) {
-        $prevPrefix = Format-DiffSnippet -Text $prefixText -MaxChars 300 -KeepTail
-        $prevSuffix = Format-DiffSnippet -Text $suffixText -MaxChars 300
-        $prevOld = Format-DiffSnippet -Text $oldText -MaxChars 4000
-        $prevNew = Format-DiffSnippet -Text $newText -MaxChars 4000
-        Write-Host ($script:Gm.BoldRed + '--- BEFORE ---' + $script:Gm.Reset)
-        Write-Host ($script:Gm.Grey0 + $prevPrefix + $script:Gm.Reset) -NoNewline
-        Write-Host ($script:Gm.BgDiffRed + $script:Gm.Red + $prevOld + $script:Gm.Reset) -NoNewline
-        Write-Host ($script:Gm.Grey0 + $prevSuffix + $script:Gm.Reset)
-        Write-Host ($script:Gm.BoldGreen + '--- AFTER ---' + $script:Gm.Reset)
-        Write-Host ($script:Gm.Grey0 + $prevPrefix + $script:Gm.Reset) -NoNewline
-        Write-Host ($script:Gm.BgDiffGreen + $script:Gm.Green + $prevNew + $script:Gm.Reset) -NoNewline
-        Write-Host ($script:Gm.Grey0 + $prevSuffix + $script:Gm.Reset)
+    if ($script:OutputMode -ne 'json') {
+        Write-Host ("`n" + $script:Gm.BoldYellow + 'PROPOSED ' + $Name + ': ' + $path + $script:Gm.Reset)
+        if ($null -ne $before) {
+            $prevPrefix = Format-DiffSnippet -Text $prefixText -MaxChars 300 -KeepTail
+            $prevSuffix = Format-DiffSnippet -Text $suffixText -MaxChars 300
+            $prevOld = Format-DiffSnippet -Text $oldText -MaxChars 4000
+            $prevNew = Format-DiffSnippet -Text $newText -MaxChars 4000
+            Write-Host ($script:Gm.BoldRed + '--- BEFORE ---' + $script:Gm.Reset)
+            Write-Host ($script:Gm.Grey0 + $prevPrefix + $script:Gm.Reset) -NoNewline
+            Write-Host ($script:Gm.BgDiffRed + $script:Gm.Red + $prevOld + $script:Gm.Reset) -NoNewline
+            Write-Host ($script:Gm.Grey0 + $prevSuffix + $script:Gm.Reset)
+            Write-Host ($script:Gm.BoldGreen + '--- AFTER ---' + $script:Gm.Reset)
+            Write-Host ($script:Gm.Grey0 + $prevPrefix + $script:Gm.Reset) -NoNewline
+            Write-Host ($script:Gm.BgDiffGreen + $script:Gm.Green + $prevNew + $script:Gm.Reset) -NoNewline
+            Write-Host ($script:Gm.Grey0 + $prevSuffix + $script:Gm.Reset)
+        }
+        else {
+            Write-Host ($script:Gm.BoldGreen + '--- AFTER ---' + $script:Gm.Reset)
+            Write-Host ($script:Gm.BgDiffGreen + $script:Gm.Green + (Format-DiffSnippet -Text $after -MaxChars 4000) + $script:Gm.Reset)
+        }
+        Write-Host ($script:Gm.Grey0 + '--- END OF PREVIEW ---' + $script:Gm.Reset)
     }
-    else {
-        Write-Host ($script:Gm.BoldGreen + '--- AFTER ---' + $script:Gm.Reset)
-        Write-Host ($script:Gm.BgDiffGreen + $script:Gm.Green + (Format-DiffSnippet -Text $after -MaxChars 4000) + $script:Gm.Reset)
-    }
-    Write-Host ($script:Gm.Grey0 + '--- END OF PREVIEW ---' + $script:Gm.Reset)
     if ($script:AgentPermission -in @('AutoEdit', 'Auto')) {
-        Write-Host ($script:Gm.Aqua + '  [auto-approved by ' + $script:AgentPermission + ' mode]' + $script:Gm.Reset)
+        if ($script:OutputMode -ne 'json') {
+            Write-Host ($script:Gm.Aqua + '  [auto-approved by ' + $script:AgentPermission + ' mode]' + $script:Gm.Reset)
+        }
     }
     else {
+        if ($script:OutputMode -eq 'json') {
+            return (@{ status = 'cancelled'; message = 'Interactive confirmation is disabled in JSON mode. Use -Permission AutoEdit or Auto to allow file modifications.' } | ConvertTo-Json -Compress)
+        }
         Write-Host ($script:Gm.BoldYellow + 'Confirm: ' + $script:Gm.Fg) -NoNewline
         $approval = Read-Host 'Type WRITE to approve this file change; Enter cancels'
         Write-Host $script:Gm.Reset -NoNewline
@@ -1025,7 +1058,9 @@ function Invoke-AgentWrite {
                 throw 'Backup verification failed. No write performed.'
             }
             $backupPath = $backup.FullName
-            Write-Host ($script:Gm.Grey1 + 'Backup: ' + $backupPath + $script:Gm.Reset)
+            if ($script:OutputMode -ne 'json') {
+                Write-Host ($script:Gm.Grey1 + 'Backup: ' + $backupPath + $script:Gm.Reset)
+            }
             $script:CurrentTurnWrites += @{
                 action = 'modified'
                 full_path = $path
@@ -1149,12 +1184,16 @@ function Invoke-AgentUndo {
                 }
                 Remove-Item -LiteralPath $w.backup -Force -ErrorAction Stop
                 $w.undone = $true
-                Write-Host ($script:Gm.Aqua + '  [undo] Restored ' + $w.rel_path + $script:Gm.Reset)
+                if ($script:OutputMode -ne 'json') {
+                    Write-Host ($script:Gm.Aqua + '  [undo] Restored ' + $w.rel_path + $script:Gm.Reset)
+                }
             }
             elseif ($w.action -eq 'created') {
                 if (Test-Path -LiteralPath $w.full_path) {
                     Remove-Item -LiteralPath $w.full_path -Force -ErrorAction Stop
-                    Write-Host ($script:Gm.Aqua + '  [undo] Removed created file ' + $w.rel_path + $script:Gm.Reset)
+                    if ($script:OutputMode -ne 'json') {
+                        Write-Host ($script:Gm.Aqua + '  [undo] Removed created file ' + $w.rel_path + $script:Gm.Reset)
+                    }
                 }
                 $w.undone = $true
             }
@@ -1190,7 +1229,9 @@ function Invoke-AgentTool {
         $allowSkill = ($name -eq 'read_file')
         $path = Resolve-AgentPath -Root $Root -RelativePath $arguments.path -AllowRegisteredSkill:$allowSkill
         $item = Get-Item -LiteralPath $path -Force -ErrorAction Stop
-        Write-Host ($script:Gm.Yellow + ('  [{0}] ' -f $name) + $script:Gm.Grey1 + $arguments.path + $script:Gm.Reset)
+        if ($script:OutputMode -ne 'json') {
+            Write-Host ($script:Gm.Yellow + ('  [{0}] ' -f $name) + $script:Gm.Grey1 + $arguments.path + $script:Gm.Reset)
+        }
         if ($name -eq 'list_files') {
             if (-not $item.PSIsContainer) { throw 'Expected a directory.' }
             $maxEntries = 200
