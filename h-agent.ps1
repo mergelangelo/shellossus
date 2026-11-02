@@ -4,7 +4,10 @@ param(
     [string]$Workspace = '.',
     [string]$ConfigPath = "$env:USERPROFILE\.h-agent\.env",
     [int]$MaxSteps = 8,
+    [string]$Permission = 'Ask',
+    [string]$ReasoningEffort = '',
     [string]$Prompt = '',
+    [switch]$HideReasoning,
     [switch]$Continue,
     [switch]$Setup,
     [switch]$LibraryOnly
@@ -268,6 +271,24 @@ function Write-AgentReply {
     }
 }
 
+function Write-AgentReasoning {
+    param([string]$Text)
+    if (-not $Text -or $script:ShowReasoning -eq 'hide') { return }
+    $lines = @($Text.Trim() -split "`r?`n")
+    if ($script:ShowReasoning -eq 'full' -or $lines.Count -le 3) {
+        Write-Host ("`n" + $script:Gm.Grey0 + '  [reasoning]' + $script:Gm.Reset)
+        foreach ($l in $lines) {
+            Write-Host ($script:Gm.Grey1 + '  | ' + (Format-PreviewText $l) + $script:Gm.Reset)
+        }
+    }
+    else {
+        Write-Host ("`n" + $script:Gm.Grey0 + "  [reasoning: last 3 of $($lines.Count) lines | /reasoning full to expand]" + $script:Gm.Reset)
+        foreach ($l in @($lines | Select-Object -Last 3)) {
+            Write-Host ($script:Gm.Grey1 + '  | ' + (Format-PreviewText $l) + $script:Gm.Reset)
+        }
+    }
+}
+
 function Test-IsSecretFile {
     param($Item)
     if ($Item.PSIsContainer) { return $false }
@@ -308,6 +329,9 @@ function Resolve-AgentPath {
 }
 
 $script:CurrentTurnWrites = @()
+$script:AgentPermission = 'Ask'
+$script:ShowReasoning = 'compact'
+$script:ReasoningEffort = ''
 
 function Get-AgentTools {
     foreach ($name in @('list_files', 'read_file')) {
@@ -357,24 +381,40 @@ function Get-AgentTools {
                     path = @{ type = 'string'; description = 'Workspace-relative file or directory path; . means the root.' }
                     pattern = @{ type = 'string'; description = 'Regex or literal search pattern.' }
                     literal = @{ type = 'boolean'; description = 'Set true for literal substring match instead of regex.' }
+                    case_sensitive = @{ type = 'boolean'; description = 'Set true for case-sensitive matching.' }
+                    include = @{ type = 'string'; description = 'Optional file name wildcard filter, e.g. *.sql or *.ps1.' }
+                    context_lines = @{ type = 'integer'; description = 'Optional surrounding context lines (0..5).' }
                 }
                 required = @('path', 'pattern')
             }
         }
     }
+    if ($script:AgentPermission -eq 'ReadOnly') { return }
     foreach ($name in @('write_file', 'edit_file')) {
         $properties = @{ path = @{ type = 'string'; description = 'Workspace-relative text file path. Parent directory must exist.' } }
         if ($name -eq 'write_file') {
-            $description = 'Create a UTF-8 text file (or overwrite when overwrite=true). Requires user confirmation.'
+            $description = 'Create a UTF-8 text file (or overwrite when overwrite=true).'
             $properties.content = @{ type = 'string'; description = 'Complete file contents, at most 20000 characters.' }
             $properties.overwrite = @{ type = 'boolean'; description = 'Set true to overwrite an existing file (saves a backup).' }
             $required = @('path', 'content')
         }
         else {
-            $description = 'Replace a unique block in a UTF-8 text file (supports exact or trailing-whitespace/quote-normalized matching). Requires user confirmation; saves a backup.'
-            $properties.old_text = @{ type = 'string'; description = 'Nonempty text occurring once in the file.' }
-            $properties.new_text = @{ type = 'string'; description = 'Replacement text.' }
-            $required = @('path', 'old_text', 'new_text')
+            $description = 'Replace one or more unique blocks in a UTF-8 text file (supports single old_text/new_text or batch edits[] array; saves a backup).'
+            $properties.old_text = @{ type = 'string'; description = 'Single edit: nonempty text occurring once in the file.' }
+            $properties.new_text = @{ type = 'string'; description = 'Single edit: replacement text.' }
+            $properties.edits = @{
+                type = 'array'
+                description = 'Optional batch of non-overlapping edits: array of {old_text, new_text} objects.'
+                items = @{
+                    type = 'object'
+                    properties = @{
+                        old_text = @{ type = 'string' }
+                        new_text = @{ type = 'string' }
+                    }
+                    required = @('old_text', 'new_text')
+                }
+            }
+            $required = @('path')
         }
         @{ type = 'function'; function = @{ name = $name; description = $description; parameters = @{ type = 'object'; properties = $properties; required = $required } } }
     }
@@ -382,7 +422,7 @@ function Get-AgentTools {
         type = 'function'
         function = @{
             name = 'run_command'
-            description = 'Execute a PowerShell command in the workspace directory. Requires explicit user RUN confirmation.'
+            description = 'Execute a PowerShell command in the workspace directory.'
             parameters = @{
                 type = 'object'
                 properties = @{
@@ -397,9 +437,10 @@ function Get-AgentTools {
 function Invoke-ShellCommand {
     param([string]$Root, [string]$Command)
     if (-not $Command -or -not $Command.Trim()) { throw 'Command must not be empty.' }
+    $wrappedCmd = "`$env:H_AGENT_API_KEY = `$null; `$env:OPENAI_API_KEY = `$null; " + $Command
     Push-Location -LiteralPath $Root -ErrorAction Stop
     try {
-        $rawOut = @(& powershell -NoProfile -NonInteractive -Command $Command 2>&1 | ForEach-Object { [string]$_ })
+        $rawOut = @(& powershell -NoProfile -NonInteractive -Command $wrappedCmd 2>&1 | ForEach-Object { [string]$_ })
         $exitCode = if ($null -ne $LASTEXITCODE) { [int]$LASTEXITCODE } else { 0 }
     }
     finally {
@@ -408,7 +449,19 @@ function Invoke-ShellCommand {
     $text = ($rawOut | Select-Object -First 300) -join "`n"
     $truncated = $rawOut.Count -gt 300
     if ($text.Length -gt 20000) { $text = $text.Substring(0, 20000); $truncated = $true }
-    return @{ exit_code = $exitCode; output = $text; truncated = $truncated }
+    $fullLogRel = $null
+    if ($truncated) {
+        try {
+            $outDir = Join-Path $Root '.h-agent\output'
+            if (-not (Test-Path -LiteralPath $outDir)) { New-Item -ItemType Directory -Path $outDir -Force -ErrorAction Stop | Out-Null }
+            $logName = 'cmd-' + (Get-Date -Format 'yyyyMMdd-HHmmss') + '-' + ([guid]::NewGuid().ToString('N').Substring(0, 6)) + '.log'
+            $logFull = Join-Path $outDir $logName
+            Set-Content -LiteralPath $logFull -Value ($rawOut -join "`r`n") -Encoding UTF8 -ErrorAction Stop
+            $fullLogRel = Get-WorkspaceRelativePath -Root $Root -FullPath $logFull
+        }
+        catch {}
+    }
+    return @{ exit_code = $exitCode; output = $text; truncated = $truncated; full_output_path = $fullLogRel }
 }
 
 function Invoke-AgentCommand {
@@ -418,11 +471,16 @@ function Invoke-AgentCommand {
     if ($cmdText.Length -gt 8000) { throw 'Command is too long.' }
     Write-Host ("`n" + $script:Gm.BoldYellow + 'PROPOSED run_command (in ' + $Root + '):' + $script:Gm.Reset)
     Write-Host ($script:Gm.Bg1 + $script:Gm.Yellow + '  ' + (Format-PreviewText $cmdText) + '  ' + $script:Gm.Reset)
-    Write-Host ($script:Gm.BoldYellow + 'Confirm: ' + $script:Gm.Fg) -NoNewline
-    $approval = Read-Host 'Type RUN to execute this command; Enter cancels'
-    Write-Host $script:Gm.Reset -NoNewline
-    if ($approval -cne 'RUN') {
-        return (@{ status = 'cancelled'; message = 'User declined command execution. Do not retry without a new user request.' } | ConvertTo-Json -Compress)
+    if ($script:AgentPermission -eq 'Auto') {
+        Write-Host ($script:Gm.Aqua + '  [auto-approved by Auto mode]' + $script:Gm.Reset)
+    }
+    else {
+        Write-Host ($script:Gm.BoldYellow + 'Confirm: ' + $script:Gm.Fg) -NoNewline
+        $approval = Read-Host 'Type RUN to execute this command; Enter cancels'
+        Write-Host $script:Gm.Reset -NoNewline
+        if ($approval -cne 'RUN') {
+            return (@{ status = 'cancelled'; message = 'User declined command execution. Do not retry without a new user request.' } | ConvertTo-Json -Compress)
+        }
     }
     $res = Invoke-ShellCommand -Root $Root -Command $cmdText
     if ($res.output) {
@@ -439,6 +497,7 @@ function Invoke-AgentCommand {
         exit_code = $res.exit_code
         output = $res.output
         truncated = $res.truncated
+        full_output_path = $res.full_output_path
     } | ConvertTo-Json -Compress)
 }
 
@@ -518,6 +577,8 @@ function Invoke-AgentWrite {
     $before = $null
     $prefixText = ''
     $suffixText = ''
+    $editsApplied = 1
+    $firstChangedLine = 1
     if ($Name -eq 'write_file') {
         if ($Arguments.path -match '[/\\]$') { throw 'Invalid file name.' }
         $parent = Resolve-AgentPath -Root $Root -RelativePath (Split-Path $Arguments.path -Parent)
@@ -546,16 +607,54 @@ function Invoke-AgentWrite {
         if ($item.PSIsContainer -or $item.Length -gt 1MB) { throw 'Expected a text file up to 1 MiB.' }
         $before = Get-Content -LiteralPath $path -Raw -Encoding UTF8 -ErrorAction Stop
         if ($null -eq $before) { $before = '' }
-        if ($Arguments.old_text -isnot [string] -or -not $Arguments.old_text -or $Arguments.new_text -isnot [string]) { throw 'Expected nonempty old_text and string new_text.' }
-        $matchInfo = Find-EditMatch -Content $before -OldText $Arguments.old_text
-        $index = $matchInfo.index
-        $oldText = $matchInfo.matched_text
-        $newText = $Arguments.new_text
-        if ($before.Contains("`r`n")) { $newText = $newText.Replace("`r`n", "`n").Replace("`n", "`r`n") }
-        $prefixText = $before.Substring(0, $index)
-        $suffixText = $before.Substring($index + $matchInfo.length)
-        $after = $prefixText + $newText + $suffixText
+        $rawEdits = @()
+        if ($null -ne $Arguments.edits) {
+            $rawEdits = @($Arguments.edits)
+            if ($rawEdits.Count -eq 0) { throw 'edits array must not be empty.' }
+        }
+        else {
+            if ($Arguments.old_text -isnot [string] -or -not $Arguments.old_text -or $Arguments.new_text -isnot [string]) { throw 'Expected nonempty old_text and string new_text.' }
+            $rawEdits = @(@{ old_text = $Arguments.old_text; new_text = $Arguments.new_text })
+        }
+        $resolvedEdits = @()
+        foreach ($ed in $rawEdits) {
+            if ($ed.old_text -isnot [string] -or -not $ed.old_text -or $ed.new_text -isnot [string]) { throw 'Each edit must have nonempty old_text and string new_text.' }
+            $m = Find-EditMatch -Content $before -OldText $ed.old_text
+            $repText = $ed.new_text
+            if ($before.Contains("`r`n")) { $repText = $repText.Replace("`r`n", "`n").Replace("`n", "`r`n") }
+            $resolvedEdits += @{ index = $m.index; length = $m.length; matched_text = $m.matched_text; new_text = $repText }
+        }
+        for ($i = 0; $i -lt $resolvedEdits.Count; $i++) {
+            for ($j = $i + 1; $j -lt $resolvedEdits.Count; $j++) {
+                $a = $resolvedEdits[$i]
+                $b = $resolvedEdits[$j]
+                if ($a.index -lt ($b.index + $b.length) -and $b.index -lt ($a.index + $a.length)) {
+                    throw 'Batch edits overlap. Provide non-overlapping edit blocks.'
+                }
+            }
+        }
+        $sortedAsc = @($resolvedEdits | Sort-Object { $_.index })
+        $minIdx = $sortedAsc[0].index
+        $firstChangedLine = (@($before.Substring(0, $minIdx) -split "`n")).Count
+        $editsApplied = $resolvedEdits.Count
+        $after = $before
+        foreach ($ed in @($resolvedEdits | Sort-Object { $_.index } -Descending)) {
+            $after = $after.Substring(0, $ed.index) + $ed.new_text + $after.Substring($ed.index + $ed.length)
+        }
         if ($after -ceq $before) { return (@{ status = 'unchanged' } | ConvertTo-Json -Compress) }
+        if ($resolvedEdits.Count -eq 1) {
+            $only = $resolvedEdits[0]
+            $prefixText = $before.Substring(0, $only.index)
+            $oldText = $only.matched_text
+            $newText = $only.new_text
+            $suffixText = $before.Substring($only.index + $only.length)
+        }
+        else {
+            $prefixText = ''
+            $oldText = $before
+            $newText = $after
+            $suffixText = ''
+        }
     }
     if ($after.Length -gt 20000 -or ($null -ne $before -and $before.Length -gt 20000)) { throw 'Write preview is limited to 20000 characters.' }
     if ($after -match '\x00' -or ($null -ne $before -and $before -match '\x00')) { throw 'Binary content is not supported.' }
@@ -575,10 +674,15 @@ function Invoke-AgentWrite {
         Write-Host ($script:Gm.BgDiffGreen + $script:Gm.Green + (Format-PreviewText $after) + $script:Gm.Reset)
     }
     Write-Host ($script:Gm.Grey0 + '--- END OF PREVIEW ---' + $script:Gm.Reset)
-    Write-Host ($script:Gm.BoldYellow + 'Confirm: ' + $script:Gm.Fg) -NoNewline
-    $approval = Read-Host 'Type WRITE to approve this file change; Enter cancels'
-    Write-Host $script:Gm.Reset -NoNewline
-    if ($approval -cne 'WRITE') { return (@{ status = 'cancelled'; message = 'User declined. Do not retry without a new user request.' } | ConvertTo-Json -Compress) }
+    if ($script:AgentPermission -in @('AutoEdit', 'Auto')) {
+        Write-Host ($script:Gm.Aqua + '  [auto-approved by ' + $script:AgentPermission + ' mode]' + $script:Gm.Reset)
+    }
+    else {
+        Write-Host ($script:Gm.BoldYellow + 'Confirm: ' + $script:Gm.Fg) -NoNewline
+        $approval = Read-Host 'Type WRITE to approve this file change; Enter cancels'
+        Write-Host $script:Gm.Reset -NoNewline
+        if ($approval -cne 'WRITE') { return (@{ status = 'cancelled'; message = 'User declined. Do not retry without a new user request.' } | ConvertTo-Json -Compress) }
+    }
     $backupPath = $null
     if ($null -ne $before) {
         $path = Resolve-AgentPath -Root $Root -RelativePath $Arguments.path
@@ -602,7 +706,7 @@ function Invoke-AgentWrite {
     else {
         $script:CurrentTurnWrites += @{ action = 'created'; full_path = $path; rel_path = $Arguments.path }
     }
-    return (@{ status = 'written'; path = $Arguments.path; backup = $backupPath } | ConvertTo-Json -Compress)
+    return (@{ status = 'written'; path = $Arguments.path; backup = $backupPath; edits_applied = $editsApplied; first_changed_line = $firstChangedLine } | ConvertTo-Json -Compress)
 }
 
 function Invoke-AgentUndo {
@@ -629,6 +733,9 @@ function Invoke-AgentTool {
     try {
         $name = $Call.function.name
         if ($name -notin @('list_files', 'read_file', 'find_files', 'grep_files', 'write_file', 'edit_file', 'run_command')) { throw 'Unknown tool.' }
+        if ($script:AgentPermission -eq 'ReadOnly' -and $name -in @('write_file', 'edit_file', 'run_command')) {
+            throw 'Permission mode ReadOnly does not allow file modifications or commands.'
+        }
         $arguments = $Call.function.arguments | ConvertFrom-Json -ErrorAction Stop
         if ($name -eq 'run_command') { return (Invoke-AgentCommand -Root $Root -Arguments $arguments) }
         if ($arguments.path -isnot [string]) { throw 'path must be a string.' }
@@ -653,7 +760,7 @@ function Invoke-AgentTool {
             $truncated = $false
             foreach ($child in @(Get-ChildItem -LiteralPath $path -Recurse -Force -ErrorAction SilentlyContinue)) {
                 if (($child.Attributes -band 1024) -ne 0) { continue }
-                if ($child.FullName -match '[/\\]\.git([/\\]|$)') { continue }
+                if ($child.FullName -match '[/\\](\.git|node_modules)([/\\]|$)') { continue }
                 if (Test-IsSecretFile $child) { continue }
                 if ($child.Name -like $arguments.pattern) {
                     if ($found.Count -ge 200) { $truncated = $true; break }
@@ -669,12 +776,21 @@ function Invoke-AgentTool {
         if ($name -eq 'grep_files') {
             if ($arguments.pattern -isnot [string] -or -not $arguments.pattern) { throw 'pattern must be a nonempty string.' }
             $isLiteral = [bool]$arguments.literal
+            $isCaseSensitive = [bool]$arguments.case_sensitive
+            $includeFilter = if ($arguments.include -is [string] -and $arguments.include.Trim()) { $arguments.include.Trim() } else { '' }
+            $ctxLines = 0
+            if ($null -ne $arguments.context_lines) {
+                $ctxLines = [int]$arguments.context_lines
+                if ($ctxLines -lt 0) { $ctxLines = 0 }
+                if ($ctxLines -gt 5) { $ctxLines = 5 }
+            }
             $targetFiles = @()
             if ($item.PSIsContainer) {
                 foreach ($child in @(Get-ChildItem -LiteralPath $path -Recurse -Force -File -ErrorAction SilentlyContinue)) {
                     if (($child.Attributes -band 1024) -ne 0) { continue }
-                    if ($child.FullName -match '[/\\]\.git([/\\]|$)') { continue }
+                    if ($child.FullName -match '[/\\](\.git|node_modules)([/\\]|$)') { continue }
                     if (Test-IsSecretFile $child) { continue }
+                    if ($includeFilter -and ($child.Name -notlike $includeFilter)) { continue }
                     if ($child.Length -le 1MB) { $targetFiles += $child.FullName }
                     if ($targetFiles.Count -ge 500) { break }
                 }
@@ -688,15 +804,21 @@ function Invoke-AgentTool {
             if ($targetFiles.Count -gt 0) {
                 $selParams = @{ LiteralPath = $targetFiles; Pattern = $arguments.pattern; Encoding = 'UTF8'; ErrorAction = 'Stop' }
                 if ($isLiteral) { $selParams.SimpleMatch = $true }
+                if ($isCaseSensitive) { $selParams.CaseSensitive = $true }
+                if ($ctxLines -gt 0) { $selParams.Context = @($ctxLines, $ctxLines) }
                 foreach ($m in @(Select-String @selParams)) {
                     if ($hits.Count -ge 100) { $truncated = $true; break }
                     $lineText = [string]$m.Line
                     if ($lineText.Length -gt 300) { $lineText = $lineText.Substring(0, 300) + '...' }
-                    $hits += @{
+                    $hitObj = @{
                         path = (Get-WorkspaceRelativePath -Root $Root -FullPath $m.Path)
                         line_number = [int]$m.LineNumber
                         line = $lineText
                     }
+                    if ($ctxLines -gt 0 -and $m.Context) {
+                        $hitObj.context = @($m.Context.PreContext) + @($lineText) + @($m.Context.PostContext)
+                    }
+                    $hits += $hitObj
                 }
             }
             return (@{ matches = $hits; truncated = $truncated } | ConvertTo-Json -Depth 5 -Compress)
@@ -951,12 +1073,14 @@ function Invoke-AgentTurn {
     param($State, [string]$Endpoint, [string]$ModelId, [string]$ApiKey, [string]$Root, [int]$Steps)
     $overflowRetried = $false
     for ($step = 0; $step -lt $Steps; $step++) {
-        $body = @{
+        $bodyObj = @{
             model = $ModelId
             messages = @($State.messages)
             tools = @(Get-AgentTools)
             stream = $false
-        } | ConvertTo-Json -Depth 40 -Compress
+        }
+        if ($script:ReasoningEffort) { $bodyObj.reasoning_effort = $script:ReasoningEffort }
+        $body = $bodyObj | ConvertTo-Json -Depth 40 -Compress
         $request = @{
             Uri = $Endpoint
             Method = 'Post'
@@ -967,29 +1091,47 @@ function Invoke-AgentTurn {
             ErrorAction = 'Stop'
         }
         $tempResponse = New-TemporaryFile -ErrorAction Stop
+        $reply = $null
         try {
-            Invoke-WebRequest @request -UseBasicParsing -OutFile $tempResponse.FullName
-            $reply = Get-Content -LiteralPath $tempResponse.FullName -Raw -Encoding UTF8 -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
-        }
-        catch {
-            $errFormatted = Format-AgentError -ErrorRecord $_
-            if ((-not $overflowRetried) -and ($errFormatted -match '(?i)(context_length|maximum context|too many tokens|token limit)')) {
-                $overflowRetried = $true
-                Write-Host ($script:Gm.Yellow + '  [auto-recovery] Context overflow detected; compacting history and retrying...' + $script:Gm.Reset)
-                if (Invoke-AgentCompact -State $State -Endpoint $Endpoint -ModelId $ModelId -ApiKey $ApiKey) {
-                    $step--
-                    continue
+            $maxRetries = 2
+            for ($attempt = 0; $attempt -le $maxRetries; $attempt++) {
+                try {
+                    Invoke-WebRequest @request -UseBasicParsing -OutFile $tempResponse.FullName
+                    $reply = Get-Content -LiteralPath $tempResponse.FullName -Raw -Encoding UTF8 -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+                    break
+                }
+                catch {
+                    $errFormatted = Format-AgentError -ErrorRecord $_
+                    if (($attempt -lt $maxRetries) -and ($errFormatted -match '(?i)\b(408|429|500|502|503|504|timeout|timed out)\b')) {
+                        $delay = ($attempt + 1) * 2
+                        Write-Host ($script:Gm.Yellow + ("  [retry {0}/{1}] Transient error ({2}); waiting {3}s..." -f ($attempt + 1), $maxRetries, $errFormatted, $delay) + $script:Gm.Reset)
+                        Start-Sleep -Seconds $delay
+                        continue
+                    }
+                    if ((-not $overflowRetried) -and ($errFormatted -match '(?i)(context_length|maximum context|too many tokens|token limit)')) {
+                        $overflowRetried = $true
+                        Write-Host ($script:Gm.Yellow + '  [auto-recovery] Context overflow detected; compacting history and retrying...' + $script:Gm.Reset)
+                        if (Invoke-AgentCompact -State $State -Endpoint $Endpoint -ModelId $ModelId -ApiKey $ApiKey) {
+                            $step--
+                            $reply = $null
+                            break
+                        }
+                    }
+                    throw
                 }
             }
-            throw
         }
         finally {
             Remove-Item -LiteralPath $tempResponse.FullName -Force -ErrorAction SilentlyContinue
         }
+        if ($null -eq $reply) { continue }
         $message = $reply.choices[0].message
         if (-not $message) { throw 'API returned no assistant message.' }
         $assistant = @{ role = 'assistant'; content = $message.content }
-        if ($message.reasoning_content) { $assistant.reasoning_content = $message.reasoning_content }
+        if ($message.reasoning_content) {
+            $assistant.reasoning_content = $message.reasoning_content
+            Write-AgentReasoning -Text ([string]$message.reasoning_content)
+        }
         if ($message.tool_calls) { $assistant.tool_calls = @($message.tool_calls) }
         $State.messages += $assistant
         if ($message.content) { Write-AgentReply -Content $message.content }
@@ -1044,6 +1186,13 @@ if (-not $LibraryOnly) {
     if (-not $Model) { $Model = Read-Host 'Model ID' }
     if (-not $Model) { throw 'Model ID is required.' }
     if ($MaxSteps -lt 1 -or $MaxSteps -gt 30) { throw 'MaxSteps must be between 1 and 30.' }
+    if ($Permission -notin @('ReadOnly', 'Ask', 'AutoEdit', 'Auto')) { throw 'Permission must be one of: ReadOnly, Ask, AutoEdit, Auto.' }
+    $script:AgentPermission = $Permission
+    if ($HideReasoning) { $script:ShowReasoning = 'hide' }
+    if ($ReasoningEffort) {
+        if ($ReasoningEffort -notin @('low', 'medium', 'high')) { throw 'ReasoningEffort must be low, medium, or high.' }
+        $script:ReasoningEffort = $ReasoningEffort
+    }
     $rootItem = Get-Item -LiteralPath $Workspace -Force -ErrorAction Stop
     if (-not $rootItem.PSIsContainer) { throw 'Workspace must be a directory.' }
     $rootPath = Resolve-AgentPath -Root $rootItem.FullName -RelativePath '.'
@@ -1063,6 +1212,7 @@ if (-not $LibraryOnly) {
     $system = @{ role = 'system'; content = $fullSystemPrompt }
     $state = @{ messages = @($system) }
     $undoStack = @()
+    $lastFailedQuestion = ''
     if ($Continue -and (Test-Path -LiteralPath $sessionDir)) {
         $latest = Get-ChildItem -LiteralPath $sessionDir -Filter '*.jsonl' -File -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1
         if ($latest) {
@@ -1080,10 +1230,10 @@ if (-not $LibraryOnly) {
             Save-AgentSession -SessionFile $sessionFile -State $state
             return
         }
-        Write-Host ($script:Gm.OscInit + $script:Gm.BoldGreen + "h-agent | model: $Model | workspace: $rootPath" + $script:Gm.Reset)
+        Write-Host ($script:Gm.OscInit + $script:Gm.BoldGreen + "h-agent | model: $Model | permission: $($script:AgentPermission) | workspace: $rootPath" + $script:Gm.Reset)
         if (Get-AgentsContext -Root $rootPath -ConfigDir $configDir) { Write-Host ($script:Gm.Aqua + 'Loaded AGENTS.md instructions.' + $script:Gm.Reset) }
         if (Get-SkillsCatalog -Root $rootPath -ConfigDir $configDir) { Write-Host ($script:Gm.Aqua + 'Loaded skills catalog.' + $script:Gm.Reset) }
-        Write-Host ($script:Gm.Grey1 + 'Commands: /help /status /undo /compact /model /sessions /resume /clear /exit | @file | !cmd / !!cmd' + $script:Gm.Reset)
+        Write-Host ($script:Gm.Grey1 + 'Commands: /help /status /permission /reasoning /undo /retry /compact /model /sessions /resume /save /new /exit' + $script:Gm.Reset)
         while ($true) {
             Write-Host ("`n" + $script:Gm.Grey0 + ('-' * 40) + $script:Gm.Reset)
             Write-Host ($script:Gm.BoldBlue + 'You: ' + $script:Gm.Fg) -NoNewline
@@ -1092,26 +1242,81 @@ if (-not $LibraryOnly) {
             if (-not $question) { continue }
             $trimmedQ = $question.Trim()
             if ($trimmedQ -eq '/exit') { break }
-            if ($trimmedQ -eq '/clear') {
+            if ($trimmedQ -eq '/clear' -or $trimmedQ -eq '/new') {
                 $state.messages = @($system)
                 $undoStack = @()
                 $sessionFile = Join-Path $sessionDir ('session-' + (Get-Date -Format 'yyyyMMdd-HHmmss') + '.jsonl')
-                Write-Host ($script:Gm.Grey1 + 'History cleared (new session).' + $script:Gm.Reset)
+                Write-Host ($script:Gm.Grey1 + 'Started a new conversation session.' + $script:Gm.Reset)
                 continue
             }
             if ($trimmedQ -eq '/help') {
-                Write-Host ($script:Gm.Aqua + '  /status            ' + $script:Gm.Fg + 'Show context size, model, and current session file' + $script:Gm.Reset)
-                Write-Host ($script:Gm.Aqua + '  /undo              ' + $script:Gm.Fg + 'Revert last turn AND restore modified/created files on disk' + $script:Gm.Reset)
-                Write-Host ($script:Gm.Aqua + '  /compact [focus]   ' + $script:Gm.Fg + 'Summarize older turns into a structured context handoff' + $script:Gm.Reset)
-                Write-Host ($script:Gm.Aqua + '  /model <id>        ' + $script:Gm.Fg + 'Switch active model ID for this session' + $script:Gm.Reset)
-                Write-Host ($script:Gm.Aqua + '  /sessions          ' + $script:Gm.Fg + 'List saved sessions in ~/.h-agent/sessions' + $script:Gm.Reset)
-                Write-Host ($script:Gm.Aqua + '  /resume <num|name> ' + $script:Gm.Fg + 'Resume a saved session by number or filename' + $script:Gm.Reset)
-                Write-Host ($script:Gm.Aqua + '  /clear             ' + $script:Gm.Fg + 'Reset conversation and start a fresh session' + $script:Gm.Reset)
-                Write-Host ($script:Gm.Aqua + '  /exit              ' + $script:Gm.Fg + 'Exit h-agent' + $script:Gm.Reset)
-                Write-Host ($script:Gm.Aqua + '  /<template> [args] ' + $script:Gm.Fg + 'Run a custom Markdown prompt from .h-agent/prompts/<name>.md' + $script:Gm.Reset)
-                Write-Host ($script:Gm.Aqua + '  @path/to/file      ' + $script:Gm.Fg + 'Inline-attach a workspace file into your prompt' + $script:Gm.Reset)
-                Write-Host ($script:Gm.Aqua + '  !command           ' + $script:Gm.Fg + 'Run shell command and add output to context' + $script:Gm.Reset)
-                Write-Host ($script:Gm.Aqua + '  !!command          ' + $script:Gm.Fg + 'Run shell command locally without adding to context' + $script:Gm.Reset)
+                Write-Host ($script:Gm.Aqua + '  /status                      ' + $script:Gm.Fg + 'Show context size, model, permission mode, and session file' + $script:Gm.Reset)
+                Write-Host ($script:Gm.Aqua + '  /permission <mode>           ' + $script:Gm.Fg + 'Set mode: ReadOnly | Ask | AutoEdit (no-ask writes) | Auto' + $script:Gm.Reset)
+                Write-Host ($script:Gm.Aqua + '  /reasoning <mode|effort>     ' + $script:Gm.Fg + 'View: compact | full | hide; Effort: low | medium | high' + $script:Gm.Reset)
+                Write-Host ($script:Gm.Aqua + '  /undo                        ' + $script:Gm.Fg + 'Revert last turn AND restore modified/created files on disk' + $script:Gm.Reset)
+                Write-Host ($script:Gm.Aqua + '  /retry                       ' + $script:Gm.Fg + 'Retry the last failed user request' + $script:Gm.Reset)
+                Write-Host ($script:Gm.Aqua + '  /compact [focus]             ' + $script:Gm.Fg + 'Summarize older turns into a structured context handoff' + $script:Gm.Reset)
+                Write-Host ($script:Gm.Aqua + '  /model <id>                  ' + $script:Gm.Fg + 'Switch active model ID for this session' + $script:Gm.Reset)
+                Write-Host ($script:Gm.Aqua + '  /sessions                    ' + $script:Gm.Fg + 'List saved sessions in ~/.h-agent/sessions' + $script:Gm.Reset)
+                Write-Host ($script:Gm.Aqua + '  /resume <num|name>           ' + $script:Gm.Fg + 'Resume a saved session by number or filename' + $script:Gm.Reset)
+                Write-Host ($script:Gm.Aqua + '  /save [name]                 ' + $script:Gm.Fg + 'Save conversation to current or named session file' + $script:Gm.Reset)
+                Write-Host ($script:Gm.Aqua + '  /new (/clear)                ' + $script:Gm.Fg + 'Start a fresh session while keeping old session files' + $script:Gm.Reset)
+                Write-Host ($script:Gm.Aqua + '  /exit                        ' + $script:Gm.Fg + 'Exit h-agent' + $script:Gm.Reset)
+                Write-Host ($script:Gm.Aqua + '  /<template> [args]           ' + $script:Gm.Fg + 'Run a custom Markdown prompt from .h-agent/prompts/<name>.md' + $script:Gm.Reset)
+                Write-Host ($script:Gm.Aqua + '  @path/to/file                ' + $script:Gm.Fg + 'Inline-attach a workspace file into your prompt' + $script:Gm.Reset)
+                Write-Host ($script:Gm.Aqua + '  !command / !!command         ' + $script:Gm.Fg + 'Run shell command (! adds to context, !! local only)' + $script:Gm.Reset)
+                continue
+            }
+            if ($trimmedQ -match '^/permission(?:\s+(.+))?$') {
+                if ($Matches[1]) {
+                    $reqPerm = $Matches[1].Trim()
+                    $matchedPerm = @('ReadOnly', 'Ask', 'AutoEdit', 'Auto') | Where-Object { $_ -ieq $reqPerm } | Select-Object -First 1
+                    if ($matchedPerm) {
+                        $script:AgentPermission = $matchedPerm
+                        Write-Host ($script:Gm.Green + "  Permission mode set to: $($script:AgentPermission)" + $script:Gm.Reset)
+                    }
+                    else {
+                        Write-Host ($script:Gm.Red + '  Invalid permission mode. Choose: ReadOnly, Ask, AutoEdit, Auto' + $script:Gm.Reset)
+                    }
+                }
+                else {
+                    Write-Host ($script:Gm.Aqua + "  Current permission mode: $($script:AgentPermission) (use /permission ReadOnly|Ask|AutoEdit|Auto)" + $script:Gm.Reset)
+                }
+                continue
+            }
+            if ($trimmedQ -match '^/reasoning(?:\s+(.+))?$') {
+                if ($Matches[1]) {
+                    $argR = $Matches[1].Trim().ToLower()
+                    if ($argR -in @('compact', 'full', 'hide')) {
+                        $script:ShowReasoning = $argR
+                        Write-Host ($script:Gm.Green + "  Reasoning display set to: $($script:ShowReasoning)" + $script:Gm.Reset)
+                    }
+                    elseif ($argR -in @('low', 'medium', 'high')) {
+                        $script:ReasoningEffort = $argR
+                        Write-Host ($script:Gm.Green + "  Reasoning effort set to: $($script:ReasoningEffort)" + $script:Gm.Reset)
+                    }
+                    elseif ($argR -eq 'default' -or $argR -eq 'off') {
+                        $script:ReasoningEffort = ''
+                        Write-Host ($script:Gm.Green + '  Reasoning effort reset to provider default.' + $script:Gm.Reset)
+                    }
+                    else {
+                        Write-Host ($script:Gm.Red + '  Usage: /reasoning [compact|full|hide|low|medium|high|default]' + $script:Gm.Reset)
+                    }
+                }
+                else {
+                    $effLabel = if ($script:ReasoningEffort) { $script:ReasoningEffort } else { 'default' }
+                    Write-Host ($script:Gm.Aqua + "  Reasoning view: $($script:ShowReasoning) | effort: $effLabel" + $script:Gm.Reset)
+                }
+                continue
+            }
+            if ($trimmedQ -match '^/save(?:\s+(.+))?$') {
+                if ($Matches[1]) {
+                    $nameArg = $Matches[1].Trim()
+                    if ($nameArg -notmatch '\.jsonl$') { $nameArg += '.jsonl' }
+                    $sessionFile = Join-Path $sessionDir (Split-Path $nameArg -Leaf)
+                }
+                Save-AgentSession -SessionFile $sessionFile -State $state
+                Write-Host ($script:Gm.Green + "  Saved session: $sessionFile" + $script:Gm.Reset)
                 continue
             }
             if ($trimmedQ -eq '/undo') {
@@ -1129,7 +1334,7 @@ if (-not $LibraryOnly) {
             }
             if ($trimmedQ -eq '/status' -or $trimmedQ -eq '/tokens') {
                 $st = Get-ContextStats -State $state
-                Write-Host ($script:Gm.Aqua + "  Model: $($Model) | Messages: $($st.messages) | Chars: $($st.chars) (~$($st.est_tokens) tokens)" + $script:Gm.Reset)
+                Write-Host ($script:Gm.Aqua + "  Model: $($Model) | Permission: $($script:AgentPermission) | Messages: $($st.messages) | Chars: $($st.chars) (~$($st.est_tokens) tokens)" + $script:Gm.Reset)
                 Write-Host ($script:Gm.Grey1 + "  Session: $sessionFile" + $script:Gm.Reset)
                 continue
             }
@@ -1190,14 +1395,24 @@ if (-not $LibraryOnly) {
                 if ($chosen) {
                     $state.messages = @(Read-AgentSession -SessionFile $chosen)
                     $sessionFile = $chosen
-                    Write-Host ($script:Gm.Green + "  Resumed session: $sessionFile ($($state.messages.Count) messages)" + $script:Gm.Reset)
+                    if ($PSBoundParameters.Keys -notcontains 'Permission') { $script:AgentPermission = 'Ask' }
+                    Write-Host ($script:Gm.Green + "  Resumed session: $sessionFile ($($state.messages.Count) messages, permission=$($script:AgentPermission))" + $script:Gm.Reset)
                 }
                 else {
                     Write-Host ($script:Gm.Red + "  Session not found: $arg" + $script:Gm.Reset)
                 }
                 continue
             }
-            if ($trimmedQ.StartsWith('/')) {
+            if ($trimmedQ -eq '/retry') {
+                if (-not $lastFailedQuestion) {
+                    Write-Host ($script:Gm.Grey1 + '  No failed request to retry.' + $script:Gm.Reset)
+                    continue
+                }
+                $question = $lastFailedQuestion
+                $trimmedQ = $question.Trim()
+                Write-Host ($script:Gm.Aqua + '  [retry] Resending last failed prompt...' + $script:Gm.Reset)
+            }
+            elseif ($trimmedQ.StartsWith('/')) {
                 $tplText = Resolve-PromptTemplate -Root $rootPath -ConfigDir $configDir -InputText $trimmedQ
                 if ($null -eq $tplText) {
                     Write-Host ($script:Gm.Red + "  Unknown command or prompt template: $trimmedQ (use /help)" + $script:Gm.Reset)
@@ -1236,12 +1451,14 @@ if (-not $LibraryOnly) {
             $state.messages += @{ role = 'user'; content = $expandedQuestion }
             try {
                 Invoke-AgentTurn -State $state -Endpoint $endpoint -ModelId $Model -ApiKey $agentKey -Root $rootPath -Steps $MaxSteps
+                $lastFailedQuestion = ''
                 $undoStack += @{ messages = $beforeTurn; writes = @($script:CurrentTurnWrites) }
                 Save-AgentSession -SessionFile $sessionFile -State $state
             }
             catch {
+                $lastFailedQuestion = $question
                 Invoke-AgentUndo -State $state -UndoEntry @{ messages = $beforeTurn; writes = @($script:CurrentTurnWrites) }
-                Write-Host ($script:Gm.Red + 'Request failed; turn rolled back: ' + (Format-AgentError -ErrorRecord $_) + $script:Gm.Reset)
+                Write-Host ($script:Gm.Red + 'Request failed; turn rolled back (use /retry to resend): ' + (Format-AgentError -ErrorRecord $_) + $script:Gm.Reset)
             }
         }
     }

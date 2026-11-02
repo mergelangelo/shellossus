@@ -197,6 +197,56 @@ try {
     Assert-True ((Get-Content -LiteralPath (Join-Path $workspacePath 'fuzzy.txt') -Raw -Encoding UTF8) -eq "alpha   `r`nbeta`t`r`ngamma") 'Undo did not restore modified file from backup.'
     Assert-True (-not (Test-Path -LiteralPath (Join-Path $workspacePath 'temp-new.txt'))) 'Undo did not remove newly created file.'
 
+    # Batch edits[] in edit_file (multiple non-overlapping edits + overlap rejection).
+    Set-Content -LiteralPath (Join-Path $workspacePath 'batch.txt') -Value "one`r`ntwo`r`nthree`r`nfour" -Encoding UTF8 -NoNewline
+    $call.function.name = 'edit_file'
+    $call.function.arguments = '{"path":"batch.txt","edits":[{"old_text":"one","new_text":"1"},{"old_text":"four","new_text":"4"}]}'
+    $batchRes = Invoke-AgentTool -Root $workspacePath -Call $call | ConvertFrom-Json
+    Assert-True ($batchRes.status -eq 'written' -and $batchRes.edits_applied -eq 2 -and $batchRes.first_changed_line -eq 1) 'Batch edits[] failed.'
+    Remove-Item -LiteralPath $batchRes.backup -Force
+    Assert-True ((Get-Content -LiteralPath (Join-Path $workspacePath 'batch.txt') -Raw -Encoding UTF8) -eq "1`r`ntwo`r`nthree`r`n4") 'Batch edits[] content mismatch.'
+    $call.function.arguments = '{"path":"batch.txt","edits":[{"old_text":"two\nthree","new_text":"X"},{"old_text":"three\n4","new_text":"Y"}]}'
+    $overlapRes = Invoke-AgentTool -Root $workspacePath -Call $call | ConvertFrom-Json
+    Assert-True ($overlapRes.error -like '*overlap*') 'Overlapping batch edits[] were not rejected.'
+
+    # 4 Permission modes: ReadOnly, Ask, AutoEdit, Auto.
+    $script:approval = ''
+    $script:AgentPermission = 'ReadOnly'
+    Assert-True (@(Get-AgentTools).Count -eq 4) 'ReadOnly mode should only expose 4 read-only tools.'
+    $call.function.name = 'write_file'
+    $call.function.arguments = '{"path":"ro.txt","content":"no"}'
+    $roRes = Invoke-AgentTool -Root $workspacePath -Call $call | ConvertFrom-Json
+    Assert-True ($roRes.error -like '*ReadOnly*') 'ReadOnly mode did not block write_file.'
+
+    $script:AgentPermission = 'AutoEdit'
+    $promptsBefore = $script:prompts
+    $call.function.name = 'write_file'
+    $call.function.arguments = '{"path":"autoedit.txt","content":"auto-written"}'
+    $aeWrite = Invoke-AgentTool -Root $workspacePath -Call $call | ConvertFrom-Json
+    Assert-True ($aeWrite.status -eq 'written' -and $script:prompts -eq $promptsBefore) 'AutoEdit mode should write without prompting Read-Host.'
+    $call.function.name = 'run_command'
+    $call.function.arguments = '{"command":"Write-Output \"should-prompt\""}'
+    $aeCmd = Invoke-AgentTool -Root $workspacePath -Call $call | ConvertFrom-Json
+    Assert-True ($aeCmd.status -eq 'cancelled' -and $script:prompts -gt $promptsBefore) 'AutoEdit mode must still prompt for run_command.'
+
+    $script:AgentPermission = 'Auto'
+    $promptsBefore = $script:prompts
+    $autoCmd = Invoke-AgentTool -Root $workspacePath -Call $call | ConvertFrom-Json
+    Assert-True ($autoCmd.status -eq 'executed' -and $script:prompts -eq $promptsBefore) 'Auto mode should execute run_command without prompting.'
+
+    # Truncated run_command saves full log under .h-agent/output/*.log.
+    $call.function.arguments = '{"command":"1..320 | ForEach-Object { \"line-$_\" }"}'
+    $truncCmd = Invoke-AgentTool -Root $workspacePath -Call $call | ConvertFrom-Json
+    Assert-True ($truncCmd.truncated -and [bool]$truncCmd.full_output_path -and (Test-Path -LiteralPath (Join-Path $workspacePath $truncCmd.full_output_path))) 'Truncated run_command did not save full output log.'
+    $script:AgentPermission = 'Ask'
+    $script:approval = 'WRITE'
+
+    # Enhanced grep_files with include filter and context_lines.
+    $call.function.name = 'grep_files'
+    $call.function.arguments = '{"path":".","pattern":"two","include":"batch.txt","context_lines":1}'
+    $ctxGrep = Invoke-AgentTool -Root $workspacePath -Call $call | ConvertFrom-Json
+    Assert-True ($ctxGrep.matches.Count -eq 1 -and $ctxGrep.matches[0].context.Count -ge 2) 'grep_files include/context_lines failed.'
+
     # Session JSONL persistence roundtrip.
     $sessionFile = Join-Path $testRoot 'sessions\test.jsonl'
     $sampleState = @{ messages = @(
@@ -283,6 +333,13 @@ try {
     Assert-True ($clSys.Contains('sql-tuning')) 'ConstrainedLanguage Build-SystemPrompt failed.'
     $clMatch = Find-EditMatch -Content "one   `r`ntwo" -OldText "one`ntwo"
     Assert-True ($clMatch.index -eq 0 -and $clMatch.length -eq 11) 'ConstrainedLanguage Find-EditMatch failed.'
+    $script:AgentPermission = 'AutoEdit'
+    $call = @{ id = 'cl-batch'; function = @{ name = 'edit_file'; arguments = '{"path":"batch.txt","edits":[{"old_text":"two","new_text":"2"},{"old_text":"three","new_text":"3"}]}' } }
+    $clBatch = Invoke-AgentTool -Root $workspacePath -Call $call | ConvertFrom-Json
+    Assert-True ($clBatch.status -eq 'written' -and $clBatch.edits_applied -eq 2) 'ConstrainedLanguage batch edit_file failed.'
+    Remove-Item -LiteralPath $clBatch.backup -Force
+    $script:AgentPermission = 'Ask'
+    Write-AgentReasoning -Text "Step 1`nStep 2`nStep 3`nStep 4"
     Write-AgentReply -Content "# Title`n## Subtitle`n> quote`n- **item** with ``code```n| A | B |`n|---|---|`n| 1 | 2 |`n``````sql`nSELECT 1;`n``````"
     Save-AgentConfig -Path $configPath -Config $loadedConfig
     $constrainedConfig = Read-AgentConfig -Path $configPath
