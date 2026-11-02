@@ -1,4 +1,4 @@
-# h-agent — Zero Dependencies. One Script. Full Agent Power.
+# Zero Dependencies. One Script. Full Agent Power.
 ### 100% Native PowerShell Agent for Windows PowerShell 5.1+
 
 **No Python. No Node.js. No external modules or binaries.** While other agents demand heavy runtimes, `h-agent` runs out of the box on every Windows machine.
@@ -7,18 +7,16 @@ Drop a single `.ps1` file onto any Windows desktop or server and connect to any 
 
 ## Key Features
 
-- **7 Built-in Tools:** `list_files`, `read_file` (line pagination), `find_files`, `grep_files` (regex/literal, `include` filter, `context_lines`), `write_file`, `edit_file` (fuzzy whitespace/quote matching + atomic batch `edits[]`), and `run_command` (process timeout, streaming disk logs, API key scrubbing).
-- **4 Permission Modes (`-Permission` / `/permission`):**
-  | Mode | File Reads & Search | File Writes & Edits | Shell Commands (`run_command`) |
-  | --- | --- | --- | --- |
-  | `ReadOnly` | Allowed | Disabled | Disabled |
-  | `Ask` *(default)* | Allowed | Prompts `WRITE` | Prompts `RUN` |
-  | `AutoEdit` | Allowed | Auto-approved (with backup) | Prompts `RUN` |
-  | `Auto` | Allowed | Auto-approved (with backup) | Auto-approved |
-- **Atomic Writes & Disk `/undo`:** Staged writes via temporary files with verification, colored diff previews, automatic backups, manual-edit conflict detection, and full disk rollback via `/undo`.
-- **Project Context & Extensibility:** Auto-loads `AGENTS.md`, `CLAUDE.md`, `SYSTEM.md`, `APPEND_SYSTEM.md`, workspace/global `skills/*/SKILL.md`, custom `/<template>` prompts, `@file` inline attachments, and `!cmd` / `!!cmd` shell shortcuts.
-- **Project-Scoped Sessions & Compaction:** Atomic `.jsonl` session storage tied to each workspace (`-Continue`, `/sessions`, `/resume`, `/save`, `/new`) and structured context compaction (`/compact [focus]` + automatic context-overflow recovery).
-- **TrueColor Terminal UI:** Exact `sainnhe/gruvbox-material` (dark medium) palette with Markdown headings, lists, code blocks, auto-aligned tables, and collapsible `reasoning` blocks.
+| Capability | What It Does |
+| --- | --- |
+| **7 Built-in Tools** | `list_files`, `read_file` (line & character pagination), `find_files` (path globs + `.gitignore`), `grep_files` (regex/literal, `include` filter, `context_lines`, file-offset pagination), `write_file`, `edit_file` (fuzzy whitespace/quote matching + atomic batch `edits[]`), and `run_command` (timeout, streaming disk logs, API key scrubbing) |
+| **4 Permission Modes** | `ReadOnly` (reads/search only), `Ask` *(default: prompts `WRITE` / `RUN`)*, `AutoEdit` (auto-approves file writes with backup; asks `RUN`), `Auto` (auto-approves writes and commands) |
+| **Transactional Disk `/undo`** | Staged writes via temporary files with verification, colored diff previews, automatic backups, manual-edit conflict detection, and full multi-step disk rollback via `/undo` |
+| **Session Tree, Fork & Export** | Workspace-scoped `.jsonl` sessions (`-Continue`, `/sessions`, `/resume`), branch navigation (`/tree`), session forking (`/fork`), and standalone HTML export (`/export`) |
+| **Smart Context Compaction** | Iterative structured handoffs (`/compact [focus]`) with cumulative `<read-files>` / `<modified-files>` tracking and automatic context-overflow recovery |
+| **Context & Extensibility** | Auto-loads `AGENTS.md`, `CLAUDE.md`, `SYSTEM.md`, `APPEND_SYSTEM.md`, `skills/*/SKILL.md` (`/skill:name`), `/<template>` prompts (`$1`, `$@`, `${1:-default}`), `@file` attachments, and `!cmd` / `!!cmd` |
+| **TrueColor Terminal UI** | `sainnhe/gruvbox-material` (dark medium) palette with Markdown headings, lists, code blocks, auto-aligned tables, collapsible `reasoning` blocks, and `-Mode json` event streaming |
+| **Enterprise & Lockdown Ready** | Pure ASCII single-script distribution (`h-agent.ps1`), NTFS junction/symlink boundary protection, `.env` secret blocking, and full `ConstrainedLanguage` mode compatibility |
 
 ## Quick Start
 
