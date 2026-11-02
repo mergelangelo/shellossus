@@ -978,22 +978,58 @@ function Invoke-AgentUndo {
     param($State, $UndoEntry)
     if (-not $UndoEntry) { return }
     $writes = @($UndoEntry.writes)
+    $preflightErrors = @()
+    for ($i = $writes.Count - 1; $i -ge 0; $i--) {
+        $w = $writes[$i]
+        if (-not $w -or $w.undone) { continue }
+        if ($w.action -eq 'modified') {
+            if (-not $w.backup -or -not (Test-Path -LiteralPath $w.backup)) {
+                $preflightErrors += "Backup file missing for $($w.rel_path)."
+                continue
+            }
+            if (Test-Path -LiteralPath $w.full_path) {
+                $targetItem = Get-Item -LiteralPath $w.full_path -Force -ErrorAction SilentlyContinue
+                if ($targetItem -and $targetItem.PSIsContainer) {
+                    $preflightErrors += "Target path $($w.rel_path) is now a directory."
+                    continue
+                }
+                if ($null -ne $w.after_content) {
+                    $diskNow = Get-Content -LiteralPath $w.full_path -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
+                    if ($null -eq $diskNow) { $diskNow = '' }
+                    if (($diskNow -cne $w.after_content) -and ($null -eq $w.before_content -or $diskNow -cne $w.before_content)) {
+                        $preflightErrors += "File $($w.rel_path) was modified after the agent write; refusing to overwrite manual changes (backup kept at $($w.backup))."
+                        continue
+                    }
+                }
+            }
+        }
+        elseif ($w.action -eq 'created') {
+            if (Test-Path -LiteralPath $w.full_path) {
+                $targetItem = Get-Item -LiteralPath $w.full_path -Force -ErrorAction SilentlyContinue
+                if ($targetItem -and $targetItem.PSIsContainer) {
+                    $preflightErrors += "Created path $($w.rel_path) is now a directory."
+                    continue
+                }
+                if ($null -ne $w.after_content) {
+                    $diskNow = Get-Content -LiteralPath $w.full_path -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
+                    if ($null -eq $diskNow) { $diskNow = '' }
+                    if ($diskNow -cne $w.after_content) {
+                        $preflightErrors += "Created file $($w.rel_path) was modified after creation; refusing to delete manual changes."
+                        continue
+                    }
+                }
+            }
+        }
+    }
+    if ($preflightErrors.Count -gt 0) {
+        throw ('Undo failed: ' + ($preflightErrors -join '; '))
+    }
     $undoErrors = @()
     for ($i = $writes.Count - 1; $i -ge 0; $i--) {
         $w = $writes[$i]
-        if (-not $w) { continue }
+        if (-not $w -or $w.undone) { continue }
         try {
             if ($w.action -eq 'modified') {
-                if (-not $w.backup -or -not (Test-Path -LiteralPath $w.backup)) {
-                    throw "Backup file missing for $($w.rel_path)."
-                }
-                if ((Test-Path -LiteralPath $w.full_path) -and ($null -ne $w.after_content)) {
-                    $diskNow = Get-Content -LiteralPath $w.full_path -Raw -Encoding UTF8 -ErrorAction Stop
-                    if ($null -eq $diskNow) { $diskNow = '' }
-                    if (($diskNow -cne $w.after_content) -and ($null -eq $w.before_content -or $diskNow -cne $w.before_content)) {
-                        throw "File $($w.rel_path) was modified after the agent write; refusing to overwrite manual changes (backup kept at $($w.backup))."
-                    }
-                }
                 $expectedOrig = Get-Content -LiteralPath $w.backup -Raw -Encoding UTF8 -ErrorAction Stop
                 if ($null -eq $expectedOrig) { $expectedOrig = '' }
                 Copy-Item -LiteralPath $w.backup -Destination $w.full_path -Force -ErrorAction Stop
@@ -1003,20 +1039,15 @@ function Invoke-AgentUndo {
                     throw "Restored content verification failed for $($w.rel_path) (backup kept at $($w.backup))."
                 }
                 Remove-Item -LiteralPath $w.backup -Force -ErrorAction Stop
+                $w.undone = $true
                 Write-Host ($script:Gm.Aqua + '  [undo] Restored ' + $w.rel_path + $script:Gm.Reset)
             }
             elseif ($w.action -eq 'created') {
                 if (Test-Path -LiteralPath $w.full_path) {
-                    if ($null -ne $w.after_content) {
-                        $diskNow = Get-Content -LiteralPath $w.full_path -Raw -Encoding UTF8 -ErrorAction Stop
-                        if ($null -eq $diskNow) { $diskNow = '' }
-                        if ($diskNow -cne $w.after_content) {
-                            throw "Created file $($w.rel_path) was modified after creation; refusing to delete manual changes."
-                        }
-                    }
                     Remove-Item -LiteralPath $w.full_path -Force -ErrorAction Stop
                     Write-Host ($script:Gm.Aqua + '  [undo] Removed created file ' + $w.rel_path + $script:Gm.Reset)
                 }
+                $w.undone = $true
             }
         }
         catch {
@@ -1403,6 +1434,31 @@ function Find-ProjectSession {
     return $null
 }
 
+function Invoke-SessionResume {
+    param([string]$SessionFile, $State, [string]$CurrentWorkspace = '')
+    if (-not (Test-Path -LiteralPath $SessionFile)) { throw "Session file not found: $SessionFile" }
+    $meta = Get-AgentSessionMeta -SessionFile $SessionFile
+    if ($meta -and $meta.workspace -and $CurrentWorkspace) {
+        $targetWs = if (Test-Path -LiteralPath $CurrentWorkspace) { (Get-Item -LiteralPath $CurrentWorkspace -Force).FullName } else { $CurrentWorkspace }
+        $metaNorm = ([string]$meta.workspace).TrimEnd('\').TrimEnd('/')
+        $targetNorm = ([string]$targetWs).TrimEnd('\').TrimEnd('/')
+        if ($metaNorm -ine $targetNorm) {
+            throw "Cannot resume session from a different workspace ($($meta.workspace))."
+        }
+    }
+    $loadedMessages = @(Read-AgentSession -SessionFile $SessionFile -State $State)
+    $State.messages = $loadedMessages
+    if ($CurrentWorkspace) {
+        $State.workspace = if (Test-Path -LiteralPath $CurrentWorkspace) { (Get-Item -LiteralPath $CurrentWorkspace -Force).FullName } else { $CurrentWorkspace }
+    }
+    if ($meta -and $meta.model) {
+        $State.model = [string]$meta.model
+    }
+    $State.undo_stack = @()
+    $State.last_failed_question = ''
+    return $State
+}
+
 function Get-ContextStats {
     param($State)
     $chars = 0
@@ -1476,7 +1532,13 @@ function Invoke-AgentCompact {
     finally {
         Remove-Item -LiteralPath $tempFile.FullName -Force -ErrorAction SilentlyContinue
     }
-    $summaryText = $reply.choices[0].message.content
+    $choice = $reply.choices[0]
+    if (-not $choice -or -not $choice.message) { throw 'Compaction returned no assistant message.' }
+    $finishReason = [string]$choice.finish_reason
+    if ($finishReason -and ($finishReason -ne 'stop')) {
+        throw "Compaction summary was incomplete (finish_reason=$finishReason)."
+    }
+    $summaryText = $choice.message.content
     if (-not $summaryText) { throw 'Compaction returned empty summary.' }
     $summaryMsg = @{ role = 'user'; content = ("[Compacted Conversation Summary]`n" + $summaryText.Trim()) }
     $State.messages = @($systemMsg, $summaryMsg) + $recent
@@ -1645,7 +1707,8 @@ if (-not $LibraryOnly) {
         $latestProjectSession = Find-ProjectSession -SessionDir $sessionDir -Workspace $rootPath
         if ($latestProjectSession) {
             $sessionFile = $latestProjectSession
-            $state.messages = @(Read-AgentSession -SessionFile $sessionFile -State $state)
+            Invoke-SessionResume -SessionFile $sessionFile -State $state -CurrentWorkspace $rootPath | Out-Null
+            if ($PSBoundParameters.Keys -notcontains 'Model' -and $state.model) { $Model = $state.model }
         }
     }
     try {
@@ -1808,11 +1871,19 @@ if (-not $LibraryOnly) {
                     Write-Host ($script:Gm.Grey1 + '  No saved sessions yet.' + $script:Gm.Reset)
                     continue
                 }
-                $list = @(Get-ChildItem -LiteralPath $sessionDir -Filter '*.jsonl' -File | Sort-Object LastWriteTime -Descending | Select-Object -First 15)
+                $wsNorm = $rootPath.TrimEnd('\').TrimEnd('/')
+                $list = @(Get-ChildItem -LiteralPath $sessionDir -Filter '*.jsonl' -File | Sort-Object LastWriteTime -Descending | Where-Object {
+                    $m = Get-AgentSessionMeta -SessionFile $_.FullName
+                    (-not $m) -or (-not $m.workspace) -or ($m.workspace.TrimEnd('\').TrimEnd('/') -ieq $wsNorm)
+                } | Select-Object -First 15)
+                if ($list.Count -eq 0) {
+                    Write-Host ($script:Gm.Grey1 + '  No saved sessions for this workspace.' + $script:Gm.Reset)
+                    continue
+                }
                 for ($i = 0; $i -lt $list.Count; $i++) {
                     $meta = Get-AgentSessionMeta -SessionFile $list[$i].FullName
-                    $wsInfo = if ($meta -and $meta.workspace) { " [$($meta.workspace)]" } else { '' }
-                    Write-Host ($script:Gm.Yellow + ("  [{0}] " -f ($i + 1)) + $script:Gm.Fg + $list[$i].Name + $script:Gm.Grey1 + (" ({0}){1}" -f $list[$i].LastWriteTime.ToString('yyyy-MM-dd HH:mm'), $wsInfo) + $script:Gm.Reset)
+                    $mdlInfo = if ($meta -and $meta.model) { " [model: $($meta.model)]" } else { '' }
+                    Write-Host ($script:Gm.Yellow + ("  [{0}] " -f ($i + 1)) + $script:Gm.Fg + $list[$i].Name + $script:Gm.Grey1 + (" ({0}){1}" -f $list[$i].LastWriteTime.ToString('yyyy-MM-dd HH:mm'), $mdlInfo) + $script:Gm.Reset)
                 }
                 continue
             }
@@ -1822,21 +1893,37 @@ if (-not $LibraryOnly) {
                     Write-Host ($script:Gm.Grey1 + '  No saved sessions found.' + $script:Gm.Reset)
                     continue
                 }
-                $list = @(Get-ChildItem -LiteralPath $sessionDir -Filter '*.jsonl' -File | Sort-Object LastWriteTime -Descending)
+                $wsNorm = $rootPath.TrimEnd('\').TrimEnd('/')
+                $list = @(Get-ChildItem -LiteralPath $sessionDir -Filter '*.jsonl' -File | Sort-Object LastWriteTime -Descending | Where-Object {
+                    $m = Get-AgentSessionMeta -SessionFile $_.FullName
+                    (-not $m) -or (-not $m.workspace) -or ($m.workspace.TrimEnd('\').TrimEnd('/') -ieq $wsNorm)
+                })
                 $chosen = $null
                 if ($arg -match '^\d+$') {
                     $idx = [int]$arg - 1
                     if ($idx -ge 0 -and $idx -lt $list.Count) { $chosen = $list[$idx].FullName }
                 }
                 else {
-                    $cand = Join-Path $sessionDir $arg
+                    $cand = Join-Path $sessionDir (Split-Path $arg -Leaf)
                     if (Test-Path -LiteralPath $cand) { $chosen = $cand }
+                    elseif (-not ($arg -match '\.jsonl$')) {
+                        $candJsonl = Join-Path $sessionDir ((Split-Path $arg -Leaf) + '.jsonl')
+                        if (Test-Path -LiteralPath $candJsonl) { $chosen = $candJsonl }
+                    }
                 }
                 if ($chosen) {
-                    $state.messages = @(Read-AgentSession -SessionFile $chosen -State $state)
-                    $sessionFile = $chosen
-                    if ($PSBoundParameters.Keys -notcontains 'Permission') { $script:AgentPermission = 'Ask' }
-                    Write-Host ($script:Gm.Green + "  Resumed session: $sessionFile ($($state.messages.Count) messages, permission=$($script:AgentPermission))" + $script:Gm.Reset)
+                    try {
+                        Invoke-SessionResume -SessionFile $chosen -State $state -CurrentWorkspace $rootPath | Out-Null
+                        $sessionFile = $chosen
+                        $undoStack = @()
+                        $lastFailedQuestion = ''
+                        if ($state.model) { $Model = $state.model }
+                        if ($PSBoundParameters.Keys -notcontains 'Permission') { $script:AgentPermission = 'Ask' }
+                        Write-Host ($script:Gm.Green + "  Resumed session: $sessionFile ($($state.messages.Count) messages, model=$Model, permission=$($script:AgentPermission))" + $script:Gm.Reset)
+                    }
+                    catch {
+                        Write-Host ($script:Gm.Red + '  ' + $_.Exception.Message + $script:Gm.Reset)
+                    }
                 }
                 else {
                     Write-Host ($script:Gm.Red + "  Session not found: $arg" + $script:Gm.Reset)

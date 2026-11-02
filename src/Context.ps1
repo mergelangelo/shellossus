@@ -243,6 +243,31 @@ function Find-ProjectSession {
     return $null
 }
 
+function Invoke-SessionResume {
+    param([string]$SessionFile, $State, [string]$CurrentWorkspace = '')
+    if (-not (Test-Path -LiteralPath $SessionFile)) { throw "Session file not found: $SessionFile" }
+    $meta = Get-AgentSessionMeta -SessionFile $SessionFile
+    if ($meta -and $meta.workspace -and $CurrentWorkspace) {
+        $targetWs = if (Test-Path -LiteralPath $CurrentWorkspace) { (Get-Item -LiteralPath $CurrentWorkspace -Force).FullName } else { $CurrentWorkspace }
+        $metaNorm = ([string]$meta.workspace).TrimEnd('\').TrimEnd('/')
+        $targetNorm = ([string]$targetWs).TrimEnd('\').TrimEnd('/')
+        if ($metaNorm -ine $targetNorm) {
+            throw "Cannot resume session from a different workspace ($($meta.workspace))."
+        }
+    }
+    $loadedMessages = @(Read-AgentSession -SessionFile $SessionFile -State $State)
+    $State.messages = $loadedMessages
+    if ($CurrentWorkspace) {
+        $State.workspace = if (Test-Path -LiteralPath $CurrentWorkspace) { (Get-Item -LiteralPath $CurrentWorkspace -Force).FullName } else { $CurrentWorkspace }
+    }
+    if ($meta -and $meta.model) {
+        $State.model = [string]$meta.model
+    }
+    $State.undo_stack = @()
+    $State.last_failed_question = ''
+    return $State
+}
+
 function Get-ContextStats {
     param($State)
     $chars = 0
@@ -316,7 +341,13 @@ function Invoke-AgentCompact {
     finally {
         Remove-Item -LiteralPath $tempFile.FullName -Force -ErrorAction SilentlyContinue
     }
-    $summaryText = $reply.choices[0].message.content
+    $choice = $reply.choices[0]
+    if (-not $choice -or -not $choice.message) { throw 'Compaction returned no assistant message.' }
+    $finishReason = [string]$choice.finish_reason
+    if ($finishReason -and ($finishReason -ne 'stop')) {
+        throw "Compaction summary was incomplete (finish_reason=$finishReason)."
+    }
+    $summaryText = $choice.message.content
     if (-not $summaryText) { throw 'Compaction returned empty summary.' }
     $summaryMsg = @{ role = 'user'; content = ("[Compacted Conversation Summary]`n" + $summaryText.Trim()) }
     $State.messages = @($systemMsg, $summaryMsg) + $recent
