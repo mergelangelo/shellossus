@@ -847,12 +847,12 @@ function Invoke-WorkspaceIgnoreScan {
     if ($Depth -gt $MaxDepth) { return }
     $localRules = @(Read-DirectoryIgnoreRules -RootFull $RootFull -DirFull $CurrentDir)
     foreach ($lr in $localRules) { $lr }
-    $activeRules = if ($localRules.Count -gt 0) {
-        @(Compress-IgnoreRules -Rules (@($ParentRules) + $localRules))
+    $activeRules = @(if ($localRules.Count -gt 0) {
+        Compress-IgnoreRules -Rules (@($ParentRules) + $localRules)
     }
     else {
         $ParentRules
-    }
+    })
     $subDirs = @(Get-ChildItem -LiteralPath $CurrentDir -Force -Directory -ErrorAction SilentlyContinue | Sort-Object FullName)
     foreach ($sd in $subDirs) {
         if (($sd.Attributes -band 1024) -ne 0) { continue }
@@ -870,12 +870,12 @@ function Get-WorkspaceIgnoreRules {
     $scanItem = if ($SearchPath -and (Test-Path -LiteralPath $SearchPath)) { Get-Item -LiteralPath $SearchPath -Force } else { Get-Item -LiteralPath $Root -Force }
     $scanDir = if ($scanItem.PSIsContainer) { $scanItem.FullName.TrimEnd('\').TrimEnd('/') } else { (Split-Path $scanItem.FullName -Parent).TrimEnd('\').TrimEnd('/') }
     $ancestorRules = @(Get-AncestorIgnoreRules -RootFull $rootFull -ScanDir $scanDir)
-    $scannedRules = if ($scanItem.PSIsContainer) {
-        @(Invoke-WorkspaceIgnoreScan -RootFull $rootFull -CurrentDir $scanDir -ParentRules $ancestorRules)
+    $scannedRules = @(if ($scanItem.PSIsContainer) {
+        Invoke-WorkspaceIgnoreScan -RootFull $rootFull -CurrentDir $scanDir -ParentRules $ancestorRules
     }
     else {
-        @(Read-DirectoryIgnoreRules -RootFull $rootFull -DirFull $scanDir)
-    }
+        Read-DirectoryIgnoreRules -RootFull $rootFull -DirFull $scanDir
+    })
     return @(Compress-IgnoreRules -Rules ($ancestorRules + $scannedRules))
 }
 
@@ -906,15 +906,15 @@ function Invoke-WorkspaceWalk {
     )
     if ($Depth -gt $MaxDepth) { return }
     $localRules = @(Read-DirectoryIgnoreRules -RootFull $RootFull -DirFull $CurrentDir)
-    $activeRules = if ($localRules.Count -gt 0) {
-        @(Compress-IgnoreRules -Rules (@($ParentRules) + $localRules))
+    $activeRules = @(if ($localRules.Count -gt 0) {
+        Compress-IgnoreRules -Rules (@($ParentRules) + $localRules)
     }
     elseif ($Depth -eq 0 -and $ParentRules.Count -gt 0) {
-        @(Compress-IgnoreRules -Rules $ParentRules)
+        Compress-IgnoreRules -Rules $ParentRules
     }
     else {
         $ParentRules
-    }
+    })
     $entries = @(Get-ChildItem -LiteralPath $CurrentDir -Force -ErrorAction SilentlyContinue | Sort-Object FullName)
     $dirsToEnter = @(foreach ($child in $entries) {
         if (($child.Attributes -band 1024) -ne 0) { continue }
@@ -1955,7 +1955,7 @@ function Invoke-AgentTool {
                 }
             })
             $notice = if ($truncated) { "[${maxFind} results limit reached. Refine pattern or increase limit]" } else { $null }
-            return (@{ matches = $found; files = $found; count = $found.Count; truncated = $truncated; notice = $notice } | ConvertTo-Json -Depth 5 -Compress)
+            return (@{ matches = @($found); files = @($found); count = $found.Count; truncated = $truncated; notice = $notice } | ConvertTo-Json -Depth 5 -Compress)
         }
         if ($name -eq 'grep_files') {
             if (-not $arguments.pattern) { throw 'pattern must be a nonempty string.' }
@@ -1985,18 +1985,18 @@ function Invoke-AgentTool {
                 $fileOffset = [int]$arguments.file_offset
                 if ($fileOffset -lt 0) { throw 'file_offset must be at least 0.' }
             }
-            $allCandidateFiles = if ($item.PSIsContainer) {
-                @(foreach ($walkEntry in @(Get-WorkspaceWalkEntries -Root $Root -SearchPath $path -FilesOnly)) {
+            $allCandidateFiles = @(if ($item.PSIsContainer) {
+                foreach ($walkEntry in @(Get-WorkspaceWalkEntries -Root $Root -SearchPath $path -FilesOnly)) {
                     $child = $walkEntry.item
                     $relCandidate = $walkEntry.rel_path
                     if ($includeFilter -and ($child.Name -notlike $includeFilter) -and ($relCandidate -notlike $includeFilter)) { continue }
                     if ($child.Length -le 1MB) { $child.FullName }
-                })
+                }
             }
             else {
                 if ($item.Length -gt 1MB) { throw 'File exceeds 1 MiB.' }
-                @($item.FullName)
-            }
+                $item.FullName
+            })
             $totalFiles = $allCandidateFiles.Count
             $targetFiles = @($allCandidateFiles | Select-Object -Skip $fileOffset -First 500)
             $filesScanned = $targetFiles.Count
@@ -2004,12 +2004,12 @@ function Invoke-AgentTool {
             $matchLimitReached = $false
             $linesTruncated = $false
             $hitCount = 0
-            $hits = if ($targetFiles.Count -gt 0) {
+            $hits = @(if ($targetFiles.Count -gt 0) {
                 $selParams = @{ LiteralPath = $targetFiles; Pattern = $arguments.pattern; Encoding = 'UTF8'; ErrorAction = 'Stop' }
                 if ($isLiteral) { $selParams.SimpleMatch = $true }
                 if ($isCaseSensitive) { $selParams.CaseSensitive = $true }
                 if ($ctxLines -gt 0) { $selParams.Context = @($ctxLines, $ctxLines) }
-                @(foreach ($m in @(Select-String @selParams)) {
+                foreach ($m in @(Select-String @selParams)) {
                     if ($hitCount -ge $maxMatches) { $matchLimitReached = $true; break }
                     $hitCount++
                     $lineText = [string]$m.Line
@@ -2027,11 +2027,8 @@ function Invoke-AgentTool {
                         $hitObj.context = @($m.Context.PreContext) + @($lineText) + @($m.Context.PostContext)
                     }
                     $hitObj
-                })
-            }
-            else {
-                @()
-            }
+                }
+            })
             $truncated = ($fileLimitReached -or $matchLimitReached)
             $truncReason = if ($matchLimitReached -and $fileLimitReached) {
                 'max_matches_and_max_files'
@@ -2052,7 +2049,7 @@ function Invoke-AgentTool {
             if ($linesTruncated) { $notices += 'Some lines truncated to 300 chars; use read_file for full lines' }
             $noticeStr = if ($notices.Count -gt 0) { '[' + ($notices -join '. ') + ']' } else { $null }
             return (@{
-                matches = $hits
+                matches = @($hits)
                 truncated = $truncated
                 truncation_reason = $truncReason
                 files_scanned = $filesScanned
