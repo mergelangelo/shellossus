@@ -119,6 +119,60 @@ try {
     $crlfAfter = Get-Content -LiteralPath (Join-Path $workspacePath 'crlf.txt') -Raw -Encoding UTF8
     Assert-True ($crlfAfter -eq "row1`r`nrow2`r`nline3") 'CRLF line endings were not preserved after edit.'
 
+    # write_file with overwrite=true backs up and replaces content after WRITE confirmation.
+    $call.function.name = 'write_file'
+    $call.function.arguments = '{"path":"created.txt","content":"overwritten","overwrite":true}'
+    $result = Invoke-AgentTool -Root $workspacePath -Call $call | ConvertFrom-Json
+    Assert-True ($result.status -eq 'written' -and [bool]$result.backup) 'Overwrite with backup failed.'
+    Assert-True ((Get-Content -LiteralPath $result.backup -Raw -Encoding UTF8) -eq 'second') 'Overwrite backup content mismatch.'
+    Remove-Item -LiteralPath $result.backup -Force
+    Assert-True ((Get-Content -LiteralPath (Join-Path $workspacePath 'created.txt') -Raw -Encoding UTF8) -eq 'overwritten') 'Overwritten file content mismatch.'
+
+    # find_files and grep_files search workspace while hiding credentials.
+    $script:AgentConfigPath = Format-ConfigPath -Path (Join-Path $workspacePath '.\custom.cfg')
+    $call.function.name = 'find_files'
+    $call.function.arguments = '{"path":".","pattern":"*"}'
+    $found = Invoke-AgentTool -Root $workspacePath -Call $call | ConvertFrom-Json
+    Assert-True ($found.matches.path -contains 'hello.txt') 'find_files missed hello.txt.'
+    Assert-True ($found.matches.path -notcontains '.env' -and $found.matches.path -notcontains 'custom.cfg') 'find_files exposed credentials.'
+
+    $call.function.name = 'grep_files'
+    $call.function.arguments = '{"path":".","pattern":"row2"}'
+    $grepped = Invoke-AgentTool -Root $workspacePath -Call $call | ConvertFrom-Json
+    Assert-True ($grepped.matches.Count -eq 1 -and $grepped.matches[0].path -eq 'crlf.txt' -and $grepped.matches[0].line_number -eq 2) 'grep_files failed to locate match.'
+    $call.function.arguments = '{"path":".","pattern":"SECRET"}'
+    $secretGrep = Invoke-AgentTool -Root $workspacePath -Call $call | ConvertFrom-Json
+    Assert-True ($secretGrep.matches.Count -eq 0) 'grep_files leaked .env contents.'
+
+    # run_command requires RUN confirmation and executes isolated PowerShell commands.
+    $call.function.name = 'run_command'
+    $call.function.arguments = '{"command":"Write-Output \"cmd-ok\""}'
+    $script:approval = 'WRITE'
+    $cmdDeclined = Invoke-AgentTool -Root $workspacePath -Call $call | ConvertFrom-Json
+    Assert-True ($cmdDeclined.status -eq 'cancelled') 'run_command must require RUN approval.'
+    $script:approval = 'RUN'
+    $cmdApproved = Invoke-AgentTool -Root $workspacePath -Call $call | ConvertFrom-Json
+    Assert-True ($cmdApproved.status -eq 'executed' -and $cmdApproved.exit_code -eq 0 -and $cmdApproved.output.Trim() -eq 'cmd-ok') 'Approved run_command failed.'
+    $script:approval = 'WRITE'
+
+    # AGENTS.md loading and @file prompt expansion.
+    Set-Content -LiteralPath (Join-Path $workspacePath 'AGENTS.md') -Value 'Always use snake_case.' -Encoding UTF8
+    $agentsText = Get-AgentsContext -Root $workspacePath -ConfigDir ''
+    Assert-True ($agentsText.Contains('Always use snake_case.')) 'AGENTS.md was not loaded.'
+    $expanded = Expand-UserPrompt -Root $workspacePath -Prompt 'Check @hello.txt and @.env'
+    Assert-True ($expanded.Contains('<file path="hello.txt">') -and (-not $expanded.Contains('SECRET=hidden'))) '@file expansion failed or leaked .env.'
+
+    # Session JSONL persistence roundtrip.
+    $sessionFile = Join-Path $testRoot 'sessions\test.jsonl'
+    $sampleState = @{ messages = @(
+        @{ role = 'system'; content = 'sys' },
+        @{ role = 'user'; content = 'hi' },
+        @{ role = 'assistant'; content = 'hello' }
+    ) }
+    Save-AgentSession -SessionFile $sessionFile -State $sampleState
+    $restoredMsgs = @(Read-AgentSession -SessionFile $sessionFile)
+    Assert-True ($restoredMsgs.Count -eq 3 -and $restoredMsgs[2].content -eq 'hello') 'Session JSONL roundtrip failed.'
+
     # Exercise the agent/tool/API round trip without any network or real key.
     $script:requests = 0
     function Invoke-RestMethod {
@@ -173,6 +227,14 @@ try {
     $result = Invoke-AgentTool -Root $workspacePath -Call $call | ConvertFrom-Json
     Assert-True ($result.status -eq 'written') 'ConstrainedLanguage CRLF edit failed.'
     Remove-Item -LiteralPath $result.backup -Force
+    $call = @{ id = 'cl-grep'; function = @{ name = 'grep_files'; arguments = '{"path":".","pattern":"row3"}' } }
+    $result = Invoke-AgentTool -Root $workspacePath -Call $call | ConvertFrom-Json
+    Assert-True ($result.matches.Count -eq 1) 'ConstrainedLanguage grep_files failed.'
+    $script:approval = 'RUN'
+    $call = @{ id = 'cl-cmd'; function = @{ name = 'run_command'; arguments = '{"command":"Write-Output \"cl-cmd-ok\""}' } }
+    $result = Invoke-AgentTool -Root $workspacePath -Call $call | ConvertFrom-Json
+    Assert-True ($result.status -eq 'executed' -and $result.output.Trim() -eq 'cl-cmd-ok') 'ConstrainedLanguage run_command failed.'
+    $script:approval = 'WRITE'
     $errText = Format-AgentError -ErrorRecord @{ Exception = @{ Message = 'HTTP 400' }; ErrorDetails = @{ Message = '{"error":{"message":"Bad model"}}' } }
     Assert-True ($errText -eq 'HTTP 400 (Bad model)') 'ConstrainedLanguage error formatting failed.'
     $tableLines = @(Format-MarkdownTable -Lines @('| Col | Val |', '|---|---|', '| a | **bold** |') -Indent '')
