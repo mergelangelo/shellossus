@@ -1,111 +1,112 @@
 # h-agent
 
-Минимальный агент для Windows PowerShell 5.1 и OpenAI-совместимого Chat Completions API. Без Python, Node.js, Bash и дополнительных модулей.
+Minimalist terminal coding agent for **Windows PowerShell 5.1+** and any OpenAI-compatible Chat Completions API.
+Zero external dependencies: no Python, no Node.js, no Bash, no PowerShell Gallery modules. Designed to run in standard desktops as well as restricted enterprise / Citrix / VDI environments (including PowerShell `ConstrainedLanguage` mode).
 
-## Возможности (в духе Pi coding agent)
+## Key Features
 
-- **7 инструментов агента:** `list_files`, `read_file` (с пагинацией `start_line`, `max_lines` и метаданными `total_lines`/`next_start_line`), `find_files` (рекурсивный поиск по маске с пропуском `.git`/`node_modules`), `grep_files` (поиск текста и регулярок с фильтром файлов `include`, учётом регистра `case_sensitive` и строками контекста `context_lines`), `write_file` (создание и перезапись с `overwrite=true`), `edit_file` (одиночная замена или пакетный массив `edits[]` с проверкой пересечений, сохранением `CRLF`/`LF` и умным fuzzy-сопоставлением) и `run_command` (изолированный запуск команд PowerShell с очисткой переменных API-ключей и сохранением полного лога в `.h-agent/output/*.log` при обрезке вывода).
-- **4 режима разрешений (`-Permission` и `/permission`):**
-  - `ReadOnly` — доступны только инструменты чтения и поиска (`list_files`, `read_file`, `find_files`, `grep_files`).
-  - `Ask` *(по умолчанию)* — запрашивает `WRITE` для записи файлов и `RUN` для выполнения команд.
-  - `AutoEdit` *(без запроса на запись)* — автоматически применяет `write_file` и `edit_file` (показывая цветной diff и сохраняя бэкапы для `/undo`), но требует подтверждения `RUN` для `run_command`.
-  - `Auto` — автоматически выполняет и запись файлов, и команды (с сохранением бэкапов для `/undo`).
-- **Безопасное подтверждение и откат (`/undo`):** каждая запись файла показывает `BEFORE`/`AFTER` с подсветкой изменений и создаёт резервную копию. Команда `/undo` откатывает последний ход не только в диалоге, но и на диске (восстанавливает изменённые файлы из бэкапа и удаляет созданные файлы).
-- **Кастомизация и контекст как в Pi:**
-  - Автоподгрузка `AGENTS.md`, `SYSTEM.md` и `APPEND_SYSTEM.md` (из `.h-agent\` рабочей папки и `%USERPROFILE%\.h-agent\`).
-  - Каталог навыков (`skills/*/SKILL.md`) с ленивой подгрузкой через `read_file` и пользовательские шаблоны команд (`.h-agent\prompts\<имя>.md` с подстановкой `$ARGUMENTS` при вызове `/<имя> аргументы`).
-  - Быстрая вставка файлов в запрос через `@путь/к/файлу` (например: `Проверь запрос в @sql/report.sql`).
-  - Быстрый запуск команд прямо из строки ввода: `!команда` (выполнить и добавить вывод в контекст диалога) и `!!команда` (выполнить только локально в терминале).
-  - Одношаговый неинтерактивный режим запуска: `h-agent -Prompt "Проанализируй @report.sql"`.
-- **Сессии, рассуждения (`reasoning`) и надёжность:**
-  - Автосохранение диалогов в `%USERPROFILE%\.h-agent\sessions\*.jsonl`, продолжение через `-Continue` или команды `/sessions`, `/resume`, `/save [имя]`, `/new`.
-  - Управление отображением и усилием рассуждений модели (`/reasoning compact|full|hide|low|medium|high`, параметр `-ReasoningEffort` / `-HideReasoning`).
-  - Авто-повтор при временных сетевых сбоях и лимитах (`HTTP 408/429/500/502/503/504`) + команда `/retry` для повтора последнего запроса.
-  - Структурированное сжатие истории (`/compact [фокус]`, авто-сжатие при превышении порога и авто-восстановление при ошибке переполнения контекста модели) по секциям `Goal`, `Constraints`, `Progress`, `Key Decisions`, `Next Steps`, `Critical Context`.
-- **Терминальный рендеринг:** палитра `sainnhe/gruvbox-material` (TrueColor RGB) с форматированием Markdown-заголовков, списков, блоков кода и авто-выравниванием таблиц.
+- **7 Built-in Tools:** `list_files`, `read_file` (line pagination), `find_files`, `grep_files` (regex/literal, `include` filter, `context_lines`), `write_file`, `edit_file` (fuzzy whitespace/quote matching + atomic batch `edits[]`), and `run_command` (process timeout, streaming disk logs, API key scrubbing).
+- **4 Permission Modes (`-Permission` / `/permission`):**
+  | Mode | File Reads & Search | File Writes & Edits | Shell Commands (`run_command`) |
+  | --- | --- | --- | --- |
+  | `ReadOnly` | Allowed | Disabled | Disabled |
+  | `Ask` *(default)* | Allowed | Prompts `WRITE` | Prompts `RUN` |
+  | `AutoEdit` | Allowed | Auto-approved (with backup) | Prompts `RUN` |
+  | `Auto` | Allowed | Auto-approved (with backup) | Auto-approved |
+- **Atomic Writes & Disk `/undo`:** Staged writes via temporary files with verification, colored diff previews, automatic backups, manual-edit conflict detection, and full disk rollback via `/undo`.
+- **Pi-style Context & Extensibility:** Auto-loads `AGENTS.md`, `SYSTEM.md`, `APPEND_SYSTEM.md`, workspace/global `skills/*/SKILL.md`, custom `/<template>` prompts, `@file` inline attachments, and `!cmd` / `!!cmd` shell shortcuts.
+- **Project-Scoped Sessions & Compaction:** Atomic `.jsonl` session storage tied to each workspace (`-Continue`, `/sessions`, `/resume`, `/save`, `/new`) and structured context compaction (`/compact [focus]` + automatic context-overflow recovery).
+- **TrueColor Terminal UI:** Exact `sainnhe/gruvbox-material` (dark medium) palette with Markdown headings, lists, code blocks, auto-aligned tables, and collapsible `reasoning` blocks.
 
-## Запуск в Citrix / Windows
+## Quick Start
 
-Один раз сохраните `h-agent.ps1` и `install.ps1` в постоянную папку, например `C:\Users\YOUR-NAME\Tools\h-agent`. Можно скопировать содержимое этих файлов из GitHub в редактор, скачивать архив не обязательно.
+### 1. Install Launcher (One-Time)
 
-В PowerShell перейдите в эту папку и зарегистрируйте команду:
+Clone the repository or copy [`h-agent.ps1`](h-agent.ps1) and [`install.ps1`](install.ps1) into a permanent folder (e.g. `C:\Users\YOU\Tools\h-agent`), then run:
 
 ```powershell
 .\install.ps1
 ```
 
-`install.ps1` добавляет функцию `h-agent` в профиль текущего пользователя и хоста PowerShell. Существующие настройки сохраняются, перед изменением создаётся копия профиля. Права администратора не нужны. Если перенесёте скрипт, повторите установку из новой папки. Никакие политики безопасности не меняются.
-
-Откройте новое окно PowerShell (без `-NoProfile`) и один раз настройте подключение:
+Open a new PowerShell window and configure your API endpoint, model ID, and key (stored in `%USERPROFILE%\.h-agent\.env`, outside your project):
 
 ```powershell
 h-agent -Setup
 ```
 
-Введите адрес API с `/v1`, точный ID модели и ключ. На вопрос о рабочей папке нажмите Enter: тогда при каждом запуске будет использоваться **текущая папка**. Настройки сохраняются в `%USERPROFILE%\.h-agent\.env`, вне проекта. Ключ хранится **обычным текстом**, ввод также виден на экране; не делитесь файлом и этим экраном. Это не зашифрованное хранилище секретов.
-
-Теперь обычный запуск:
+### 2. Run in Any Project
 
 ```powershell
-cd "C:\path\to\project"
+cd C:\path\to\project
 h-agent
 ```
 
-Повторный ввод ключа не требуется. Путь к программе запоминается в профиле, путь к текущему проекту определяется автоматически. При переносе между PowerShell 5.1 и PowerShell 7/другими хостами установку команды нужно выполнить в каждом используемом хосте. Если Citrix сбрасывает пользовательский профиль при выходе, сохранение между сессиями зависит от настроек Citrix.
-
-Для изменения настроек снова выполните `h-agent -Setup`. Enter сохраняет прежние адрес, модель и ключ, но очищает фиксированную рабочую папку. `.env.example` показывает поддерживаемые поля. Значения читаются как данные, без выполнения PowerShell-кода. `.env` в текущем проекте автоматически **не загружается**.
-
-Приоритет: явные параметры запуска → переменные среды → пользовательский `.env`. Рабочая папка по умолчанию — текущая; фиксированную можно задать через `H_AGENT_WORKSPACE`. Файл настроек можно выбрать параметром `-ConfigPath`.
-
-Прямой запуск без регистрации команды также доступен:
+Common launch flags:
 
 ```powershell
-& "C:\Users\YOUR-NAME\Tools\h-agent\h-agent.ps1" -Workspace "C:\path\to\project"
+h-agent -Continue                        # Resume latest session for current workspace
+h-agent -Permission AutoEdit             # Edit files without prompting; ask before shell commands
+h-agent -Prompt "Explain @src/Tools.ps1" # Single-shot non-interactive mode
 ```
 
-Адрес и ключ по-прежнему читаются из настроек. Не добавляйте `/chat/completions` к BaseUrl: скрипт добавляет его сам. Если настройки ещё не сохранены, скрипт спросит недостающие значения только на текущий запуск; для сохранения используйте `-Setup`.
+## Interactive Commands
 
-Первое задание:
+| Command | Description |
+| --- | --- |
+| `/help` | List available interactive commands |
+| `/status` | Show active model, permission mode, token estimate, and session path |
+| `/permission <mode>` | Switch mode: `ReadOnly`, `Ask`, `AutoEdit`, `Auto` |
+| `/reasoning <opt>` | Display: `compact`, `full`, `hide`; Effort: `low`, `medium`, `high`, `default` |
+| `/undo` | Revert last turn in conversation and restore modified/created files on disk |
+| `/retry` | Resend the last failed user prompt |
+| `/compact [focus]` | Summarize older turns into a structured context handoff |
+| `/model <id>` | Switch model ID for the current session |
+| `/sessions` | List recent saved sessions |
+| `/resume <num\|name>` | Load a saved session |
+| `/save [name]` | Save current session (optionally under a custom filename) |
+| `/new` (`/clear`) | Start a fresh session |
+| `/<template> [args]` | Expand a prompt template from `.h-agent/prompts/<name>.md` |
+| `@path/to/file` | Attach a workspace file inline into your prompt |
+| `!cmd` / `!!cmd` | Execute a shell command (`!` appends output to context; `!!` is local-only) |
+| `/exit` | Quit `h-agent` |
 
-> Посмотри файлы в рабочей папке. Затем прочитай hello.txt и кратко перескажи его содержимое.
+## Repository Structure
 
-На следующем ходе агент помнит диалог. На один ход выделено до 8 запросов к модели; настройка `-MaxSteps 12` меняет лимит (1–30).
+```text
+.
+├── h-agent.ps1         # Standalone single-file distribution (built from src/*.ps1)
+├── build.ps1           # Bundler and sync verifier (.\build.ps1 / .\build.ps1 -Check)
+├── install.ps1         # PowerShell profile launcher installer
+├── src/
+│   ├── Config.ps1      # .env parser, workspace path boundary & reparse-point checks
+│   ├── Theme.ps1       # Gruvbox Material RGB palette, Markdown & table renderer
+│   ├── Tools.ps1       # Tool schemas, argument validator, file I/O, undo, shell runner
+│   ├── Context.ps1     # System prompt builder, skills, templates, sessions, compaction
+│   └── Cli.ps1         # Agent turn loop, retry/overflow recovery, interactive REPL
+├── tests/
+│   └── smoke.ps1       # Automated test suite (includes ConstrainedLanguage checks)
+├── docs/
+│   ├── architecture.md # Internal design, module boundaries, and build pipeline
+│   ├── security.md     # Permission model, workspace isolation, and enterprise notes
+│   └── customization.md# Guide to AGENTS.md, skills, prompt templates, and sessions
+└── examples/           # Sample prompt templates and skills
+```
 
-## Ограничения корпоративной среды
+## Development & Testing
 
-Новых исполняемых файлов не требуется, но корпоративные правила могут запрещать и PowerShell-скрипты. Скрипт **не меняет ExecutionPolicy, режим языка и настройки безопасности**. Если `.ps1` запрещён политикой, используйте согласованный с ИТ способ запуска. Вставка исходного кода в открытую консоль возможна только если такой способ разрешён вашей организацией; не используйте её для обхода блокировки скриптов.
-
-Код использует стандартные команды PowerShell и ориентирован на ConstrainedLanguage. Это не гарантия работы во всех конфигурациях Citrix/WDAC/AppLocker. Проверки в CI запускаются на Windows PowerShell 5.1, в том числе чтение файла в ConstrainedLanguage; корпоративная среда может вводить дополнительные ограничения.
-
-## Данные и границы доступа
-
-- Введённые сообщения, история и содержимое прочитанных файлов отправляются указанному API. Используйте разрешённый для этих данных сервер и отдельную рабочую папку.
-- Чтение: список до 200 элементов; файл до 1 МиБ, до 300 строк (с поддержкой смещения `start_line`) и 20 000 символов за вызов. Обрезанные результаты помечаются `truncated`. Запись требует отдельного подтверждения каждой операции; инструмента выполнения команд нет.
-- Проверяется принадлежность пути рабочей папке; junction/symlink/reparse points в пути отвергаются. Это прикладная проверка, **не системная песочница** и не защита от одновременной подмены файлов другим процессом.
-- После ошибки запроса текущий ход откатывается в локальной истории. Уже отправленные серверу данные это не удаляет.
-- Сетевые запросы не повторяются автоматически. Сохраняется стандартная проверка TLS-сертификатов.
-- Ключ очищается из переменной скрипта при выходе; гарантированное стирание из памяти не обещается.
-- Файлы `.env`/`.env.*` (кроме шаблона `.env.example`) и пользовательский файл настроек закрыты для просмотра в списках, чтения и записи инструментами агента. Сохранённый ключ используется для авторизации API, в сообщения модели не добавляется.
-
-## Структура проекта и сборка
-
-Исходный код разделён на модули в папке `src/`, а в корне репозитория всегда лежит собранный автономный `h-agent.ps1` (удобный для прямого копирования в Citrix / VDI без git и сборщиков):
-
-- `src/Config.ps1` — чтение/сохранение `.env`-конфигурации, проверка границ рабочей папки, защита секретов и reparse points.
-- `src/Theme.ps1` — палитра `sainnhe/gruvbox-material` (TrueColor RGB) и рендерер Markdown / таблиц / блоков `reasoning`.
-- `src/Tools.ps1` — 7 инструментов агента, 4 режима разрешений (`ReadOnly`, `Ask`, `AutoEdit`, `Auto`), fuzzy и пакетный `edit_file`, изолированный `run_command` и дисковый откат `/undo`.
-- `src/Context.ps1` — сборка системного промпта (`AGENTS.md`, `SYSTEM.md`, `APPEND_SYSTEM.md`, `skills/*/SKILL.md`), шаблоны `/<template>`, вложения `@file`, `.jsonl`-сессии и структурированный `/compact`.
-- `src/Cli.ps1` — цикл хода агента (`Invoke-AgentTurn` с авто-повтором и защитой от переполнения контекста) и интерактивный REPL.
-- `build.ps1` — скрипт сборки (`.\build.ps1` пересобирает `h-agent.ps1` из `src/*.ps1`, а `.\build.ps1 -Check` проверяет их синхронность в CI).
-
-## Проверки
-
-На Windows, из папки репозитория:
+Edit modular files under [`src/`](src/), rebuild [`h-agent.ps1`](h-agent.ps1), and run the smoke test suite:
 
 ```powershell
+.\build.ps1
 .\tests\smoke.ps1
 ```
 
-Проверяются синхронность `src/*.ps1` и `h-agent.ps1` (`build.ps1 -Check`), чтение файла, отклонение выхода за рабочую папку, неизвестный инструмент, неверный JSON, обрезка длинного файла, полный цикл API → инструмент → API на заглушке и чтение в ConstrainedLanguage. Настоящий API и ключ для проверок не нужны. Тест переключает текущую PowerShell-сессию в ConstrainedLanguage: запускайте его в отдельном окне. Автоматический запуск настроен в GitHub Actions.
+## Documentation
 
-Не добавляйте в репозиторий ключи, конфигурации с секретами или рабочие документы.
+- [Architecture & Build Pipeline](docs/architecture.md)
+- [Security, Permissions & Enterprise Guide](docs/security.md)
+- [Customization: AGENTS.md, Skills & Prompt Templates](docs/customization.md)
+
+## License
+
+[MIT](LICENSE)
