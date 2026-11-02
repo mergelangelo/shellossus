@@ -197,7 +197,7 @@ try {
     Wait-AgentProcessWithSpinner -Process $clDoneProc -StatusLabel 'CL wait check' -TimeoutSec 5 -PollMs 10
 
     $clCap = Get-AgentCapabilities -Root $workspacePath
-    Assert-True ($clCap.permission -eq 'Ask' -and $clCap.tool_names.Count -eq 7 -and $clCap.environment.language_mode -eq 'ConstrainedLanguage') 'ConstrainedLanguage Get-AgentCapabilities or Get-AgentEnvironment failed.'
+    Assert-True ($clCap.permission -eq 'Ask' -and $clCap.tool_names.Count -eq 8 -and ($clCap.tool_names -contains 'run_agent') -and $clCap.environment.language_mode -eq 'ConstrainedLanguage') 'ConstrainedLanguage Get-AgentCapabilities or Get-AgentEnvironment failed.'
     $clSyncState = @{ messages = @(@{ role = 'system'; content = 'sys' }, @{ role = 'user'; content = 'q' }, @{ role = 'assistant'; content = 'a' }) }
     $clSyncRes = Sync-AgentCapabilities -State $clSyncState -RecordTransition
     Assert-True ($clSyncRes.consistent -and $clSyncState.messages[0].content.Contains('<capabilities>')) 'ConstrainedLanguage Sync-AgentCapabilities failed.'
@@ -205,6 +205,21 @@ try {
     Assert-True ($clSig -eq '1|read_file|{max_lines:10,path:"a.txt"}') 'ConstrainedLanguage Get-ToolCallSignature failed.'
     $clWalk = @(Get-WorkspaceWalkEntries -Root $workspacePath -SearchPath $workspacePath -FilesOnly)
     Assert-True ($clWalk.Count -ge 1) 'ConstrainedLanguage Get-WorkspaceWalkEntries failed.'
+    $clNormSub = Format-RunAgentArguments -ArgsObj ('{"agent":"scout","task":"check"}' | ConvertFrom-Json)
+    Assert-True ($clNormSub.role -eq 'scout' -and $clNormSub.prompt -eq 'check') 'ConstrainedLanguage Format-RunAgentArguments failed.'
+    $clRole = Resolve-AgentRole -Name 'scout' -Root $workspacePath
+    Assert-True ($clRole.name -eq 'recon' -and $clRole.permission -eq 'ReadOnly') 'ConstrainedLanguage Resolve-AgentRole failed.'
+    $clAgentCmd = Resolve-PromptTemplate -Root $workspacePath -ConfigDir $globalCfgDir -InputText '/agent:recon find queries'
+    Assert-True ($clAgentCmd.Contains('<agent_role name="recon"') -and $clAgentCmd.Contains('find queries')) 'ConstrainedLanguage /agent:<role> failed.'
+    function Invoke-WebRequest {
+        param($Uri, $Method, $Headers, $ContentType, $Body, $TimeoutSec, $ErrorAction, [switch]$UseBasicParsing, $OutFile)
+        $r = @{ choices = @(@{ finish_reason = 'stop'; message = @{ content = 'CL subagent ok' } }) } | ConvertTo-Json -Depth 10 -Compress
+        Set-Content -LiteralPath $OutFile -Value $r -Encoding UTF8 -NoNewline
+    }
+    $clSubCall = @{ id = 'cl-sub'; function = @{ name = 'run_agent'; arguments = '{"role":"recon","prompt":"Quick check"}' } }
+    $clSubRes = Invoke-AgentTool -Root $workspacePath -Call $clSubCall | ConvertFrom-Json
+    Assert-True ($clSubRes.status -eq 'completed' -and $clSubRes.output -eq 'CL subagent ok') 'ConstrainedLanguage run_agent execution failed.'
+    Remove-Item Function:\Invoke-WebRequest -ErrorAction SilentlyContinue
 }
 finally {
     Remove-TestEnvironment -Env $envData

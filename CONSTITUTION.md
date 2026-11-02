@@ -57,7 +57,7 @@ Before accessing any path, `shellossus` must verify the target and every ancesto
 
 ### Section 1. Permission Modes
 Tool availability and confirmation prompts are governed by four permission modes:
-1. **`ReadOnly`**: Exposes only read-only tools (`list_files`, `read_file`, `find_files`, `grep_files`) and blocks all file writes and shell commands.
+1. **`ReadOnly`**: Exposes only read-only tools (`list_files`, `read_file`, `find_files`, `grep_files`, and `run_agent` clamped to `ReadOnly`) and blocks all file writes and shell commands.
 2. **`Ask`**: Previews changes or commands and requires explicit user confirmation (`WRITE` for file changes, `RUN` for shell commands).
 3. **`AutoEdit`**: Automatically approves file creations and edits while still requiring `RUN` confirmation for `run_command`.
 4. **`Auto`**: Automatically approves both file modifications and shell commands within workspace boundaries.
@@ -77,6 +77,11 @@ Tool arguments must be validated against the tool's schema before execution. Unk
 
 ### Section 5. Isolated Shell Execution and Output Logs
 `run_command` must redirect stdout and stderr directly to temporary disk files to avoid memory exhaustion, enforce a strict execution timeout (`Wait-Process` followed by process termination), and save the full untruncated output under `.shellossus/output/` whenever terminal output is truncated.
+
+### Section 6. Subagent Delegation (`run_agent`)
+1. `run_agent` supports single delegation (`prompt`), parallel read-only fan-out (`parallel[]`, 1..8 tasks), and sequential pipelines (`pipeline[]`, 1..8 steps with `{previous}` / `$PREVIOUS` substitution), with `context` set to `'clean'` (default) or `'fork'` (cloning parent conversation history up to the last valid boundary).
+2. Subagents cannot recursively invoke `run_agent` (`$script:SubagentDepth` is capped at 1) and can never escalate permissions above the parent session (`ReadOnly` sessions and `recon`/`audit`/`parallel[]` subagents are strictly clamped to `ReadOnly`).
+3. File writes performed by in-process subagents are recorded into the parent turn's `$script:CurrentTurnWrites` so a single `/undo` atomically reverts both parent and subagent modifications.
 
 ---
 
@@ -120,7 +125,8 @@ In interactive and text modes, output uses the 24-bit TrueColor `sainnhe/gruvbox
 2. `APPEND_SYSTEM.md` additions;
 3. Hierarchical `AGENTS.md` and `CLAUDE.md` files from the workspace root;
 4. Local and global skills (`SKILL.md`) listed in an `<available_skills>` XML catalog and invocable via `/skill:<name>` or `read_file`;
-5. Prompt templates (`.shellossus/prompts/*.md`) supporting positional, slice, and default arguments (`$1`, `$@`, `$ARGUMENTS`, `${1:-default}`, `${@:2}`) without recursive re-evaluation.
+5. Built-in (`recon`, `audit`, `craft`) and custom subagent role profiles (`.shellossus/agents/*.md` and `~/.shellossus/agents/*.md`) listed in an `<available_agents>` XML catalog and invocable via `run_agent`, `/agents`, or `/agent:<role>`;
+6. Prompt templates (`.shellossus/prompts/*.md`) supporting positional, slice, and default arguments (`$1`, `$@`, `$ARGUMENTS`, `${1:-default}`, `${@:2}`) without recursive re-evaluation.
 
 ---
 
