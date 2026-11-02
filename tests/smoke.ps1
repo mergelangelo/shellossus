@@ -155,12 +155,47 @@ try {
     Assert-True ($cmdApproved.status -eq 'executed' -and $cmdApproved.exit_code -eq 0 -and $cmdApproved.output.Trim() -eq 'cmd-ok') 'Approved run_command failed.'
     $script:approval = 'WRITE'
 
-    # AGENTS.md loading and @file prompt expansion.
+    # AGENTS.md, SYSTEM.md, APPEND_SYSTEM.md, Skills catalog, Prompt templates, and @file prompt expansion.
     Set-Content -LiteralPath (Join-Path $workspacePath 'AGENTS.md') -Value 'Always use snake_case.' -Encoding UTF8
-    $agentsText = Get-AgentsContext -Root $workspacePath -ConfigDir ''
-    Assert-True ($agentsText.Contains('Always use snake_case.')) 'AGENTS.md was not loaded.'
+    $dotH = Join-Path $workspacePath '.h-agent'
+    $skillFolder = Join-Path $dotH 'skills\sql-tuning'
+    $promptFolder = Join-Path $dotH 'prompts'
+    New-Item -ItemType Directory -Path $skillFolder -Force | Out-Null
+    New-Item -ItemType Directory -Path $promptFolder -Force | Out-Null
+    Set-Content -LiteralPath (Join-Path $dotH 'APPEND_SYSTEM.md') -Value 'Prefer CTEs over subqueries.' -Encoding UTF8
+    Set-Content -LiteralPath (Join-Path $skillFolder 'SKILL.md') -Value "---`nname: sql-tuning`ndescription: Optimize heavy SQL queries`n---`nCheck indexes." -Encoding UTF8
+    Set-Content -LiteralPath (Join-Path $promptFolder 'review.md') -Value 'Review carefully: $ARGUMENTS' -Encoding UTF8
+    $fullSys = Build-SystemPrompt -Root $workspacePath -ConfigDir ''
+    Assert-True ($fullSys.Contains('Always use snake_case.') -and $fullSys.Contains('Prefer CTEs over subqueries.') -and $fullSys.Contains('sql-tuning')) 'Build-SystemPrompt missed AGENTS.md, APPEND_SYSTEM.md, or skills.'
+    $tpl = Resolve-PromptTemplate -Root $workspacePath -ConfigDir '' -InputText '/review @hello.txt'
+    Assert-True ($tpl -eq 'Review carefully: @hello.txt') 'Prompt template expansion failed.'
     $expanded = Expand-UserPrompt -Root $workspacePath -Prompt 'Check @hello.txt and @.env'
     Assert-True ($expanded.Contains('<file path="hello.txt">') -and (-not $expanded.Contains('SECRET=hidden'))) '@file expansion failed or leaked .env.'
+
+    # read_file max_lines and total_lines metadata.
+    $call.function.name = 'read_file'
+    $call.function.arguments = '{"path":"long.txt","start_line":10,"max_lines":5}'
+    $sliceRes = Invoke-AgentTool -Root $workspacePath -Call $call | ConvertFrom-Json
+    Assert-True ($sliceRes.total_lines -eq 350 -and $sliceRes.start_line -eq 10 -and $sliceRes.end_line -eq 14 -and $sliceRes.next_start_line -eq 15) 'read_file max_lines/total_lines metadata failed.'
+
+    # Fuzzy edit_file matching (trailing spaces + smart quotes) and /undo disk rollback.
+    $script:CurrentTurnWrites = @()
+    Set-Content -LiteralPath (Join-Path $workspacePath 'fuzzy.txt') -Value "alpha   `r`nbeta`t`r`ngamma" -Encoding UTF8 -NoNewline
+    $call.function.name = 'edit_file'
+    $call.function.arguments = '{"path":"fuzzy.txt","old_text":"alpha\nbeta","new_text":"A\nB"}'
+    $fuzzyRes = Invoke-AgentTool -Root $workspacePath -Call $call | ConvertFrom-Json
+    Assert-True ($fuzzyRes.status -eq 'written') 'Fuzzy edit_file with trailing whitespace failed.'
+    Assert-True ((Get-Content -LiteralPath (Join-Path $workspacePath 'fuzzy.txt') -Raw -Encoding UTF8) -eq "A`r`nB`r`ngamma") 'Fuzzy edit_file output mismatch.'
+    $call.function.name = 'write_file'
+    $call.function.arguments = '{"path":"temp-new.txt","content":"temp"}'
+    $tempWriteRes = Invoke-AgentTool -Root $workspacePath -Call $call | ConvertFrom-Json
+    Assert-True ($tempWriteRes.status -eq 'written' -and (Test-Path -LiteralPath (Join-Path $workspacePath 'temp-new.txt'))) 'Temp file creation failed.'
+    $undoEntry = @{ messages = @(@{ role = 'system'; content = 'sys' }); writes = @($script:CurrentTurnWrites) }
+    $undoState = @{ messages = @(@{ role = 'system'; content = 'sys' }, @{ role = 'user'; content = 'change' }) }
+    Invoke-AgentUndo -State $undoState -UndoEntry $undoEntry
+    Assert-True ($undoState.messages.Count -eq 1) 'Undo did not restore message state.'
+    Assert-True ((Get-Content -LiteralPath (Join-Path $workspacePath 'fuzzy.txt') -Raw -Encoding UTF8) -eq "alpha   `r`nbeta`t`r`ngamma") 'Undo did not restore modified file from backup.'
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $workspacePath 'temp-new.txt'))) 'Undo did not remove newly created file.'
 
     # Session JSONL persistence roundtrip.
     $sessionFile = Join-Path $testRoot 'sessions\test.jsonl'
@@ -244,6 +279,10 @@ try {
     Assert-True ($plainTable[2] -eq '| a   | bold |') 'Table cell markdown stripping or padding failed.'
     $inlineOut = Format-MarkdownInline -Text 'Hello **world** and `SELECT *`'
     Assert-True ($inlineOut.Contains('38;2;231;138;78') -and (-not $inlineOut.Contains('**')) -and (-not $inlineOut.Contains('`'))) 'Gruvbox Material inline markdown formatting failed.'
+    $clSys = Build-SystemPrompt -Root $workspacePath -ConfigDir ''
+    Assert-True ($clSys.Contains('sql-tuning')) 'ConstrainedLanguage Build-SystemPrompt failed.'
+    $clMatch = Find-EditMatch -Content "one   `r`ntwo" -OldText "one`ntwo"
+    Assert-True ($clMatch.index -eq 0 -and $clMatch.length -eq 11) 'ConstrainedLanguage Find-EditMatch failed.'
     Write-AgentReply -Content "# Title`n## Subtitle`n> quote`n- **item** with ``code```n| A | B |`n|---|---|`n| 1 | 2 |`n``````sql`nSELECT 1;`n``````"
     Save-AgentConfig -Path $configPath -Config $loadedConfig
     $constrainedConfig = Read-AgentConfig -Path $configPath
