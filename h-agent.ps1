@@ -7,6 +7,19 @@ param(
     [string]$Permission = 'Ask',
     [string]$ReasoningEffort = '',
     [string]$Prompt = '',
+    [string]$Mode = 'text',
+    [string]$Session = '',
+    [string]$SessionDir = '',
+    [switch]$NoSession,
+    [string]$SessionName = '',
+    [string]$Fork = '',
+    [string]$Export = '',
+    [string]$Tools = '',
+    [string]$ExcludeTools = '',
+    [switch]$NoTools,
+    [switch]$NoSkills,
+    [switch]$NoPromptTemplates,
+    [switch]$NoContextFiles,
     [switch]$HideReasoning,
     [switch]$Continue,
     [switch]$Setup,
@@ -379,16 +392,352 @@ $script:CurrentTurnWrites = @()
 $script:AgentPermission = 'Ask'
 $script:ShowReasoning = 'compact'
 $script:ReasoningEffort = ''
+$script:NoTools = $false
+$script:EnabledTools = @()
+$script:ExcludedTools = @()
+$script:ActiveSessionId = ''
+$script:ActiveSessionFile = ''
+$script:ActiveModelId = ''
+
+function Resolve-ToolCanonicalName {
+    param([string]$Name)
+    if (-not $Name) { return '' }
+    $lower = $Name.Trim().ToLower()
+    switch ($lower) {
+        'read' { return 'read_file' }
+        'ls' { return 'list_files' }
+        'find' { return 'find_files' }
+        'grep' { return 'grep_files' }
+        'write' { return 'write_file' }
+        'edit' { return 'edit_file' }
+        'bash' { return 'run_command' }
+        'powershell' { return 'run_command' }
+        default { return $lower }
+    }
+}
+
+function Test-IsToolEnabled {
+    param([string]$Name)
+    $canon = Resolve-ToolCanonicalName -Name $Name
+    if ($script:NoTools) { return $false }
+    if ($script:AgentPermission -eq 'ReadOnly' -and $canon -in @('write_file', 'edit_file', 'run_command')) {
+        return $false
+    }
+    if ($script:EnabledTools -and $script:EnabledTools.Count -gt 0) {
+        $matched = $false
+        foreach ($pat in $script:EnabledTools) {
+            $normPat = Resolve-ToolCanonicalName -Name $pat
+            if ($canon -like $normPat -or $Name -like $pat) { $matched = $true; break }
+        }
+        if (-not $matched) { return $false }
+    }
+    if ($script:ExcludedTools -and $script:ExcludedTools.Count -gt 0) {
+        foreach ($pat in $script:ExcludedTools) {
+            $normPat = Resolve-ToolCanonicalName -Name $pat
+            if ($canon -like $normPat -or $Name -like $pat) { return $false }
+        }
+    }
+    return $true
+}
+
+function Format-ByteSize {
+    param([long]$Bytes)
+    if ($Bytes -lt 1024) { return "${Bytes}B" }
+    if ($Bytes -lt 1048576) {
+        $kb = [int](($Bytes * 10 + 512) / 1024)
+        return ('{0}.{1}KB' -f [int]($kb / 10), ($kb % 10))
+    }
+    $mb = [int](($Bytes * 10 + 524288) / 1048576)
+    return ('{0}.{1}MB' -f [int]($mb / 10), ($mb % 10))
+}
+
+function Invoke-TruncateLine {
+    param([string]$Line, [int]$MaxChars = 500)
+    if ($null -eq $Line) { return @{ text = ''; wasTruncated = $false } }
+    if ($Line.Length -le $MaxChars) {
+        return @{ text = $Line; wasTruncated = $false }
+    }
+    return @{ text = ($Line.Substring(0, $MaxChars) + '... [truncated]'); wasTruncated = $true }
+}
+
+function Invoke-TruncateHead {
+    param([string]$Content, [int]$MaxLines = 2000, [int]$MaxBytes = 51200)
+    if (-not $Content) {
+        return @{
+            content = ''
+            truncated = $false
+            truncatedBy = $null
+            totalLines = 0
+            totalBytes = 0
+            outputLines = 0
+            outputBytes = 0
+            lastLinePartial = $false
+            firstLineExceedsLimit = $false
+            maxLines = $MaxLines
+            maxBytes = $MaxBytes
+        }
+    }
+    $norm = $Content.Replace("`r`n", "`n")
+    $lines = @($norm -split "`n")
+    if ($norm.EndsWith("`n") -and $lines.Count -gt 0 -and $lines[$lines.Count - 1] -eq '') {
+        if ($lines.Count -eq 1) { $lines = @() }
+        else { $lines = @($lines[0..($lines.Count - 2)]) }
+    }
+    $totalLines = $lines.Count
+    $totalBytes = $norm.Length
+    if ($totalLines -le $MaxLines -and $totalBytes -le $MaxBytes) {
+        return @{
+            content = $norm
+            truncated = $false
+            truncatedBy = $null
+            totalLines = $totalLines
+            totalBytes = $totalBytes
+            outputLines = $totalLines
+            outputBytes = $totalBytes
+            lastLinePartial = $false
+            firstLineExceedsLimit = $false
+            maxLines = $MaxLines
+            maxBytes = $MaxBytes
+        }
+    }
+    if ($lines.Count -gt 0 -and ([string]$lines[0]).Length -gt $MaxBytes) {
+        return @{
+            content = ''
+            truncated = $true
+            truncatedBy = 'bytes'
+            totalLines = $totalLines
+            totalBytes = $totalBytes
+            outputLines = 0
+            outputBytes = 0
+            lastLinePartial = $false
+            firstLineExceedsLimit = $true
+            maxLines = $MaxLines
+            maxBytes = $MaxBytes
+        }
+    }
+    $outLines = @()
+    $outBytes = 0
+    $truncBy = 'lines'
+    for ($i = 0; $i -lt $lines.Count -and $i -lt $MaxLines; $i++) {
+        $ln = [string]$lines[$i]
+        $lnBytes = $ln.Length + $(if ($i -gt 0) { 1 } else { 0 })
+        if (($outBytes + $lnBytes) -gt $MaxBytes) {
+            $truncBy = 'bytes'
+            break
+        }
+        $outLines += $ln
+        $outBytes += $lnBytes
+    }
+    if ($outLines.Count -ge $MaxLines -and $outBytes -le $MaxBytes) {
+        $truncBy = 'lines'
+    }
+    $outText = $outLines -join "`n"
+    return @{
+        content = $outText
+        truncated = $true
+        truncatedBy = $truncBy
+        totalLines = $totalLines
+        totalBytes = $totalBytes
+        outputLines = $outLines.Count
+        outputBytes = $outText.Length
+        lastLinePartial = $false
+        firstLineExceedsLimit = $false
+        maxLines = $MaxLines
+        maxBytes = $MaxBytes
+    }
+}
+
+function Invoke-TruncateTail {
+    param([string]$Content, [int]$MaxLines = 2000, [int]$MaxBytes = 51200)
+    if (-not $Content) {
+        return @{
+            content = ''
+            truncated = $false
+            truncatedBy = $null
+            totalLines = 0
+            totalBytes = 0
+            outputLines = 0
+            outputBytes = 0
+            lastLinePartial = $false
+            firstLineExceedsLimit = $false
+            maxLines = $MaxLines
+            maxBytes = $MaxBytes
+        }
+    }
+    $norm = $Content.Replace("`r`n", "`n")
+    $lines = @($norm -split "`n")
+    if ($norm.EndsWith("`n") -and $lines.Count -gt 0 -and $lines[$lines.Count - 1] -eq '') {
+        if ($lines.Count -eq 1) { $lines = @() }
+        else { $lines = @($lines[0..($lines.Count - 2)]) }
+    }
+    $totalLines = $lines.Count
+    $totalBytes = $norm.Length
+    if ($totalLines -le $MaxLines -and $totalBytes -le $MaxBytes) {
+        return @{
+            content = $norm
+            truncated = $false
+            truncatedBy = $null
+            totalLines = $totalLines
+            totalBytes = $totalBytes
+            outputLines = $totalLines
+            outputBytes = $totalBytes
+            lastLinePartial = $false
+            firstLineExceedsLimit = $false
+            maxLines = $MaxLines
+            maxBytes = $MaxBytes
+        }
+    }
+    $revLines = @()
+    $outBytes = 0
+    $truncBy = 'lines'
+    $lastPartial = $false
+    for ($i = $lines.Count - 1; $i -ge 0 -and $revLines.Count -lt $MaxLines; $i--) {
+        $ln = [string]$lines[$i]
+        $lnBytes = $ln.Length + $(if ($revLines.Count -gt 0) { 1 } else { 0 })
+        if (($outBytes + $lnBytes) -gt $MaxBytes) {
+            $truncBy = 'bytes'
+            if ($revLines.Count -eq 0 -and $ln.Length -gt $MaxBytes) {
+                $revLines += $ln.Substring($ln.Length - $MaxBytes)
+                $lastPartial = $true
+            }
+            break
+        }
+        $revLines += $ln
+        $outBytes += $lnBytes
+    }
+    $outLines = @()
+    for ($j = $revLines.Count - 1; $j -ge 0; $j--) {
+        $outLines += $revLines[$j]
+    }
+    if ($outLines.Count -ge $MaxLines -and $outBytes -le $MaxBytes) {
+        $truncBy = 'lines'
+    }
+    $outText = $outLines -join "`n"
+    return @{
+        content = $outText
+        truncated = $true
+        truncatedBy = $truncBy
+        totalLines = $totalLines
+        totalBytes = $totalBytes
+        outputLines = $outLines.Count
+        outputBytes = $outText.Length
+        lastLinePartial = $lastPartial
+        firstLineExceedsLimit = $false
+        maxLines = $MaxLines
+        maxBytes = $MaxBytes
+    }
+}
+
+function Convert-IgnorePatternToRule {
+    param([string]$Line, [string]$DirPrefix = '')
+    $trimmed = $Line.Trim()
+    if (-not $trimmed) { return $null }
+    if ($trimmed.StartsWith('#') -and (-not $trimmed.StartsWith('\#'))) { return $null }
+    $pat = $trimmed
+    $negated = $false
+    if ($pat.StartsWith('!')) {
+        $negated = $true
+        $pat = $pat.Substring(1)
+    }
+    elseif ($pat.StartsWith('\!') -or $pat.StartsWith('\#')) {
+        $pat = $pat.Substring(1)
+    }
+    if (-not $pat) { return $null }
+    $dirOnly = $pat.EndsWith('/')
+    if ($dirOnly) { $pat = $pat.TrimEnd('/') }
+    if (-not $pat) { return $null }
+    $anchored = $pat.StartsWith('/')
+    if ($anchored) { $pat = $pat.TrimStart('/') }
+    if ($pat.Contains('/')) { $anchored = $true }
+    $rx = $pat -replace '([.+^$()\[\]{}|\\])', '\$1'
+    $rx = $rx -replace '/\*\*/', '__DBLSTAR_SLASH__'
+    $rx = $rx -replace '^\*\*/', '__LEAD_DBLSTAR__'
+    $rx = $rx -replace '/\*\*$', '__TRAIL_DBLSTAR__'
+    $rx = $rx -replace '\*\*', '__ANY__'
+    $rx = $rx -replace '\*', '[^/]*'
+    $rx = $rx -replace '\?', '[^/]'
+    $rx = $rx.Replace('__DBLSTAR_SLASH__', '(?:/.*)?/')
+    $rx = $rx.Replace('__LEAD_DBLSTAR__', '(?:.+/)?')
+    $rx = $rx.Replace('__TRAIL_DBLSTAR__', '(?:/.*)?')
+    $rx = $rx.Replace('__ANY__', '.*')
+    $prefRx = if ($DirPrefix) { ($DirPrefix -replace '([.+^$()\[\]{}|\\*?\-])', '\$1') } else { '' }
+    $tailRx = if ($dirOnly) { '/.*$' } else { '(?:/.*)?$' }
+    $finalRx = if ($anchored) {
+        '^' + $prefRx + $rx + $tailRx
+    }
+    else {
+        '^' + $prefRx + '(?:.+/)?' + $rx + $tailRx
+    }
+    return @{
+        regex = $finalRx
+        negated = $negated
+        pattern = $trimmed
+    }
+}
+
+function Get-WorkspaceIgnoreRules {
+    param([string]$Root, [string]$SearchPath = '')
+    $rules = @()
+    if (-not $Root -or -not (Test-Path -LiteralPath $Root)) { return $rules }
+    $rootFull = (Get-Item -LiteralPath $Root -Force).FullName
+    $dirsToCheck = @($rootFull)
+    $scanBase = if ($SearchPath -and (Test-Path -LiteralPath $SearchPath)) { (Get-Item -LiteralPath $SearchPath -Force).FullName } else { $rootFull }
+    if ($scanBase -ne $rootFull -and (-not ($dirsToCheck -contains $scanBase))) {
+        $dirsToCheck += $scanBase
+    }
+    foreach ($subDir in @(Get-ChildItem -LiteralPath $scanBase -Recurse -Force -Directory -ErrorAction SilentlyContinue)) {
+        if (($subDir.Attributes -band 1024) -ne 0) { continue }
+        if ($subDir.FullName -match '[/\\](\.git|node_modules)([/\\]|$)') { continue }
+        $dirsToCheck += $subDir.FullName
+    }
+    foreach ($d in $dirsToCheck) {
+        $relDir = Get-WorkspaceRelativePath -Root $rootFull -FullPath $d
+        $dirPrefix = if ($d -ieq $rootFull -or -not $relDir -or $relDir -eq '.') { '' } else { $relDir.Replace('\', '/').Trim('/') + '/' }
+        foreach ($igName in @('.gitignore', '.ignore', '.fdignore')) {
+            $igFile = Join-Path $d $igName
+            if (-not (Test-Path -LiteralPath $igFile)) { continue }
+            $igItem = Get-Item -LiteralPath $igFile -Force -ErrorAction SilentlyContinue
+            if (-not $igItem -or $igItem.PSIsContainer -or (($igItem.Attributes -band 1024) -ne 0) -or $igItem.Length -gt 256KB) { continue }
+            foreach ($line in @(Get-Content -LiteralPath $igFile -Encoding UTF8 -ErrorAction SilentlyContinue)) {
+                $r = Convert-IgnorePatternToRule -Line ([string]$line) -DirPrefix $dirPrefix
+                if ($null -ne $r) { $rules += $r }
+            }
+        }
+    }
+    return $rules
+}
+
+function Test-PathIgnored {
+    param([string]$RelativePath, [bool]$IsDir, [array]$Rules)
+    if (-not $Rules -or $Rules.Count -eq 0 -or -not $RelativePath) { return $false }
+    $norm = $RelativePath.Replace('\', '/').TrimStart('/')
+    $check = if ($IsDir) { $norm.TrimEnd('/') + '/' } else { $norm }
+    $ignored = $false
+    foreach ($r in $Rules) {
+        if ($check -match $r.regex) {
+            $ignored = (-not $r.negated)
+        }
+    }
+    return $ignored
+}
 
 function Get-AgentTools {
     foreach ($name in @('list_files', 'read_file')) {
+        if (-not (Test-IsToolEnabled -Name $name)) { continue }
         $description = 'List up to 200 entries in a directory. Names only; no file contents.'
-        $properties = @{ path = @{ type = 'string'; description = 'Workspace-relative path; . means the root.' } }
+        $properties = @{
+            path = @{ type = 'string'; description = 'Workspace-relative path; . means the root.' }
+        }
+        if ($name -eq 'list_files') {
+            $properties.limit = @{ type = 'integer'; description = 'Optional maximum number of entries to return (1..500, default 200).' }
+        }
         if ($name -eq 'read_file') {
             $description = 'Read a UTF-8 text file: up to 300 lines and 20000 characters, maximum file size 1 MiB. Returns total_lines and pagination metadata.'
             $properties.start_line = @{ type = 'integer'; description = 'Optional 1-based first line to read (default 1).' }
             $properties.max_lines = @{ type = 'integer'; description = 'Optional maximum number of lines to read (1..300, default 300).' }
             $properties.start_char = @{ type = 'integer'; description = 'Optional 1-based character offset within start_line for reading long lines (default 1).' }
+            $properties.offset = @{ type = 'integer'; description = 'Optional alias for start_line (1-based line offset).' }
+            $properties.limit = @{ type = 'integer'; description = 'Optional alias for max_lines (1..300).' }
         }
         @{
             type = 'function'
@@ -403,43 +752,51 @@ function Get-AgentTools {
             }
         }
     }
-    @{
-        type = 'function'
-        function = @{
-            name = 'find_files'
-            description = 'Find files or directories recursively by wildcard pattern (e.g. *.sql, *report*), up to 200 matches.'
-            parameters = @{
-                type = 'object'
-                properties = @{
-                    path = @{ type = 'string'; description = 'Workspace-relative directory path; . means the root.' }
-                    pattern = @{ type = 'string'; description = 'File name wildcard pattern, e.g. *.sql or *.' }
+    if (Test-IsToolEnabled -Name 'find_files') {
+        @{
+            type = 'function'
+            function = @{
+                name = 'find_files'
+                description = 'Find files or directories recursively by wildcard pattern (e.g. *.sql, src/*.ps1), respecting .gitignore/.ignore.'
+                parameters = @{
+                    type = 'object'
+                    properties = @{
+                        path = @{ type = 'string'; description = 'Workspace-relative directory path; . means the root.' }
+                        pattern = @{ type = 'string'; description = 'File name or relative path wildcard pattern, e.g. *.sql or src/*.ps1.' }
+                        limit = @{ type = 'integer'; description = 'Optional maximum number of results (1..1000, default 200).' }
+                    }
+                    required = @('path', 'pattern')
                 }
-                required = @('path', 'pattern')
             }
         }
     }
-    @{
-        type = 'function'
-        function = @{
-            name = 'grep_files'
-            description = 'Search UTF-8 text files for a regex or literal pattern, returning matching paths, line numbers, and lines (up to 100 matches).'
-            parameters = @{
-                type = 'object'
-                properties = @{
-                    path = @{ type = 'string'; description = 'Workspace-relative file or directory path; . means the root.' }
-                    pattern = @{ type = 'string'; description = 'Regex or literal search pattern.' }
-                    literal = @{ type = 'boolean'; description = 'Set true for literal substring match instead of regex.' }
-                    case_sensitive = @{ type = 'boolean'; description = 'Set true for case-sensitive matching.' }
-                    include = @{ type = 'string'; description = 'Optional file name wildcard filter, e.g. *.sql or *.ps1.' }
-                    context_lines = @{ type = 'integer'; description = 'Optional surrounding context lines (0..5).' }
-                    file_offset = @{ type = 'integer'; description = 'Optional 0-based file offset to continue searching when truncated by max_files (default 0).' }
+    if (Test-IsToolEnabled -Name 'grep_files') {
+        @{
+            type = 'function'
+            function = @{
+                name = 'grep_files'
+                description = 'Search UTF-8 text files for a regex or literal pattern (respecting .gitignore/.ignore), returning matching paths, line numbers, and lines.'
+                parameters = @{
+                    type = 'object'
+                    properties = @{
+                        path = @{ type = 'string'; description = 'Workspace-relative file or directory path; . means the root.' }
+                        pattern = @{ type = 'string'; description = 'Regex or literal search pattern.' }
+                        literal = @{ type = 'boolean'; description = 'Set true for literal substring match instead of regex.' }
+                        case_sensitive = @{ type = 'boolean'; description = 'Set true for case-sensitive matching.' }
+                        include = @{ type = 'string'; description = 'Optional file name wildcard filter, e.g. *.sql or *.ps1.' }
+                        glob = @{ type = 'string'; description = 'Optional alias for include wildcard filter.' }
+                        context_lines = @{ type = 'integer'; description = 'Optional surrounding context lines (0..5).' }
+                        limit = @{ type = 'integer'; description = 'Optional maximum number of matches to return (1..500, default 100).' }
+                        file_offset = @{ type = 'integer'; description = 'Optional 0-based file offset to continue searching when truncated by max_files (default 0).' }
+                    }
+                    required = @('path', 'pattern')
                 }
-                required = @('path', 'pattern')
             }
         }
     }
     if ($script:AgentPermission -eq 'ReadOnly') { return }
     foreach ($name in @('write_file', 'edit_file')) {
+        if (-not (Test-IsToolEnabled -Name $name)) { continue }
         $properties = @{ path = @{ type = 'string'; description = 'Workspace-relative text file path. Parent directory must exist.' } }
         if ($name -eq 'write_file') {
             $description = 'Create a UTF-8 text file (or overwrite when overwrite=true).'
@@ -467,18 +824,20 @@ function Get-AgentTools {
         }
         @{ type = 'function'; function = @{ name = $name; description = $description; parameters = @{ type = 'object'; properties = $properties; required = $required } } }
     }
-    @{
-        type = 'function'
-        function = @{
-            name = 'run_command'
-            description = 'Execute a PowerShell command in the workspace directory.'
-            parameters = @{
-                type = 'object'
-                properties = @{
-                    command = @{ type = 'string'; description = 'PowerShell command to execute.' }
-                    timeout_sec = @{ type = 'integer'; description = 'Optional timeout in seconds (1..600, default 60).' }
+    if (Test-IsToolEnabled -Name 'run_command') {
+        @{
+            type = 'function'
+            function = @{
+                name = 'run_command'
+                description = 'Execute a PowerShell command in the workspace directory.'
+                parameters = @{
+                    type = 'object'
+                    properties = @{
+                        command = @{ type = 'string'; description = 'PowerShell command to execute.' }
+                        timeout_sec = @{ type = 'integer'; description = 'Optional timeout in seconds (1..600, default 60).' }
+                    }
+                    required = @('command')
                 }
-                required = @('command')
             }
         }
     }
@@ -491,6 +850,57 @@ function Get-ObjectPropertyNames {
     return @(Get-Member -InputObject $InputObject -MemberType NoteProperty | ForEach-Object { $_.Name })
 }
 
+function Format-EditArguments {
+    param($Arguments)
+    if ($null -eq $Arguments -or $Arguments -is [string] -or $Arguments -is [ValueType] -or $Arguments -is [array]) {
+        return $Arguments
+    }
+    $props = @(Get-ObjectPropertyNames -InputObject $Arguments)
+    $out = @{}
+    foreach ($p in $props) {
+        if ($p -eq 'oldText') { $out['old_text'] = $Arguments.$p }
+        elseif ($p -eq 'newText') { $out['new_text'] = $Arguments.$p }
+        else { $out[$p] = $Arguments.$p }
+    }
+    if ($out.ContainsKey('edits') -and $null -ne $out['edits']) {
+        $rawEdits = $out['edits']
+        if ($rawEdits -is [string]) {
+            try {
+                $parsed = $rawEdits | ConvertFrom-Json -ErrorAction Stop
+                if ($parsed -is [array]) { $rawEdits = $parsed }
+                elseif ($null -ne $parsed) { $rawEdits = @($parsed) }
+            }
+            catch {}
+        }
+        elseif ($rawEdits -isnot [array] -and $rawEdits -isnot [ValueType]) {
+            $edItemProps = @(Get-ObjectPropertyNames -InputObject $rawEdits)
+            if (($edItemProps -contains 'old_text' -or $edItemProps -contains 'oldText') -and ($edItemProps -contains 'new_text' -or $edItemProps -contains 'newText')) {
+                $rawEdits = @($rawEdits)
+            }
+        }
+        if ($rawEdits -is [array]) {
+            $normArr = @()
+            foreach ($item in $rawEdits) {
+                if ($null -ne $item -and $item -isnot [string] -and $item -isnot [ValueType] -and $item -isnot [array]) {
+                    $ip = @(Get-ObjectPropertyNames -InputObject $item)
+                    $normItem = @{}
+                    foreach ($k in $ip) {
+                        if ($k -eq 'oldText') { $normItem['old_text'] = $item.$k }
+                        elseif ($k -eq 'newText') { $normItem['new_text'] = $item.$k }
+                        else { $normItem[$k] = $item.$k }
+                    }
+                    $normArr += $normItem
+                }
+                else {
+                    $normArr += $item
+                }
+            }
+            $out['edits'] = $normArr
+        }
+    }
+    return $out
+}
+
 function Test-AgentToolArguments {
     param([string]$Name, $Arguments)
     if ($null -eq $Arguments -or $Arguments -is [string] -or $Arguments -is [ValueType] -or $Arguments -is [array]) {
@@ -499,19 +909,19 @@ function Test-AgentToolArguments {
     $schemas = @{
         list_files = @{
             required = @('path')
-            types = @{ path = 'string' }
+            types = @{ path = 'string'; limit = 'integer' }
         }
         read_file = @{
             required = @('path')
-            types = @{ path = 'string'; start_line = 'integer'; max_lines = 'integer'; start_char = 'integer' }
+            types = @{ path = 'string'; start_line = 'integer'; max_lines = 'integer'; start_char = 'integer'; offset = 'integer'; limit = 'integer' }
         }
         find_files = @{
             required = @('path', 'pattern')
-            types = @{ path = 'string'; pattern = 'string' }
+            types = @{ path = 'string'; pattern = 'string'; limit = 'integer' }
         }
         grep_files = @{
             required = @('path', 'pattern')
-            types = @{ path = 'string'; pattern = 'string'; literal = 'boolean'; case_sensitive = 'boolean'; include = 'string'; context_lines = 'integer'; file_offset = 'integer' }
+            types = @{ path = 'string'; pattern = 'string'; literal = 'boolean'; case_sensitive = 'boolean'; include = 'string'; glob = 'string'; context_lines = 'integer'; limit = 'integer'; file_offset = 'integer' }
         }
         write_file = @{
             required = @('path', 'content')
@@ -599,18 +1009,44 @@ function Invoke-ShellCommand {
     $errTemp = New-TemporaryFile -ErrorAction Stop
     $savedHKey = $env:H_AGENT_API_KEY
     $savedOKey = $env:OPENAI_API_KEY
+    $savedHSess = $env:H_AGENT_SESSION_ID
+    $savedHFile = $env:H_AGENT_SESSION_FILE
+    $savedHMod = $env:H_AGENT_MODEL
+    $savedHReas = $env:H_AGENT_REASONING_LEVEL
+    $savedPiSess = $env:PI_SESSION_ID
+    $savedPiFile = $env:PI_SESSION_FILE
+    $savedPiMod = $env:PI_MODEL
+    $savedPiReas = $env:PI_REASONING_LEVEL
     $timedOut = $false
     $exitCode = 0
+    $startTime = Get-Date
     try {
         try {
             $env:H_AGENT_API_KEY = $null
             $env:OPENAI_API_KEY = $null
+            if ($script:ActiveSessionId) {
+                $env:H_AGENT_SESSION_ID = $script:ActiveSessionId
+                $env:PI_SESSION_ID = $script:ActiveSessionId
+            }
+            if ($script:ActiveSessionFile) {
+                $env:H_AGENT_SESSION_FILE = $script:ActiveSessionFile
+                $env:PI_SESSION_FILE = $script:ActiveSessionFile
+            }
+            if ($script:ActiveModelId) {
+                $env:H_AGENT_MODEL = $script:ActiveModelId
+                $env:PI_MODEL = $script:ActiveModelId
+            }
+            if ($script:ReasoningEffort) {
+                $env:H_AGENT_REASONING_LEVEL = $script:ReasoningEffort
+                $env:PI_REASONING_LEVEL = $script:ReasoningEffort
+            }
+            $wrappedCmd = "try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch {}`n" + $Command
             $argList = if ($env:OS -eq 'Windows_NT') {
-                $escaped = ($Command -replace '(\\*)"', '$1$1\"') -replace '(\\*)$', '$1$1'
+                $escaped = ($wrappedCmd -replace '(\\*)"', '$1$1\"') -replace '(\\*)$', '$1$1'
                 "-NoProfile -NonInteractive -Command `"$escaped`""
             }
             else {
-                @('-NoProfile', '-NonInteractive', '-Command', $Command)
+                @('-NoProfile', '-NonInteractive', '-Command', $wrappedCmd)
             }
             $proc = Start-Process -FilePath $shellExe -ArgumentList $argList -WorkingDirectory $rootFull -RedirectStandardOutput $outTemp.FullName -RedirectStandardError $errTemp.FullName -NoNewWindow -PassThru -ErrorAction Stop
             if (-not $proc.HasExited) {
@@ -636,22 +1072,24 @@ function Invoke-ShellCommand {
         finally {
             $env:H_AGENT_API_KEY = $savedHKey
             $env:OPENAI_API_KEY = $savedOKey
+            $env:H_AGENT_SESSION_ID = $savedHSess
+            $env:H_AGENT_SESSION_FILE = $savedHFile
+            $env:H_AGENT_MODEL = $savedHMod
+            $env:H_AGENT_REASONING_LEVEL = $savedHReas
+            $env:PI_SESSION_ID = $savedPiSess
+            $env:PI_SESSION_FILE = $savedPiFile
+            $env:PI_MODEL = $savedPiMod
+            $env:PI_REASONING_LEVEL = $savedPiReas
         }
+        $elapsedSec = [int](((Get-Date) - $startTime).TotalSeconds * 10) / 10.0
         $outItem = Get-Item -LiteralPath $outTemp.FullName -Force -ErrorAction Stop
         $errItem = Get-Item -LiteralPath $errTemp.FullName -Force -ErrorAction Stop
-        $outHead = if ($outItem.Length -gt 0) { @(Get-Content -LiteralPath $outTemp.FullName -TotalCount 301 -Encoding UTF8 -ErrorAction SilentlyContinue) } else { @() }
-        $errHead = if ($errItem.Length -gt 0) { @(Get-Content -LiteralPath $errTemp.FullName -TotalCount 301 -Encoding UTF8 -ErrorAction SilentlyContinue) } else { @() }
-        $combinedHead = @($outHead) + @($errHead)
-        $truncated = ($combinedHead.Count -gt 300) -or ($outItem.Length -gt 20000) -or ($errItem.Length -gt 20000)
-        $text = ($combinedHead | Select-Object -First 300) -join "`n"
-        if ($text.Length -gt 20000) {
-            $text = $text.Substring(0, 20000)
-            $truncated = $true
-        }
-        if ($timedOut) {
-            $timeoutNote = "[Command timed out after ${TimeoutSec}s and was terminated]"
-            $text = if ($text) { $text + "`n" + $timeoutNote } else { $timeoutNote }
-        }
+        $outRaw = if ($outItem.Length -gt 0 -and $outItem.Length -le 2MB) { Get-Content -LiteralPath $outTemp.FullName -Raw -Encoding UTF8 -ErrorAction SilentlyContinue } elseif ($outItem.Length -gt 2MB) { (Get-Content -LiteralPath $outTemp.FullName -Tail 400 -Encoding UTF8 -ErrorAction SilentlyContinue) -join "`n" } else { '' }
+        $errRaw = if ($errItem.Length -gt 0 -and $errItem.Length -le 2MB) { Get-Content -LiteralPath $errTemp.FullName -Raw -Encoding UTF8 -ErrorAction SilentlyContinue } elseif ($errItem.Length -gt 2MB) { (Get-Content -LiteralPath $errTemp.FullName -Tail 400 -Encoding UTF8 -ErrorAction SilentlyContinue) -join "`n" } else { '' }
+        $combinedRaw = if ($outRaw -and $errRaw) { $outRaw.TrimEnd("`r", "`n") + "`n" + $errRaw } elseif ($outRaw) { [string]$outRaw } elseif ($errRaw) { [string]$errRaw } else { '' }
+        $tailRes = Invoke-TruncateTail -Content $combinedRaw -MaxLines 300 -MaxBytes 20000
+        $truncated = $tailRes.truncated -or ($outItem.Length -gt 2MB) -or ($errItem.Length -gt 2MB)
+        $text = $tailRes.content
         $fullLogRel = $null
         if ($truncated) {
             try {
@@ -667,12 +1105,17 @@ function Invoke-ShellCommand {
             }
             catch {}
         }
+        if ($timedOut) {
+            $timeoutNote = "[Command timed out after ${TimeoutSec}s and was terminated]"
+            $text = if ($text) { $text + "`n" + $timeoutNote } else { $timeoutNote }
+        }
         return @{
             exit_code = $exitCode
             output = $text
             truncated = $truncated
             full_output_path = $fullLogRel
             timed_out = $timedOut
+            wall_time_seconds = $elapsedSec
         }
     }
     finally {
@@ -722,6 +1165,7 @@ function Invoke-AgentCommand {
         truncated = $res.truncated
         full_output_path = $res.full_output_path
         timed_out = $res.timed_out
+        wall_time_seconds = $res.wall_time_seconds
     } | ConvertTo-Json -Compress)
 }
 
@@ -1093,7 +1537,13 @@ function Invoke-AgentTool {
         if ($script:AgentPermission -eq 'ReadOnly' -and $name -in @('write_file', 'edit_file', 'run_command')) {
             throw 'Permission mode ReadOnly does not allow file modifications or commands.'
         }
+        if (-not (Test-IsToolEnabled -Name $name)) {
+            throw "Tool '$name' is disabled by current tool configuration."
+        }
         $arguments = $Call.function.arguments | ConvertFrom-Json -ErrorAction Stop
+        if ($name -eq 'edit_file') {
+            $arguments = Format-EditArguments -Arguments $arguments
+        }
         Test-AgentToolArguments -Name $name -Arguments $arguments
         if ($name -eq 'run_command') { return (Invoke-AgentCommand -Root $Root -Arguments $arguments) }
         if ($name -in @('write_file', 'edit_file')) { return (Invoke-AgentWrite -Root $Root -Name $name -Arguments $arguments) }
@@ -1103,56 +1553,99 @@ function Invoke-AgentTool {
         Write-Host ($script:Gm.Yellow + ('  [{0}] ' -f $name) + $script:Gm.Grey1 + $arguments.path + $script:Gm.Reset)
         if ($name -eq 'list_files') {
             if (-not $item.PSIsContainer) { throw 'Expected a directory.' }
+            $maxEntries = 200
+            if ($null -ne $arguments.limit) {
+                $maxEntries = [int]$arguments.limit
+                if ($maxEntries -lt 1 -or $maxEntries -gt 500) { throw 'limit must be between 1 and 500.' }
+            }
             $entries = @(Get-ChildItem -LiteralPath $path -Force -ErrorAction Stop | Where-Object {
                 -not (Test-IsSecretFile $_)
-            } | Select-Object -First 201)
+            } | Sort-Object { $_.Name.ToLower() } | Select-Object -First ($maxEntries + 1))
+            $isTrunc = ($entries.Count -gt $maxEntries)
+            $notice = if ($isTrunc) { "[${maxEntries} entries limit reached]" } else { $null }
             return (@{
-                entries = @($entries | Select-Object -First 200 -Property Name, PSIsContainer, Length)
-                truncated = ($entries.Count -gt 200)
+                entries = @($entries | Select-Object -First $maxEntries -Property Name, PSIsContainer, Length)
+                truncated = $isTrunc
+                notice = $notice
             } | ConvertTo-Json -Depth 5 -Compress)
         }
         if ($name -eq 'find_files') {
             if (-not $item.PSIsContainer) { throw 'Expected a directory.' }
             if (-not $arguments.pattern.Trim()) { throw 'pattern must be a nonempty string.' }
+            $maxFind = 200
+            if ($null -ne $arguments.limit) {
+                $maxFind = [int]$arguments.limit
+                if ($maxFind -lt 1 -or $maxFind -gt 1000) { throw 'limit must be between 1 and 1000.' }
+            }
+            $ignoreRules = @(Get-WorkspaceIgnoreRules -Root $Root -SearchPath $path)
+            $rawPat = $arguments.pattern.Trim()
+            $isPathPat = ($rawPat.Contains('/') -or $rawPat.Contains('\'))
+            $normPat = $rawPat.Replace('\', '/').TrimStart('/')
+            $altPat = if ($normPat.StartsWith('**/')) { $normPat.Substring(3) } else { '' }
             $found = @()
             $truncated = $false
             foreach ($child in @(Get-ChildItem -LiteralPath $path -Recurse -Force -ErrorAction SilentlyContinue)) {
                 if (($child.Attributes -band 1024) -ne 0) { continue }
                 if ($child.FullName -match '[/\\](\.git|node_modules)([/\\]|$)') { continue }
                 if (Test-IsSecretFile $child) { continue }
-                if ($child.Name -like $arguments.pattern) {
-                    if ($found.Count -ge 200) { $truncated = $true; break }
+                $relPath = Get-WorkspaceRelativePath -Root $Root -FullPath $child.FullName
+                if (Test-PathIgnored -RelativePath $relPath -IsDir ([bool]$child.PSIsContainer) -Rules $ignoreRules) { continue }
+                $isMatch = if ($isPathPat) {
+                    ($relPath -like $normPat) -or ($altPat -and ($relPath -like $altPat))
+                }
+                else {
+                    ($child.Name -like $rawPat)
+                }
+                if ($isMatch) {
+                    if ($found.Count -ge $maxFind) { $truncated = $true; break }
                     $found += @{
-                        path = (Get-WorkspaceRelativePath -Root $Root -FullPath $child.FullName)
+                        path = $relPath
                         is_dir = [bool]$child.PSIsContainer
                         length = if ($child.PSIsContainer) { $null } else { $child.Length }
                     }
                 }
             }
-            return (@{ matches = $found; truncated = $truncated } | ConvertTo-Json -Depth 5 -Compress)
+            $notice = if ($truncated) { "[${maxFind} results limit reached. Refine pattern or increase limit]" } else { $null }
+            return (@{ matches = $found; truncated = $truncated; notice = $notice } | ConvertTo-Json -Depth 5 -Compress)
         }
         if ($name -eq 'grep_files') {
             if (-not $arguments.pattern) { throw 'pattern must be a nonempty string.' }
             $isLiteral = ($arguments.literal -eq $true)
             $isCaseSensitive = ($arguments.case_sensitive -eq $true)
-            $includeFilter = if ($arguments.include -is [string] -and $arguments.include.Trim()) { $arguments.include.Trim() } else { '' }
+            $includeFilter = if ($arguments.include -is [string] -and $arguments.include.Trim()) {
+                $arguments.include.Trim()
+            }
+            elseif ($arguments.glob -is [string] -and $arguments.glob.Trim()) {
+                $arguments.glob.Trim()
+            }
+            else {
+                ''
+            }
             $ctxLines = 0
             if ($null -ne $arguments.context_lines) {
                 $ctxLines = [int]$arguments.context_lines
                 if ($ctxLines -lt 0 -or $ctxLines -gt 5) { throw 'context_lines must be between 0 and 5.' }
+            }
+            $maxMatches = 100
+            if ($null -ne $arguments.limit) {
+                $maxMatches = [int]$arguments.limit
+                if ($maxMatches -lt 1 -or $maxMatches -gt 500) { throw 'limit must be between 1 and 500.' }
             }
             $fileOffset = 0
             if ($null -ne $arguments.file_offset) {
                 $fileOffset = [int]$arguments.file_offset
                 if ($fileOffset -lt 0) { throw 'file_offset must be at least 0.' }
             }
+            $ignoreRules = @(Get-WorkspaceIgnoreRules -Root $Root -SearchPath $path)
             $allCandidateFiles = @()
             if ($item.PSIsContainer) {
                 foreach ($child in @(Get-ChildItem -LiteralPath $path -Recurse -Force -File -ErrorAction SilentlyContinue | Sort-Object FullName)) {
                     if (($child.Attributes -band 1024) -ne 0) { continue }
                     if ($child.FullName -match '[/\\](\.git|node_modules)([/\\]|$)') { continue }
                     if (Test-IsSecretFile $child) { continue }
-                    if ($includeFilter -and ($child.Name -notlike $includeFilter)) { continue }
+                    $relCandidate = Get-WorkspaceRelativePath -Root $Root -FullPath $child.FullName
+                    if (Test-PathIgnored -RelativePath $relCandidate -IsDir $false -Rules $ignoreRules) { continue }
+                    if ($includeFilter -and ($child.Name -notlike $includeFilter) -and ($relCandidate -notlike $includeFilter)) { continue }
                     if ($child.Length -le 1MB) { $allCandidateFiles += $child.FullName }
                 }
             }
@@ -1166,15 +1659,19 @@ function Invoke-AgentTool {
             $fileLimitReached = (($fileOffset + $filesScanned) -lt $totalFiles)
             $hits = @()
             $matchLimitReached = $false
+            $linesTruncated = $false
             if ($targetFiles.Count -gt 0) {
                 $selParams = @{ LiteralPath = $targetFiles; Pattern = $arguments.pattern; Encoding = 'UTF8'; ErrorAction = 'Stop' }
                 if ($isLiteral) { $selParams.SimpleMatch = $true }
                 if ($isCaseSensitive) { $selParams.CaseSensitive = $true }
                 if ($ctxLines -gt 0) { $selParams.Context = @($ctxLines, $ctxLines) }
                 foreach ($m in @(Select-String @selParams)) {
-                    if ($hits.Count -ge 100) { $matchLimitReached = $true; break }
+                    if ($hits.Count -ge $maxMatches) { $matchLimitReached = $true; break }
                     $lineText = [string]$m.Line
-                    if ($lineText.Length -gt 300) { $lineText = $lineText.Substring(0, 300) + '...' }
+                    if ($lineText.Length -gt 300) {
+                        $lineText = $lineText.Substring(0, 300) + '...'
+                        $linesTruncated = $true
+                    }
                     $hitObj = @{
                         path = (Get-WorkspaceRelativePath -Root $Root -FullPath $m.Path)
                         line_number = [int]$m.LineNumber
@@ -1200,6 +1697,11 @@ function Invoke-AgentTool {
                 $null
             }
             $nextFileOffset = if ($fileLimitReached) { $fileOffset + $filesScanned } else { $null }
+            $notices = @()
+            if ($matchLimitReached) { $notices += "${maxMatches} matches limit reached" }
+            if ($fileLimitReached) { $notices += "Scanned ${filesScanned} of ${totalFiles} files; use file_offset=${nextFileOffset} to continue" }
+            if ($linesTruncated) { $notices += 'Some lines truncated to 300 chars; use read_file for full lines' }
+            $noticeStr = if ($notices.Count -gt 0) { '[' + ($notices -join '. ') + ']' } else { $null }
             return (@{
                 matches = $hits
                 truncated = $truncated
@@ -1207,6 +1709,8 @@ function Invoke-AgentTool {
                 files_scanned = $filesScanned
                 total_files = $totalFiles
                 next_file_offset = $nextFileOffset
+                lines_truncated = $linesTruncated
+                notice = $noticeStr
             } | ConvertTo-Json -Depth 5 -Compress)
         }
         if ($item.PSIsContainer) { throw 'Expected a text file.' }
@@ -1215,6 +1719,10 @@ function Invoke-AgentTool {
         if ($null -ne $arguments.start_line) {
             $startLine = [int]$arguments.start_line
             if ($startLine -lt 1) { throw 'start_line must be at least 1.' }
+        }
+        elseif ($null -ne $arguments.offset) {
+            $startLine = [int]$arguments.offset
+            if ($startLine -lt 1) { throw 'offset must be at least 1.' }
         }
         $startChar = 1
         if ($null -ne $arguments.start_char) {
@@ -1225,6 +1733,10 @@ function Invoke-AgentTool {
         if ($null -ne $arguments.max_lines) {
             $maxLines = [int]$arguments.max_lines
             if ($maxLines -lt 1 -or $maxLines -gt 300) { throw 'max_lines must be between 1 and 300.' }
+        }
+        elseif ($null -ne $arguments.limit) {
+            $maxLines = [int]$arguments.limit
+            if ($maxLines -lt 1 -or $maxLines -gt 300) { throw 'limit must be between 1 and 300.' }
         }
         $allLines = @(Get-Content -LiteralPath $path -Encoding UTF8 -ErrorAction Stop)
         $totalLines = $allLines.Count
@@ -1239,6 +1751,7 @@ function Invoke-AgentTool {
                 truncated = $false
                 next_start_line = $null
                 next_start_char = $null
+                notice = $null
             } | ConvertTo-Json -Compress)
         }
         $limitIdx = $startLine - 1 + $maxLines - 1
@@ -1283,6 +1796,15 @@ function Invoke-AgentTool {
             $nextStartLine = $endLine + 1
             $nextStartChar = $null
         }
+        $readNotice = if ($truncated -and $null -ne $nextStartChar) {
+            "[Showing line ${startLine} chars ${startChar}..$($nextStartChar - 1). Use start_line=${nextStartLine}, start_char=${nextStartChar} to continue.]"
+        }
+        elseif ($truncated) {
+            "[Showing lines ${startLine}-${endLine} of ${totalLines}. Use start_line=${nextStartLine} to continue.]"
+        }
+        else {
+            $null
+        }
         return (@{
             text = ($pageLines -join "`n")
             start_line = $startLine
@@ -1292,24 +1814,47 @@ function Invoke-AgentTool {
             truncated = $truncated
             next_start_line = $nextStartLine
             next_start_char = $nextStartChar
+            notice = $readNotice
         } | ConvertTo-Json -Compress)
     }
     catch { return (@{ error = $_.Exception.Message } | ConvertTo-Json -Compress) }
 }
 
 # --- src/Context.ps1 ---
-# System prompt assembly (AGENTS.md, SYSTEM.md, skills), prompt templates, @file attachments, project sessions, and compaction.
+# System prompt assembly (AGENTS.md, CLAUDE.md, SYSTEM.md, skills), prompt templates, @file attachments, tree sessions, HTML export, and compaction.
+
+$script:NoContextFiles = $false
+$script:NoSkills = $false
+$script:NoPromptTemplates = $false
+$script:SkillsByName = @{}
+
+function Escape-XmlText {
+    param([string]$Text)
+    if (-not $Text) { return '' }
+    return $Text.Replace('&', '&amp;').Replace('<', '&lt;').Replace('>', '&gt;').Replace('"', '&quot;').Replace("'", '&apos;')
+}
 
 function Get-AgentsContext {
     param([string]$Root, [string]$ConfigDir)
+    if ($script:NoContextFiles) { return '' }
     $parts = @()
+    $seenFiles = @{}
     $candidates = @()
-    if ($ConfigDir) { $candidates += (Join-Path $ConfigDir 'AGENTS.md') }
-    if ($Root) { $candidates += (Join-Path $Root 'AGENTS.md') }
+    if ($ConfigDir) {
+        $candidates += (Join-Path $ConfigDir 'AGENTS.md')
+        $candidates += (Join-Path $ConfigDir 'CLAUDE.md')
+    }
+    if ($Root) {
+        $candidates += (Join-Path $Root 'AGENTS.md')
+        $candidates += (Join-Path $Root 'CLAUDE.md')
+    }
     foreach ($cand in $candidates) {
         if ($cand -and (Test-Path -LiteralPath $cand)) {
             $item = Get-Item -LiteralPath $cand -Force -ErrorAction SilentlyContinue
             if ($item -and (-not $item.PSIsContainer) -and (($item.Attributes -band 1024) -eq 0) -and $item.Length -le 256KB) {
+                $fullKey = $item.FullName.ToLower()
+                if ($seenFiles.ContainsKey($fullKey)) { continue }
+                $seenFiles[$fullKey] = $true
                 $text = Get-Content -LiteralPath $item.FullName -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
                 if ($text) {
                     if ($text.Length -gt 8000) { $text = $text.Substring(0, 8000) + "`n...(truncated)" }
@@ -1324,6 +1869,8 @@ function Get-AgentsContext {
 function Get-SkillsCatalog {
     param([string]$Root, [string]$ConfigDir)
     $script:RegisteredSkills = @{}
+    $script:SkillsByName = @{}
+    if ($script:NoSkills) { return '' }
     $dirs = @()
     if ($ConfigDir) { $dirs += (Join-Path $ConfigDir 'skills') }
     if ($Root) {
@@ -1331,9 +1878,11 @@ function Get-SkillsCatalog {
         $dirs += (Join-Path $Root 'skills')
     }
     $entries = @()
+    $xmlSkills = @()
     foreach ($d in $dirs) {
         if (-not $d -or -not (Test-Path -LiteralPath $d)) { continue }
-        foreach ($skillFile in @(Get-ChildItem -LiteralPath $d -Recurse -Filter 'SKILL.md' -File -ErrorAction SilentlyContinue | Select-Object -First 30)) {
+        $ignoreRules = @(Get-WorkspaceIgnoreRules -Root $d -SearchPath $d)
+        foreach ($skillFile in @(Get-ChildItem -LiteralPath $d -Recurse -Filter 'SKILL.md' -File -ErrorAction SilentlyContinue | Select-Object -First 40)) {
             if (($skillFile.Attributes -band 1024) -ne 0 -or $skillFile.Length -gt 128KB) { continue }
             $hasReparse = $false
             $cursor = $skillFile
@@ -1343,22 +1892,56 @@ function Get-SkillsCatalog {
                 else { $cursor = $cursor.Directory }
             }
             if ($hasReparse) { continue }
+            $relInSkillRoot = Get-WorkspaceRelativePath -Root $d -FullPath $skillFile.FullName
+            if (Test-PathIgnored -RelativePath $relInSkillRoot -IsDir $false -Rules $ignoreRules) { continue }
             $raw = Get-Content -LiteralPath $skillFile.FullName -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
             if (-not $raw) { continue }
             $skillName = $skillFile.Directory.Name
             $skillDesc = 'Domain skill instructions.'
-            if ($raw -match '(?m)^name:\s*(.+)$') { $skillName = $Matches[1].Trim() }
-            if ($raw -match '(?m)^description:\s*(.+)$') { $skillDesc = $Matches[1].Trim() }
+            $disableModelInvocation = $false
+            if ($raw -match '(?m)^name:\s*(.+)$') { $skillName = $Matches[1].Trim().Trim('"', "'") }
+            if ($raw -match '(?m)^description:\s*(.+)$') { $skillDesc = $Matches[1].Trim().Trim('"', "'") }
+            if ($raw -match '(?m)^disable-model-invocation:\s*(true|false)\s*$') {
+                $disableModelInvocation = ($Matches[1].Trim().ToLower() -eq 'true')
+            }
+            if ($script:SkillsByName.ContainsKey($skillName)) { continue }
             $rel = if ($Root) { Get-WorkspaceRelativePath -Root $Root -FullPath $skillFile.FullName } else { $skillFile.FullName }
             $script:RegisteredSkills[$skillFile.FullName] = $skillFile.FullName
             $script:RegisteredSkills[$rel] = $skillFile.FullName
             $script:RegisteredSkills[$skillName] = $skillFile.FullName
             $script:RegisteredSkills["skills/$skillName/SKILL.md"] = $skillFile.FullName
-            $entries += "- $skillName ($rel): $skillDesc"
+            $script:SkillsByName[$skillName] = @{
+                name = $skillName
+                description = $skillDesc
+                file_path = $skillFile.FullName
+                rel_path = $rel
+                disable_model_invocation = $disableModelInvocation
+            }
+            if (-not $disableModelInvocation) {
+                $entries += "- $skillName ($rel): $skillDesc"
+                $xmlSkills += ("  <skill>`n    <name>" + (Escape-XmlText $skillName) + "</name>`n    <description>" + (Escape-XmlText $skillDesc) + "</description>`n    <location>" + (Escape-XmlText $rel) + "</location>`n  </skill>")
+            }
         }
     }
     if ($entries.Count -eq 0) { return '' }
-    return ("Available skills (use read_file on the skill path when relevant):`n" + ($entries -join "`n"))
+    return ("Available skills (use read_file on the skill path when relevant):`n" + ($entries -join "`n") + "`n<available_skills>`n" + ($xmlSkills -join "`n") + "`n</available_skills>")
+}
+
+function Resolve-SkillCommand {
+    param([string]$Root, [string]$ConfigDir, [string]$InputText)
+    if ($InputText -notmatch '^/skill:([a-zA-Z0-9_-]+)(?:\s+(.*))?$') { return $null }
+    $skillName = $Matches[1]
+    $skillArgs = if ($Matches[2]) { $Matches[2].Trim() } else { '' }
+    if (-not $script:SkillsByName -or $script:SkillsByName.Count -eq 0) {
+        $null = Get-SkillsCatalog -Root $Root -ConfigDir $ConfigDir
+    }
+    if (-not $script:SkillsByName.ContainsKey($skillName)) { return $null }
+    $skillInfo = $script:SkillsByName[$skillName]
+    $raw = Get-Content -LiteralPath $skillInfo.file_path -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
+    if (-not $raw) { return $null }
+    $body = $raw -replace '(?s)^---\r?\n.*?\r?\n---\r?\n?', ''
+    $expanded = Expand-TemplateArgs -Content $body.Trim() -ArgsString $skillArgs
+    return ("<skill name=`"$skillName`" path=`"$($skillInfo.rel_path)`">`n" + $expanded + "`n</skill>")
 }
 
 function Build-SystemPrompt {
@@ -1389,8 +1972,127 @@ function Build-SystemPrompt {
     return $basePrompt
 }
 
+function Split-CommandArgs {
+    param([string]$ArgsString)
+    $argsList = @()
+    if (-not $ArgsString) { return $argsList }
+    $current = ''
+    $hasToken = $false
+    $inQuote = ''
+    for ($i = 0; $i -lt $ArgsString.Length; $i++) {
+        $ch = $ArgsString[$i]
+        if ($inQuote) {
+            if ([string]$ch -eq $inQuote) {
+                $inQuote = ''
+            }
+            else {
+                $current += $ch
+            }
+        }
+        elseif ($ch -eq [char]'"' -or $ch -eq [char]"'") {
+            $inQuote = [string]$ch
+            $hasToken = $true
+        }
+        elseif ([string]$ch -match '^\s$') {
+            if ($hasToken) {
+                $argsList += $current
+                $current = ''
+                $hasToken = $false
+            }
+        }
+        else {
+            $current += $ch
+            $hasToken = $true
+        }
+    }
+    if ($hasToken) {
+        $argsList += $current
+    }
+    return $argsList
+}
+
+function Expand-TemplateArgs {
+    param([string]$Content, [string]$ArgsString = '')
+    if (-not $Content) { return '' }
+    $argsList = @(Split-CommandArgs -ArgsString $ArgsString)
+    $allArgs = $argsList -join ' '
+    $pattern = '\$\{(\d+|ARGUMENTS|@):-([^}]*)\}|\$\{@:(\d+)(?::(\d+))?\}|\$(ARGUMENTS|@|\d+)'
+    $hasPlaceholders = ($Content -match $pattern)
+    if (-not $hasPlaceholders) {
+        if ($ArgsString -and $ArgsString.Trim()) {
+            return ($Content.Trim() + "`n`n" + $ArgsString.Trim())
+        }
+        return $Content.Trim()
+    }
+    $out = ''
+    $pos = 0
+    $work = $Content
+    while ($pos -lt $work.Length) {
+        $rem = $work.Substring($pos)
+        if ($rem -match $pattern) {
+            $fullMatch = [string]$Matches[0]
+            $matchIdx = $rem.IndexOf($fullMatch, [StringComparison]::Ordinal)
+            if ($matchIdx -gt 0) {
+                $out += $rem.Substring(0, $matchIdx)
+            }
+            $replacement = ''
+            if ($Matches[1]) {
+                $defTarget = [string]$Matches[1]
+                $defVal = [string]$Matches[2]
+                $actual = if ($defTarget -eq '@' -or $defTarget -eq 'ARGUMENTS') {
+                    $allArgs
+                }
+                else {
+                    $idx = [int]$defTarget - 1
+                    if ($idx -ge 0 -and $idx -lt $argsList.Count) { [string]$argsList[$idx] } else { '' }
+                }
+                $replacement = if ($actual) { $actual } else { $defVal }
+            }
+            elseif ($Matches[3]) {
+                $sliceStart = [int]$Matches[3] - 1
+                if ($sliceStart -lt 0) { $sliceStart = 0 }
+                if ($sliceStart -ge $argsList.Count) {
+                    $replacement = ''
+                }
+                elseif ($Matches[4]) {
+                    $sliceLen = [int]$Matches[4]
+                    $endIdx = $sliceStart + $sliceLen - 1
+                    if ($endIdx -ge $argsList.Count) { $endIdx = $argsList.Count - 1 }
+                    if ($endIdx -ge $sliceStart) {
+                        $replacement = (@($argsList[$sliceStart..$endIdx]) -join ' ')
+                    }
+                }
+                else {
+                    $replacement = (@($argsList[$sliceStart..($argsList.Count - 1)]) -join ' ')
+                }
+            }
+            elseif ($Matches[5]) {
+                $simple = [string]$Matches[5]
+                if ($simple -eq 'ARGUMENTS' -or $simple -eq '@') {
+                    $replacement = $allArgs
+                }
+                else {
+                    $idx = [int]$simple - 1
+                    $replacement = if ($idx -ge 0 -and $idx -lt $argsList.Count) { [string]$argsList[$idx] } else { '' }
+                }
+            }
+            $out += $replacement
+            $pos += $matchIdx + $fullMatch.Length
+        }
+        else {
+            $out += $rem
+            break
+        }
+    }
+    return $out.Trim()
+}
+
 function Resolve-PromptTemplate {
     param([string]$Root, [string]$ConfigDir, [string]$InputText)
+    if ($script:NoPromptTemplates) { return $null }
+    if ($InputText -match '^/skill:') {
+        return (Resolve-SkillCommand -Root $Root -ConfigDir $ConfigDir -InputText $InputText)
+    }
     if ($InputText -notmatch '^/([a-zA-Z0-9_-]+)(?:\s+(.*))?$') { return $null }
     $name = $Matches[1]
     $argsText = if ($Matches[2]) { $Matches[2].Trim() } else { '' }
@@ -1403,9 +2105,8 @@ function Resolve-PromptTemplate {
         if (Test-Path -LiteralPath $cand) {
             $tpl = Get-Content -LiteralPath $cand -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
             if ($tpl) {
-                if ($tpl.Contains('$ARGUMENTS')) { return $tpl.Replace('$ARGUMENTS', $argsText).Trim() }
-                if ($argsText) { return ($tpl.Trim() + "`n`n" + $argsText) }
-                return $tpl.Trim()
+                $body = $tpl -replace '(?s)^---\r?\n.*?\r?\n---\r?\n?', ''
+                return (Expand-TemplateArgs -Content $body -ArgsString $argsText)
             }
         }
     }
@@ -1439,6 +2140,117 @@ function Expand-UserPrompt {
     return $Prompt
 }
 
+function Ensure-SessionTree {
+    param($State)
+    if ($null -eq $State) { return }
+    if ($null -eq $State.tree_entries) {
+        $State.tree_entries = @()
+    }
+    $existingById = @{}
+    foreach ($te in @($State.tree_entries)) {
+        if ($te -and $te.id) { $existingById[[string]$te.id] = $te }
+    }
+    $prevId = $null
+    $counter = $State.tree_entries.Count
+    for ($i = 0; $i -lt $State.messages.Count; $i++) {
+        $m = $State.messages[$i]
+        if ($m.role -eq 'system') { continue }
+        if (-not $m.id) {
+            $counter++
+            $newId = ('e{0:D4}' -f $counter)
+            while ($existingById.ContainsKey($newId)) {
+                $counter++
+                $newId = ('e{0:D4}' -f $counter)
+            }
+            $m.id = $newId
+        }
+        $m.parent_id = $prevId
+        $prevId = [string]$m.id
+        if (-not $existingById.ContainsKey($prevId)) {
+            $entryCopy = @{
+                id = $prevId
+                parent_id = $m.parent_id
+                role = [string]$m.role
+                content = $m.content
+                timestamp = (Get-Date -Format 'yyyy-MM-ddTHH:mm:ssK')
+            }
+            if ($m.reasoning_content) { $entryCopy.reasoning_content = $m.reasoning_content }
+            if ($m.tool_calls) { $entryCopy.tool_calls = @($m.tool_calls) }
+            if ($m.tool_call_id) { $entryCopy.tool_call_id = [string]$m.tool_call_id }
+            $State.tree_entries += $entryCopy
+            $existingById[$prevId] = $entryCopy
+        }
+    }
+    $State.leaf_id = $prevId
+}
+
+function Get-SessionTree {
+    param($State)
+    Ensure-SessionTree -State $State
+    $activeIds = @{}
+    foreach ($m in @($State.messages)) {
+        if ($m.id) { $activeIds[[string]$m.id] = $true }
+    }
+    $nodes = @()
+    foreach ($te in @($State.tree_entries)) {
+        $preview = if ($te.content) { ([string]$te.content -replace '\s+', ' ').Trim() } elseif ($te.tool_calls) { '[tool_calls]' } else { '' }
+        if ($preview.Length -gt 60) { $preview = $preview.Substring(0, 60) + '...' }
+        $nodes += @{
+            id = [string]$te.id
+            parent_id = $te.parent_id
+            role = [string]$te.role
+            preview = $preview
+            active = [bool]$activeIds.ContainsKey([string]$te.id)
+            is_leaf = ([string]$te.id -eq [string]$State.leaf_id)
+        }
+    }
+    return $nodes
+}
+
+function Switch-SessionBranch {
+    param($State, [string]$TargetId)
+    Ensure-SessionTree -State $State
+    if (-not $TargetId) { throw 'Target entry ID is required.' }
+    $byId = @{}
+    foreach ($te in @($State.tree_entries)) {
+        if ($te -and $te.id) { $byId[[string]$te.id] = $te }
+    }
+    if (-not $byId.ContainsKey($TargetId)) {
+        throw "Entry ID '$TargetId' not found in session tree."
+    }
+    $chainRev = @()
+    $curr = $byId[$TargetId]
+    $guard = 0
+    while ($null -ne $curr -and $guard -lt 5000) {
+        $guard++
+        $msg = @{
+            id = [string]$curr.id
+            parent_id = $curr.parent_id
+            role = [string]$curr.role
+            content = $curr.content
+        }
+        if ($curr.reasoning_content) { $msg.reasoning_content = $curr.reasoning_content }
+        if ($curr.tool_calls) { $msg.tool_calls = @($curr.tool_calls) }
+        if ($curr.tool_call_id) { $msg.tool_call_id = [string]$curr.tool_call_id }
+        $chainRev += $msg
+        if ($curr.parent_id -and $byId.ContainsKey([string]$curr.parent_id)) {
+            $curr = $byId[[string]$curr.parent_id]
+        }
+        else {
+            $curr = $null
+        }
+    }
+    $sysMsg = if ($State.messages.Count -gt 0 -and $State.messages[0].role -eq 'system') { $State.messages[0] } else { @{ role = 'system'; content = '' } }
+    $rebuilt = @($sysMsg)
+    for ($i = $chainRev.Count - 1; $i -ge 0; $i--) {
+        $rebuilt += $chainRev[$i]
+    }
+    $State.messages = $rebuilt
+    $State.leaf_id = $TargetId
+    $State.undo_stack = @()
+    return $State
+}
+
 function Save-AgentSession {
     param([string]$SessionFile, $State, [string]$Workspace = '', [string]$Model = '', [string]$SessionId = '')
     if (-not $SessionFile) { return }
@@ -1446,24 +2258,50 @@ function Save-AgentSession {
     if ($parent -and -not (Test-Path -LiteralPath $parent)) {
         New-Item -ItemType Directory -Path $parent -Force -ErrorAction Stop | Out-Null
     }
+    Ensure-SessionTree -State $State
     $sid = if ($SessionId) { $SessionId } elseif ($State.session_id) { [string]$State.session_id } else { 'sess-' + (Get-Date -Format 'yyyyMMddHHmmss') + '-' + (Get-Random -Minimum 100000 -Maximum 999999) }
     $ws = if ($Workspace) { $Workspace } elseif ($State.workspace) { [string]$State.workspace } else { '' }
     if ($ws -and (Test-Path -LiteralPath $ws)) { $ws = (Get-Item -LiteralPath $ws -Force).FullName }
     $mdl = if ($Model) { $Model } elseif ($State.model) { [string]$State.model } else { '' }
+    $sName = if ($State.session_name) { [string]$State.session_name } else { '' }
+    $parentSess = if ($State.parent_session) { [string]$State.parent_session } else { '' }
     $State.session_id = $sid
     $State.workspace = $ws
     $State.model = $mdl
+    $script:ActiveSessionId = $sid
+    $script:ActiveSessionFile = $SessionFile
+    $script:ActiveModelId = $mdl
     $meta = @{
         type = 'session_meta'
         version = 1
         id = $sid
+        name = $sName
         workspace = $ws
         model = $mdl
+        parent_session = $parentSess
+        leaf_id = $State.leaf_id
         updated_at = (Get-Date -Format 'yyyy-MM-ddTHH:mm:ssK')
     }
     $lines = @($meta | ConvertTo-Json -Depth 5 -Compress)
+    $activeIds = @{}
     foreach ($m in @($State.messages)) {
+        if ($m.id) { $activeIds[[string]$m.id] = $true }
         $lines += ($m | ConvertTo-Json -Depth 20 -Compress)
+    }
+    foreach ($te in @($State.tree_entries)) {
+        if ($te -and $te.id -and -not $activeIds.ContainsKey([string]$te.id)) {
+            $bEntry = @{
+                type = 'branch_entry'
+                id = [string]$te.id
+                parent_id = $te.parent_id
+                role = [string]$te.role
+                content = $te.content
+            }
+            if ($te.reasoning_content) { $bEntry.reasoning_content = $te.reasoning_content }
+            if ($te.tool_calls) { $bEntry.tool_calls = @($te.tool_calls) }
+            if ($te.tool_call_id) { $bEntry.tool_call_id = [string]$te.tool_call_id }
+            $lines += ($bEntry | ConvertTo-Json -Depth 20 -Compress)
+        }
     }
     $tempSession = New-TemporaryFile -ErrorAction Stop
     try {
@@ -1489,8 +2327,11 @@ function Get-AgentSessionMeta {
                 return @{
                     version = [int]$obj.version
                     id = [string]$obj.id
+                    name = if ($obj.name) { [string]$obj.name } else { '' }
                     workspace = [string]$obj.workspace
                     model = [string]$obj.model
+                    parent_session = if ($obj.parent_session) { [string]$obj.parent_session } else { '' }
+                    leaf_id = if ($obj.leaf_id) { [string]$obj.leaf_id } else { '' }
                     updated_at = [string]$obj.updated_at
                 }
             }
@@ -1514,10 +2355,30 @@ function Read-AgentSession {
                 $State.session_id = [string]$obj.id
                 $State.workspace = [string]$obj.workspace
                 $State.model = [string]$obj.model
+                if ($obj.name) { $State.session_name = [string]$obj.name }
+                if ($obj.parent_session) { $State.parent_session = [string]$obj.parent_session }
+            }
+            continue
+        }
+        if ($obj.type -eq 'branch_entry') {
+            if ($null -ne $State) {
+                if ($null -eq $State.tree_entries) { $State.tree_entries = @() }
+                $bMsg = @{
+                    id = [string]$obj.id
+                    parent_id = $obj.parent_id
+                    role = [string]$obj.role
+                    content = $obj.content
+                }
+                if ($obj.reasoning_content) { $bMsg.reasoning_content = $obj.reasoning_content }
+                if ($obj.tool_calls) { $bMsg.tool_calls = @($obj.tool_calls) }
+                if ($obj.tool_call_id) { $bMsg.tool_call_id = [string]$obj.tool_call_id }
+                $State.tree_entries += $bMsg
             }
             continue
         }
         $msg = @{ role = [string]$obj.role; content = $obj.content }
+        if ($obj.id) { $msg.id = [string]$obj.id }
+        if ($obj.parent_id) { $msg.parent_id = [string]$obj.parent_id }
         if ($obj.reasoning_content) { $msg.reasoning_content = $obj.reasoning_content }
         if ($obj.tool_calls) { $msg.tool_calls = @($obj.tool_calls) }
         if ($obj.tool_call_id) { $msg.tool_call_id = [string]$obj.tool_call_id }
@@ -1555,8 +2416,10 @@ function Invoke-SessionResume {
             throw "Cannot resume session from a different workspace ($($meta.workspace))."
         }
     }
+    $State.tree_entries = @()
     $loadedMessages = @(Read-AgentSession -SessionFile $SessionFile -State $State)
     $State.messages = $loadedMessages
+    Ensure-SessionTree -State $State
     if ($CurrentWorkspace) {
         $State.workspace = if (Test-Path -LiteralPath $CurrentWorkspace) { (Get-Item -LiteralPath $CurrentWorkspace -Force).FullName } else { $CurrentWorkspace }
     }
@@ -1568,6 +2431,93 @@ function Invoke-SessionResume {
     return $State
 }
 
+function Invoke-SessionFork {
+    param($State, [string]$SessionDir, [string]$Workspace, [string]$Model, [string]$FromId = '')
+    Ensure-SessionTree -State $State
+    $forkState = @{
+        session_id = 'sess-' + (Get-Date -Format 'yyyyMMdd-HHmmss') + '-' + (Get-Random -Minimum 100000 -Maximum 999999)
+        session_name = if ($State.session_name) { "$($State.session_name) (fork)" } else { '' }
+        parent_session = [string]$State.session_id
+        workspace = $Workspace
+        model = $Model
+        messages = @($State.messages)
+        tree_entries = @($State.tree_entries)
+        undo_stack = @()
+        last_failed_question = ''
+    }
+    if ($FromId) {
+        Switch-SessionBranch -State $forkState -TargetId $FromId | Out-Null
+    }
+    $forkFile = Join-Path $SessionDir ($forkState.session_id + '.jsonl')
+    Save-AgentSession -SessionFile $forkFile -State $forkState -Workspace $Workspace -Model $Model -SessionId $forkState.session_id
+    return @{ state = $forkState; session_file = $forkFile }
+}
+
+function Export-AgentSessionHtml {
+    param($State, [string]$OutputPath)
+    $title = if ($State.session_name) { [string]$State.session_name } elseif ($State.session_id) { [string]$State.session_id } else { 'h-agent session' }
+    $cards = @()
+    foreach ($m in @($State.messages)) {
+        $role = [string]$m.role
+        if ($role -eq 'system') { continue }
+        $bodyParts = @()
+        if ($m.reasoning_content) {
+            $bodyParts += '<div class="reasoning"><strong>Thinking:</strong><pre>' + (Escape-XmlText ([string]$m.reasoning_content)) + '</pre></div>'
+        }
+        if ($m.content) {
+            $bodyParts += '<pre class="content">' + (Escape-XmlText ([string]$m.content)) + '</pre>'
+        }
+        if ($m.tool_calls) {
+            foreach ($tc in @($m.tool_calls)) {
+                $fnName = if ($tc.function -and $tc.function.name) { [string]$tc.function.name } else { 'tool' }
+                $fnArgs = if ($tc.function -and $tc.function.arguments) { [string]$tc.function.arguments } else { '{}' }
+                $bodyParts += '<div class="tool-call"><code>' + (Escape-XmlText "$fnName($fnArgs)") + '</code></div>'
+            }
+        }
+        $idBadge = if ($m.id) { ' <span class="badge">#' + (Escape-XmlText ([string]$m.id)) + '</span>' } else { '' }
+        $cards += ('<div class="card role-' + (Escape-XmlText $role) + '"><div class="role-header">' + (Escape-XmlText $role.ToUpper()) + $idBadge + '</div>' + ($bodyParts -join "`n") + '</div>')
+    }
+    $html = @(
+        '<!DOCTYPE html>',
+        '<html lang="en"><head><meta charset="utf-8">',
+        ('<title>' + (Escape-XmlText $title) + '</title>'),
+        '<style>',
+        'body { background: #1d2021; color: #d4be98; font-family: Consolas, monospace; margin: 2rem auto; max-width: 960px; padding: 0 1rem; }',
+        'h1 { color: #a9b665; border-bottom: 1px solid #3c3836; padding-bottom: 0.5rem; }',
+        '.meta { color: #928374; margin-bottom: 1.5rem; font-size: 0.9rem; }',
+        '.card { background: #282828; border: 1px solid #3c3836; border-radius: 6px; padding: 1rem; margin-bottom: 1rem; }',
+        '.role-user { border-left: 4px solid #7daea3; }',
+        '.role-assistant { border-left: 4px solid #a9b665; }',
+        '.role-tool { border-left: 4px solid #d8a657; background: #242424; }',
+        '.role-header { font-weight: bold; margin-bottom: 0.5rem; color: #e78a4e; }',
+        '.badge { color: #928374; font-weight: normal; font-size: 0.85rem; }',
+        '.reasoning { color: #928374; border-left: 2px solid #504945; padding-left: 0.75rem; margin-bottom: 0.5rem; }',
+        '.tool-call { color: #d8a657; margin-top: 0.5rem; }',
+        'pre { white-space: pre-wrap; word-wrap: break-word; margin: 0; }',
+        '</style></head><body>',
+        ('<h1>' + (Escape-XmlText $title) + '</h1>'),
+        ('<div class="meta">Session: ' + (Escape-XmlText ([string]$State.session_id)) + ' | Model: ' + (Escape-XmlText ([string]$State.model)) + ' | Workspace: ' + (Escape-XmlText ([string]$State.workspace)) + '</div>'),
+        ($cards -join "`n"),
+        '</body></html>'
+    ) -join "`n"
+    $parent = Split-Path $OutputPath -Parent
+    if ($parent -and -not (Test-Path -LiteralPath $parent)) {
+        New-Item -ItemType Directory -Path $parent -Force -ErrorAction Stop | Out-Null
+    }
+    Set-Content -LiteralPath $OutputPath -Value $html -Encoding UTF8 -ErrorAction Stop
+    return $OutputPath
+}
+
+function Get-MessageEstimatedTokens {
+    param($Message)
+    if ($null -eq $Message) { return 0 }
+    $chars = 0
+    if ($Message.content) { $chars += ([string]$Message.content).Length }
+    if ($Message.reasoning_content) { $chars += ([string]$Message.reasoning_content).Length }
+    if ($Message.tool_calls) { $chars += (($Message.tool_calls | ConvertTo-Json -Depth 10 -Compress)).Length }
+    return [int](($chars + 3) / 4)
+}
+
 function Get-ContextStats {
     param($State)
     $chars = 0
@@ -1576,33 +2526,153 @@ function Get-ContextStats {
         if ($m.tool_calls) { $chars += (($m.tool_calls | ConvertTo-Json -Depth 10 -Compress)).Length }
     }
     $tokens = [int](($chars + 3) / 4)
-    return @{ messages = $State.messages.Count; chars = $chars; est_tokens = $tokens }
+    $usageIn = if ($State.usage_input_tokens) { [int]$State.usage_input_tokens } else { 0 }
+    $usageOut = if ($State.usage_output_tokens) { [int]$State.usage_output_tokens } else { 0 }
+    return @{
+        messages = $State.messages.Count
+        chars = $chars
+        est_tokens = $tokens
+        usage_input_tokens = $usageIn
+        usage_output_tokens = $usageOut
+        usage_total_tokens = ($usageIn + $usageOut)
+    }
+}
+
+function Find-CompactionCutPoint {
+    param([array]$Messages, [int]$KeepRecent = 4, [int]$KeepRecentTokens = 0)
+    $validCuts = @()
+    for ($i = 1; $i -lt $Messages.Count; $i++) {
+        if ($Messages[$i].role -ne 'tool') {
+            $validCuts += $i
+        }
+    }
+    if ($validCuts.Count -eq 0) {
+        return @{ cut_index = 1; turn_start_index = -1; is_split_turn = $false }
+    }
+    $targetCut = $Messages.Count - $KeepRecent
+    if ($KeepRecentTokens -gt 0) {
+        $accTokens = 0
+        $tokenCut = $validCuts[0]
+        for ($i = $Messages.Count - 1; $i -ge 1; $i--) {
+            $accTokens += (Get-MessageEstimatedTokens -Message $Messages[$i])
+            if ($accTokens -ge $KeepRecentTokens) {
+                $foundCand = $null
+                foreach ($vc in $validCuts) {
+                    if ($vc -ge $i) { $foundCand = $vc; break }
+                }
+                $tokenCut = if ($null -ne $foundCand) { $foundCand } else { $validCuts[$validCuts.Count - 1] }
+                break
+            }
+        }
+        $targetCut = $tokenCut
+    }
+    if ($targetCut -lt 1) { $targetCut = 1 }
+    if ($targetCut -ge $Messages.Count) { $targetCut = $Messages.Count - 1 }
+    while ($targetCut -gt 1 -and $Messages[$targetCut].role -eq 'tool') {
+        $targetCut--
+    }
+    if ($targetCut -le 1) {
+        $targetCut = $Messages.Count - $KeepRecent
+        if ($targetCut -lt 1) { $targetCut = 1 }
+        while ($targetCut -lt ($Messages.Count - 1) -and $Messages[$targetCut].role -eq 'tool') {
+            $targetCut++
+        }
+    }
+    $isSplit = $false
+    $turnStart = -1
+    if ($targetCut -gt 1 -and $Messages[$targetCut].role -eq 'assistant') {
+        for ($j = $targetCut - 1; $j -ge 1; $j--) {
+            if ($Messages[$j].role -eq 'user') {
+                $turnStart = $j
+                $isSplit = $true
+                break
+            }
+        }
+    }
+    return @{
+        cut_index = $targetCut
+        turn_start_index = $turnStart
+        is_split_turn = $isSplit
+    }
+}
+
+function Get-CompactionFileOperations {
+    param([array]$Messages)
+    $readSet = @{}
+    $modSet = @{}
+    foreach ($m in $Messages) {
+        if ($m.role -eq 'user' -and $m.content -is [string] -and $m.content.StartsWith('[Compacted Conversation Summary]')) {
+            $cText = [string]$m.content
+            if ($cText -match '(?s)<read-files>\r?\n(.*?)\r?\n</read-files>') {
+                foreach ($rf in @($Matches[1] -split '\r?\n')) {
+                    if ($rf.Trim()) { $readSet[$rf.Trim()] = $true }
+                }
+            }
+            if ($cText -match '(?s)<modified-files>\r?\n(.*?)\r?\n</modified-files>') {
+                foreach ($mf in @($Matches[1] -split '\r?\n')) {
+                    if ($mf.Trim()) { $modSet[$mf.Trim()] = $true }
+                }
+            }
+        }
+        if ($m.tool_calls) {
+            foreach ($tc in @($m.tool_calls)) {
+                $fnName = if ($tc.function -and $tc.function.name) { [string]$tc.function.name } else { '' }
+                $fnArgsRaw = if ($tc.function -and $tc.function.arguments) { [string]$tc.function.arguments } else { '' }
+                if (-not $fnArgsRaw) { continue }
+                try {
+                    $parsedArgs = $fnArgsRaw | ConvertFrom-Json -ErrorAction Stop
+                    $p = if ($parsedArgs.path) { [string]$parsedArgs.path } else { '' }
+                    if ($p) {
+                        if ($fnName -eq 'read_file' -or $fnName -eq 'read') { $readSet[$p] = $true }
+                        elseif ($fnName -in @('write_file', 'edit_file', 'write', 'edit')) { $modSet[$p] = $true }
+                    }
+                }
+                catch {}
+            }
+        }
+    }
+    $readOnly = @($readSet.Keys | Where-Object { -not $modSet.ContainsKey($_) } | Sort-Object)
+    $modified = @($modSet.Keys | Sort-Object)
+    $sections = @()
+    if ($readOnly.Count -gt 0) {
+        $sections += ("<read-files>`n" + ($readOnly -join "`n") + "`n</read-files>")
+    }
+    if ($modified.Count -gt 0) {
+        $sections += ("<modified-files>`n" + ($modified -join "`n") + "`n</modified-files>")
+    }
+    $xmlSuffix = if ($sections.Count -gt 0) { "`n`n" + ($sections -join "`n`n") } else { '' }
+    return @{
+        read_files = $readOnly
+        modified_files = $modified
+        xml = $xmlSuffix
+    }
 }
 
 function Invoke-AgentCompact {
-    param($State, [string]$Endpoint, [string]$ModelId, [string]$ApiKey, [string]$Focus = '', [int]$KeepRecent = 4)
+    param($State, [string]$Endpoint, [string]$ModelId, [string]$ApiKey, [string]$Focus = '', [int]$KeepRecent = 4, [int]$KeepRecentTokens = 0)
     if ($State.messages.Count -le ($KeepRecent + 1)) { return $false }
     $systemMsg = $State.messages[0]
-    $cutIndex = $State.messages.Count - $KeepRecent
-    while ($cutIndex -gt 1 -and $State.messages[$cutIndex].role -eq 'tool') {
-        $cutIndex--
-    }
-    if ($cutIndex -le 1) {
-        $cutIndex = $State.messages.Count - $KeepRecent
-        while ($cutIndex -lt ($State.messages.Count - 1) -and $State.messages[$cutIndex].role -eq 'tool') {
-            $cutIndex++
-        }
-    }
+    $cutInfo = Find-CompactionCutPoint -Messages $State.messages -KeepRecent $KeepRecent -KeepRecentTokens $KeepRecentTokens
+    $cutIndex = $cutInfo.cut_index
     if ($cutIndex -le 1) { return $false }
     $toSummarize = @($State.messages[1..($cutIndex - 1)])
     $recent = @($State.messages[$cutIndex..($State.messages.Count - 1)])
+    $fileOps = Get-CompactionFileOperations -Messages $toSummarize
+    $previousSummary = ''
     $transcript = @()
     foreach ($m in $toSummarize) {
         $role = [string]$m.role
+        if ($role -eq 'user' -and $m.content -is [string] -and $m.content.StartsWith('[Compacted Conversation Summary]')) {
+            $prevRaw = ([string]$m.content).Substring('[Compacted Conversation Summary]'.Length).Trim()
+            $prevRaw = $prevRaw -replace '(?s)\r?\n\r?\n<read-files>.*$', ''
+            $prevRaw = $prevRaw -replace '(?s)\r?\n\r?\n<modified-files>.*$', ''
+            $previousSummary = $prevRaw.Trim()
+            continue
+        }
         if ($role -eq 'tool') {
             $tcId = if ($m.tool_call_id) { " id=$($m.tool_call_id)" } else { '' }
             $resText = [string]$m.content
-            if ($resText.Length -gt 1500) { $resText = $resText.Substring(0, 1500) + '...(truncated)' }
+            if ($resText.Length -gt 2000) { $resText = $resText.Substring(0, 2000) + "`n`n[... $(($m.content).Length - 2000) more characters truncated]" }
             $transcript += "[tool_result$tcId]: $resText"
             continue
         }
@@ -1623,13 +2693,23 @@ function Invoke-AgentCompact {
         }
         $transcript += "[$role]: " + ($parts -join "`n")
     }
-    $prompt = "Summarize the conversation history above into a structured context handoff using these exact Markdown sections:`n## Goal`n## Constraints & Preferences`n## Progress (Done / In Progress / Blocked)`n## Key Decisions`n## Next Steps`n## Critical Context (file paths, schemas, queries, errors)`nBe concise and factual."
+    $prompt = if ($previousSummary) {
+        "Update the existing structured summary in <previous-summary> with the new conversation messages above using these exact Markdown sections:`n## Goal`n## Constraints & Preferences`n## Progress (Done / In Progress / Blocked)`n## Key Decisions`n## Next Steps`n## Critical Context (file paths, schemas, queries, errors)`nPreserve existing information and exact file paths."
+    }
+    else {
+        "Summarize the conversation history above into a structured context handoff using these exact Markdown sections:`n## Goal`n## Constraints & Preferences`n## Progress (Done / In Progress / Blocked)`n## Key Decisions`n## Next Steps`n## Critical Context (file paths, schemas, queries, errors)`nBe concise and factual."
+    }
     if ($Focus) { $prompt += "`nFocus especially on: $Focus" }
+    $userBody = "<conversation>`n" + ($transcript -join "`n`n") + "`n</conversation>`n`n"
+    if ($previousSummary) {
+        $userBody += "<previous-summary>`n" + $previousSummary + "`n</previous-summary>`n`n"
+    }
+    $userBody += $prompt
     $summaryReq = @{
         model = $ModelId
         messages = @(
-            @{ role = 'system'; content = 'You are a context compaction assistant. Produce a dense, structured summary in the language of the conversation.' },
-            @{ role = 'user'; content = (($transcript -join "`n`n") + "`n`n" + $prompt) }
+            @{ role = 'system'; content = 'You are a context compaction assistant. Produce a dense, structured summary in the language of the conversation. Do NOT continue the conversation or call tools.' },
+            @{ role = 'user'; content = $userBody }
         )
         stream = $false
     } | ConvertTo-Json -Depth 20 -Compress
@@ -1647,20 +2727,38 @@ function Invoke-AgentCompact {
     if ($finishReason -and ($finishReason -ne 'stop')) {
         throw "Compaction summary was incomplete (finish_reason=$finishReason)."
     }
+    if ($choice.message.tool_calls) {
+        throw 'Compaction summary attempted to call a tool.'
+    }
     $summaryText = $choice.message.content
     if (-not $summaryText) { throw 'Compaction returned empty summary.' }
-    $summaryMsg = @{ role = 'user'; content = ("[Compacted Conversation Summary]`n" + $summaryText.Trim()) }
+    $finalSummary = $summaryText.Trim() + $fileOps.xml
+    $summaryMsg = @{ role = 'user'; content = ("[Compacted Conversation Summary]`n" + $finalSummary) }
     $State.messages = @($systemMsg, $summaryMsg) + $recent
+    Ensure-SessionTree -State $State
     return $true
 }
 
 # --- src/Cli.ps1 ---
-# Agent turn loop (HTTP retries, finish_reason check, overflow auto-compaction, tool dispatch) and interactive CLI REPL.
+# Agent turn loop (HTTP retries, finish_reason check, overflow auto-compaction, tool dispatch, JSON event stream) and interactive CLI REPL.
+
+function Write-AgentJsonEvent {
+    param([string]$EventType, [hashtable]$Payload = @{})
+    if ($script:OutputMode -ne 'json') { return }
+    $ev = @{
+        type = $EventType
+        timestamp = (Get-Date -Format 'yyyy-MM-ddTHH:mm:ssK')
+    }
+    foreach ($k in $Payload.Keys) { $ev[$k] = $Payload[$k] }
+    Write-Host ($ev | ConvertTo-Json -Depth 20 -Compress)
+}
 
 function Invoke-AgentTurn {
     param($State, [string]$Endpoint, [string]$ModelId, [string]$ApiKey, [string]$Root, [int]$Steps)
     $overflowRetried = $false
+    $script:ActiveModelId = $ModelId
     for ($step = 0; $step -lt $Steps; $step++) {
+        Write-AgentJsonEvent -EventType 'turn_start' -Payload @{ model = $ModelId; step = $step }
         $bodyObj = @{
             model = $ModelId
             messages = @($State.messages)
@@ -1692,13 +2790,17 @@ function Invoke-AgentTurn {
                     $errFormatted = Format-AgentError -ErrorRecord $_
                     if (($attempt -lt $maxRetries) -and ($errFormatted -match '(?i)\b(408|429|500|502|503|504|timeout|timed out)\b')) {
                         $delay = ($attempt + 1) * 2
-                        Write-Host ($script:Gm.Yellow + ("  [retry {0}/{1}] Transient error ({2}); waiting {3}s..." -f ($attempt + 1), $maxRetries, $errFormatted, $delay) + $script:Gm.Reset)
+                        if ($script:OutputMode -ne 'json') {
+                            Write-Host ($script:Gm.Yellow + ("  [retry {0}/{1}] Transient error ({2}); waiting {3}s..." -f ($attempt + 1), $maxRetries, $errFormatted, $delay) + $script:Gm.Reset)
+                        }
                         Start-Sleep -Seconds $delay
                         continue
                     }
                     if ((-not $overflowRetried) -and ($errFormatted -match '(?i)(context_length|maximum context|too many tokens|token limit)')) {
                         $overflowRetried = $true
-                        Write-Host ($script:Gm.Yellow + '  [auto-recovery] Context overflow detected; compacting history and retrying...' + $script:Gm.Reset)
+                        if ($script:OutputMode -ne 'json') {
+                            Write-Host ($script:Gm.Yellow + '  [auto-recovery] Context overflow detected; compacting history and retrying...' + $script:Gm.Reset)
+                        }
                         if (Invoke-AgentCompact -State $State -Endpoint $Endpoint -ModelId $ModelId -ApiKey $ApiKey) {
                             $step--
                             $reply = $null
@@ -1713,6 +2815,10 @@ function Invoke-AgentTurn {
             Remove-Item -LiteralPath $tempResponse.FullName -Force -ErrorAction SilentlyContinue
         }
         if ($null -eq $reply) { continue }
+        if ($reply.usage) {
+            if ($reply.usage.prompt_tokens) { $State.usage_input_tokens = [int]$State.usage_input_tokens + [int]$reply.usage.prompt_tokens }
+            if ($reply.usage.completion_tokens) { $State.usage_output_tokens = [int]$State.usage_output_tokens + [int]$reply.usage.completion_tokens }
+        }
         $choice = $reply.choices[0]
         if (-not $choice -or -not $choice.message) { throw 'API returned no assistant message.' }
         $finishReason = [string]$choice.finish_reason
@@ -1723,18 +2829,35 @@ function Invoke-AgentTurn {
         $assistant = @{ role = 'assistant'; content = $message.content }
         if ($message.reasoning_content) {
             $assistant.reasoning_content = $message.reasoning_content
-            Write-AgentReasoning -Text ([string]$message.reasoning_content)
+            if ($script:OutputMode -ne 'json') {
+                Write-AgentReasoning -Text ([string]$message.reasoning_content)
+            }
         }
         if ($message.tool_calls) { $assistant.tool_calls = @($message.tool_calls) }
         $State.messages += $assistant
-        if ($message.content) { Write-AgentReply -Content $message.content }
-        if (-not $message.tool_calls) { return }
+        Ensure-SessionTree -State $State
+        Write-AgentJsonEvent -EventType 'message_end' -Payload @{
+            role = 'assistant'
+            content = $message.content
+            tool_calls = if ($message.tool_calls) { @($message.tool_calls) } else { @() }
+        }
+        if ($message.content -and $script:OutputMode -ne 'json') { Write-AgentReply -Content $message.content }
+        if (-not $message.tool_calls) {
+            Write-AgentJsonEvent -EventType 'turn_end' -Payload @{ step = $step; status = 'completed' }
+            return
+        }
         foreach ($call in $message.tool_calls) {
+            Write-AgentJsonEvent -EventType 'tool_execution_start' -Payload @{ id = [string]$call.id; name = [string]$call.function.name }
             $output = Invoke-AgentTool -Root $Root -Call $call
+            Write-AgentJsonEvent -EventType 'tool_execution_end' -Payload @{ id = [string]$call.id; name = [string]$call.function.name; result = $output }
             $State.messages += @{ role = 'tool'; tool_call_id = $call.id; content = $output }
+            Ensure-SessionTree -State $State
         }
     }
-    Write-Host ($script:Gm.Yellow + 'Step limit reached. Ask to continue, or use /clear.' + $script:Gm.Reset)
+    if ($script:OutputMode -ne 'json') {
+        Write-Host ($script:Gm.Yellow + 'Step limit reached. Ask to continue, or use /clear.' + $script:Gm.Reset)
+    }
+    Write-AgentJsonEvent -EventType 'turn_end' -Payload @{ step = $Steps; status = 'step_limit_reached' }
 }
 
 if (-not $LibraryOnly) {
@@ -1774,6 +2897,19 @@ if (-not $LibraryOnly) {
         if ($env:H_AGENT_WORKSPACE) { $Workspace = $env:H_AGENT_WORKSPACE }
         elseif ($config.H_AGENT_WORKSPACE) { $Workspace = $config.H_AGENT_WORKSPACE }
     }
+    $rootItem = Get-Item -LiteralPath $Workspace -Force -ErrorAction Stop
+    if (-not $rootItem.PSIsContainer) { throw 'Workspace must be a directory.' }
+    $rootPath = Resolve-AgentPath -Root $rootItem.FullName -RelativePath '.'
+    $configDir = Split-Path $script:AgentConfigPath -Parent
+    $sessionDir = if ($SessionDir) { $SessionDir } else { Join-Path $configDir 'sessions' }
+    if ($Export -and ($Export -match '\.jsonl$') -and (Test-Path -LiteralPath $Export)) {
+        $expState = @{ session_id = ''; workspace = $rootPath; model = $Model; messages = @() }
+        Invoke-SessionResume -SessionFile $Export -State $expState | Out-Null
+        $outHtml = $Export -replace '\.jsonl$', '.html'
+        $exported = Export-AgentSessionHtml -State $expState -OutputPath $outHtml
+        Write-Host ($script:Gm.Green + "Exported session HTML: $exported" + $script:Gm.Reset)
+        return
+    }
     if (-not $BaseUrl) { $BaseUrl = Read-Host 'API base URL (including /v1)' }
     if ($BaseUrl -notmatch '^https://[^\s]+$') { throw 'Use an HTTPS API base URL.' }
     if (-not $Model) { $Model = Read-Host 'Model ID' }
@@ -1781,14 +2917,19 @@ if (-not $LibraryOnly) {
     if ($MaxSteps -lt 1 -or $MaxSteps -gt 30) { throw 'MaxSteps must be between 1 and 30.' }
     if ($Permission -notin @('ReadOnly', 'Ask', 'AutoEdit', 'Auto')) { throw 'Permission must be one of: ReadOnly, Ask, AutoEdit, Auto.' }
     $script:AgentPermission = $Permission
+    $script:OutputMode = if ($Mode) { $Mode.ToLower() } else { 'text' }
+    if ($script:OutputMode -notin @('text', 'json')) { throw 'Mode must be text or json.' }
+    $script:NoTools = [bool]$NoTools
+    $script:EnabledTools = if ($Tools) { @($Tools -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ }) } else { @() }
+    $script:ExcludedTools = if ($ExcludeTools) { @($ExcludeTools -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ }) } else { @() }
+    $script:NoSkills = [bool]$NoSkills
+    $script:NoPromptTemplates = [bool]$NoPromptTemplates
+    $script:NoContextFiles = [bool]$NoContextFiles
     if ($HideReasoning) { $script:ShowReasoning = 'hide' }
     if ($ReasoningEffort) {
         if ($ReasoningEffort -notin @('low', 'medium', 'high')) { throw 'ReasoningEffort must be low, medium, or high.' }
         $script:ReasoningEffort = $ReasoningEffort
     }
-    $rootItem = Get-Item -LiteralPath $Workspace -Force -ErrorAction Stop
-    if (-not $rootItem.PSIsContainer) { throw 'Workspace must be a directory.' }
-    $rootPath = Resolve-AgentPath -Root $rootItem.FullName -RelativePath '.'
     $endpoint = $BaseUrl.TrimEnd('/') + '/chat/completions'
     $agentKey = $env:H_AGENT_API_KEY
     if (-not $agentKey) { $agentKey = $config.H_AGENT_API_KEY }
@@ -1798,27 +2939,59 @@ if (-not $LibraryOnly) {
         $agentKey = Read-Host 'API key'
     }
     if (-not $agentKey) { throw 'API key is required.' }
-    $configDir = Split-Path $script:AgentConfigPath -Parent
-    $sessionDir = Join-Path $configDir 'sessions'
     $sessionId = 'sess-' + (Get-Date -Format 'yyyyMMdd-HHmmss') + '-' + (Get-Random -Minimum 100000 -Maximum 999999)
-    $sessionFile = Join-Path $sessionDir ($sessionId + '.jsonl')
+    $sessionFile = if ($NoSession) { '' } else { Join-Path $sessionDir ($sessionId + '.jsonl') }
     $fullSystemPrompt = Build-SystemPrompt -Root $rootPath -ConfigDir $configDir
     $system = @{ role = 'system'; content = $fullSystemPrompt }
     $state = @{
         session_id = $sessionId
+        session_name = $SessionName
         workspace = $rootPath
         model = $Model
         messages = @($system)
+        tree_entries = @()
+        usage_input_tokens = 0
+        usage_output_tokens = 0
     }
+    $script:ActiveSessionId = $sessionId
+    $script:ActiveSessionFile = $sessionFile
+    $script:ActiveModelId = $Model
     $undoStack = @()
     $lastFailedQuestion = ''
-    if ($Continue) {
-        $latestProjectSession = Find-ProjectSession -SessionDir $sessionDir -Workspace $rootPath
-        if ($latestProjectSession) {
-            $sessionFile = $latestProjectSession
-            Invoke-SessionResume -SessionFile $sessionFile -State $state -CurrentWorkspace $rootPath | Out-Null
+    if ($Session) {
+        $candSess = if (Test-Path -LiteralPath $Session) { $Session } else { Join-Path $sessionDir (Split-Path $Session -Leaf) }
+        if (-not (Test-Path -LiteralPath $candSess) -and ($candSess -notmatch '\.jsonl$')) { $candSess += '.jsonl' }
+        if (Test-Path -LiteralPath $candSess) {
+            $sessionFile = if ($NoSession) { '' } else { $candSess }
+            Invoke-SessionResume -SessionFile $candSess -State $state -CurrentWorkspace $rootPath | Out-Null
             if ($PSBoundParameters.Keys -notcontains 'Model' -and $state.model) { $Model = $state.model }
         }
+        elseif (-not $NoSession) {
+            $sessionFile = $candSess
+        }
+    }
+    elseif ($Fork) {
+        $candFork = if (Test-Path -LiteralPath $Fork) { $Fork } else { Join-Path $sessionDir (Split-Path $Fork -Leaf) }
+        if (-not (Test-Path -LiteralPath $candFork) -and ($candFork -notmatch '\.jsonl$')) { $candFork += '.jsonl' }
+        if (-not (Test-Path -LiteralPath $candFork)) { throw "Session file to fork not found: $Fork" }
+        $srcState = @{ session_id = ''; workspace = $rootPath; model = $Model; messages = @() }
+        Invoke-SessionResume -SessionFile $candFork -State $srcState -CurrentWorkspace $rootPath | Out-Null
+        $forkRes = Invoke-SessionFork -State $srcState -SessionDir $sessionDir -NewName $SessionName
+        $state = $forkRes.state
+        $sessionFile = if ($NoSession) { '' } else { $forkRes.session_file }
+    }
+    elseif ($Continue) {
+        $latestProjectSession = Find-ProjectSession -SessionDir $sessionDir -Workspace $rootPath
+        if ($latestProjectSession) {
+            $sessionFile = if ($NoSession) { '' } else { $latestProjectSession }
+            Invoke-SessionResume -SessionFile $latestProjectSession -State $state -CurrentWorkspace $rootPath | Out-Null
+            if ($PSBoundParameters.Keys -notcontains 'Model' -and $state.model) { $Model = $state.model }
+        }
+    }
+    if ($Export) {
+        $exported = Export-AgentSessionHtml -State $state -OutputPath $Export
+        Write-Host ($script:Gm.Green + "Exported session HTML: $exported" + $script:Gm.Reset)
+        return
     }
     try {
         if ($Prompt) {
@@ -1831,9 +3004,9 @@ if (-not $LibraryOnly) {
             return
         }
         Write-Host ($script:Gm.OscInit + $script:Gm.BoldGreen + "h-agent | model: $Model | permission: $($script:AgentPermission) | workspace: $rootPath" + $script:Gm.Reset)
-        if (Get-AgentsContext -Root $rootPath -ConfigDir $configDir) { Write-Host ($script:Gm.Aqua + 'Loaded AGENTS.md instructions.' + $script:Gm.Reset) }
+        if (Get-AgentsContext -Root $rootPath -ConfigDir $configDir) { Write-Host ($script:Gm.Aqua + 'Loaded AGENTS.md/CLAUDE.md instructions.' + $script:Gm.Reset) }
         if (Get-SkillsCatalog -Root $rootPath -ConfigDir $configDir) { Write-Host ($script:Gm.Aqua + 'Loaded skills catalog.' + $script:Gm.Reset) }
-        Write-Host ($script:Gm.Grey1 + 'Commands: /help /status /permission /reasoning /undo /retry /compact /model /sessions /resume /save /new /exit' + $script:Gm.Reset)
+        Write-Host ($script:Gm.Grey1 + 'Commands: /help /status /session /permission /reasoning /undo /retry /compact /tree /fork /export /copy /reload /model /sessions /resume /save /new /exit' + $script:Gm.Reset)
         while ($true) {
             Write-Host ("`n" + $script:Gm.Grey0 + ('-' * 40) + $script:Gm.Reset)
             Write-Host ($script:Gm.BoldBlue + 'You: ' + $script:Gm.Fg) -NoNewline
@@ -1841,34 +3014,58 @@ if (-not $LibraryOnly) {
             Write-Host $script:Gm.Reset -NoNewline
             if (-not $question) { continue }
             $trimmedQ = $question.Trim()
-            if ($trimmedQ -eq '/exit') { break }
+            if ($trimmedQ -eq '/exit' -or $trimmedQ -eq '/quit') { break }
             if ($trimmedQ -eq '/clear' -or $trimmedQ -eq '/new') {
                 $newId = 'sess-' + (Get-Date -Format 'yyyyMMdd-HHmmss') + '-' + (Get-Random -Minimum 100000 -Maximum 999999)
                 $state.session_id = $newId
+                $state.session_name = ''
+                $state.parent_session = ''
                 $state.workspace = $rootPath
                 $state.model = $Model
                 $state.messages = @($system)
+                $state.tree_entries = @()
+                $state.leaf_id = $null
                 $undoStack = @()
-                $sessionFile = Join-Path $sessionDir ($newId + '.jsonl')
+                $sessionFile = if ($NoSession) { '' } else { Join-Path $sessionDir ($newId + '.jsonl') }
+                $script:ActiveSessionId = $newId
+                $script:ActiveSessionFile = $sessionFile
                 Write-Host ($script:Gm.Grey1 + 'Started a new conversation session.' + $script:Gm.Reset)
                 continue
             }
             if ($trimmedQ -eq '/help') {
-                Write-Host ($script:Gm.Aqua + '  /status                      ' + $script:Gm.Fg + 'Show context size, model, permission mode, and session file' + $script:Gm.Reset)
+                Write-Host ($script:Gm.Aqua + '  /status (/session, /tokens)  ' + $script:Gm.Fg + 'Show context size, token usage, model, permission, and session info' + $script:Gm.Reset)
                 Write-Host ($script:Gm.Aqua + '  /permission <mode>           ' + $script:Gm.Fg + 'Set mode: ReadOnly | Ask | AutoEdit (no-ask writes) | Auto' + $script:Gm.Reset)
-                Write-Host ($script:Gm.Aqua + '  /reasoning <mode|effort>     ' + $script:Gm.Fg + 'View: compact | full | hide; Effort: low | medium | high' + $script:Gm.Reset)
+                Write-Host ($script:Gm.Aqua + '  /reasoning (/thinking) <arg> ' + $script:Gm.Fg + 'View: compact | full | hide; Effort: low | medium | high | off' + $script:Gm.Reset)
                 Write-Host ($script:Gm.Aqua + '  /undo                        ' + $script:Gm.Fg + 'Revert last turn AND restore modified/created files on disk' + $script:Gm.Reset)
                 Write-Host ($script:Gm.Aqua + '  /retry                       ' + $script:Gm.Fg + 'Retry the last failed user request' + $script:Gm.Reset)
                 Write-Host ($script:Gm.Aqua + '  /compact [focus]             ' + $script:Gm.Fg + 'Summarize older turns into a structured context handoff' + $script:Gm.Reset)
+                Write-Host ($script:Gm.Aqua + '  /name [name]                 ' + $script:Gm.Fg + 'Set or display the human-friendly session name' + $script:Gm.Reset)
+                Write-Host ($script:Gm.Aqua + '  /tree [entry-id]             ' + $script:Gm.Fg + 'Show conversation tree or switch active branch to <entry-id>' + $script:Gm.Reset)
+                Write-Host ($script:Gm.Aqua + '  /fork [entry-id] (/clone)    ' + $script:Gm.Fg + 'Fork current branch (or from <entry-id>) into a new session file' + $script:Gm.Reset)
+                Write-Host ($script:Gm.Aqua + '  /export [path.html|.jsonl]   ' + $script:Gm.Fg + 'Export session to standalone HTML (or JSONL)' + $script:Gm.Reset)
+                Write-Host ($script:Gm.Aqua + '  /import <path.jsonl>         ' + $script:Gm.Fg + 'Import and resume a JSONL session file' + $script:Gm.Reset)
+                Write-Host ($script:Gm.Aqua + '  /copy                        ' + $script:Gm.Fg + 'Copy the last assistant response to clipboard' + $script:Gm.Reset)
+                Write-Host ($script:Gm.Aqua + '  /reload                      ' + $script:Gm.Fg + 'Reload AGENTS.md, CLAUDE.md, SYSTEM.md, skills, and prompt templates' + $script:Gm.Reset)
+                Write-Host ($script:Gm.Aqua + '  /hotkeys                     ' + $script:Gm.Fg + 'Display input shortcuts and syntax reference' + $script:Gm.Reset)
                 Write-Host ($script:Gm.Aqua + '  /model <id>                  ' + $script:Gm.Fg + 'Switch active model ID for this session' + $script:Gm.Reset)
                 Write-Host ($script:Gm.Aqua + '  /sessions                    ' + $script:Gm.Fg + 'List saved sessions in ~/.h-agent/sessions' + $script:Gm.Reset)
                 Write-Host ($script:Gm.Aqua + '  /resume <num|name>           ' + $script:Gm.Fg + 'Resume a saved session by number or filename' + $script:Gm.Reset)
                 Write-Host ($script:Gm.Aqua + '  /save [name]                 ' + $script:Gm.Fg + 'Save conversation to current or named session file' + $script:Gm.Reset)
                 Write-Host ($script:Gm.Aqua + '  /new (/clear)                ' + $script:Gm.Fg + 'Start a fresh session while keeping old session files' + $script:Gm.Reset)
-                Write-Host ($script:Gm.Aqua + '  /exit                        ' + $script:Gm.Fg + 'Exit h-agent' + $script:Gm.Reset)
+                Write-Host ($script:Gm.Aqua + '  /exit (/quit)                ' + $script:Gm.Fg + 'Exit h-agent' + $script:Gm.Reset)
+                Write-Host ($script:Gm.Aqua + '  /skill:<name> [args]         ' + $script:Gm.Fg + 'Invoke a skill directly with arguments' + $script:Gm.Reset)
                 Write-Host ($script:Gm.Aqua + '  /<template> [args]           ' + $script:Gm.Fg + 'Run a custom Markdown prompt from .h-agent/prompts/<name>.md' + $script:Gm.Reset)
                 Write-Host ($script:Gm.Aqua + '  @path/to/file                ' + $script:Gm.Fg + 'Inline-attach a workspace file into your prompt' + $script:Gm.Reset)
                 Write-Host ($script:Gm.Aqua + '  !command / !!command         ' + $script:Gm.Fg + 'Run shell command (! adds to context, !! local only)' + $script:Gm.Reset)
+                continue
+            }
+            if ($trimmedQ -eq '/hotkeys') {
+                Write-Host ($script:Gm.Aqua + '  @path/to/file     ' + $script:Gm.Fg + 'Attach file contents inline into prompt' + $script:Gm.Reset)
+                Write-Host ($script:Gm.Aqua + '  !cmd              ' + $script:Gm.Fg + 'Execute shell command and append output to conversation context' + $script:Gm.Reset)
+                Write-Host ($script:Gm.Aqua + '  !!cmd             ' + $script:Gm.Fg + 'Execute shell command locally without adding to context' + $script:Gm.Reset)
+                Write-Host ($script:Gm.Aqua + '  /skill:<name>     ' + $script:Gm.Fg + 'Expand a skill SKILL.md into the prompt' + $script:Gm.Reset)
+                Write-Host ($script:Gm.Aqua + '  /<template>       ' + $script:Gm.Fg + 'Expand a prompt template with $1, $2, $@, ${1:-default}' + $script:Gm.Reset)
+                Write-Host ($script:Gm.Aqua + '  Ctrl+C            ' + $script:Gm.Fg + 'Interrupt running command or exit interactive prompt' + $script:Gm.Reset)
                 continue
             }
             if ($trimmedQ -match '^/permission(?:\s+(.+))?$') {
@@ -1888,7 +3085,7 @@ if (-not $LibraryOnly) {
                 }
                 continue
             }
-            if ($trimmedQ -match '^/reasoning(?:\s+(.+))?$') {
+            if ($trimmedQ -match '^/(?:reasoning|thinking)(?:\s+(.+))?$') {
                 if ($Matches[1]) {
                     $argR = $Matches[1].Trim().ToLower()
                     if ($argR -in @('compact', 'full', 'hide')) {
@@ -1911,6 +3108,142 @@ if (-not $LibraryOnly) {
                     $effLabel = if ($script:ReasoningEffort) { $script:ReasoningEffort } else { 'default' }
                     Write-Host ($script:Gm.Aqua + "  Reasoning view: $($script:ShowReasoning) | effort: $effLabel" + $script:Gm.Reset)
                 }
+                continue
+            }
+            if ($trimmedQ -match '^/name(?:\s+(.+))?$') {
+                if ($Matches[1]) {
+                    $state.session_name = $Matches[1].Trim()
+                    Save-AgentSession -SessionFile $sessionFile -State $state -Workspace $rootPath -Model $Model
+                    Write-Host ($script:Gm.Green + "  Session name set to: $($state.session_name)" + $script:Gm.Reset)
+                }
+                else {
+                    $nm = if ($state.session_name) { $state.session_name } else { '(unnamed)' }
+                    Write-Host ($script:Gm.Aqua + "  Session name: $nm (use /name <text> to set)" + $script:Gm.Reset)
+                }
+                continue
+            }
+            if ($trimmedQ -match '^/tree(?:\s+(.+))?$') {
+                if ($Matches[1]) {
+                    $targetEntryId = $Matches[1].Trim()
+                    try {
+                        Switch-SessionBranch -State $state -TargetId $targetEntryId | Out-Null
+                        $undoStack = @()
+                        Save-AgentSession -SessionFile $sessionFile -State $state -Workspace $rootPath -Model $Model
+                        Write-Host ($script:Gm.Green + "  Switched active branch to entry $targetEntryId ($($state.messages.Count) messages in active path)." + $script:Gm.Reset)
+                    }
+                    catch {
+                        Write-Host ($script:Gm.Red + '  ' + $_.Exception.Message + $script:Gm.Reset)
+                    }
+                }
+                else {
+                    $treeNodes = @(Get-SessionTree -State $state)
+                    if ($treeNodes.Count -eq 0) {
+                        Write-Host ($script:Gm.Grey1 + '  Session tree is empty.' + $script:Gm.Reset)
+                    }
+                    else {
+                        foreach ($node in $treeNodes) {
+                            $marker = if ($node.is_leaf) { '*' } elseif ($node.active) { '+' } else { '-' }
+                            $parentInfo = if ($node.parent_id) { " <- $($node.parent_id)" } else { ' (root)' }
+                            $color = if ($node.is_leaf) { $script:Gm.BoldGreen } elseif ($node.active) { $script:Gm.Aqua } else { $script:Gm.Grey1 }
+                            Write-Host ($color + ("  {0} [{1}] ({2}{3}) " -f $marker, $node.id, $node.role, $parentInfo) + $script:Gm.Fg + $node.preview + $script:Gm.Reset)
+                        }
+                        Write-Host ($script:Gm.Grey1 + '  (Use /tree <entry-id> to switch branch, or /fork <entry-id> to fork)' + $script:Gm.Reset)
+                    }
+                }
+                continue
+            }
+            if ($trimmedQ -match '^/(?:fork|clone)(?:\s+(.+))?$') {
+                $forkEntryId = if ($Matches[1]) { $Matches[1].Trim() } else { '' }
+                try {
+                    $forkRes = Invoke-SessionFork -State $state -SessionDir $sessionDir -EntryId $forkEntryId
+                    $state = $forkRes.state
+                    $sessionFile = if ($NoSession) { '' } else { $forkRes.session_file }
+                    $undoStack = @()
+                    Write-Host ($script:Gm.Green + "  Forked session to: $($forkRes.session_file) (id=$($forkRes.session_id))" + $script:Gm.Reset)
+                }
+                catch {
+                    Write-Host ($script:Gm.Red + '  Fork failed: ' + $_.Exception.Message + $script:Gm.Reset)
+                }
+                continue
+            }
+            if ($trimmedQ -match '^/(?:export|share)(?:\s+(.+))?$') {
+                $expArg = if ($Matches[1]) { $Matches[1].Trim() } else { '' }
+                try {
+                    if (-not $expArg) {
+                        $baseName = if ($state.session_id) { [string]$state.session_id } else { 'session-export' }
+                        $expArg = Join-Path $rootPath ($baseName + '.html')
+                    }
+                    elseif ($expArg -notmatch '^([a-zA-Z]:[\\/]|[\\/])') {
+                        $expArg = Join-Path $rootPath $expArg
+                    }
+                    if ($expArg -match '\.jsonl$') {
+                        Save-AgentSession -SessionFile $expArg -State $state -Workspace $rootPath -Model $Model
+                        Write-Host ($script:Gm.Green + "  Exported session JSONL: $expArg" + $script:Gm.Reset)
+                    }
+                    else {
+                        if ($expArg -notmatch '\.html?$') { $expArg += '.html' }
+                        $outHtml = Export-AgentSessionHtml -State $state -OutputPath $expArg
+                        Write-Host ($script:Gm.Green + "  Exported session HTML: $outHtml" + $script:Gm.Reset)
+                    }
+                }
+                catch {
+                    Write-Host ($script:Gm.Red + '  Export failed: ' + $_.Exception.Message + $script:Gm.Reset)
+                }
+                continue
+            }
+            if ($trimmedQ -match '^/import(?:\s+(.+))?$') {
+                if (-not $Matches[1]) {
+                    Write-Host ($script:Gm.Red + '  Usage: /import <path-to-session.jsonl>' + $script:Gm.Reset)
+                    continue
+                }
+                $impArg = $Matches[1].Trim()
+                $impPath = if (Test-Path -LiteralPath $impArg) { $impArg } else { Join-Path $rootPath $impArg }
+                if (-not (Test-Path -LiteralPath $impPath)) {
+                    Write-Host ($script:Gm.Red + "  File not found: $impArg" + $script:Gm.Reset)
+                    continue
+                }
+                try {
+                    Invoke-SessionResume -SessionFile $impPath -State $state -CurrentWorkspace $rootPath | Out-Null
+                    $sessionFile = if ($NoSession) { '' } else { $impPath }
+                    $undoStack = @()
+                    $lastFailedQuestion = ''
+                    if ($state.model) { $Model = $state.model }
+                    Write-Host ($script:Gm.Green + "  Imported session: $impPath ($($state.messages.Count) messages)" + $script:Gm.Reset)
+                }
+                catch {
+                    Write-Host ($script:Gm.Red + '  Import failed: ' + $_.Exception.Message + $script:Gm.Reset)
+                }
+                continue
+            }
+            if ($trimmedQ -eq '/copy') {
+                $lastAssistant = $null
+                for ($i = $state.messages.Count - 1; $i -ge 0; $i--) {
+                    if ($state.messages[$i].role -eq 'assistant' -and $state.messages[$i].content) {
+                        $lastAssistant = [string]$state.messages[$i].content
+                        break
+                    }
+                }
+                if (-not $lastAssistant) {
+                    Write-Host ($script:Gm.Grey1 + '  No assistant message to copy.' + $script:Gm.Reset)
+                }
+                else {
+                    try {
+                        Set-Clipboard -Value $lastAssistant -ErrorAction Stop
+                        Write-Host ($script:Gm.Green + "  Copied last assistant response ($($lastAssistant.Length) chars) to clipboard." + $script:Gm.Reset)
+                    }
+                    catch {
+                        Write-Host ($script:Gm.Red + '  Clipboard copy failed: ' + $_.Exception.Message + $script:Gm.Reset)
+                    }
+                }
+                continue
+            }
+            if ($trimmedQ -eq '/reload') {
+                $fullSystemPrompt = Build-SystemPrompt -Root $rootPath -ConfigDir $configDir
+                $system.content = $fullSystemPrompt
+                if ($state.messages.Count -gt 0 -and $state.messages[0].role -eq 'system') {
+                    $state.messages[0].content = $fullSystemPrompt
+                }
+                Write-Host ($script:Gm.Green + '  Reloaded AGENTS.md/CLAUDE.md, SYSTEM.md, skills catalog, and prompt templates.' + $script:Gm.Reset)
                 continue
             }
             if ($trimmedQ -match '^/save(?:\s+(.+))?$') {
@@ -1941,10 +3274,15 @@ if (-not $LibraryOnly) {
                 }
                 continue
             }
-            if ($trimmedQ -eq '/status' -or $trimmedQ -eq '/tokens') {
+            if ($trimmedQ -eq '/status' -or $trimmedQ -eq '/tokens' -or $trimmedQ -eq '/session') {
                 $st = Get-ContextStats -State $state
+                $inTok = if ($state.usage_input_tokens) { [int]$state.usage_input_tokens } else { 0 }
+                $outTok = if ($state.usage_output_tokens) { [int]$state.usage_output_tokens } else { 0 }
+                $nmInfo = if ($state.session_name) { " | Name: $($state.session_name)" } else { '' }
+                $leafInfo = if ($state.leaf_id) { " | Leaf: $($state.leaf_id)" } else { '' }
                 Write-Host ($script:Gm.Aqua + "  Model: $($Model) | Permission: $($script:AgentPermission) | Messages: $($st.messages) | Chars: $($st.chars) (~$($st.est_tokens) tokens)" + $script:Gm.Reset)
-                Write-Host ($script:Gm.Grey1 + "  Session: $sessionFile" + $script:Gm.Reset)
+                Write-Host ($script:Gm.Grey1 + "  Session ID: $($state.session_id)$nmInfo$leafInfo | API Usage: in=$inTok out=$outTok" + $script:Gm.Reset)
+                Write-Host ($script:Gm.Grey1 + "  Session File: $(if ($sessionFile) { $sessionFile } else { '(ephemeral -NoSession)' })" + $script:Gm.Reset)
                 continue
             }
             if ($trimmedQ -match '^/model(?:\s+(.+))?$') {

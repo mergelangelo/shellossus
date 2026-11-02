@@ -4,16 +4,352 @@ $script:CurrentTurnWrites = @()
 $script:AgentPermission = 'Ask'
 $script:ShowReasoning = 'compact'
 $script:ReasoningEffort = ''
+$script:NoTools = $false
+$script:EnabledTools = @()
+$script:ExcludedTools = @()
+$script:ActiveSessionId = ''
+$script:ActiveSessionFile = ''
+$script:ActiveModelId = ''
+
+function Resolve-ToolCanonicalName {
+    param([string]$Name)
+    if (-not $Name) { return '' }
+    $lower = $Name.Trim().ToLower()
+    switch ($lower) {
+        'read' { return 'read_file' }
+        'ls' { return 'list_files' }
+        'find' { return 'find_files' }
+        'grep' { return 'grep_files' }
+        'write' { return 'write_file' }
+        'edit' { return 'edit_file' }
+        'bash' { return 'run_command' }
+        'powershell' { return 'run_command' }
+        default { return $lower }
+    }
+}
+
+function Test-IsToolEnabled {
+    param([string]$Name)
+    $canon = Resolve-ToolCanonicalName -Name $Name
+    if ($script:NoTools) { return $false }
+    if ($script:AgentPermission -eq 'ReadOnly' -and $canon -in @('write_file', 'edit_file', 'run_command')) {
+        return $false
+    }
+    if ($script:EnabledTools -and $script:EnabledTools.Count -gt 0) {
+        $matched = $false
+        foreach ($pat in $script:EnabledTools) {
+            $normPat = Resolve-ToolCanonicalName -Name $pat
+            if ($canon -like $normPat -or $Name -like $pat) { $matched = $true; break }
+        }
+        if (-not $matched) { return $false }
+    }
+    if ($script:ExcludedTools -and $script:ExcludedTools.Count -gt 0) {
+        foreach ($pat in $script:ExcludedTools) {
+            $normPat = Resolve-ToolCanonicalName -Name $pat
+            if ($canon -like $normPat -or $Name -like $pat) { return $false }
+        }
+    }
+    return $true
+}
+
+function Format-ByteSize {
+    param([long]$Bytes)
+    if ($Bytes -lt 1024) { return "${Bytes}B" }
+    if ($Bytes -lt 1048576) {
+        $kb = [int](($Bytes * 10 + 512) / 1024)
+        return ('{0}.{1}KB' -f [int]($kb / 10), ($kb % 10))
+    }
+    $mb = [int](($Bytes * 10 + 524288) / 1048576)
+    return ('{0}.{1}MB' -f [int]($mb / 10), ($mb % 10))
+}
+
+function Invoke-TruncateLine {
+    param([string]$Line, [int]$MaxChars = 500)
+    if ($null -eq $Line) { return @{ text = ''; wasTruncated = $false } }
+    if ($Line.Length -le $MaxChars) {
+        return @{ text = $Line; wasTruncated = $false }
+    }
+    return @{ text = ($Line.Substring(0, $MaxChars) + '... [truncated]'); wasTruncated = $true }
+}
+
+function Invoke-TruncateHead {
+    param([string]$Content, [int]$MaxLines = 2000, [int]$MaxBytes = 51200)
+    if (-not $Content) {
+        return @{
+            content = ''
+            truncated = $false
+            truncatedBy = $null
+            totalLines = 0
+            totalBytes = 0
+            outputLines = 0
+            outputBytes = 0
+            lastLinePartial = $false
+            firstLineExceedsLimit = $false
+            maxLines = $MaxLines
+            maxBytes = $MaxBytes
+        }
+    }
+    $norm = $Content.Replace("`r`n", "`n")
+    $lines = @($norm -split "`n")
+    if ($norm.EndsWith("`n") -and $lines.Count -gt 0 -and $lines[$lines.Count - 1] -eq '') {
+        if ($lines.Count -eq 1) { $lines = @() }
+        else { $lines = @($lines[0..($lines.Count - 2)]) }
+    }
+    $totalLines = $lines.Count
+    $totalBytes = $norm.Length
+    if ($totalLines -le $MaxLines -and $totalBytes -le $MaxBytes) {
+        return @{
+            content = $norm
+            truncated = $false
+            truncatedBy = $null
+            totalLines = $totalLines
+            totalBytes = $totalBytes
+            outputLines = $totalLines
+            outputBytes = $totalBytes
+            lastLinePartial = $false
+            firstLineExceedsLimit = $false
+            maxLines = $MaxLines
+            maxBytes = $MaxBytes
+        }
+    }
+    if ($lines.Count -gt 0 -and ([string]$lines[0]).Length -gt $MaxBytes) {
+        return @{
+            content = ''
+            truncated = $true
+            truncatedBy = 'bytes'
+            totalLines = $totalLines
+            totalBytes = $totalBytes
+            outputLines = 0
+            outputBytes = 0
+            lastLinePartial = $false
+            firstLineExceedsLimit = $true
+            maxLines = $MaxLines
+            maxBytes = $MaxBytes
+        }
+    }
+    $outLines = @()
+    $outBytes = 0
+    $truncBy = 'lines'
+    for ($i = 0; $i -lt $lines.Count -and $i -lt $MaxLines; $i++) {
+        $ln = [string]$lines[$i]
+        $lnBytes = $ln.Length + $(if ($i -gt 0) { 1 } else { 0 })
+        if (($outBytes + $lnBytes) -gt $MaxBytes) {
+            $truncBy = 'bytes'
+            break
+        }
+        $outLines += $ln
+        $outBytes += $lnBytes
+    }
+    if ($outLines.Count -ge $MaxLines -and $outBytes -le $MaxBytes) {
+        $truncBy = 'lines'
+    }
+    $outText = $outLines -join "`n"
+    return @{
+        content = $outText
+        truncated = $true
+        truncatedBy = $truncBy
+        totalLines = $totalLines
+        totalBytes = $totalBytes
+        outputLines = $outLines.Count
+        outputBytes = $outText.Length
+        lastLinePartial = $false
+        firstLineExceedsLimit = $false
+        maxLines = $MaxLines
+        maxBytes = $MaxBytes
+    }
+}
+
+function Invoke-TruncateTail {
+    param([string]$Content, [int]$MaxLines = 2000, [int]$MaxBytes = 51200)
+    if (-not $Content) {
+        return @{
+            content = ''
+            truncated = $false
+            truncatedBy = $null
+            totalLines = 0
+            totalBytes = 0
+            outputLines = 0
+            outputBytes = 0
+            lastLinePartial = $false
+            firstLineExceedsLimit = $false
+            maxLines = $MaxLines
+            maxBytes = $MaxBytes
+        }
+    }
+    $norm = $Content.Replace("`r`n", "`n")
+    $lines = @($norm -split "`n")
+    if ($norm.EndsWith("`n") -and $lines.Count -gt 0 -and $lines[$lines.Count - 1] -eq '') {
+        if ($lines.Count -eq 1) { $lines = @() }
+        else { $lines = @($lines[0..($lines.Count - 2)]) }
+    }
+    $totalLines = $lines.Count
+    $totalBytes = $norm.Length
+    if ($totalLines -le $MaxLines -and $totalBytes -le $MaxBytes) {
+        return @{
+            content = $norm
+            truncated = $false
+            truncatedBy = $null
+            totalLines = $totalLines
+            totalBytes = $totalBytes
+            outputLines = $totalLines
+            outputBytes = $totalBytes
+            lastLinePartial = $false
+            firstLineExceedsLimit = $false
+            maxLines = $MaxLines
+            maxBytes = $MaxBytes
+        }
+    }
+    $revLines = @()
+    $outBytes = 0
+    $truncBy = 'lines'
+    $lastPartial = $false
+    for ($i = $lines.Count - 1; $i -ge 0 -and $revLines.Count -lt $MaxLines; $i--) {
+        $ln = [string]$lines[$i]
+        $lnBytes = $ln.Length + $(if ($revLines.Count -gt 0) { 1 } else { 0 })
+        if (($outBytes + $lnBytes) -gt $MaxBytes) {
+            $truncBy = 'bytes'
+            if ($revLines.Count -eq 0 -and $ln.Length -gt $MaxBytes) {
+                $revLines += $ln.Substring($ln.Length - $MaxBytes)
+                $lastPartial = $true
+            }
+            break
+        }
+        $revLines += $ln
+        $outBytes += $lnBytes
+    }
+    $outLines = @()
+    for ($j = $revLines.Count - 1; $j -ge 0; $j--) {
+        $outLines += $revLines[$j]
+    }
+    if ($outLines.Count -ge $MaxLines -and $outBytes -le $MaxBytes) {
+        $truncBy = 'lines'
+    }
+    $outText = $outLines -join "`n"
+    return @{
+        content = $outText
+        truncated = $true
+        truncatedBy = $truncBy
+        totalLines = $totalLines
+        totalBytes = $totalBytes
+        outputLines = $outLines.Count
+        outputBytes = $outText.Length
+        lastLinePartial = $lastPartial
+        firstLineExceedsLimit = $false
+        maxLines = $MaxLines
+        maxBytes = $MaxBytes
+    }
+}
+
+function Convert-IgnorePatternToRule {
+    param([string]$Line, [string]$DirPrefix = '')
+    $trimmed = $Line.Trim()
+    if (-not $trimmed) { return $null }
+    if ($trimmed.StartsWith('#') -and (-not $trimmed.StartsWith('\#'))) { return $null }
+    $pat = $trimmed
+    $negated = $false
+    if ($pat.StartsWith('!')) {
+        $negated = $true
+        $pat = $pat.Substring(1)
+    }
+    elseif ($pat.StartsWith('\!') -or $pat.StartsWith('\#')) {
+        $pat = $pat.Substring(1)
+    }
+    if (-not $pat) { return $null }
+    $dirOnly = $pat.EndsWith('/')
+    if ($dirOnly) { $pat = $pat.TrimEnd('/') }
+    if (-not $pat) { return $null }
+    $anchored = $pat.StartsWith('/')
+    if ($anchored) { $pat = $pat.TrimStart('/') }
+    if ($pat.Contains('/')) { $anchored = $true }
+    $rx = $pat -replace '([.+^$()\[\]{}|\\])', '\$1'
+    $rx = $rx -replace '/\*\*/', '__DBLSTAR_SLASH__'
+    $rx = $rx -replace '^\*\*/', '__LEAD_DBLSTAR__'
+    $rx = $rx -replace '/\*\*$', '__TRAIL_DBLSTAR__'
+    $rx = $rx -replace '\*\*', '__ANY__'
+    $rx = $rx -replace '\*', '[^/]*'
+    $rx = $rx -replace '\?', '[^/]'
+    $rx = $rx.Replace('__DBLSTAR_SLASH__', '(?:/.*)?/')
+    $rx = $rx.Replace('__LEAD_DBLSTAR__', '(?:.+/)?')
+    $rx = $rx.Replace('__TRAIL_DBLSTAR__', '(?:/.*)?')
+    $rx = $rx.Replace('__ANY__', '.*')
+    $prefRx = if ($DirPrefix) { ($DirPrefix -replace '([.+^$()\[\]{}|\\*?\-])', '\$1') } else { '' }
+    $tailRx = if ($dirOnly) { '/.*$' } else { '(?:/.*)?$' }
+    $finalRx = if ($anchored) {
+        '^' + $prefRx + $rx + $tailRx
+    }
+    else {
+        '^' + $prefRx + '(?:.+/)?' + $rx + $tailRx
+    }
+    return @{
+        regex = $finalRx
+        negated = $negated
+        pattern = $trimmed
+    }
+}
+
+function Get-WorkspaceIgnoreRules {
+    param([string]$Root, [string]$SearchPath = '')
+    $rules = @()
+    if (-not $Root -or -not (Test-Path -LiteralPath $Root)) { return $rules }
+    $rootFull = (Get-Item -LiteralPath $Root -Force).FullName
+    $dirsToCheck = @($rootFull)
+    $scanBase = if ($SearchPath -and (Test-Path -LiteralPath $SearchPath)) { (Get-Item -LiteralPath $SearchPath -Force).FullName } else { $rootFull }
+    if ($scanBase -ne $rootFull -and (-not ($dirsToCheck -contains $scanBase))) {
+        $dirsToCheck += $scanBase
+    }
+    foreach ($subDir in @(Get-ChildItem -LiteralPath $scanBase -Recurse -Force -Directory -ErrorAction SilentlyContinue)) {
+        if (($subDir.Attributes -band 1024) -ne 0) { continue }
+        if ($subDir.FullName -match '[/\\](\.git|node_modules)([/\\]|$)') { continue }
+        $dirsToCheck += $subDir.FullName
+    }
+    foreach ($d in $dirsToCheck) {
+        $relDir = Get-WorkspaceRelativePath -Root $rootFull -FullPath $d
+        $dirPrefix = if ($d -ieq $rootFull -or -not $relDir -or $relDir -eq '.') { '' } else { $relDir.Replace('\', '/').Trim('/') + '/' }
+        foreach ($igName in @('.gitignore', '.ignore', '.fdignore')) {
+            $igFile = Join-Path $d $igName
+            if (-not (Test-Path -LiteralPath $igFile)) { continue }
+            $igItem = Get-Item -LiteralPath $igFile -Force -ErrorAction SilentlyContinue
+            if (-not $igItem -or $igItem.PSIsContainer -or (($igItem.Attributes -band 1024) -ne 0) -or $igItem.Length -gt 256KB) { continue }
+            foreach ($line in @(Get-Content -LiteralPath $igFile -Encoding UTF8 -ErrorAction SilentlyContinue)) {
+                $r = Convert-IgnorePatternToRule -Line ([string]$line) -DirPrefix $dirPrefix
+                if ($null -ne $r) { $rules += $r }
+            }
+        }
+    }
+    return $rules
+}
+
+function Test-PathIgnored {
+    param([string]$RelativePath, [bool]$IsDir, [array]$Rules)
+    if (-not $Rules -or $Rules.Count -eq 0 -or -not $RelativePath) { return $false }
+    $norm = $RelativePath.Replace('\', '/').TrimStart('/')
+    $check = if ($IsDir) { $norm.TrimEnd('/') + '/' } else { $norm }
+    $ignored = $false
+    foreach ($r in $Rules) {
+        if ($check -match $r.regex) {
+            $ignored = (-not $r.negated)
+        }
+    }
+    return $ignored
+}
 
 function Get-AgentTools {
     foreach ($name in @('list_files', 'read_file')) {
+        if (-not (Test-IsToolEnabled -Name $name)) { continue }
         $description = 'List up to 200 entries in a directory. Names only; no file contents.'
-        $properties = @{ path = @{ type = 'string'; description = 'Workspace-relative path; . means the root.' } }
+        $properties = @{
+            path = @{ type = 'string'; description = 'Workspace-relative path; . means the root.' }
+        }
+        if ($name -eq 'list_files') {
+            $properties.limit = @{ type = 'integer'; description = 'Optional maximum number of entries to return (1..500, default 200).' }
+        }
         if ($name -eq 'read_file') {
             $description = 'Read a UTF-8 text file: up to 300 lines and 20000 characters, maximum file size 1 MiB. Returns total_lines and pagination metadata.'
             $properties.start_line = @{ type = 'integer'; description = 'Optional 1-based first line to read (default 1).' }
             $properties.max_lines = @{ type = 'integer'; description = 'Optional maximum number of lines to read (1..300, default 300).' }
             $properties.start_char = @{ type = 'integer'; description = 'Optional 1-based character offset within start_line for reading long lines (default 1).' }
+            $properties.offset = @{ type = 'integer'; description = 'Optional alias for start_line (1-based line offset).' }
+            $properties.limit = @{ type = 'integer'; description = 'Optional alias for max_lines (1..300).' }
         }
         @{
             type = 'function'
@@ -28,43 +364,51 @@ function Get-AgentTools {
             }
         }
     }
-    @{
-        type = 'function'
-        function = @{
-            name = 'find_files'
-            description = 'Find files or directories recursively by wildcard pattern (e.g. *.sql, *report*), up to 200 matches.'
-            parameters = @{
-                type = 'object'
-                properties = @{
-                    path = @{ type = 'string'; description = 'Workspace-relative directory path; . means the root.' }
-                    pattern = @{ type = 'string'; description = 'File name wildcard pattern, e.g. *.sql or *.' }
+    if (Test-IsToolEnabled -Name 'find_files') {
+        @{
+            type = 'function'
+            function = @{
+                name = 'find_files'
+                description = 'Find files or directories recursively by wildcard pattern (e.g. *.sql, src/*.ps1), respecting .gitignore/.ignore.'
+                parameters = @{
+                    type = 'object'
+                    properties = @{
+                        path = @{ type = 'string'; description = 'Workspace-relative directory path; . means the root.' }
+                        pattern = @{ type = 'string'; description = 'File name or relative path wildcard pattern, e.g. *.sql or src/*.ps1.' }
+                        limit = @{ type = 'integer'; description = 'Optional maximum number of results (1..1000, default 200).' }
+                    }
+                    required = @('path', 'pattern')
                 }
-                required = @('path', 'pattern')
             }
         }
     }
-    @{
-        type = 'function'
-        function = @{
-            name = 'grep_files'
-            description = 'Search UTF-8 text files for a regex or literal pattern, returning matching paths, line numbers, and lines (up to 100 matches).'
-            parameters = @{
-                type = 'object'
-                properties = @{
-                    path = @{ type = 'string'; description = 'Workspace-relative file or directory path; . means the root.' }
-                    pattern = @{ type = 'string'; description = 'Regex or literal search pattern.' }
-                    literal = @{ type = 'boolean'; description = 'Set true for literal substring match instead of regex.' }
-                    case_sensitive = @{ type = 'boolean'; description = 'Set true for case-sensitive matching.' }
-                    include = @{ type = 'string'; description = 'Optional file name wildcard filter, e.g. *.sql or *.ps1.' }
-                    context_lines = @{ type = 'integer'; description = 'Optional surrounding context lines (0..5).' }
-                    file_offset = @{ type = 'integer'; description = 'Optional 0-based file offset to continue searching when truncated by max_files (default 0).' }
+    if (Test-IsToolEnabled -Name 'grep_files') {
+        @{
+            type = 'function'
+            function = @{
+                name = 'grep_files'
+                description = 'Search UTF-8 text files for a regex or literal pattern (respecting .gitignore/.ignore), returning matching paths, line numbers, and lines.'
+                parameters = @{
+                    type = 'object'
+                    properties = @{
+                        path = @{ type = 'string'; description = 'Workspace-relative file or directory path; . means the root.' }
+                        pattern = @{ type = 'string'; description = 'Regex or literal search pattern.' }
+                        literal = @{ type = 'boolean'; description = 'Set true for literal substring match instead of regex.' }
+                        case_sensitive = @{ type = 'boolean'; description = 'Set true for case-sensitive matching.' }
+                        include = @{ type = 'string'; description = 'Optional file name wildcard filter, e.g. *.sql or *.ps1.' }
+                        glob = @{ type = 'string'; description = 'Optional alias for include wildcard filter.' }
+                        context_lines = @{ type = 'integer'; description = 'Optional surrounding context lines (0..5).' }
+                        limit = @{ type = 'integer'; description = 'Optional maximum number of matches to return (1..500, default 100).' }
+                        file_offset = @{ type = 'integer'; description = 'Optional 0-based file offset to continue searching when truncated by max_files (default 0).' }
+                    }
+                    required = @('path', 'pattern')
                 }
-                required = @('path', 'pattern')
             }
         }
     }
     if ($script:AgentPermission -eq 'ReadOnly') { return }
     foreach ($name in @('write_file', 'edit_file')) {
+        if (-not (Test-IsToolEnabled -Name $name)) { continue }
         $properties = @{ path = @{ type = 'string'; description = 'Workspace-relative text file path. Parent directory must exist.' } }
         if ($name -eq 'write_file') {
             $description = 'Create a UTF-8 text file (or overwrite when overwrite=true).'
@@ -92,18 +436,20 @@ function Get-AgentTools {
         }
         @{ type = 'function'; function = @{ name = $name; description = $description; parameters = @{ type = 'object'; properties = $properties; required = $required } } }
     }
-    @{
-        type = 'function'
-        function = @{
-            name = 'run_command'
-            description = 'Execute a PowerShell command in the workspace directory.'
-            parameters = @{
-                type = 'object'
-                properties = @{
-                    command = @{ type = 'string'; description = 'PowerShell command to execute.' }
-                    timeout_sec = @{ type = 'integer'; description = 'Optional timeout in seconds (1..600, default 60).' }
+    if (Test-IsToolEnabled -Name 'run_command') {
+        @{
+            type = 'function'
+            function = @{
+                name = 'run_command'
+                description = 'Execute a PowerShell command in the workspace directory.'
+                parameters = @{
+                    type = 'object'
+                    properties = @{
+                        command = @{ type = 'string'; description = 'PowerShell command to execute.' }
+                        timeout_sec = @{ type = 'integer'; description = 'Optional timeout in seconds (1..600, default 60).' }
+                    }
+                    required = @('command')
                 }
-                required = @('command')
             }
         }
     }
@@ -116,6 +462,57 @@ function Get-ObjectPropertyNames {
     return @(Get-Member -InputObject $InputObject -MemberType NoteProperty | ForEach-Object { $_.Name })
 }
 
+function Format-EditArguments {
+    param($Arguments)
+    if ($null -eq $Arguments -or $Arguments -is [string] -or $Arguments -is [ValueType] -or $Arguments -is [array]) {
+        return $Arguments
+    }
+    $props = @(Get-ObjectPropertyNames -InputObject $Arguments)
+    $out = @{}
+    foreach ($p in $props) {
+        if ($p -eq 'oldText') { $out['old_text'] = $Arguments.$p }
+        elseif ($p -eq 'newText') { $out['new_text'] = $Arguments.$p }
+        else { $out[$p] = $Arguments.$p }
+    }
+    if ($out.ContainsKey('edits') -and $null -ne $out['edits']) {
+        $rawEdits = $out['edits']
+        if ($rawEdits -is [string]) {
+            try {
+                $parsed = $rawEdits | ConvertFrom-Json -ErrorAction Stop
+                if ($parsed -is [array]) { $rawEdits = $parsed }
+                elseif ($null -ne $parsed) { $rawEdits = @($parsed) }
+            }
+            catch {}
+        }
+        elseif ($rawEdits -isnot [array] -and $rawEdits -isnot [ValueType]) {
+            $edItemProps = @(Get-ObjectPropertyNames -InputObject $rawEdits)
+            if (($edItemProps -contains 'old_text' -or $edItemProps -contains 'oldText') -and ($edItemProps -contains 'new_text' -or $edItemProps -contains 'newText')) {
+                $rawEdits = @($rawEdits)
+            }
+        }
+        if ($rawEdits -is [array]) {
+            $normArr = @()
+            foreach ($item in $rawEdits) {
+                if ($null -ne $item -and $item -isnot [string] -and $item -isnot [ValueType] -and $item -isnot [array]) {
+                    $ip = @(Get-ObjectPropertyNames -InputObject $item)
+                    $normItem = @{}
+                    foreach ($k in $ip) {
+                        if ($k -eq 'oldText') { $normItem['old_text'] = $item.$k }
+                        elseif ($k -eq 'newText') { $normItem['new_text'] = $item.$k }
+                        else { $normItem[$k] = $item.$k }
+                    }
+                    $normArr += $normItem
+                }
+                else {
+                    $normArr += $item
+                }
+            }
+            $out['edits'] = $normArr
+        }
+    }
+    return $out
+}
+
 function Test-AgentToolArguments {
     param([string]$Name, $Arguments)
     if ($null -eq $Arguments -or $Arguments -is [string] -or $Arguments -is [ValueType] -or $Arguments -is [array]) {
@@ -124,19 +521,19 @@ function Test-AgentToolArguments {
     $schemas = @{
         list_files = @{
             required = @('path')
-            types = @{ path = 'string' }
+            types = @{ path = 'string'; limit = 'integer' }
         }
         read_file = @{
             required = @('path')
-            types = @{ path = 'string'; start_line = 'integer'; max_lines = 'integer'; start_char = 'integer' }
+            types = @{ path = 'string'; start_line = 'integer'; max_lines = 'integer'; start_char = 'integer'; offset = 'integer'; limit = 'integer' }
         }
         find_files = @{
             required = @('path', 'pattern')
-            types = @{ path = 'string'; pattern = 'string' }
+            types = @{ path = 'string'; pattern = 'string'; limit = 'integer' }
         }
         grep_files = @{
             required = @('path', 'pattern')
-            types = @{ path = 'string'; pattern = 'string'; literal = 'boolean'; case_sensitive = 'boolean'; include = 'string'; context_lines = 'integer'; file_offset = 'integer' }
+            types = @{ path = 'string'; pattern = 'string'; literal = 'boolean'; case_sensitive = 'boolean'; include = 'string'; glob = 'string'; context_lines = 'integer'; limit = 'integer'; file_offset = 'integer' }
         }
         write_file = @{
             required = @('path', 'content')
@@ -224,18 +621,44 @@ function Invoke-ShellCommand {
     $errTemp = New-TemporaryFile -ErrorAction Stop
     $savedHKey = $env:H_AGENT_API_KEY
     $savedOKey = $env:OPENAI_API_KEY
+    $savedHSess = $env:H_AGENT_SESSION_ID
+    $savedHFile = $env:H_AGENT_SESSION_FILE
+    $savedHMod = $env:H_AGENT_MODEL
+    $savedHReas = $env:H_AGENT_REASONING_LEVEL
+    $savedPiSess = $env:PI_SESSION_ID
+    $savedPiFile = $env:PI_SESSION_FILE
+    $savedPiMod = $env:PI_MODEL
+    $savedPiReas = $env:PI_REASONING_LEVEL
     $timedOut = $false
     $exitCode = 0
+    $startTime = Get-Date
     try {
         try {
             $env:H_AGENT_API_KEY = $null
             $env:OPENAI_API_KEY = $null
+            if ($script:ActiveSessionId) {
+                $env:H_AGENT_SESSION_ID = $script:ActiveSessionId
+                $env:PI_SESSION_ID = $script:ActiveSessionId
+            }
+            if ($script:ActiveSessionFile) {
+                $env:H_AGENT_SESSION_FILE = $script:ActiveSessionFile
+                $env:PI_SESSION_FILE = $script:ActiveSessionFile
+            }
+            if ($script:ActiveModelId) {
+                $env:H_AGENT_MODEL = $script:ActiveModelId
+                $env:PI_MODEL = $script:ActiveModelId
+            }
+            if ($script:ReasoningEffort) {
+                $env:H_AGENT_REASONING_LEVEL = $script:ReasoningEffort
+                $env:PI_REASONING_LEVEL = $script:ReasoningEffort
+            }
+            $wrappedCmd = "try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch {}`n" + $Command
             $argList = if ($env:OS -eq 'Windows_NT') {
-                $escaped = ($Command -replace '(\\*)"', '$1$1\"') -replace '(\\*)$', '$1$1'
+                $escaped = ($wrappedCmd -replace '(\\*)"', '$1$1\"') -replace '(\\*)$', '$1$1'
                 "-NoProfile -NonInteractive -Command `"$escaped`""
             }
             else {
-                @('-NoProfile', '-NonInteractive', '-Command', $Command)
+                @('-NoProfile', '-NonInteractive', '-Command', $wrappedCmd)
             }
             $proc = Start-Process -FilePath $shellExe -ArgumentList $argList -WorkingDirectory $rootFull -RedirectStandardOutput $outTemp.FullName -RedirectStandardError $errTemp.FullName -NoNewWindow -PassThru -ErrorAction Stop
             if (-not $proc.HasExited) {
@@ -261,22 +684,24 @@ function Invoke-ShellCommand {
         finally {
             $env:H_AGENT_API_KEY = $savedHKey
             $env:OPENAI_API_KEY = $savedOKey
+            $env:H_AGENT_SESSION_ID = $savedHSess
+            $env:H_AGENT_SESSION_FILE = $savedHFile
+            $env:H_AGENT_MODEL = $savedHMod
+            $env:H_AGENT_REASONING_LEVEL = $savedHReas
+            $env:PI_SESSION_ID = $savedPiSess
+            $env:PI_SESSION_FILE = $savedPiFile
+            $env:PI_MODEL = $savedPiMod
+            $env:PI_REASONING_LEVEL = $savedPiReas
         }
+        $elapsedSec = [int](((Get-Date) - $startTime).TotalSeconds * 10) / 10.0
         $outItem = Get-Item -LiteralPath $outTemp.FullName -Force -ErrorAction Stop
         $errItem = Get-Item -LiteralPath $errTemp.FullName -Force -ErrorAction Stop
-        $outHead = if ($outItem.Length -gt 0) { @(Get-Content -LiteralPath $outTemp.FullName -TotalCount 301 -Encoding UTF8 -ErrorAction SilentlyContinue) } else { @() }
-        $errHead = if ($errItem.Length -gt 0) { @(Get-Content -LiteralPath $errTemp.FullName -TotalCount 301 -Encoding UTF8 -ErrorAction SilentlyContinue) } else { @() }
-        $combinedHead = @($outHead) + @($errHead)
-        $truncated = ($combinedHead.Count -gt 300) -or ($outItem.Length -gt 20000) -or ($errItem.Length -gt 20000)
-        $text = ($combinedHead | Select-Object -First 300) -join "`n"
-        if ($text.Length -gt 20000) {
-            $text = $text.Substring(0, 20000)
-            $truncated = $true
-        }
-        if ($timedOut) {
-            $timeoutNote = "[Command timed out after ${TimeoutSec}s and was terminated]"
-            $text = if ($text) { $text + "`n" + $timeoutNote } else { $timeoutNote }
-        }
+        $outRaw = if ($outItem.Length -gt 0 -and $outItem.Length -le 2MB) { Get-Content -LiteralPath $outTemp.FullName -Raw -Encoding UTF8 -ErrorAction SilentlyContinue } elseif ($outItem.Length -gt 2MB) { (Get-Content -LiteralPath $outTemp.FullName -Tail 400 -Encoding UTF8 -ErrorAction SilentlyContinue) -join "`n" } else { '' }
+        $errRaw = if ($errItem.Length -gt 0 -and $errItem.Length -le 2MB) { Get-Content -LiteralPath $errTemp.FullName -Raw -Encoding UTF8 -ErrorAction SilentlyContinue } elseif ($errItem.Length -gt 2MB) { (Get-Content -LiteralPath $errTemp.FullName -Tail 400 -Encoding UTF8 -ErrorAction SilentlyContinue) -join "`n" } else { '' }
+        $combinedRaw = if ($outRaw -and $errRaw) { $outRaw.TrimEnd("`r", "`n") + "`n" + $errRaw } elseif ($outRaw) { [string]$outRaw } elseif ($errRaw) { [string]$errRaw } else { '' }
+        $tailRes = Invoke-TruncateTail -Content $combinedRaw -MaxLines 300 -MaxBytes 20000
+        $truncated = $tailRes.truncated -or ($outItem.Length -gt 2MB) -or ($errItem.Length -gt 2MB)
+        $text = $tailRes.content
         $fullLogRel = $null
         if ($truncated) {
             try {
@@ -292,12 +717,17 @@ function Invoke-ShellCommand {
             }
             catch {}
         }
+        if ($timedOut) {
+            $timeoutNote = "[Command timed out after ${TimeoutSec}s and was terminated]"
+            $text = if ($text) { $text + "`n" + $timeoutNote } else { $timeoutNote }
+        }
         return @{
             exit_code = $exitCode
             output = $text
             truncated = $truncated
             full_output_path = $fullLogRel
             timed_out = $timedOut
+            wall_time_seconds = $elapsedSec
         }
     }
     finally {
@@ -347,6 +777,7 @@ function Invoke-AgentCommand {
         truncated = $res.truncated
         full_output_path = $res.full_output_path
         timed_out = $res.timed_out
+        wall_time_seconds = $res.wall_time_seconds
     } | ConvertTo-Json -Compress)
 }
 
@@ -718,7 +1149,13 @@ function Invoke-AgentTool {
         if ($script:AgentPermission -eq 'ReadOnly' -and $name -in @('write_file', 'edit_file', 'run_command')) {
             throw 'Permission mode ReadOnly does not allow file modifications or commands.'
         }
+        if (-not (Test-IsToolEnabled -Name $name)) {
+            throw "Tool '$name' is disabled by current tool configuration."
+        }
         $arguments = $Call.function.arguments | ConvertFrom-Json -ErrorAction Stop
+        if ($name -eq 'edit_file') {
+            $arguments = Format-EditArguments -Arguments $arguments
+        }
         Test-AgentToolArguments -Name $name -Arguments $arguments
         if ($name -eq 'run_command') { return (Invoke-AgentCommand -Root $Root -Arguments $arguments) }
         if ($name -in @('write_file', 'edit_file')) { return (Invoke-AgentWrite -Root $Root -Name $name -Arguments $arguments) }
@@ -728,56 +1165,99 @@ function Invoke-AgentTool {
         Write-Host ($script:Gm.Yellow + ('  [{0}] ' -f $name) + $script:Gm.Grey1 + $arguments.path + $script:Gm.Reset)
         if ($name -eq 'list_files') {
             if (-not $item.PSIsContainer) { throw 'Expected a directory.' }
+            $maxEntries = 200
+            if ($null -ne $arguments.limit) {
+                $maxEntries = [int]$arguments.limit
+                if ($maxEntries -lt 1 -or $maxEntries -gt 500) { throw 'limit must be between 1 and 500.' }
+            }
             $entries = @(Get-ChildItem -LiteralPath $path -Force -ErrorAction Stop | Where-Object {
                 -not (Test-IsSecretFile $_)
-            } | Select-Object -First 201)
+            } | Sort-Object { $_.Name.ToLower() } | Select-Object -First ($maxEntries + 1))
+            $isTrunc = ($entries.Count -gt $maxEntries)
+            $notice = if ($isTrunc) { "[${maxEntries} entries limit reached]" } else { $null }
             return (@{
-                entries = @($entries | Select-Object -First 200 -Property Name, PSIsContainer, Length)
-                truncated = ($entries.Count -gt 200)
+                entries = @($entries | Select-Object -First $maxEntries -Property Name, PSIsContainer, Length)
+                truncated = $isTrunc
+                notice = $notice
             } | ConvertTo-Json -Depth 5 -Compress)
         }
         if ($name -eq 'find_files') {
             if (-not $item.PSIsContainer) { throw 'Expected a directory.' }
             if (-not $arguments.pattern.Trim()) { throw 'pattern must be a nonempty string.' }
+            $maxFind = 200
+            if ($null -ne $arguments.limit) {
+                $maxFind = [int]$arguments.limit
+                if ($maxFind -lt 1 -or $maxFind -gt 1000) { throw 'limit must be between 1 and 1000.' }
+            }
+            $ignoreRules = @(Get-WorkspaceIgnoreRules -Root $Root -SearchPath $path)
+            $rawPat = $arguments.pattern.Trim()
+            $isPathPat = ($rawPat.Contains('/') -or $rawPat.Contains('\'))
+            $normPat = $rawPat.Replace('\', '/').TrimStart('/')
+            $altPat = if ($normPat.StartsWith('**/')) { $normPat.Substring(3) } else { '' }
             $found = @()
             $truncated = $false
             foreach ($child in @(Get-ChildItem -LiteralPath $path -Recurse -Force -ErrorAction SilentlyContinue)) {
                 if (($child.Attributes -band 1024) -ne 0) { continue }
                 if ($child.FullName -match '[/\\](\.git|node_modules)([/\\]|$)') { continue }
                 if (Test-IsSecretFile $child) { continue }
-                if ($child.Name -like $arguments.pattern) {
-                    if ($found.Count -ge 200) { $truncated = $true; break }
+                $relPath = Get-WorkspaceRelativePath -Root $Root -FullPath $child.FullName
+                if (Test-PathIgnored -RelativePath $relPath -IsDir ([bool]$child.PSIsContainer) -Rules $ignoreRules) { continue }
+                $isMatch = if ($isPathPat) {
+                    ($relPath -like $normPat) -or ($altPat -and ($relPath -like $altPat))
+                }
+                else {
+                    ($child.Name -like $rawPat)
+                }
+                if ($isMatch) {
+                    if ($found.Count -ge $maxFind) { $truncated = $true; break }
                     $found += @{
-                        path = (Get-WorkspaceRelativePath -Root $Root -FullPath $child.FullName)
+                        path = $relPath
                         is_dir = [bool]$child.PSIsContainer
                         length = if ($child.PSIsContainer) { $null } else { $child.Length }
                     }
                 }
             }
-            return (@{ matches = $found; truncated = $truncated } | ConvertTo-Json -Depth 5 -Compress)
+            $notice = if ($truncated) { "[${maxFind} results limit reached. Refine pattern or increase limit]" } else { $null }
+            return (@{ matches = $found; truncated = $truncated; notice = $notice } | ConvertTo-Json -Depth 5 -Compress)
         }
         if ($name -eq 'grep_files') {
             if (-not $arguments.pattern) { throw 'pattern must be a nonempty string.' }
             $isLiteral = ($arguments.literal -eq $true)
             $isCaseSensitive = ($arguments.case_sensitive -eq $true)
-            $includeFilter = if ($arguments.include -is [string] -and $arguments.include.Trim()) { $arguments.include.Trim() } else { '' }
+            $includeFilter = if ($arguments.include -is [string] -and $arguments.include.Trim()) {
+                $arguments.include.Trim()
+            }
+            elseif ($arguments.glob -is [string] -and $arguments.glob.Trim()) {
+                $arguments.glob.Trim()
+            }
+            else {
+                ''
+            }
             $ctxLines = 0
             if ($null -ne $arguments.context_lines) {
                 $ctxLines = [int]$arguments.context_lines
                 if ($ctxLines -lt 0 -or $ctxLines -gt 5) { throw 'context_lines must be between 0 and 5.' }
+            }
+            $maxMatches = 100
+            if ($null -ne $arguments.limit) {
+                $maxMatches = [int]$arguments.limit
+                if ($maxMatches -lt 1 -or $maxMatches -gt 500) { throw 'limit must be between 1 and 500.' }
             }
             $fileOffset = 0
             if ($null -ne $arguments.file_offset) {
                 $fileOffset = [int]$arguments.file_offset
                 if ($fileOffset -lt 0) { throw 'file_offset must be at least 0.' }
             }
+            $ignoreRules = @(Get-WorkspaceIgnoreRules -Root $Root -SearchPath $path)
             $allCandidateFiles = @()
             if ($item.PSIsContainer) {
                 foreach ($child in @(Get-ChildItem -LiteralPath $path -Recurse -Force -File -ErrorAction SilentlyContinue | Sort-Object FullName)) {
                     if (($child.Attributes -band 1024) -ne 0) { continue }
                     if ($child.FullName -match '[/\\](\.git|node_modules)([/\\]|$)') { continue }
                     if (Test-IsSecretFile $child) { continue }
-                    if ($includeFilter -and ($child.Name -notlike $includeFilter)) { continue }
+                    $relCandidate = Get-WorkspaceRelativePath -Root $Root -FullPath $child.FullName
+                    if (Test-PathIgnored -RelativePath $relCandidate -IsDir $false -Rules $ignoreRules) { continue }
+                    if ($includeFilter -and ($child.Name -notlike $includeFilter) -and ($relCandidate -notlike $includeFilter)) { continue }
                     if ($child.Length -le 1MB) { $allCandidateFiles += $child.FullName }
                 }
             }
@@ -791,15 +1271,19 @@ function Invoke-AgentTool {
             $fileLimitReached = (($fileOffset + $filesScanned) -lt $totalFiles)
             $hits = @()
             $matchLimitReached = $false
+            $linesTruncated = $false
             if ($targetFiles.Count -gt 0) {
                 $selParams = @{ LiteralPath = $targetFiles; Pattern = $arguments.pattern; Encoding = 'UTF8'; ErrorAction = 'Stop' }
                 if ($isLiteral) { $selParams.SimpleMatch = $true }
                 if ($isCaseSensitive) { $selParams.CaseSensitive = $true }
                 if ($ctxLines -gt 0) { $selParams.Context = @($ctxLines, $ctxLines) }
                 foreach ($m in @(Select-String @selParams)) {
-                    if ($hits.Count -ge 100) { $matchLimitReached = $true; break }
+                    if ($hits.Count -ge $maxMatches) { $matchLimitReached = $true; break }
                     $lineText = [string]$m.Line
-                    if ($lineText.Length -gt 300) { $lineText = $lineText.Substring(0, 300) + '...' }
+                    if ($lineText.Length -gt 300) {
+                        $lineText = $lineText.Substring(0, 300) + '...'
+                        $linesTruncated = $true
+                    }
                     $hitObj = @{
                         path = (Get-WorkspaceRelativePath -Root $Root -FullPath $m.Path)
                         line_number = [int]$m.LineNumber
@@ -825,6 +1309,11 @@ function Invoke-AgentTool {
                 $null
             }
             $nextFileOffset = if ($fileLimitReached) { $fileOffset + $filesScanned } else { $null }
+            $notices = @()
+            if ($matchLimitReached) { $notices += "${maxMatches} matches limit reached" }
+            if ($fileLimitReached) { $notices += "Scanned ${filesScanned} of ${totalFiles} files; use file_offset=${nextFileOffset} to continue" }
+            if ($linesTruncated) { $notices += 'Some lines truncated to 300 chars; use read_file for full lines' }
+            $noticeStr = if ($notices.Count -gt 0) { '[' + ($notices -join '. ') + ']' } else { $null }
             return (@{
                 matches = $hits
                 truncated = $truncated
@@ -832,6 +1321,8 @@ function Invoke-AgentTool {
                 files_scanned = $filesScanned
                 total_files = $totalFiles
                 next_file_offset = $nextFileOffset
+                lines_truncated = $linesTruncated
+                notice = $noticeStr
             } | ConvertTo-Json -Depth 5 -Compress)
         }
         if ($item.PSIsContainer) { throw 'Expected a text file.' }
@@ -840,6 +1331,10 @@ function Invoke-AgentTool {
         if ($null -ne $arguments.start_line) {
             $startLine = [int]$arguments.start_line
             if ($startLine -lt 1) { throw 'start_line must be at least 1.' }
+        }
+        elseif ($null -ne $arguments.offset) {
+            $startLine = [int]$arguments.offset
+            if ($startLine -lt 1) { throw 'offset must be at least 1.' }
         }
         $startChar = 1
         if ($null -ne $arguments.start_char) {
@@ -850,6 +1345,10 @@ function Invoke-AgentTool {
         if ($null -ne $arguments.max_lines) {
             $maxLines = [int]$arguments.max_lines
             if ($maxLines -lt 1 -or $maxLines -gt 300) { throw 'max_lines must be between 1 and 300.' }
+        }
+        elseif ($null -ne $arguments.limit) {
+            $maxLines = [int]$arguments.limit
+            if ($maxLines -lt 1 -or $maxLines -gt 300) { throw 'limit must be between 1 and 300.' }
         }
         $allLines = @(Get-Content -LiteralPath $path -Encoding UTF8 -ErrorAction Stop)
         $totalLines = $allLines.Count
@@ -864,6 +1363,7 @@ function Invoke-AgentTool {
                 truncated = $false
                 next_start_line = $null
                 next_start_char = $null
+                notice = $null
             } | ConvertTo-Json -Compress)
         }
         $limitIdx = $startLine - 1 + $maxLines - 1
@@ -908,6 +1408,15 @@ function Invoke-AgentTool {
             $nextStartLine = $endLine + 1
             $nextStartChar = $null
         }
+        $readNotice = if ($truncated -and $null -ne $nextStartChar) {
+            "[Showing line ${startLine} chars ${startChar}..$($nextStartChar - 1). Use start_line=${nextStartLine}, start_char=${nextStartChar} to continue.]"
+        }
+        elseif ($truncated) {
+            "[Showing lines ${startLine}-${endLine} of ${totalLines}. Use start_line=${nextStartLine} to continue.]"
+        }
+        else {
+            $null
+        }
         return (@{
             text = ($pageLines -join "`n")
             start_line = $startLine
@@ -917,6 +1426,7 @@ function Invoke-AgentTool {
             truncated = $truncated
             next_start_line = $nextStartLine
             next_start_char = $nextStartChar
+            notice = $readNotice
         } | ConvertTo-Json -Compress)
     }
     catch { return (@{ error = $_.Exception.Message } | ConvertTo-Json -Compress) }
