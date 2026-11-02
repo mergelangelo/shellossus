@@ -890,7 +890,8 @@ function Get-ObjectPropertyNames {
 }
 
 function Format-EditArguments {
-    param([Alias('ArgsObj')]$Arguments)
+    param($Arguments, $ArgsObj = $null)
+    if ($null -eq $Arguments -and $null -ne $ArgsObj) { $Arguments = $ArgsObj }
     if ($null -eq $Arguments -or $Arguments -is [string] -or $Arguments -is [ValueType] -or $Arguments -is [array]) {
         return $Arguments
     }
@@ -905,8 +906,9 @@ function Format-EditArguments {
         $rawEdits = $out['edits']
         if ($rawEdits -is [string]) {
             try {
-                $parsed = @($rawEdits | ConvertFrom-Json -ErrorAction Stop)
-                if ($parsed.Count -gt 0) { $rawEdits = $parsed }
+                $parsed = $rawEdits | ConvertFrom-Json -ErrorAction Stop
+                if ($parsed -is [array]) { $rawEdits = $parsed }
+                elseif ($null -ne $parsed) { $rawEdits = @($parsed) }
             }
             catch {}
         }
