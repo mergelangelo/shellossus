@@ -298,8 +298,9 @@ function Test-IsSecretFile {
 function Get-WorkspaceRelativePath {
     param([string]$Root, [string]$FullPath)
     $prefix = (Get-Item -LiteralPath $Root -Force).FullName.TrimEnd('\') + '\'
-    if ($FullPath.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) {
-        return $FullPath.Substring($prefix.Length).Replace('\', '/')
+    $resolvedFull = if (Test-Path -LiteralPath $FullPath) { (Get-Item -LiteralPath $FullPath -Force).FullName } else { $FullPath }
+    if ($resolvedFull.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) {
+        return $resolvedFull.Substring($prefix.Length).Replace('\', '/')
     }
     return $FullPath
 }
@@ -437,13 +438,18 @@ function Get-AgentTools {
 function Invoke-ShellCommand {
     param([string]$Root, [string]$Command)
     if (-not $Command -or -not $Command.Trim()) { throw 'Command must not be empty.' }
-    $wrappedCmd = "`$env:H_AGENT_API_KEY = `$null; `$env:OPENAI_API_KEY = `$null; " + $Command
+    $savedHKey = $env:H_AGENT_API_KEY
+    $savedOKey = $env:OPENAI_API_KEY
     Push-Location -LiteralPath $Root -ErrorAction Stop
     try {
-        $rawOut = @(& powershell -NoProfile -NonInteractive -Command $wrappedCmd 2>&1 | ForEach-Object { [string]$_ })
+        $env:H_AGENT_API_KEY = $null
+        $env:OPENAI_API_KEY = $null
+        $rawOut = @(& powershell -NoProfile -NonInteractive -Command $Command 2>&1 | ForEach-Object { [string]$_ })
         $exitCode = if ($null -ne $LASTEXITCODE) { [int]$LASTEXITCODE } else { 0 }
     }
     finally {
+        $env:H_AGENT_API_KEY = $savedHKey
+        $env:OPENAI_API_KEY = $savedOKey
         Pop-Location -ErrorAction SilentlyContinue
     }
     $text = ($rawOut | Select-Object -First 300) -join "`n"
@@ -452,9 +458,9 @@ function Invoke-ShellCommand {
     $fullLogRel = $null
     if ($truncated) {
         try {
-            $outDir = Join-Path $Root '.h-agent\output'
+            $outDir = Join-Path (Get-Item -LiteralPath $Root -Force).FullName '.h-agent\output'
             if (-not (Test-Path -LiteralPath $outDir)) { New-Item -ItemType Directory -Path $outDir -Force -ErrorAction Stop | Out-Null }
-            $logName = 'cmd-' + (Get-Date -Format 'yyyyMMdd-HHmmss') + '-' + ([guid]::NewGuid().ToString('N').Substring(0, 6)) + '.log'
+            $logName = 'cmd-' + (Get-Date -Format 'yyyyMMdd-HHmmss') + '-' + (Get-Random -Minimum 100000 -Maximum 999999) + '.log'
             $logFull = Join-Path $outDir $logName
             Set-Content -LiteralPath $logFull -Value ($rawOut -join "`r`n") -Encoding UTF8 -ErrorAction Stop
             $fullLogRel = Get-WorkspaceRelativePath -Root $Root -FullPath $logFull
