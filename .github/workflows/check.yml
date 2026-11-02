@@ -1,0 +1,10 @@
+name: PowerShell checks
+on: [push, pull_request]
+jobs:
+  windows-powershell:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test Windows PowerShell 5.1
+        shell: powershell
+        run: .\tests\smoke.ps1
