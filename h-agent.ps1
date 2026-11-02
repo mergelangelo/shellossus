@@ -79,6 +79,39 @@ function Format-AgentError {
     return $msg
 }
 
+function Format-PreviewText {
+    param([string]$Text)
+    return ($Text -replace '[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]', '?')
+}
+
+function Write-AgentReply {
+    param([string]$Content)
+    Write-Host "`nH: " -ForegroundColor Green -NoNewline
+    $inCode = $false
+    $first = $true
+    foreach ($line in @($Content -split "`r?`n")) {
+        if (-not $first) { Write-Host '   ' -NoNewline }
+        $first = $false
+        if ($line.TrimStart().StartsWith('```')) {
+            Write-Host $line -ForegroundColor DarkGray
+            $inCode = -not $inCode
+        }
+        elseif ($inCode) {
+            Write-Host $line -ForegroundColor Yellow
+        }
+        elseif ($line -match '^\s*#{1,6}\s+') {
+            Write-Host $line -ForegroundColor Cyan
+        }
+        elseif ($line -match '^(\s*[-*+]\s+)(.*)$') {
+            Write-Host $Matches[1] -ForegroundColor Green -NoNewline
+            Write-Host $Matches[2] -ForegroundColor White
+        }
+        else {
+            Write-Host $line -ForegroundColor White
+        }
+    }
+}
+
 function Resolve-AgentPath {
     param([string]$Root, [string]$RelativePath)
     if (-not $RelativePath) { $RelativePath = '.' }
@@ -174,19 +207,30 @@ function Invoke-AgentWrite {
         if ($index -lt 0) { throw 'old_text was not found. Read the file again.' }
         if ($before.IndexOf($oldText, $index + $oldText.Length, [StringComparison]::Ordinal) -ge 0) { throw 'old_text occurs more than once. Provide more context.' }
         if ($before.Contains("`r`n")) { $newText = $newText.Replace("`r`n", "`n").Replace("`n", "`r`n") }
-        $after = $before.Substring(0, $index) + $newText + $before.Substring($index + $oldText.Length)
+        $prefixText = $before.Substring(0, $index)
+        $suffixText = $before.Substring($index + $oldText.Length)
+        $after = $prefixText + $newText + $suffixText
         if ($after -ceq $before) { return (@{ status = 'unchanged' } | ConvertTo-Json -Compress) }
     }
     if ($after.Length -gt 20000 -or ($null -ne $before -and $before.Length -gt 20000)) { throw 'Write preview is limited to 20000 characters.' }
     if ($after -match '\x00' -or ($null -ne $before -and $before -match '\x00')) { throw 'Binary content is not supported.' }
     Write-Host ("`nPROPOSED " + $Name + ': ' + $path) -ForegroundColor Yellow
     if ($null -ne $before) {
-        Write-Host '--- BEFORE ---'
-        Write-Host ($before -replace '[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]', '?')
+        Write-Host '--- BEFORE ---' -ForegroundColor Red
+        Write-Host (Format-PreviewText $prefixText) -ForegroundColor DarkGray -NoNewline
+        Write-Host (Format-PreviewText $oldText) -ForegroundColor Red -NoNewline
+        Write-Host (Format-PreviewText $suffixText) -ForegroundColor DarkGray
+        Write-Host '--- AFTER ---' -ForegroundColor Green
+        Write-Host (Format-PreviewText $prefixText) -ForegroundColor DarkGray -NoNewline
+        Write-Host (Format-PreviewText $newText) -ForegroundColor Green -NoNewline
+        Write-Host (Format-PreviewText $suffixText) -ForegroundColor DarkGray
     }
-    Write-Host '--- AFTER ---'
-    Write-Host ($after -replace '[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]', '?')
-    Write-Host '--- END OF PREVIEW ---'
+    else {
+        Write-Host '--- AFTER ---' -ForegroundColor Green
+        Write-Host (Format-PreviewText $after) -ForegroundColor Green
+    }
+    Write-Host '--- END OF PREVIEW ---' -ForegroundColor DarkGray
+    Write-Host 'Confirm: ' -ForegroundColor Yellow -NoNewline
     $approval = Read-Host 'Type WRITE to approve this file change; Enter cancels'
     if ($approval -cne 'WRITE') { return (@{ status = 'cancelled'; message = 'User declined. Do not retry without a new user request.' } | ConvertTo-Json -Compress) }
     $backupPath = $null
@@ -198,7 +242,7 @@ function Invoke-AgentWrite {
         $backup = New-TemporaryFile -ErrorAction Stop
         Copy-Item -LiteralPath $path -Destination $backup.FullName -Force -ErrorAction Stop
         $backupPath = $backup.FullName
-        Write-Host ('Backup: ' + $backupPath)
+        Write-Host ('Backup: ' + $backupPath) -ForegroundColor DarkGray
     }
     else {
         $parent = Resolve-AgentPath -Root $Root -RelativePath (Split-Path $Arguments.path -Parent)
@@ -219,7 +263,8 @@ function Invoke-AgentTool {
         if ($name -in @('write_file', 'edit_file')) { return (Invoke-AgentWrite -Root $Root -Name $name -Arguments $arguments) }
         $path = Resolve-AgentPath -Root $Root -RelativePath $arguments.path
         $item = Get-Item -LiteralPath $path -Force -ErrorAction Stop
-        Write-Host ('  [{0}] {1}' -f $name, $arguments.path) -ForegroundColor DarkCyan
+        Write-Host ('  [{0}] ' -f $name) -ForegroundColor DarkYellow -NoNewline
+        Write-Host $arguments.path -ForegroundColor DarkGray
         if ($name -eq 'list_files') {
             if (-not $item.PSIsContainer) { throw 'Expected a directory.' }
             $entries = @(Get-ChildItem -LiteralPath $path -Force -ErrorAction Stop | Where-Object {
@@ -280,7 +325,7 @@ function Invoke-AgentTurn {
         if ($message.reasoning_content) { $assistant.reasoning_content = $message.reasoning_content }
         if ($message.tool_calls) { $assistant.tool_calls = @($message.tool_calls) }
         $State.messages += $assistant
-        if ($message.content) { Write-Host ("`nAI: " + $message.content) }
+        if ($message.content) { Write-AgentReply -Content $message.content }
         if (-not $message.tool_calls) { return }
         foreach ($call in $message.tool_calls) {
             $output = Invoke-AgentTool -Root $Root -Call $call
@@ -350,12 +395,18 @@ if (-not $LibraryOnly) {
     }
     $state = @{ messages = @($system) }
     Write-Host "h-agent | workspace: $rootPath" -ForegroundColor Green
-    Write-Host 'Read files are sent to the API. Writes require WRITE confirmation. /exit to quit; /clear to reset history.'
+    Write-Host 'Read files are sent to the API. Writes require WRITE confirmation. /exit to quit; /clear to reset history.' -ForegroundColor DarkGray
     try {
         while ($true) {
-            $question = Read-Host "`nYou"
+            Write-Host "`n----------------------------------------" -ForegroundColor DarkGray
+            Write-Host 'You: ' -ForegroundColor Cyan -NoNewline
+            $question = Read-Host
             if ($question -eq '/exit') { break }
-            if ($question -eq '/clear') { $state.messages = @($system); continue }
+            if ($question -eq '/clear') {
+                $state.messages = @($system)
+                Write-Host 'History cleared.' -ForegroundColor DarkGray
+                continue
+            }
             if (-not $question) { continue }
             $beforeTurn = @($state.messages)
             $state.messages += @{ role = 'user'; content = $question }
