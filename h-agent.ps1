@@ -453,11 +453,11 @@ function Format-ByteSize {
 
 function Invoke-TruncateLine {
     param([string]$Line, [int]$MaxChars = 500)
-    if ($null -eq $Line) { return @{ text = ''; wasTruncated = $false } }
+    if ($null -eq $Line) { return @{ text = ''; wasTruncated = $false; was_truncated = $false } }
     if ($Line.Length -le $MaxChars) {
-        return @{ text = $Line; wasTruncated = $false }
+        return @{ text = $Line; wasTruncated = $false; was_truncated = $false }
     }
-    return @{ text = ($Line.Substring(0, $MaxChars) + '... [truncated]'); wasTruncated = $true }
+    return @{ text = ($Line.Substring(0, $MaxChars) + '... [truncated]'); wasTruncated = $true; was_truncated = $true }
 }
 
 function Invoke-TruncateHead {
@@ -467,10 +467,15 @@ function Invoke-TruncateHead {
             content = ''
             truncated = $false
             truncatedBy = $null
+            truncated_by = $null
             totalLines = 0
+            total_lines = 0
             totalBytes = 0
+            total_bytes = 0
             outputLines = 0
+            output_lines = 0
             outputBytes = 0
+            output_bytes = 0
             lastLinePartial = $false
             firstLineExceedsLimit = $false
             maxLines = $MaxLines
@@ -490,10 +495,15 @@ function Invoke-TruncateHead {
             content = $norm
             truncated = $false
             truncatedBy = $null
+            truncated_by = $null
             totalLines = $totalLines
+            total_lines = $totalLines
             totalBytes = $totalBytes
+            total_bytes = $totalBytes
             outputLines = $totalLines
+            output_lines = $totalLines
             outputBytes = $totalBytes
+            output_bytes = $totalBytes
             lastLinePartial = $false
             firstLineExceedsLimit = $false
             maxLines = $MaxLines
@@ -505,10 +515,15 @@ function Invoke-TruncateHead {
             content = ''
             truncated = $true
             truncatedBy = 'bytes'
+            truncated_by = 'bytes'
             totalLines = $totalLines
+            total_lines = $totalLines
             totalBytes = $totalBytes
+            total_bytes = $totalBytes
             outputLines = 0
+            output_lines = 0
             outputBytes = 0
+            output_bytes = 0
             lastLinePartial = $false
             firstLineExceedsLimit = $true
             maxLines = $MaxLines
@@ -536,10 +551,15 @@ function Invoke-TruncateHead {
         content = $outText
         truncated = $true
         truncatedBy = $truncBy
+        truncated_by = $truncBy
         totalLines = $totalLines
+        total_lines = $totalLines
         totalBytes = $totalBytes
+        total_bytes = $totalBytes
         outputLines = $outLines.Count
+        output_lines = $outLines.Count
         outputBytes = $outText.Length
+        output_bytes = $outText.Length
         lastLinePartial = $false
         firstLineExceedsLimit = $false
         maxLines = $MaxLines
@@ -554,10 +574,15 @@ function Invoke-TruncateTail {
             content = ''
             truncated = $false
             truncatedBy = $null
+            truncated_by = $null
             totalLines = 0
+            total_lines = 0
             totalBytes = 0
+            total_bytes = 0
             outputLines = 0
+            output_lines = 0
             outputBytes = 0
+            output_bytes = 0
             lastLinePartial = $false
             firstLineExceedsLimit = $false
             maxLines = $MaxLines
@@ -577,10 +602,15 @@ function Invoke-TruncateTail {
             content = $norm
             truncated = $false
             truncatedBy = $null
+            truncated_by = $null
             totalLines = $totalLines
+            total_lines = $totalLines
             totalBytes = $totalBytes
+            total_bytes = $totalBytes
             outputLines = $totalLines
+            output_lines = $totalLines
             outputBytes = $totalBytes
+            output_bytes = $totalBytes
             lastLinePartial = $false
             firstLineExceedsLimit = $false
             maxLines = $MaxLines
@@ -617,10 +647,15 @@ function Invoke-TruncateTail {
         content = $outText
         truncated = $true
         truncatedBy = $truncBy
+        truncated_by = $truncBy
         totalLines = $totalLines
+        total_lines = $totalLines
         totalBytes = $totalBytes
+        total_bytes = $totalBytes
         outputLines = $outLines.Count
+        output_lines = $outLines.Count
         outputBytes = $outText.Length
+        output_bytes = $outText.Length
         lastLinePartial = $lastPartial
         firstLineExceedsLimit = $false
         maxLines = $MaxLines
@@ -851,7 +886,7 @@ function Get-ObjectPropertyNames {
 }
 
 function Format-EditArguments {
-    param($Arguments)
+    param([Alias('ArgsObj')]$Arguments)
     if ($null -eq $Arguments -or $Arguments -is [string] -or $Arguments -is [ValueType] -or $Arguments -is [array]) {
         return $Arguments
     }
@@ -866,9 +901,8 @@ function Format-EditArguments {
         $rawEdits = $out['edits']
         if ($rawEdits -is [string]) {
             try {
-                $parsed = $rawEdits | ConvertFrom-Json -ErrorAction Stop
-                if ($parsed -is [array]) { $rawEdits = $parsed }
-                elseif ($null -ne $parsed) { $rawEdits = @($parsed) }
+                $parsed = @($rawEdits | ConvertFrom-Json -ErrorAction Stop)
+                if ($parsed.Count -gt 0) { $rawEdits = $parsed }
             }
             catch {}
         }
@@ -1941,7 +1975,11 @@ function Resolve-SkillCommand {
     if (-not $raw) { return $null }
     $body = $raw -replace '(?s)^---\r?\n.*?\r?\n---\r?\n?', ''
     $expanded = Expand-TemplateArgs -Content $body.Trim() -ArgsString $skillArgs
-    return ("<skill name=`"$skillName`" path=`"$($skillInfo.rel_path)`">`n" + $expanded + "`n</skill>")
+    $outXml = "<skill name=`"$skillName`" path=`"$($skillInfo.rel_path)`">`n" + $expanded + "`n</skill>"
+    if ($skillArgs -and ($body -notmatch '\$(?:\d+|@|ARGUMENTS|\{)')) {
+        $outXml += "`n`nUser: $skillArgs"
+    }
+    return $outXml
 }
 
 function Build-SystemPrompt {
@@ -2432,25 +2470,29 @@ function Invoke-SessionResume {
 }
 
 function Invoke-SessionFork {
-    param($State, [string]$SessionDir, [string]$Workspace, [string]$Model, [string]$FromId = '')
+    param($State, [string]$SessionDir, [string]$Workspace = '', [string]$Model = '', [string]$FromId = '', [string]$EntryId = '', [string]$NewName = '')
     Ensure-SessionTree -State $State
+    $effWs = if ($Workspace) { $Workspace } elseif ($State.workspace) { [string]$State.workspace } else { '' }
+    $effMdl = if ($Model) { $Model } elseif ($State.model) { [string]$State.model } else { '' }
+    $effName = if ($NewName) { $NewName } elseif ($State.session_name) { "$($State.session_name) (fork)" } else { '' }
+    $effId = if ($EntryId) { $EntryId } else { $FromId }
     $forkState = @{
         session_id = 'sess-' + (Get-Date -Format 'yyyyMMdd-HHmmss') + '-' + (Get-Random -Minimum 100000 -Maximum 999999)
-        session_name = if ($State.session_name) { "$($State.session_name) (fork)" } else { '' }
+        session_name = $effName
         parent_session = [string]$State.session_id
-        workspace = $Workspace
-        model = $Model
+        workspace = $effWs
+        model = $effMdl
         messages = @($State.messages)
         tree_entries = @($State.tree_entries)
         undo_stack = @()
         last_failed_question = ''
     }
-    if ($FromId) {
-        Switch-SessionBranch -State $forkState -TargetId $FromId | Out-Null
+    if ($effId) {
+        Switch-SessionBranch -State $forkState -TargetId $effId | Out-Null
     }
     $forkFile = Join-Path $SessionDir ($forkState.session_id + '.jsonl')
-    Save-AgentSession -SessionFile $forkFile -State $forkState -Workspace $Workspace -Model $Model -SessionId $forkState.session_id
-    return @{ state = $forkState; session_file = $forkFile }
+    Save-AgentSession -SessionFile $forkFile -State $forkState -Workspace $effWs -Model $effMdl -SessionId $forkState.session_id
+    return @{ state = $forkState; session_file = $forkFile; session_id = $forkState.session_id }
 }
 
 function Export-AgentSessionHtml {
@@ -2539,21 +2581,22 @@ function Get-ContextStats {
 }
 
 function Find-CompactionCutPoint {
-    param([array]$Messages, [int]$KeepRecent = 4, [int]$KeepRecentTokens = 0)
+    param([array]$Messages, [int]$StartIndex = 1, [int]$KeepRecent = 4, [int]$KeepRecentTokens = 0)
+    $startIdx = if ($StartIndex -gt 1) { $StartIndex } else { 1 }
     $validCuts = @()
-    for ($i = 1; $i -lt $Messages.Count; $i++) {
+    for ($i = $startIdx; $i -lt $Messages.Count; $i++) {
         if ($Messages[$i].role -ne 'tool') {
             $validCuts += $i
         }
     }
     if ($validCuts.Count -eq 0) {
-        return @{ cut_index = 1; turn_start_index = -1; is_split_turn = $false }
+        return @{ cut_index = $startIdx; first_kept_index = $startIdx; turn_start_index = -1; is_split_turn = $false }
     }
     $targetCut = $Messages.Count - $KeepRecent
     if ($KeepRecentTokens -gt 0) {
         $accTokens = 0
         $tokenCut = $validCuts[0]
-        for ($i = $Messages.Count - 1; $i -ge 1; $i--) {
+        for ($i = $Messages.Count - 1; $i -ge $startIdx; $i--) {
             $accTokens += (Get-MessageEstimatedTokens -Message $Messages[$i])
             if ($accTokens -ge $KeepRecentTokens) {
                 $foundCand = $null
@@ -2566,22 +2609,22 @@ function Find-CompactionCutPoint {
         }
         $targetCut = $tokenCut
     }
-    if ($targetCut -lt 1) { $targetCut = 1 }
+    if ($targetCut -lt $startIdx) { $targetCut = $startIdx }
     if ($targetCut -ge $Messages.Count) { $targetCut = $Messages.Count - 1 }
-    while ($targetCut -gt 1 -and $Messages[$targetCut].role -eq 'tool') {
+    while ($targetCut -gt $startIdx -and $Messages[$targetCut].role -eq 'tool') {
         $targetCut--
     }
-    if ($targetCut -le 1) {
+    if ($targetCut -le $startIdx) {
         $targetCut = $Messages.Count - $KeepRecent
-        if ($targetCut -lt 1) { $targetCut = 1 }
+        if ($targetCut -lt $startIdx) { $targetCut = $startIdx }
         while ($targetCut -lt ($Messages.Count - 1) -and $Messages[$targetCut].role -eq 'tool') {
             $targetCut++
         }
     }
     $isSplit = $false
     $turnStart = -1
-    if ($targetCut -gt 1 -and $Messages[$targetCut].role -eq 'assistant') {
-        for ($j = $targetCut - 1; $j -ge 1; $j--) {
+    if ($targetCut -gt $startIdx -and $Messages[$targetCut].role -eq 'assistant') {
+        for ($j = $targetCut - 1; $j -ge $startIdx; $j--) {
             if ($Messages[$j].role -eq 'user') {
                 $turnStart = $j
                 $isSplit = $true
@@ -2591,6 +2634,7 @@ function Find-CompactionCutPoint {
     }
     return @{
         cut_index = $targetCut
+        first_kept_index = $targetCut
         turn_start_index = $turnStart
         is_split_turn = $isSplit
     }

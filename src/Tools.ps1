@@ -65,11 +65,11 @@ function Format-ByteSize {
 
 function Invoke-TruncateLine {
     param([string]$Line, [int]$MaxChars = 500)
-    if ($null -eq $Line) { return @{ text = ''; wasTruncated = $false } }
+    if ($null -eq $Line) { return @{ text = ''; wasTruncated = $false; was_truncated = $false } }
     if ($Line.Length -le $MaxChars) {
-        return @{ text = $Line; wasTruncated = $false }
+        return @{ text = $Line; wasTruncated = $false; was_truncated = $false }
     }
-    return @{ text = ($Line.Substring(0, $MaxChars) + '... [truncated]'); wasTruncated = $true }
+    return @{ text = ($Line.Substring(0, $MaxChars) + '... [truncated]'); wasTruncated = $true; was_truncated = $true }
 }
 
 function Invoke-TruncateHead {
@@ -79,10 +79,15 @@ function Invoke-TruncateHead {
             content = ''
             truncated = $false
             truncatedBy = $null
+            truncated_by = $null
             totalLines = 0
+            total_lines = 0
             totalBytes = 0
+            total_bytes = 0
             outputLines = 0
+            output_lines = 0
             outputBytes = 0
+            output_bytes = 0
             lastLinePartial = $false
             firstLineExceedsLimit = $false
             maxLines = $MaxLines
@@ -102,10 +107,15 @@ function Invoke-TruncateHead {
             content = $norm
             truncated = $false
             truncatedBy = $null
+            truncated_by = $null
             totalLines = $totalLines
+            total_lines = $totalLines
             totalBytes = $totalBytes
+            total_bytes = $totalBytes
             outputLines = $totalLines
+            output_lines = $totalLines
             outputBytes = $totalBytes
+            output_bytes = $totalBytes
             lastLinePartial = $false
             firstLineExceedsLimit = $false
             maxLines = $MaxLines
@@ -117,10 +127,15 @@ function Invoke-TruncateHead {
             content = ''
             truncated = $true
             truncatedBy = 'bytes'
+            truncated_by = 'bytes'
             totalLines = $totalLines
+            total_lines = $totalLines
             totalBytes = $totalBytes
+            total_bytes = $totalBytes
             outputLines = 0
+            output_lines = 0
             outputBytes = 0
+            output_bytes = 0
             lastLinePartial = $false
             firstLineExceedsLimit = $true
             maxLines = $MaxLines
@@ -148,10 +163,15 @@ function Invoke-TruncateHead {
         content = $outText
         truncated = $true
         truncatedBy = $truncBy
+        truncated_by = $truncBy
         totalLines = $totalLines
+        total_lines = $totalLines
         totalBytes = $totalBytes
+        total_bytes = $totalBytes
         outputLines = $outLines.Count
+        output_lines = $outLines.Count
         outputBytes = $outText.Length
+        output_bytes = $outText.Length
         lastLinePartial = $false
         firstLineExceedsLimit = $false
         maxLines = $MaxLines
@@ -166,10 +186,15 @@ function Invoke-TruncateTail {
             content = ''
             truncated = $false
             truncatedBy = $null
+            truncated_by = $null
             totalLines = 0
+            total_lines = 0
             totalBytes = 0
+            total_bytes = 0
             outputLines = 0
+            output_lines = 0
             outputBytes = 0
+            output_bytes = 0
             lastLinePartial = $false
             firstLineExceedsLimit = $false
             maxLines = $MaxLines
@@ -189,10 +214,15 @@ function Invoke-TruncateTail {
             content = $norm
             truncated = $false
             truncatedBy = $null
+            truncated_by = $null
             totalLines = $totalLines
+            total_lines = $totalLines
             totalBytes = $totalBytes
+            total_bytes = $totalBytes
             outputLines = $totalLines
+            output_lines = $totalLines
             outputBytes = $totalBytes
+            output_bytes = $totalBytes
             lastLinePartial = $false
             firstLineExceedsLimit = $false
             maxLines = $MaxLines
@@ -229,10 +259,15 @@ function Invoke-TruncateTail {
         content = $outText
         truncated = $true
         truncatedBy = $truncBy
+        truncated_by = $truncBy
         totalLines = $totalLines
+        total_lines = $totalLines
         totalBytes = $totalBytes
+        total_bytes = $totalBytes
         outputLines = $outLines.Count
+        output_lines = $outLines.Count
         outputBytes = $outText.Length
+        output_bytes = $outText.Length
         lastLinePartial = $lastPartial
         firstLineExceedsLimit = $false
         maxLines = $MaxLines
@@ -463,7 +498,7 @@ function Get-ObjectPropertyNames {
 }
 
 function Format-EditArguments {
-    param($Arguments)
+    param([Alias('ArgsObj')]$Arguments)
     if ($null -eq $Arguments -or $Arguments -is [string] -or $Arguments -is [ValueType] -or $Arguments -is [array]) {
         return $Arguments
     }
@@ -478,9 +513,8 @@ function Format-EditArguments {
         $rawEdits = $out['edits']
         if ($rawEdits -is [string]) {
             try {
-                $parsed = $rawEdits | ConvertFrom-Json -ErrorAction Stop
-                if ($parsed -is [array]) { $rawEdits = $parsed }
-                elseif ($null -ne $parsed) { $rawEdits = @($parsed) }
+                $parsed = @($rawEdits | ConvertFrom-Json -ErrorAction Stop)
+                if ($parsed.Count -gt 0) { $rawEdits = $parsed }
             }
             catch {}
         }
