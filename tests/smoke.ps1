@@ -175,7 +175,14 @@ try {
     Remove-Item -LiteralPath $result.backup -Force
     $errText = Format-AgentError -ErrorRecord @{ Exception = @{ Message = 'HTTP 400' }; ErrorDetails = @{ Message = '{"error":{"message":"Bad model"}}' } }
     Assert-True ($errText -eq 'HTTP 400 (Bad model)') 'ConstrainedLanguage error formatting failed.'
-    Write-AgentReply -Content "# Title`n- item`n``````sql`nSELECT 1;`n``````"
+    $tableLines = @(Format-MarkdownTable -Lines @('| Col | Val |', '|---|---|', '| a | **bold** |') -Indent '')
+    $plainTable = @($tableLines | ForEach-Object { $_ -replace '\x1b\[[0-9;]*m', '' })
+    Assert-True ($plainTable[0] -eq '| Col | Val  |') 'Table header alignment failed.'
+    Assert-True ($plainTable[1] -eq '|-----+------|') 'Table separator alignment failed.'
+    Assert-True ($plainTable[2] -eq '| a   | bold |') 'Table cell markdown stripping or padding failed.'
+    $inlineOut = Format-MarkdownInline -Text 'Hello **world** and `SELECT *`'
+    Assert-True ($inlineOut.Contains('38;2;231;138;78') -and (-not $inlineOut.Contains('**')) -and (-not $inlineOut.Contains('`'))) 'Gruvbox Material inline markdown formatting failed.'
+    Write-AgentReply -Content "# Title`n## Subtitle`n> quote`n- **item** with ``code```n| A | B |`n|---|---|`n| 1 | 2 |`n``````sql`nSELECT 1;`n``````"
     Save-AgentConfig -Path $configPath -Config $loadedConfig
     $constrainedConfig = Read-AgentConfig -Path $configPath
     Assert-True ($constrainedConfig.H_AGENT_API_KEY -eq $loadedConfig.H_AGENT_API_KEY) 'ConstrainedLanguage config roundtrip failed.'
