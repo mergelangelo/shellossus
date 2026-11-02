@@ -182,6 +182,9 @@ function Invoke-AgentTurn {
     param($State, [string]$Endpoint, [string]$ModelId, [string]$ApiKey, [string]$Root, [int]$Steps = 50, [int]$MaxRepeatCalls = 0)
     $overflowRetried = $false
     $script:ActiveModelId = $ModelId
+    $script:ActiveEndpoint = $Endpoint
+    $script:ActiveApiKey = $ApiKey
+    $script:ActiveState = $State
     if ($Root) { $script:ActiveWorkspace = $Root }
     $State.step_limit_reached = $false
     $State.loop_detected = $false
@@ -355,6 +358,15 @@ function Invoke-AgentTurn {
                 try {
                     $parsedOut = $output | ConvertFrom-Json -ErrorAction Stop
                     if ($parsedOut.status -in @('written', 'executed', 'timed_out')) {
+                        $mutationEpoch++
+                    }
+                }
+                catch {}
+            }
+            elseif ($canonToolName -eq 'run_agent') {
+                try {
+                    $parsedOut = $output | ConvertFrom-Json -ErrorAction Stop
+                    if ($parsedOut.modified_files -and @($parsedOut.modified_files).Count -gt 0) {
                         $mutationEpoch++
                     }
                 }
@@ -549,7 +561,7 @@ if (-not $LibraryOnly) {
         Write-Host ($script:Gm.OscInit + $script:Gm.BoldGreen + "shellossus | model: $Model | permission: $($script:AgentPermission) | workspace: $rootPath" + $script:Gm.Reset)
         if (Get-AgentsContext -Root $rootPath -ConfigDir $configDir) { Write-Host ($script:Gm.Aqua + 'Loaded AGENTS.md/CLAUDE.md instructions.' + $script:Gm.Reset) }
         if (Get-SkillsCatalog -Root $rootPath -ConfigDir $configDir) { Write-Host ($script:Gm.Aqua + 'Loaded skills catalog.' + $script:Gm.Reset) }
-        Write-Host ($script:Gm.Grey1 + 'Commands: /help /status /session /permission /reasoning /continue /undo /retry /compact /tree /fork /export /copy /reload /model /sessions /resume /save /new /exit' + $script:Gm.Reset)
+        Write-Host ($script:Gm.Grey1 + 'Commands: /help /status /session /permission /reasoning /agents /continue /undo /retry /compact /tree /fork /export /copy /reload /model /sessions /resume /save /new /exit' + $script:Gm.Reset)
         while ($true) {
             Write-Host ("`n" + $script:Gm.Grey0 + ('-' * 40) + $script:Gm.Reset)
             Write-Host ($script:Gm.BoldBlue + 'You: ' + $script:Gm.Fg) -NoNewline
@@ -583,6 +595,7 @@ if (-not $LibraryOnly) {
                 Write-Host ($script:Gm.Aqua + '  /permission <mode>           ' + $script:Gm.Fg + 'Set mode: ReadOnly | Ask | AutoEdit (no-ask writes) | Auto' + $script:Gm.Reset)
                 Write-Host ($script:Gm.Aqua + '  /diagnostics [on|off]        ' + $script:Gm.Fg + 'Show or toggle pre-request capability/tool diagnostics' + $script:Gm.Reset)
                 Write-Host ($script:Gm.Aqua + '  /reasoning (/thinking) <arg> ' + $script:Gm.Fg + 'View: compact | full | hide; Effort: low | medium | high | off' + $script:Gm.Reset)
+                Write-Host ($script:Gm.Aqua + '  /agents                      ' + $script:Gm.Fg + 'List built-in and custom subagent roles (recon, audit, craft, ...)' + $script:Gm.Reset)
                 Write-Host ($script:Gm.Aqua + '  /continue [steps]            ' + $script:Gm.Fg + 'Continue after hitting step limit (or continue last response)' + $script:Gm.Reset)
                 Write-Host ($script:Gm.Aqua + '  /undo                        ' + $script:Gm.Fg + 'Revert last turn AND restore modified/created files on disk' + $script:Gm.Reset)
                 Write-Host ($script:Gm.Aqua + '  /retry                       ' + $script:Gm.Fg + 'Retry the last failed user request' + $script:Gm.Reset)
@@ -593,7 +606,7 @@ if (-not $LibraryOnly) {
                 Write-Host ($script:Gm.Aqua + '  /export [path.html|.jsonl]   ' + $script:Gm.Fg + 'Export session to standalone HTML (or JSONL)' + $script:Gm.Reset)
                 Write-Host ($script:Gm.Aqua + '  /import <path.jsonl>         ' + $script:Gm.Fg + 'Import and resume a JSONL session file' + $script:Gm.Reset)
                 Write-Host ($script:Gm.Aqua + '  /copy                        ' + $script:Gm.Fg + 'Copy the last assistant response to clipboard' + $script:Gm.Reset)
-                Write-Host ($script:Gm.Aqua + '  /reload                      ' + $script:Gm.Fg + 'Reload AGENTS.md, CLAUDE.md, SYSTEM.md, skills, and prompt templates' + $script:Gm.Reset)
+                Write-Host ($script:Gm.Aqua + '  /reload                      ' + $script:Gm.Fg + 'Reload AGENTS.md, CLAUDE.md, SYSTEM.md, skills, agents, and templates' + $script:Gm.Reset)
                 Write-Host ($script:Gm.Aqua + '  /hotkeys                     ' + $script:Gm.Fg + 'Display input shortcuts and syntax reference' + $script:Gm.Reset)
                 Write-Host ($script:Gm.Aqua + '  /model <id>                  ' + $script:Gm.Fg + 'Switch active model ID for this session' + $script:Gm.Reset)
                 Write-Host ($script:Gm.Aqua + '  /sessions                    ' + $script:Gm.Fg + 'List saved sessions in ~/.shellossus/sessions' + $script:Gm.Reset)
@@ -601,16 +614,28 @@ if (-not $LibraryOnly) {
                 Write-Host ($script:Gm.Aqua + '  /save [name]                 ' + $script:Gm.Fg + 'Save conversation to current or named session file' + $script:Gm.Reset)
                 Write-Host ($script:Gm.Aqua + '  /new (/clear)                ' + $script:Gm.Fg + 'Start a fresh session while keeping old session files' + $script:Gm.Reset)
                 Write-Host ($script:Gm.Aqua + '  /exit (/quit)                ' + $script:Gm.Fg + 'Exit shellossus' + $script:Gm.Reset)
+                Write-Host ($script:Gm.Aqua + '  /agent:<role> <task>         ' + $script:Gm.Fg + 'Delegate a task to a subagent role (recon, audit, craft, ...)' + $script:Gm.Reset)
                 Write-Host ($script:Gm.Aqua + '  /skill:<name> [args]         ' + $script:Gm.Fg + 'Invoke a skill directly with arguments' + $script:Gm.Reset)
                 Write-Host ($script:Gm.Aqua + '  /<template> [args]           ' + $script:Gm.Fg + 'Run a custom Markdown prompt from .shellossus/prompts/<name>.md' + $script:Gm.Reset)
                 Write-Host ($script:Gm.Aqua + '  @path/to/file                ' + $script:Gm.Fg + 'Inline-attach a workspace file into your prompt' + $script:Gm.Reset)
                 Write-Host ($script:Gm.Aqua + '  !command / !!command         ' + $script:Gm.Fg + 'Run shell command (! adds to context, !! local only)' + $script:Gm.Reset)
                 continue
             }
+            if ($trimmedQ -eq '/agents') {
+                $null = Get-AgentRolesCatalog -Root $rootPath -ConfigDir $configDir
+                foreach ($rKey in @($script:AgentRolesByName.Keys | Sort-Object)) {
+                    $rObj = $script:AgentRolesByName[$rKey]
+                    $srcTag = if ($rObj.builtin) { 'built-in' } else { $rObj.rel_path }
+                    Write-Host ($script:Gm.Aqua + ("  {0,-12} " -f $rObj.name) + $script:Gm.Yellow + ("[{0}; {1}] " -f $rObj.permission, $srcTag) + $script:Gm.Fg + $rObj.description + $script:Gm.Reset)
+                }
+                Write-Host ($script:Gm.Grey1 + '  (Invoke via /agent:<role> <task> or let the model call run_agent)' + $script:Gm.Reset)
+                continue
+            }
             if ($trimmedQ -eq '/hotkeys') {
                 Write-Host ($script:Gm.Aqua + '  @path/to/file     ' + $script:Gm.Fg + 'Attach file contents inline into prompt' + $script:Gm.Reset)
                 Write-Host ($script:Gm.Aqua + '  !cmd              ' + $script:Gm.Fg + 'Execute shell command and append output to conversation context' + $script:Gm.Reset)
                 Write-Host ($script:Gm.Aqua + '  !!cmd             ' + $script:Gm.Fg + 'Execute shell command locally without adding to context' + $script:Gm.Reset)
+                Write-Host ($script:Gm.Aqua + '  /agent:<role>     ' + $script:Gm.Fg + 'Delegate task to subagent role (recon, audit, craft, custom)' + $script:Gm.Reset)
                 Write-Host ($script:Gm.Aqua + '  /skill:<name>     ' + $script:Gm.Fg + 'Expand a skill SKILL.md into the prompt' + $script:Gm.Reset)
                 Write-Host ($script:Gm.Aqua + '  /<template>       ' + $script:Gm.Fg + 'Expand a prompt template with $1, $2, $@, ${1:-default}' + $script:Gm.Reset)
                 Write-Host ($script:Gm.Aqua + '  Ctrl+C            ' + $script:Gm.Fg + 'Interrupt running command or exit interactive prompt' + $script:Gm.Reset)

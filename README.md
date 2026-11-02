@@ -9,7 +9,8 @@ Drop [`shellossus.ps1`](shellossus.ps1) onto any machine and connect to any Open
 
 | Capability | What It Does |
 | --- | --- |
-| **7 Built-in Tools** | `list_files`, `read_file` (line & character pagination), `find_files` (path globs + `.gitignore`), `grep_files` (regex/literal, `include` filter, `context_lines`, file-offset pagination), `write_file`, `edit_file` (fuzzy whitespace/quote matching + atomic batch `edits[]`), and `run_command` (timeout, streaming disk logs, API key scrubbing) |
+| **8 Built-in Tools** | `list_files`, `read_file` (line & character pagination), `find_files` (path globs + `.gitignore`), `grep_files` (regex/literal, `include` filter, `context_lines`, file-offset pagination), `write_file`, `edit_file` (fuzzy whitespace/quote matching + atomic batch `edits[]`), `run_command` (timeout, streaming disk logs, API key scrubbing), and `run_agent` (single, `parallel[]` fan-out, and `pipeline[]` subagents with `clean`/`fork` context) |
+| **Subagent Delegation** | Built-in roles (`recon`, `audit`, `craft`) + custom `.shellossus/agents/*.md` profiles, `/agents` catalog, `/agent:<role> <task>` shortcut, and unified parent `/undo` across subagent file edits |
 | **4 Permission Modes** | `ReadOnly` (reads/search only), `Ask` *(default: prompts `WRITE` / `RUN`)*, `AutoEdit` (auto-approves file writes with backup; asks `RUN`), `Auto` (auto-approves writes and commands) |
 | **Transactional Disk `/undo`** | Staged writes via temporary files with verification, colored diff previews, automatic backups, manual-edit conflict detection, and full multi-step disk rollback via `/undo` |
 | **Session Tree, Fork & Export** | Workspace-scoped `.jsonl` sessions (`-Continue`, `/sessions`, `/resume`), branch navigation (`/tree`), session forking (`/fork`), and standalone HTML export (`/export`) |
@@ -82,6 +83,8 @@ shellossus -Prompt "Explain @src/Tools.ps1" # Single-shot non-interactive mode
 | `/resume <num\|name>` | Load a saved session |
 | `/save [name]` | Save current session (optionally under a custom filename) |
 | `/new` (`/clear`) | Start a fresh session |
+| `/agents` | List built-in (`recon`, `audit`, `craft`) and custom subagent roles |
+| `/agent:<role> <task>` | Delegate `<task>` to a specific subagent role |
 | `/skill:<name> [args]` | Invoke a skill directly with arguments |
 | `/<template> [args]` | Expand a prompt template from `.shellossus/prompts/<name>.md` (`$1`, `$@`, `${1:-default}`, `${@:2}`) |
 | `@path/to/file` | Attach a workspace file inline into your prompt |

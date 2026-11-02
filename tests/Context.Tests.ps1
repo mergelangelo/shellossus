@@ -223,7 +223,7 @@ try {
     # Dynamic <capabilities> block in Build-SystemPrompt and Sync-AgentCapabilities across mode switches without notice bloat.
     $script:AgentPermission = 'ReadOnly'
     $roSys = Build-SystemPrompt -Root $workspacePath -ConfigDir ''
-    Assert-True ($roSys.Contains('Permission mode: ReadOnly.') -and $roSys.Contains('Available tools: list_files, read_file, find_files, grep_files.') -and $roSys.Contains('File modification and shell execution are unavailable.')) 'Build-SystemPrompt in ReadOnly mode did not render expected dynamic <capabilities> block.'
+    Assert-True ($roSys.Contains('Permission mode: ReadOnly.') -and $roSys.Contains('Available tools: list_files, read_file, find_files, grep_files, run_agent.') -and $roSys.Contains('File modification and shell execution are unavailable.')) 'Build-SystemPrompt in ReadOnly mode did not render expected dynamic <capabilities> block.'
     Assert-True ($roSys.Contains('Environment: OS=') -and $roSys.Contains('Command shell (run_command):') -and $roSys.Contains('Get-Command') -and $roSys.Contains($workspacePath)) 'Build-SystemPrompt missing environment, run_command shell, workspace, or Get-Command guidance.'
     Assert-True (-not $roSys.Contains('Available tools: list_files, read_file, find_files, grep_files, write_file')) 'ReadOnly system prompt listed write_file as available.'
 
@@ -247,6 +247,23 @@ try {
     $notices2 = @($syncState.messages | Where-Object { $_.role -eq 'user' -and ([string]$_.content).StartsWith('[Capability State Change]') })
     Assert-True ($notices2.Count -eq 1 -and $sync2.prompt_updated -and $sync2.consistent -and $syncState.messages[0].content.Contains('Permission mode: Ask.') -and $notices2[0].content.Contains('Permission mode is now Ask.')) 'Repeated permission changes accumulated multiple capability notices or failed to update to Ask.'
     Assert-True ($compTreeState.messages[0].content.Contains('<capabilities>') -and $compTreeState.messages[0].content.Contains('Get-Command') -and $resumedCompState.messages[0].content.Contains('<capabilities>')) 'Capabilities and environment block was not preserved across compaction and session resume.'
+
+    # Subagent roles catalog (.shellossus/agents/*.md), /agent:<role> command expansion, and compaction tracking of subagent files.
+    $agentsDir = Join-Path $dotH 'agents'
+    New-Item -ItemType Directory -Path $agentsDir -Force | Out-Null
+    Set-Content -LiteralPath (Join-Path $agentsDir 'sql-auditor.md') -Value "---`nname: sql-auditor`ndescription: Audit SQL queries for locks`ntools: read_file, grep_files`n---`nFocus on `$1 lock contention." -Encoding UTF8
+    $rolesCat = Get-AgentRolesCatalog -Root $workspacePath -ConfigDir $globalCfgDir
+    Assert-True ($rolesCat.Contains('<available_agents>') -and $rolesCat.Contains('sql-auditor')) 'Get-AgentRolesCatalog did not load custom agent role.'
+    $resolvedSqlAuditor = Resolve-AgentRole -Name 'sql-auditor' -Root $workspacePath -ConfigDir $globalCfgDir
+    Assert-True ($resolvedSqlAuditor.permission -eq 'ReadOnly' -and $resolvedSqlAuditor.tools.Count -eq 2) 'Custom role with read-only tools did not auto-infer ReadOnly permission.'
+    Assert-True ((Resolve-AgentRole -Name 'scout' -Root $workspacePath).name -eq 'recon' -and (Resolve-AgentRole -Name 'reviewer' -Root $workspacePath).name -eq 'audit' -and (Resolve-AgentRole -Name 'worker' -Root $workspacePath).name -eq 'craft') 'Built-in role alias resolution failed.'
+    $agentCmdOut = Resolve-PromptTemplate -Root $workspacePath -ConfigDir $globalCfgDir -InputText '/agent:sql-auditor orders_table'
+    Assert-True ($agentCmdOut.Contains('<agent_role name="sql-auditor" permission="ReadOnly">') -and $agentCmdOut.Contains('Focus on orders_table lock contention.') -and $agentCmdOut.Contains('run_agent with role="sql-auditor"')) '/agent:<role> command expansion failed.'
+    $subOps = Get-CompactionFileOperations -Messages @(
+        @{ role = 'assistant'; content = ''; tool_calls = @(@{ id = 'sub1'; type = 'function'; function = @{ name = 'run_agent'; arguments = '{"role":"craft","prompt":"fix"}' } }) },
+        @{ role = 'tool'; tool_call_id = 'sub1'; content = '{"status":"completed","read_files":["sub-read.sql","sub-both.sql"],"modified_files":["sub-both.sql","sub-mod.sql"]}' }
+    )
+    Assert-True (($subOps.read_files -contains 'sub-read.sql') -and ($subOps.read_files -notcontains 'sub-both.sql') -and ($subOps.modified_files -contains 'sub-both.sql') -and ($subOps.modified_files -contains 'sub-mod.sql')) 'Get-CompactionFileOperations did not extract read_files and modified_files from run_agent tool result.'
 }
 finally {
     Remove-TestEnvironment -Env $envData

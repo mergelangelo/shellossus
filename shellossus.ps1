@@ -435,6 +435,11 @@ $script:ActiveModelId = ''
 $script:Diagnostics = $false
 $script:MaxRepeatToolCalls = 3
 $script:ActiveWorkspace = ''
+$script:ActiveEndpoint = ''
+$script:ActiveApiKey = ''
+$script:ActiveState = $null
+$script:SubagentDepth = 0
+$script:MaxSubagentDepth = 1
 
 function Resolve-ToolCanonicalName {
     param([string]$Name)
@@ -449,6 +454,10 @@ function Resolve-ToolCanonicalName {
         'edit' { return 'edit_file' }
         'bash' { return 'run_command' }
         'powershell' { return 'run_command' }
+        'subagent' { return 'run_agent' }
+        'delegate' { return 'run_agent' }
+        'delegate_task' { return 'run_agent' }
+        'spawn_agent' { return 'run_agent' }
         default { return $lower }
     }
 }
@@ -457,6 +466,9 @@ function Test-IsToolEnabled {
     param([string]$Name)
     $canon = Resolve-ToolCanonicalName -Name $Name
     if ($script:NoTools) { return $false }
+    if ($canon -eq 'run_agent' -and $script:SubagentDepth -ge $script:MaxSubagentDepth) {
+        return $false
+    }
     if ($script:AgentPermission -eq 'ReadOnly' -and $canon -in @('write_file', 'edit_file', 'run_command')) {
         return $false
     }
@@ -1154,6 +1166,51 @@ function Get-AgentCapabilities {
             }
         }
     }
+    if (Test-IsToolEnabled -Name 'run_agent') {
+        $toolNames += 'run_agent'
+        $tools += @{
+            type = 'function'
+            function = @{
+                name = 'run_agent'
+                description = 'Delegate a task, parallel fan-out, or sequential pipeline to isolated subagents (roles: recon [ReadOnly], audit [ReadOnly], craft [inherits permission]). Keeps main context clean.'
+                parameters = @{
+                    type = 'object'
+                    properties = @{
+                        role = @{ type = 'string'; description = 'Optional subagent role: recon (ReadOnly search), audit (ReadOnly review), craft (inherits permission), or custom role name.' }
+                        prompt = @{ type = 'string'; description = 'Single-task instruction for the subagent (mutually exclusive with parallel and pipeline).' }
+                        context = @{ type = 'string'; description = 'Optional context mode for single/pipeline tasks: clean (default, fresh context) or fork (clones parent conversation history).' }
+                        max_steps = @{ type = 'integer'; description = 'Optional step budget per subagent run (1..50, default 15).' }
+                        parallel = @{
+                            type = 'array'
+                            description = 'Concurrent ReadOnly fan-out tasks (1..8 items of {role, prompt}).'
+                            items = @{
+                                type = 'object'
+                                properties = @{
+                                    role = @{ type = 'string' }
+                                    prompt = @{ type = 'string' }
+                                }
+                                required = @('prompt')
+                            }
+                        }
+                        pipeline = @{
+                            type = 'array'
+                            description = 'Sequential pipeline steps (1..8 items of {role, prompt, context}); use {previous} or $PREVIOUS in prompt to reference prior step output.'
+                            items = @{
+                                type = 'object'
+                                properties = @{
+                                    role = @{ type = 'string' }
+                                    prompt = @{ type = 'string' }
+                                    context = @{ type = 'string' }
+                                }
+                                required = @('prompt')
+                            }
+                        }
+                    }
+                    required = @()
+                }
+            }
+        }
+    }
     $canRead = [bool]($toolNames | Where-Object { $_ -in @('list_files', 'read_file', 'find_files', 'grep_files') })
     $canWrite = [bool]($toolNames | Where-Object { $_ -in @('write_file', 'edit_file') })
     $canExec = ($toolNames -contains 'run_command')
@@ -1237,6 +1294,63 @@ function Format-EditArguments {
     return $out
 }
 
+function Format-RunAgentArguments {
+    param($Arguments, $ArgsObj = $null)
+    if ($null -eq $Arguments -and $null -ne $ArgsObj) { $Arguments = $ArgsObj }
+    if ($null -eq $Arguments -or $Arguments -is [string] -or $Arguments -is [ValueType] -or $Arguments -is [array]) {
+        return $Arguments
+    }
+    $props = @(Get-ObjectPropertyNames -InputObject $Arguments)
+    $out = @{}
+    foreach ($p in $props) {
+        if ($p -eq 'task' -and ($props -notcontains 'prompt')) { $out['prompt'] = $Arguments.$p }
+        elseif ($p -eq 'agent' -and ($props -notcontains 'role')) { $out['role'] = $Arguments.$p }
+        elseif ($p -eq 'tasks' -and ($props -notcontains 'parallel')) { $out['parallel'] = $Arguments.$p }
+        elseif (($p -eq 'chain' -or $p -eq 'steps') -and ($props -notcontains 'pipeline')) { $out['pipeline'] = $Arguments.$p }
+        elseif ($p -eq 'maxSteps' -and ($props -notcontains 'max_steps')) { $out['max_steps'] = $Arguments.$p }
+        else { $out[$p] = $Arguments.$p }
+    }
+    foreach ($arrField in @('parallel', 'pipeline')) {
+        if ($out.ContainsKey($arrField) -and $null -ne $out[$arrField]) {
+            $rawArr = $out[$arrField]
+            if ($rawArr -is [string]) {
+                try {
+                    $parsed = $rawArr | ConvertFrom-Json -ErrorAction Stop
+                    if ($parsed -is [array]) { $rawArr = $parsed }
+                    elseif ($null -ne $parsed) { $rawArr = @($parsed) }
+                }
+                catch {}
+            }
+            elseif ($rawArr -isnot [array] -and $rawArr -isnot [ValueType]) {
+                $itemProps = @(Get-ObjectPropertyNames -InputObject $rawArr)
+                if ($itemProps -contains 'prompt' -or $itemProps -contains 'task') {
+                    $rawArr = @($rawArr)
+                }
+            }
+            if ($rawArr -is [array]) {
+                $normArr = @()
+                foreach ($item in $rawArr) {
+                    if ($null -ne $item -and $item -isnot [string] -and $item -isnot [ValueType] -and $item -isnot [array]) {
+                        $ip = @(Get-ObjectPropertyNames -InputObject $item)
+                        $normItem = @{}
+                        foreach ($k in $ip) {
+                            if ($k -eq 'task' -and ($ip -notcontains 'prompt')) { $normItem['prompt'] = $item.$k }
+                            elseif ($k -eq 'agent' -and ($ip -notcontains 'role')) { $normItem['role'] = $item.$k }
+                            else { $normItem[$k] = $item.$k }
+                        }
+                        $normArr += $normItem
+                    }
+                    else {
+                        $normArr += $item
+                    }
+                }
+                $out[$arrField] = $normArr
+            }
+        }
+    }
+    return $out
+}
+
 function Test-AgentToolArguments {
     param([string]$Name, $Arguments)
     if ($null -eq $Arguments -or $Arguments -is [string] -or $Arguments -is [ValueType] -or $Arguments -is [array]) {
@@ -1270,6 +1384,10 @@ function Test-AgentToolArguments {
         run_command = @{
             required = @('command')
             types = @{ command = 'string'; timeout_sec = 'integer' }
+        }
+        run_agent = @{
+            required = @()
+            types = @{ role = 'string'; prompt = 'string'; context = 'string'; max_steps = 'integer'; parallel = 'array'; pipeline = 'array' }
         }
     }
     $schema = $schemas[$Name]
@@ -1330,6 +1448,85 @@ function Test-AgentToolArguments {
         else {
             if ($propNames -notcontains 'old_text' -or $propNames -notcontains 'new_text' -or $Arguments.old_text -isnot [string] -or -not $Arguments.old_text -or $Arguments.new_text -isnot [string]) {
                 throw 'Expected nonempty old_text and string new_text.'
+            }
+        }
+    }
+    if ($Name -eq 'run_agent') {
+        $hasPrompt = ($propNames -contains 'prompt' -and $null -ne $Arguments.prompt)
+        $hasParallel = ($propNames -contains 'parallel' -and $null -ne $Arguments.parallel)
+        $hasPipeline = ($propNames -contains 'pipeline' -and $null -ne $Arguments.pipeline)
+        $modeCount = ($(if ($hasPrompt) { 1 } else { 0 }) + $(if ($hasParallel) { 1 } else { 0 }) + $(if ($hasPipeline) { 1 } else { 0 }))
+        if ($modeCount -eq 0) {
+            throw 'run_agent requires one of: prompt, parallel[], or pipeline[].'
+        }
+        if ($modeCount -gt 1) {
+            throw 'Provide only one execution mode: prompt, parallel[], or pipeline[].'
+        }
+        if ($propNames -contains 'context' -and $null -ne $Arguments.context) {
+            if ($Arguments.context -notin @('clean', 'fork')) {
+                throw "Argument 'context' must be 'clean' or 'fork'."
+            }
+            if ($hasParallel -and $Arguments.context -eq 'fork') {
+                throw "Argument 'context' cannot be 'fork' when using parallel[]."
+            }
+        }
+        if ($propNames -contains 'max_steps' -and $null -ne $Arguments.max_steps) {
+            if ($Arguments.max_steps -lt 1 -or $Arguments.max_steps -gt 50) {
+                throw 'max_steps must be between 1 and 50.'
+            }
+        }
+        if ($hasPrompt) {
+            if (-not $Arguments.prompt.Trim()) {
+                throw 'prompt must be a nonempty string.'
+            }
+        }
+        if ($hasParallel) {
+            if ($Arguments.parallel.Count -lt 1 -or $Arguments.parallel.Count -gt 8) {
+                throw 'parallel[] must contain between 1 and 8 tasks.'
+            }
+            foreach ($pt in $Arguments.parallel) {
+                if ($null -eq $pt -or $pt -is [string] -or $pt -is [ValueType] -or $pt -is [array]) {
+                    throw 'Each task in parallel[] must be an object.'
+                }
+                $ptProps = @(Get-ObjectPropertyNames -InputObject $pt)
+                foreach ($pp in $ptProps) {
+                    if ($pp -notin @('role', 'prompt')) {
+                        throw "Unknown property '$pp' in parallel[] item."
+                    }
+                }
+                if ($ptProps -notcontains 'prompt' -or $pt.prompt -isnot [string] -or -not $pt.prompt.Trim()) {
+                    throw 'Each task in parallel[] must have a nonempty string prompt.'
+                }
+                if ($ptProps -contains 'role' -and $null -ne $pt.role -and $pt.role -isnot [string]) {
+                    throw "Property 'role' in parallel[] item must be a string."
+                }
+            }
+        }
+        if ($hasPipeline) {
+            if ($Arguments.pipeline.Count -lt 1 -or $Arguments.pipeline.Count -gt 8) {
+                throw 'pipeline[] must contain between 1 and 8 steps.'
+            }
+            foreach ($ps in $Arguments.pipeline) {
+                if ($null -eq $ps -or $ps -is [string] -or $ps -is [ValueType] -or $ps -is [array]) {
+                    throw 'Each step in pipeline[] must be an object.'
+                }
+                $psProps = @(Get-ObjectPropertyNames -InputObject $ps)
+                foreach ($sp in $psProps) {
+                    if ($sp -notin @('role', 'prompt', 'context')) {
+                        throw "Unknown property '$sp' in pipeline[] item."
+                    }
+                }
+                if ($psProps -notcontains 'prompt' -or $ps.prompt -isnot [string] -or -not $ps.prompt.Trim()) {
+                    throw 'Each step in pipeline[] must have a nonempty string prompt.'
+                }
+                if ($psProps -contains 'role' -and $null -ne $ps.role -and $ps.role -isnot [string]) {
+                    throw "Property 'role' in pipeline[] item must be a string."
+                }
+                if ($psProps -contains 'context' -and $null -ne $ps.context) {
+                    if ($ps.context -isnot [string] -or $ps.context -notin @('clean', 'fork')) {
+                        throw "Property 'context' in pipeline[] item must be 'clean' or 'fork'."
+                    }
+                }
             }
         }
     }
@@ -1877,11 +2074,416 @@ function Invoke-AgentUndo {
     $State.messages = @($UndoEntry.messages)
 }
 
+function Get-ForkedSubagentMessages {
+    param($ParentState, [string]$SystemPrompt)
+    $forked = @(@{ role = 'system'; content = $SystemPrompt })
+    if (-not $ParentState -or -not $ParentState.messages -or $ParentState.messages.Count -le 1) {
+        return $forked
+    }
+    $msgs = @($ParentState.messages)
+    $endIdx = $msgs.Count - 1
+    while ($endIdx -ge 1 -and $msgs[$endIdx].role -eq 'tool') {
+        $endIdx--
+    }
+    if ($endIdx -ge 1 -and $msgs[$endIdx].role -eq 'assistant' -and $msgs[$endIdx].tool_calls -and @($msgs[$endIdx].tool_calls).Count -gt 0) {
+        $endIdx--
+    }
+    for ($i = 1; $i -le $endIdx; $i++) {
+        $m = $msgs[$i]
+        if ($m.role -eq 'system') { continue }
+        if ($m.role -eq 'user' -and $m.content -is [string] -and $m.content.StartsWith('[Capability State Change]')) { continue }
+        $copyMsg = @{ role = [string]$m.role; content = $m.content }
+        if ($m.reasoning_content) { $copyMsg.reasoning_content = $m.reasoning_content }
+        if ($m.tool_calls) { $copyMsg.tool_calls = @($m.tool_calls) }
+        if ($m.tool_call_id) { $copyMsg.tool_call_id = [string]$m.tool_call_id }
+        $forked += $copyMsg
+    }
+    if (-not (Test-ValidConversationBoundary -Messages $forked)) {
+        return @(@{ role = 'system'; content = $SystemPrompt })
+    }
+    return $forked
+}
+
+function Invoke-SubagentInProcess {
+    param(
+        [string]$Root,
+        [string]$RoleName = 'craft',
+        [string]$TaskPrompt,
+        [string]$ContextMode = 'clean',
+        [int]$MaxSteps = 15,
+        [switch]$ForceReadOnly
+    )
+    $configDir = if ($script:AgentConfigPath) { Split-Path $script:AgentConfigPath -Parent } else { '' }
+    $roleObj = Resolve-AgentRole -Name $RoleName -Root $Root -ConfigDir $configDir
+    $effPerm = if ($ForceReadOnly -or $script:AgentPermission -eq 'ReadOnly' -or $roleObj.permission -eq 'ReadOnly') {
+        'ReadOnly'
+    }
+    else {
+        $script:AgentPermission
+    }
+    $effEndpoint = if ($script:ActiveEndpoint) { $script:ActiveEndpoint } else { 'https://example.invalid/v1/chat/completions' }
+    $effModel = if ($roleObj.model) { [string]$roleObj.model } elseif ($script:ActiveModelId) { $script:ActiveModelId } else { 'test-model' }
+    $effKey = if ($script:ActiveApiKey) { $script:ActiveApiKey } else { 'subagent-key' }
+    $savedPerm = $script:AgentPermission
+    $savedDepth = $script:SubagentDepth
+    $savedTools = @($script:EnabledTools)
+    $savedModel = $script:ActiveModelId
+    $savedState = $script:ActiveState
+    try {
+        $script:SubagentDepth = $savedDepth + 1
+        $script:AgentPermission = $effPerm
+        if ($roleObj.tools -and $roleObj.tools.Count -gt 0) {
+            if ($savedTools.Count -gt 0) {
+                $intersect = @()
+                foreach ($rt in $roleObj.tools) {
+                    $cRt = Resolve-ToolCanonicalName -Name $rt
+                    foreach ($st in $savedTools) {
+                        if ($cRt -eq (Resolve-ToolCanonicalName -Name $st)) { $intersect += $cRt; break }
+                    }
+                }
+                $script:EnabledTools = $intersect
+            }
+            else {
+                $script:EnabledTools = @($roleObj.tools)
+            }
+        }
+        $baseSys = Build-SystemPrompt -Root $Root -ConfigDir $configDir
+        $subSys = $baseSys + "`n`n[Subagent Role: $($roleObj.name)]`n" + $roleObj.system_prompt
+        $initMsgs = @(if ($ContextMode -eq 'fork') {
+            Get-ForkedSubagentMessages -ParentState $savedState -SystemPrompt $subSys
+        }
+        else {
+            @{ role = 'system'; content = $subSys }
+        })
+        $expandedTask = Expand-UserPrompt -Root $Root -Prompt $TaskPrompt
+        $initMsgs += @{ role = 'user'; content = $expandedTask }
+        $childState = @{
+            session_id = 'sub-' + (Get-Date -Format 'yyyyMMdd-HHmmss') + '-' + (Get-Random -Minimum 1000 -Maximum 9999)
+            workspace = $Root
+            model = $effModel
+            messages = $initMsgs
+            tree_entries = @()
+            usage_input_tokens = 0
+            usage_output_tokens = 0
+        }
+        Sync-AgentCapabilities -State $childState -Root $Root | Out-Null
+        if ($script:OutputMode -ne 'json') {
+            Write-Host ($script:Gm.Aqua + ("  [run_agent:{0}] ({1}, context={2}) " -f $roleObj.name, $effPerm, $ContextMode) + $script:Gm.Grey1 + (Invoke-TruncateLine -Line $TaskPrompt -MaxChars 90).text + $script:Gm.Reset)
+        }
+        Invoke-AgentTurn -State $childState -Endpoint $effEndpoint -ModelId $effModel -ApiKey $effKey -Root $Root -Steps $MaxSteps
+        if ($null -ne $savedState) {
+            if ($childState.usage_input_tokens) { $savedState.usage_input_tokens = [int]$savedState.usage_input_tokens + [int]$childState.usage_input_tokens }
+            if ($childState.usage_output_tokens) { $savedState.usage_output_tokens = [int]$savedState.usage_output_tokens + [int]$childState.usage_output_tokens }
+        }
+        $replyText = ''
+        $assistantSteps = 0
+        foreach ($cm in @($childState.messages)) {
+            if ($cm.role -eq 'assistant') {
+                $assistantSteps++
+                if ($cm.content) { $replyText = [string]$cm.content }
+            }
+        }
+        $fileOps = Get-CompactionFileOperations -Messages $childState.messages
+        $subStatus = if ($childState.step_limit_reached) { 'step_limit_reached' } elseif ($childState.loop_detected) { 'loop_detected' } else { 'completed' }
+        return @{
+            role = $roleObj.name
+            permission = $effPerm
+            context = $ContextMode
+            status = $subStatus
+            output = $replyText
+            steps_used = $assistantSteps
+            read_files = @($fileOps.read_files)
+            modified_files = @($fileOps.modified_files)
+            usage_input_tokens = [int]$childState.usage_input_tokens
+            usage_output_tokens = [int]$childState.usage_output_tokens
+        }
+    }
+    finally {
+        $script:AgentPermission = $savedPerm
+        $script:SubagentDepth = $savedDepth
+        $script:EnabledTools = $savedTools
+        $script:ActiveModelId = $savedModel
+        $script:ActiveState = $savedState
+    }
+}
+
+function Resolve-StandaloneScriptPath {
+    if ($script:StandaloneScriptPath -and (Test-Path -LiteralPath $script:StandaloneScriptPath)) {
+        return (Get-Item -LiteralPath $script:StandaloneScriptPath -Force).FullName
+    }
+    $cands = @()
+    if ($PSScriptRoot) {
+        $cands += (Join-Path $PSScriptRoot 'shellossus.ps1')
+        $parentDir = Split-Path $PSScriptRoot -Parent
+        if ($parentDir) { $cands += (Join-Path $parentDir 'shellossus.ps1') }
+    }
+    foreach ($c in $cands) {
+        if ($c -and (Test-Path -LiteralPath $c)) {
+            return (Get-Item -LiteralPath $c -Force).FullName
+        }
+    }
+    return ''
+}
+
+function Invoke-ParallelSubagentProcesses {
+    param([string]$Root, [array]$Tasks, [int]$MaxSteps = 15, [string]$ScriptPath)
+    $configDir = if ($script:AgentConfigPath) { Split-Path $script:AgentConfigPath -Parent } else { '' }
+    $shellExe = (Get-AgentEnvironment -Root $Root).shell_exe
+    $effEndpoint = if ($script:ActiveEndpoint) { $script:ActiveEndpoint } else { 'https://example.invalid/v1/chat/completions' }
+    $baseUrl = $effEndpoint -replace '/chat/completions/?$', ''
+    $effKey = if ($script:ActiveApiKey) { $script:ActiveApiKey } else { 'subagent-key' }
+    $workerCmd = @'
+$ErrorActionPreference = 'Stop'
+$pText = Get-Content -LiteralPath $env:SHELLOSSUS_SUB_PROMPT -Raw -Encoding UTF8
+& $env:SHELLOSSUS_SUB_SCRIPT -Workspace $env:SHELLOSSUS_SUB_ROOT -BaseUrl $env:SHELLOSSUS_SUB_BASEURL -Model $env:SHELLOSSUS_SUB_MODEL -Permission 'ReadOnly' -Mode 'json' -NoSession -MaxSteps ([int]$env:SHELLOSSUS_SUB_STEPS) -ExcludeTools 'run_agent' -Prompt $pText
+'@
+    $argList = if ($env:OS -eq 'Windows_NT') {
+        $escaped = ($workerCmd -replace '(\\*)"', '$1$1\"') -replace '(\\*)$', '$1$1'
+        "-NoProfile -NonInteractive -Command `"$escaped`""
+    }
+    else {
+        @('-NoProfile', '-NonInteractive', '-Command', $workerCmd)
+    }
+    $allResults = @()
+    $batchSize = 4
+    for ($offset = 0; $offset -lt $Tasks.Count; $offset += $batchSize) {
+        $endIdx = $offset + $batchSize - 1
+        if ($endIdx -ge $Tasks.Count) { $endIdx = $Tasks.Count - 1 }
+        $workers = @()
+        try {
+            for ($i = $offset; $i -le $endIdx; $i++) {
+                $t = $Tasks[$i]
+                $rName = if ($t.role) { [string]$t.role } else { 'recon' }
+                $roleObj = Resolve-AgentRole -Name $rName -Root $Root -ConfigDir $configDir
+                $effModel = if ($roleObj.model) { [string]$roleObj.model } elseif ($script:ActiveModelId) { $script:ActiveModelId } else { 'test-model' }
+                $promptTemp = New-TemporaryFile -ErrorAction Stop
+                $outTemp = New-TemporaryFile -ErrorAction Stop
+                $errTemp = New-TemporaryFile -ErrorAction Stop
+                $fullPrompt = "[Subagent Role: $($roleObj.name)]`n$($roleObj.system_prompt)`n`nTask:`n$($t.prompt)"
+                Set-Content -LiteralPath $promptTemp.FullName -Value $fullPrompt -Encoding UTF8 -NoNewline -ErrorAction Stop
+                if ($script:OutputMode -ne 'json') {
+                    Write-Host ($script:Gm.Aqua + ("  [run_agent:{0}] (parallel ReadOnly) " -f $roleObj.name) + $script:Gm.Grey1 + (Invoke-TruncateLine -Line ([string]$t.prompt) -MaxChars 90).text + $script:Gm.Reset)
+                }
+                $proc = $null
+                $savedSKey = $env:SHELLOSSUS_API_KEY
+                try {
+                    $env:SHELLOSSUS_API_KEY = $effKey
+                    $env:SHELLOSSUS_SUB_SCRIPT = $ScriptPath
+                    $env:SHELLOSSUS_SUB_ROOT = $Root
+                    $env:SHELLOSSUS_SUB_BASEURL = $baseUrl
+                    $env:SHELLOSSUS_SUB_MODEL = $effModel
+                    $env:SHELLOSSUS_SUB_STEPS = [string]$MaxSteps
+                    $env:SHELLOSSUS_SUB_PROMPT = $promptTemp.FullName
+                    $proc = Start-Process -FilePath $shellExe -ArgumentList $argList -WorkingDirectory $Root -RedirectStandardOutput $outTemp.FullName -RedirectStandardError $errTemp.FullName -NoNewWindow -PassThru -ErrorAction Stop
+                }
+                finally {
+                    $env:SHELLOSSUS_API_KEY = $savedSKey
+                    $env:SHELLOSSUS_SUB_SCRIPT = $null
+                    $env:SHELLOSSUS_SUB_ROOT = $null
+                    $env:SHELLOSSUS_SUB_BASEURL = $null
+                    $env:SHELLOSSUS_SUB_MODEL = $null
+                    $env:SHELLOSSUS_SUB_STEPS = $null
+                    $env:SHELLOSSUS_SUB_PROMPT = $null
+                }
+                $workers += @{
+                    role = $roleObj.name
+                    proc = $proc
+                    prompt_file = $promptTemp.FullName
+                    out_file = $outTemp.FullName
+                    err_file = $errTemp.FullName
+                }
+            }
+            $startWait = Get-Date
+            while ($true) {
+                $running = @($workers | Where-Object { -not $_.proc.HasExited })
+                if ($running.Count -eq 0) { break }
+                if (((Get-Date) - $startWait).TotalSeconds -ge 180) {
+                    foreach ($rw in $running) {
+                        Stop-Process -InputObject $rw.proc -Force -ErrorAction SilentlyContinue
+                    }
+                    break
+                }
+                Start-Sleep -Milliseconds 100
+            }
+            foreach ($w in $workers) {
+                $replyText = ''
+                $stepsUsed = 0
+                $wReadSet = @{}
+                $wStatus = 'completed'
+                if (Test-Path -LiteralPath $w.out_file) {
+                    foreach ($line in @(Get-Content -LiteralPath $w.out_file -Encoding UTF8 -ErrorAction SilentlyContinue)) {
+                        $trimmed = ([string]$line).Trim()
+                        if (-not $trimmed.StartsWith('{')) { continue }
+                        try {
+                            $ev = $trimmed | ConvertFrom-Json -ErrorAction Stop
+                            if ($ev.type -eq 'message_end' -and $ev.role -eq 'assistant') {
+                                $stepsUsed++
+                                if ($ev.content) { $replyText = [string]$ev.content }
+                                if ($ev.tool_calls) {
+                                    foreach ($tc in @($ev.tool_calls)) {
+                                        $fn = if ($tc.function -and $tc.function.name) { [string]$tc.function.name } else { '' }
+                                        if ($fn -in @('read_file', 'read') -and $tc.function.arguments) {
+                                            try {
+                                                $pa = ([string]$tc.function.arguments) | ConvertFrom-Json -ErrorAction Stop
+                                                if ($pa.path) { $wReadSet[[string]$pa.path] = $true }
+                                            }
+                                            catch {}
+                                        }
+                                    }
+                                }
+                            }
+                            elseif ($ev.type -eq 'turn_end' -and $ev.status) {
+                                $wStatus = [string]$ev.status
+                            }
+                        }
+                        catch {}
+                    }
+                }
+                if (-not $replyText -and (Test-Path -LiteralPath $w.err_file)) {
+                    $errRaw = Get-Content -LiteralPath $w.err_file -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
+                    if ($errRaw -and $errRaw.Trim()) {
+                        $wStatus = 'error'
+                        $replyText = 'Subagent error: ' + $errRaw.Trim()
+                    }
+                }
+                $allResults += @{
+                    role = $w.role
+                    permission = 'ReadOnly'
+                    context = 'clean'
+                    status = $wStatus
+                    output = $replyText
+                    steps_used = $stepsUsed
+                    read_files = @($wReadSet.Keys | Sort-Object)
+                    modified_files = @()
+                }
+            }
+        }
+        finally {
+            foreach ($w in $workers) {
+                if ($w.proc -and (-not $w.proc.HasExited)) {
+                    Stop-Process -InputObject $w.proc -Force -ErrorAction SilentlyContinue
+                }
+                Remove-Item -LiteralPath $w.prompt_file -Force -ErrorAction SilentlyContinue
+                Remove-Item -LiteralPath $w.out_file -Force -ErrorAction SilentlyContinue
+                Remove-Item -LiteralPath $w.err_file -Force -ErrorAction SilentlyContinue
+            }
+        }
+    }
+    return $allResults
+}
+
+function Invoke-AgentSubagent {
+    param([string]$Root, $Arguments)
+    if ($script:SubagentDepth -ge $script:MaxSubagentDepth) {
+        throw 'Maximum subagent nesting depth reached.'
+    }
+    $maxSteps = if ($null -ne $Arguments.max_steps) { [int]$Arguments.max_steps } else { 15 }
+    $ctxMode = if ($Arguments.context) { [string]$Arguments.context } else { 'clean' }
+    $propNames = @(Get-ObjectPropertyNames -InputObject $Arguments)
+    if ($propNames -contains 'parallel' -and $null -ne $Arguments.parallel) {
+        $configDir = if ($script:AgentConfigPath) { Split-Path $script:AgentConfigPath -Parent } else { '' }
+        foreach ($pt in $Arguments.parallel) {
+            $rName = if ($pt.role) { [string]$pt.role } else { 'recon' }
+            $null = Resolve-AgentRole -Name $rName -Root $Root -ConfigDir $configDir
+        }
+        $iwrCmd = Get-Command -Name 'Invoke-WebRequest' -ErrorAction SilentlyContinue
+        $isMockedHttp = (($iwrCmd -and $iwrCmd.CommandType -eq 'Function') -or $script:DisableAsyncHttp)
+        $standaloneScript = Resolve-StandaloneScriptPath
+        $useWorkerProcs = ($Arguments.parallel.Count -gt 1) -and (-not $isMockedHttp) -and ($ExecutionContext.SessionState.LanguageMode -ne 'ConstrainedLanguage') -and ([bool]$standaloneScript)
+        $results = @()
+        $readSet = @{}
+        if ($useWorkerProcs) {
+            $results = @(Invoke-ParallelSubagentProcesses -Root $Root -Tasks @($Arguments.parallel) -MaxSteps $maxSteps -ScriptPath $standaloneScript)
+            foreach ($subRes in $results) {
+                foreach ($rf in @($subRes.read_files)) {
+                    if ($rf) { $readSet[[string]$rf] = $true }
+                }
+            }
+        }
+        else {
+            foreach ($pt in $Arguments.parallel) {
+                $rName = if ($pt.role) { [string]$pt.role } else { 'recon' }
+                $subRes = Invoke-SubagentInProcess -Root $Root -RoleName $rName -TaskPrompt ([string]$pt.prompt) -ContextMode 'clean' -MaxSteps $maxSteps -ForceReadOnly
+                $results += $subRes
+                foreach ($rf in @($subRes.read_files)) {
+                    if ($rf) { $readSet[[string]$rf] = $true }
+                }
+            }
+        }
+        $summaryParts = @()
+        for ($i = 0; $i -lt $results.Count; $i++) {
+            $rItem = $results[$i]
+            $summaryParts += ("### Task {0} ({1})`n{2}" -f ($i + 1), $rItem.role, $rItem.output)
+        }
+        return (@{
+            status = 'completed'
+            mode = 'parallel'
+            tasks_count = $results.Count
+            output = ($summaryParts -join "`n`n")
+            results = $results
+            read_files = @($readSet.Keys | Sort-Object)
+            modified_files = @()
+        } | ConvertTo-Json -Depth 10 -Compress)
+    }
+    if ($propNames -contains 'pipeline' -and $null -ne $Arguments.pipeline) {
+        $configDir = if ($script:AgentConfigPath) { Split-Path $script:AgentConfigPath -Parent } else { '' }
+        foreach ($ps in $Arguments.pipeline) {
+            $rName = if ($ps.role) { [string]$ps.role } else { 'craft' }
+            $null = Resolve-AgentRole -Name $rName -Root $Root -ConfigDir $configDir
+        }
+        $stepResults = @()
+        $readSet = @{}
+        $modSet = @{}
+        $prevOutput = ''
+        for ($i = 0; $i -lt $Arguments.pipeline.Count; $i++) {
+            $ps = $Arguments.pipeline[$i]
+            $rName = if ($ps.role) { [string]$ps.role } else { 'craft' }
+            $stepCtx = if ($ps.context) { [string]$ps.context } else { $ctxMode }
+            $rawPrompt = [string]$ps.prompt
+            $resolvedPrompt = $rawPrompt.Replace('{previous}', $prevOutput).Replace('$PREVIOUS', $prevOutput)
+            $stepRes = Invoke-SubagentInProcess -Root $Root -RoleName $rName -TaskPrompt $resolvedPrompt -ContextMode $stepCtx -MaxSteps $maxSteps
+            $stepResults += $stepRes
+            $prevOutput = [string]$stepRes.output
+            foreach ($rf in @($stepRes.read_files)) {
+                if ($rf) { $readSet[[string]$rf] = $true }
+            }
+            foreach ($mf in @($stepRes.modified_files)) {
+                if ($mf) { $modSet[[string]$mf] = $true }
+            }
+        }
+        $readOnlyList = @($readSet.Keys | Where-Object { -not $modSet.ContainsKey($_) } | Sort-Object)
+        $modList = @($modSet.Keys | Sort-Object)
+        return (@{
+            status = 'completed'
+            mode = 'pipeline'
+            steps_count = $stepResults.Count
+            output = $prevOutput
+            results = $stepResults
+            read_files = $readOnlyList
+            modified_files = $modList
+        } | ConvertTo-Json -Depth 10 -Compress)
+    }
+    $roleName = if ($Arguments.role) { [string]$Arguments.role } else { 'craft' }
+    $singleRes = Invoke-SubagentInProcess -Root $Root -RoleName $roleName -TaskPrompt ([string]$Arguments.prompt) -ContextMode $ctxMode -MaxSteps $maxSteps
+    return (@{
+        status = $singleRes.status
+        mode = 'single'
+        role = $singleRes.role
+        permission = $singleRes.permission
+        context = $singleRes.context
+        output = $singleRes.output
+        steps_used = $singleRes.steps_used
+        read_files = $singleRes.read_files
+        modified_files = $singleRes.modified_files
+    } | ConvertTo-Json -Depth 10 -Compress)
+}
+
 function Invoke-AgentTool {
     param([string]$Root, $Call)
     try {
-        $name = $Call.function.name
-        if ($name -notin @('list_files', 'read_file', 'find_files', 'grep_files', 'write_file', 'edit_file', 'run_command')) { throw 'Unknown tool.' }
+        $rawName = [string]$Call.function.name
+        $name = if ($rawName -in @('subagent', 'delegate', 'delegate_task', 'spawn_agent')) { 'run_agent' } else { $rawName }
+        if ($name -notin @('list_files', 'read_file', 'find_files', 'grep_files', 'write_file', 'edit_file', 'run_command', 'run_agent')) { throw 'Unknown tool.' }
         if ($script:AgentPermission -eq 'ReadOnly' -and $name -in @('write_file', 'edit_file', 'run_command')) {
             throw 'Permission mode ReadOnly does not allow file modifications or commands.'
         }
@@ -1892,7 +2494,11 @@ function Invoke-AgentTool {
         if ($name -eq 'edit_file') {
             $arguments = Format-EditArguments -Arguments $arguments
         }
+        elseif ($name -eq 'run_agent') {
+            $arguments = Format-RunAgentArguments -Arguments $arguments
+        }
         Test-AgentToolArguments -Name $name -Arguments $arguments
+        if ($name -eq 'run_agent') { return (Invoke-AgentSubagent -Root $Root -Arguments $arguments) }
         if ($name -eq 'run_command') { return (Invoke-AgentCommand -Root $Root -Arguments $arguments) }
         if ($name -in @('write_file', 'edit_file')) { return (Invoke-AgentWrite -Root $Root -Name $name -Arguments $arguments) }
         $allowSkill = ($name -eq 'read_file')
@@ -2173,6 +2779,7 @@ $script:NoContextFiles = $false
 $script:NoSkills = $false
 $script:NoPromptTemplates = $false
 $script:SkillsByName = @{}
+$script:AgentRolesByName = @{}
 
 function Escape-XmlText {
     param([string]$Text)
@@ -2295,6 +2902,179 @@ function Resolve-SkillCommand {
     $outXml = "<skill name=`"$skillName`" path=`"$($skillInfo.rel_path)`">`n" + $expanded + "`n</skill>"
     if ($skillArgs -and ($body -notmatch '\$(?:\d+|@|ARGUMENTS|\{)')) {
         $outXml += "`n`nUser: $skillArgs"
+    }
+    return $outXml
+}
+
+function Resolve-AgentRoleCanonicalName {
+    param([string]$Name)
+    if (-not $Name) { return 'craft' }
+    $lower = $Name.Trim().ToLower()
+    switch ($lower) {
+        'recon' { return 'recon' }
+        'scout' { return 'recon' }
+        'explore' { return 'recon' }
+        'explorer' { return 'recon' }
+        'research' { return 'recon' }
+        'researcher' { return 'recon' }
+        'audit' { return 'audit' }
+        'auditor' { return 'audit' }
+        'review' { return 'audit' }
+        'reviewer' { return 'audit' }
+        'craft' { return 'craft' }
+        'worker' { return 'craft' }
+        'coder' { return 'craft' }
+        'builder' { return 'craft' }
+        'self' { return 'craft' }
+        'default' { return 'craft' }
+        default { return $lower }
+    }
+}
+
+function Get-BuiltinAgentRoles {
+    return @(
+        @{
+            name = 'recon'
+            permission = 'ReadOnly'
+            description = 'Fast read-only codebase reconnaissance (find, grep, and read files without polluting main context).'
+            system_prompt = 'You are a Shellossus recon subagent operating in ReadOnly mode. Explore the workspace efficiently using list_files, find_files, grep_files, and read_file. Do not attempt to modify files or run commands. Return a concise, factual report with exact file paths and line numbers.'
+            tools = @()
+            model = ''
+            builtin = $true
+        },
+        @{
+            name = 'audit'
+            permission = 'ReadOnly'
+            description = 'Read-only code review, bug hunting, and security/correctness verification.'
+            system_prompt = 'You are a Shellossus audit subagent operating in ReadOnly mode. Inspect the target code for bugs, edge cases, security issues, and regressions. Cite exact file paths and line numbers and prioritize actionable findings.'
+            tools = @()
+            model = ''
+            builtin = $true
+        },
+        @{
+            name = 'craft'
+            permission = 'inherit'
+            description = 'Full-capability implementation subagent that inherits session permissions to read, edit files, and run commands.'
+            system_prompt = 'You are a Shellossus craft subagent. Complete the delegated engineering task accurately within workspace boundaries, verify your changes, and return a concise summary of what you changed and why.'
+            tools = @()
+            model = ''
+            builtin = $true
+        }
+    )
+}
+
+function Get-AgentRolesCatalog {
+    param([string]$Root, [string]$ConfigDir)
+    $script:AgentRolesByName = @{}
+    foreach ($bRole in @(Get-BuiltinAgentRoles)) {
+        $script:AgentRolesByName[$bRole.name] = $bRole
+    }
+    $dirs = @()
+    if ($ConfigDir) { $dirs += (Join-Path $ConfigDir 'agents') }
+    if ($Root) {
+        $dirs += (Join-Path $Root '.shellossus/agents')
+        $dirs += (Join-Path $Root '.h-agent/agents')
+        $dirs += (Join-Path $Root 'agents')
+    }
+    $customEntries = @()
+    $xmlAgents = @()
+    foreach ($d in $dirs) {
+        if (-not $d -or -not (Test-Path -LiteralPath $d)) { continue }
+        $dItem = Get-Item -LiteralPath $d -Force -ErrorAction SilentlyContinue
+        if (-not $dItem -or (($dItem.Attributes -band 1024) -ne 0)) { continue }
+        $roleCountInDir = 0
+        foreach ($walkEntry in @(Get-WorkspaceWalkEntries -Root $d -SearchPath $d -FilesOnly)) {
+            $roleFile = $walkEntry.item
+            if ($roleFile.Extension -ine '.md') { continue }
+            if ($roleCountInDir -ge 40) { break }
+            $roleCountInDir++
+            if (($roleFile.Attributes -band 1024) -ne 0 -or $roleFile.Length -gt 128KB) { continue }
+            $hasReparse = $false
+            $cursor = $roleFile
+            while ($null -ne $cursor) {
+                if (($cursor.Attributes -band 1024) -ne 0) { $hasReparse = $true; break }
+                if ($cursor.PSIsContainer) { $cursor = $cursor.Parent }
+                else { $cursor = $cursor.Directory }
+            }
+            if ($hasReparse) { continue }
+            $raw = Get-Content -LiteralPath $roleFile.FullName -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
+            if (-not $raw) { continue }
+            $baseName = ($roleFile.Name -replace '\.md$', '').ToLower()
+            $roleName = $baseName
+            $roleDesc = 'Custom subagent role.'
+            $rolePerm = 'inherit'
+            $roleModel = ''
+            $roleTools = @()
+            if ($raw -match '(?m)^name:\s*(.+)$') { $roleName = $Matches[1].Trim().Trim('"', "'").ToLower() }
+            if ($raw -match '(?m)^description:\s*(.+)$') { $roleDesc = $Matches[1].Trim().Trim('"', "'") }
+            if ($raw -match '(?m)^permission:\s*(.+)$') {
+                $pVal = $Matches[1].Trim().Trim('"', "'")
+                if ($pVal -ieq 'ReadOnly') { $rolePerm = 'ReadOnly' }
+            }
+            if ($raw -match '(?m)^model:\s*(.+)$') { $roleModel = $Matches[1].Trim().Trim('"', "'") }
+            if ($raw -match '(?m)^tools:\s*(.+)$') {
+                $tRaw = $Matches[1].Trim().Trim('"', "'", '[', ']')
+                $roleTools = @($tRaw -split ',' | ForEach-Object { $_.Trim().Trim('"', "'") } | Where-Object { $_ })
+                if ($roleTools.Count -gt 0) {
+                    $hasWriteOrExec = $false
+                    foreach ($rt in $roleTools) {
+                        $cRt = Resolve-ToolCanonicalName -Name $rt
+                        if ($cRt -in @('write_file', 'edit_file', 'run_command')) { $hasWriteOrExec = $true; break }
+                    }
+                    if (-not $hasWriteOrExec) { $rolePerm = 'ReadOnly' }
+                }
+            }
+            $body = ($raw -replace '(?s)^---\r?\n.*?\r?\n---\r?\n?', '').Trim()
+            if (-not $body) { $body = $roleDesc }
+            $rel = if ($Root) { Get-WorkspaceRelativePath -Root $Root -FullPath $roleFile.FullName } else { $roleFile.FullName }
+            $roleObj = @{
+                name = $roleName
+                permission = $rolePerm
+                description = $roleDesc
+                system_prompt = $body
+                tools = $roleTools
+                model = $roleModel
+                file_path = $roleFile.FullName
+                rel_path = $rel
+                builtin = $false
+            }
+            $script:AgentRolesByName[$roleName] = $roleObj
+            $customEntries += "- $roleName ($rel, permission=$rolePerm): $roleDesc"
+            $xmlAgents += ("  <agent>`n    <name>" + (Escape-XmlText $roleName) + "</name>`n    <permission>" + (Escape-XmlText $rolePerm) + "</permission>`n    <description>" + (Escape-XmlText $roleDesc) + "</description>`n    <location>" + (Escape-XmlText $rel) + "</location>`n  </agent>")
+        }
+    }
+    if ($customEntries.Count -eq 0) { return '' }
+    return ("Custom subagent roles (invoke via run_agent role=<name>):`n" + ($customEntries -join "`n") + "`n<available_agents>`n" + ($xmlAgents -join "`n") + "`n</available_agents>")
+}
+
+function Resolve-AgentRole {
+    param([string]$Name, [string]$Root = '', [string]$ConfigDir = '')
+    if (-not $script:AgentRolesByName -or $script:AgentRolesByName.Count -eq 0) {
+        $null = Get-AgentRolesCatalog -Root $Root -ConfigDir $ConfigDir
+    }
+    $canon = Resolve-AgentRoleCanonicalName -Name $Name
+    if ($script:AgentRolesByName.ContainsKey($canon)) {
+        return $script:AgentRolesByName[$canon]
+    }
+    $avail = @($script:AgentRolesByName.Keys | Sort-Object) -join ', '
+    throw "Unknown agent role '$Name'. Available roles: $avail."
+}
+
+function Resolve-AgentRoleCommand {
+    param([string]$Root, [string]$ConfigDir, [string]$InputText)
+    if ($InputText -notmatch '^/agent:([a-zA-Z0-9_-]+)(?:\s+(.*))?$') { return $null }
+    $rawRole = $Matches[1]
+    $roleArgs = if ($Matches[2]) { $Matches[2].Trim() } else { '' }
+    if (-not $script:AgentRolesByName -or $script:AgentRolesByName.Count -eq 0) {
+        $null = Get-AgentRolesCatalog -Root $Root -ConfigDir $ConfigDir
+    }
+    $canonRole = Resolve-AgentRoleCanonicalName -Name $rawRole
+    if (-not $script:AgentRolesByName.ContainsKey($canonRole)) { return $null }
+    $roleInfo = $script:AgentRolesByName[$canonRole]
+    $expanded = Expand-TemplateArgs -Content $roleInfo.system_prompt -ArgsString $roleArgs
+    $outXml = "<agent_role name=`"$($roleInfo.name)`" permission=`"$($roleInfo.permission)`">`n" + $expanded + "`n</agent_role>"
+    if ($roleArgs) {
+        $outXml += "`n`nDelegate this task using run_agent with role=`"$($roleInfo.name)`": $roleArgs"
     }
     return $outXml
 }
@@ -2472,6 +3252,8 @@ function Build-SystemPrompt {
     if ($agentsExtra) { $basePrompt += "`n`n" + $agentsExtra }
     $skillsText = Get-SkillsCatalog -Root $Root -ConfigDir $ConfigDir
     if ($skillsText) { $basePrompt += "`n`n" + $skillsText }
+    $rolesText = Get-AgentRolesCatalog -Root $Root -ConfigDir $ConfigDir
+    if ($rolesText) { $basePrompt += "`n`n" + $rolesText }
     return $basePrompt
 }
 
@@ -2595,6 +3377,9 @@ function Resolve-PromptTemplate {
     if ($script:NoPromptTemplates) { return $null }
     if ($InputText -match '^/skill:') {
         return (Resolve-SkillCommand -Root $Root -ConfigDir $ConfigDir -InputText $InputText)
+    }
+    if ($InputText -match '^/agent:') {
+        return (Resolve-AgentRoleCommand -Root $Root -ConfigDir $ConfigDir -InputText $InputText)
     }
     if ($InputText -notmatch '^/([a-zA-Z0-9_-]+)(?:\s+(.*))?$') { return $null }
     $name = $Matches[1]
@@ -3302,6 +4087,22 @@ function Get-CompactionFileOperations {
                 catch {}
             }
         }
+        if ($m.role -eq 'tool' -and $m.content -is [string] -and ($m.content.Contains('"read_files"') -or $m.content.Contains('"modified_files"'))) {
+            try {
+                $parsedToolOut = $m.content | ConvertFrom-Json -ErrorAction Stop
+                if ($parsedToolOut.read_files) {
+                    foreach ($srf in @($parsedToolOut.read_files)) {
+                        if ($srf -and ([string]$srf).Trim()) { $readSet[([string]$srf).Trim()] = $true }
+                    }
+                }
+                if ($parsedToolOut.modified_files) {
+                    foreach ($smf in @($parsedToolOut.modified_files)) {
+                        if ($smf -and ([string]$smf).Trim()) { $modSet[([string]$smf).Trim()] = $true }
+                    }
+                }
+            }
+            catch {}
+        }
     }
     $readOnly = @($readSet.Keys | Where-Object { -not $modSet.ContainsKey($_) } | Sort-Object)
     $modified = @($modSet.Keys | Sort-Object)
@@ -3617,6 +4418,9 @@ function Invoke-AgentTurn {
     param($State, [string]$Endpoint, [string]$ModelId, [string]$ApiKey, [string]$Root, [int]$Steps = 50, [int]$MaxRepeatCalls = 0)
     $overflowRetried = $false
     $script:ActiveModelId = $ModelId
+    $script:ActiveEndpoint = $Endpoint
+    $script:ActiveApiKey = $ApiKey
+    $script:ActiveState = $State
     if ($Root) { $script:ActiveWorkspace = $Root }
     $State.step_limit_reached = $false
     $State.loop_detected = $false
@@ -3790,6 +4594,15 @@ function Invoke-AgentTurn {
                 try {
                     $parsedOut = $output | ConvertFrom-Json -ErrorAction Stop
                     if ($parsedOut.status -in @('written', 'executed', 'timed_out')) {
+                        $mutationEpoch++
+                    }
+                }
+                catch {}
+            }
+            elseif ($canonToolName -eq 'run_agent') {
+                try {
+                    $parsedOut = $output | ConvertFrom-Json -ErrorAction Stop
+                    if ($parsedOut.modified_files -and @($parsedOut.modified_files).Count -gt 0) {
                         $mutationEpoch++
                     }
                 }
@@ -3984,7 +4797,7 @@ if (-not $LibraryOnly) {
         Write-Host ($script:Gm.OscInit + $script:Gm.BoldGreen + "shellossus | model: $Model | permission: $($script:AgentPermission) | workspace: $rootPath" + $script:Gm.Reset)
         if (Get-AgentsContext -Root $rootPath -ConfigDir $configDir) { Write-Host ($script:Gm.Aqua + 'Loaded AGENTS.md/CLAUDE.md instructions.' + $script:Gm.Reset) }
         if (Get-SkillsCatalog -Root $rootPath -ConfigDir $configDir) { Write-Host ($script:Gm.Aqua + 'Loaded skills catalog.' + $script:Gm.Reset) }
-        Write-Host ($script:Gm.Grey1 + 'Commands: /help /status /session /permission /reasoning /continue /undo /retry /compact /tree /fork /export /copy /reload /model /sessions /resume /save /new /exit' + $script:Gm.Reset)
+        Write-Host ($script:Gm.Grey1 + 'Commands: /help /status /session /permission /reasoning /agents /continue /undo /retry /compact /tree /fork /export /copy /reload /model /sessions /resume /save /new /exit' + $script:Gm.Reset)
         while ($true) {
             Write-Host ("`n" + $script:Gm.Grey0 + ('-' * 40) + $script:Gm.Reset)
             Write-Host ($script:Gm.BoldBlue + 'You: ' + $script:Gm.Fg) -NoNewline
@@ -4018,6 +4831,7 @@ if (-not $LibraryOnly) {
                 Write-Host ($script:Gm.Aqua + '  /permission <mode>           ' + $script:Gm.Fg + 'Set mode: ReadOnly | Ask | AutoEdit (no-ask writes) | Auto' + $script:Gm.Reset)
                 Write-Host ($script:Gm.Aqua + '  /diagnostics [on|off]        ' + $script:Gm.Fg + 'Show or toggle pre-request capability/tool diagnostics' + $script:Gm.Reset)
                 Write-Host ($script:Gm.Aqua + '  /reasoning (/thinking) <arg> ' + $script:Gm.Fg + 'View: compact | full | hide; Effort: low | medium | high | off' + $script:Gm.Reset)
+                Write-Host ($script:Gm.Aqua + '  /agents                      ' + $script:Gm.Fg + 'List built-in and custom subagent roles (recon, audit, craft, ...)' + $script:Gm.Reset)
                 Write-Host ($script:Gm.Aqua + '  /continue [steps]            ' + $script:Gm.Fg + 'Continue after hitting step limit (or continue last response)' + $script:Gm.Reset)
                 Write-Host ($script:Gm.Aqua + '  /undo                        ' + $script:Gm.Fg + 'Revert last turn AND restore modified/created files on disk' + $script:Gm.Reset)
                 Write-Host ($script:Gm.Aqua + '  /retry                       ' + $script:Gm.Fg + 'Retry the last failed user request' + $script:Gm.Reset)
@@ -4028,7 +4842,7 @@ if (-not $LibraryOnly) {
                 Write-Host ($script:Gm.Aqua + '  /export [path.html|.jsonl]   ' + $script:Gm.Fg + 'Export session to standalone HTML (or JSONL)' + $script:Gm.Reset)
                 Write-Host ($script:Gm.Aqua + '  /import <path.jsonl>         ' + $script:Gm.Fg + 'Import and resume a JSONL session file' + $script:Gm.Reset)
                 Write-Host ($script:Gm.Aqua + '  /copy                        ' + $script:Gm.Fg + 'Copy the last assistant response to clipboard' + $script:Gm.Reset)
-                Write-Host ($script:Gm.Aqua + '  /reload                      ' + $script:Gm.Fg + 'Reload AGENTS.md, CLAUDE.md, SYSTEM.md, skills, and prompt templates' + $script:Gm.Reset)
+                Write-Host ($script:Gm.Aqua + '  /reload                      ' + $script:Gm.Fg + 'Reload AGENTS.md, CLAUDE.md, SYSTEM.md, skills, agents, and templates' + $script:Gm.Reset)
                 Write-Host ($script:Gm.Aqua + '  /hotkeys                     ' + $script:Gm.Fg + 'Display input shortcuts and syntax reference' + $script:Gm.Reset)
                 Write-Host ($script:Gm.Aqua + '  /model <id>                  ' + $script:Gm.Fg + 'Switch active model ID for this session' + $script:Gm.Reset)
                 Write-Host ($script:Gm.Aqua + '  /sessions                    ' + $script:Gm.Fg + 'List saved sessions in ~/.shellossus/sessions' + $script:Gm.Reset)
@@ -4036,16 +4850,28 @@ if (-not $LibraryOnly) {
                 Write-Host ($script:Gm.Aqua + '  /save [name]                 ' + $script:Gm.Fg + 'Save conversation to current or named session file' + $script:Gm.Reset)
                 Write-Host ($script:Gm.Aqua + '  /new (/clear)                ' + $script:Gm.Fg + 'Start a fresh session while keeping old session files' + $script:Gm.Reset)
                 Write-Host ($script:Gm.Aqua + '  /exit (/quit)                ' + $script:Gm.Fg + 'Exit shellossus' + $script:Gm.Reset)
+                Write-Host ($script:Gm.Aqua + '  /agent:<role> <task>         ' + $script:Gm.Fg + 'Delegate a task to a subagent role (recon, audit, craft, ...)' + $script:Gm.Reset)
                 Write-Host ($script:Gm.Aqua + '  /skill:<name> [args]         ' + $script:Gm.Fg + 'Invoke a skill directly with arguments' + $script:Gm.Reset)
                 Write-Host ($script:Gm.Aqua + '  /<template> [args]           ' + $script:Gm.Fg + 'Run a custom Markdown prompt from .shellossus/prompts/<name>.md' + $script:Gm.Reset)
                 Write-Host ($script:Gm.Aqua + '  @path/to/file                ' + $script:Gm.Fg + 'Inline-attach a workspace file into your prompt' + $script:Gm.Reset)
                 Write-Host ($script:Gm.Aqua + '  !command / !!command         ' + $script:Gm.Fg + 'Run shell command (! adds to context, !! local only)' + $script:Gm.Reset)
                 continue
             }
+            if ($trimmedQ -eq '/agents') {
+                $null = Get-AgentRolesCatalog -Root $rootPath -ConfigDir $configDir
+                foreach ($rKey in @($script:AgentRolesByName.Keys | Sort-Object)) {
+                    $rObj = $script:AgentRolesByName[$rKey]
+                    $srcTag = if ($rObj.builtin) { 'built-in' } else { $rObj.rel_path }
+                    Write-Host ($script:Gm.Aqua + ("  {0,-12} " -f $rObj.name) + $script:Gm.Yellow + ("[{0}; {1}] " -f $rObj.permission, $srcTag) + $script:Gm.Fg + $rObj.description + $script:Gm.Reset)
+                }
+                Write-Host ($script:Gm.Grey1 + '  (Invoke via /agent:<role> <task> or let the model call run_agent)' + $script:Gm.Reset)
+                continue
+            }
             if ($trimmedQ -eq '/hotkeys') {
                 Write-Host ($script:Gm.Aqua + '  @path/to/file     ' + $script:Gm.Fg + 'Attach file contents inline into prompt' + $script:Gm.Reset)
                 Write-Host ($script:Gm.Aqua + '  !cmd              ' + $script:Gm.Fg + 'Execute shell command and append output to conversation context' + $script:Gm.Reset)
                 Write-Host ($script:Gm.Aqua + '  !!cmd             ' + $script:Gm.Fg + 'Execute shell command locally without adding to context' + $script:Gm.Reset)
+                Write-Host ($script:Gm.Aqua + '  /agent:<role>     ' + $script:Gm.Fg + 'Delegate task to subagent role (recon, audit, craft, custom)' + $script:Gm.Reset)
                 Write-Host ($script:Gm.Aqua + '  /skill:<name>     ' + $script:Gm.Fg + 'Expand a skill SKILL.md into the prompt' + $script:Gm.Reset)
                 Write-Host ($script:Gm.Aqua + '  /<template>       ' + $script:Gm.Fg + 'Expand a prompt template with $1, $2, $@, ${1:-default}' + $script:Gm.Reset)
                 Write-Host ($script:Gm.Aqua + '  Ctrl+C            ' + $script:Gm.Fg + 'Interrupt running command or exit interactive prompt' + $script:Gm.Reset)

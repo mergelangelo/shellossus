@@ -186,7 +186,7 @@ try {
     # 4 Permission modes: ReadOnly, Ask, AutoEdit, Auto.
     $script:approval = ''
     $script:AgentPermission = 'ReadOnly'
-    Assert-True (@(Get-AgentTools).Count -eq 4) 'ReadOnly mode should only expose 4 read-only tools.'
+    Assert-True (@(Get-AgentTools).Count -eq 5) 'ReadOnly mode should expose 5 tools (4 read-only + run_agent).'
     $call.function.name = 'write_file'
     $call.function.arguments = '{"path":"ro.txt","content":"no"}'
     $roRes = Invoke-AgentTool -Root $workspacePath -Call $call | ConvertFrom-Json
@@ -341,7 +341,7 @@ try {
     $script:EnabledTools = @()
     $script:AgentPermission = 'ReadOnly'
     $capRo = Get-AgentCapabilities
-    Assert-True ($capRo.permission -eq 'ReadOnly' -and $capRo.tool_names.Count -eq 4 -and (-not $capRo.can_write) -and (-not $capRo.can_exec)) 'Get-AgentCapabilities in ReadOnly mode failed.'
+    Assert-True ($capRo.permission -eq 'ReadOnly' -and $capRo.tool_names.Count -eq 5 -and ($capRo.tool_names -contains 'run_agent') -and (-not $capRo.can_write) -and (-not $capRo.can_exec)) 'Get-AgentCapabilities in ReadOnly mode failed.'
     $script:AgentPermission = 'AutoEdit'
     $capAe = Get-AgentCapabilities
     Assert-True ($capAe.permission -eq 'AutoEdit' -and $capAe.can_write -and (-not $capAe.write_requires_confirmation) -and $capAe.exec_requires_confirmation) 'Get-AgentCapabilities in AutoEdit mode failed.'
@@ -410,6 +410,104 @@ try {
     $pruneGrepRes = Invoke-AgentTool -Root $workspacePath -Call $pruneGrepCall | ConvertFrom-Json
     Assert-True ($pruneGrepRes.matches.Count -eq 1 -and $pruneGrepRes.matches[0].file -eq 'src/app.py') 'Pruned directory .venv or ignored .tmp file was scanned during grep_files.'
     Remove-Item -LiteralPath $pruneDir -Recurse -Force
+
+    # Subagent tool (run_agent): argument normalization, validation, depth guard, single, parallel, pipeline, and shared /undo.
+    $normSub = Format-RunAgentArguments -ArgsObj ([pscustomobject]@{
+        agent = 'scout'
+        task = 'Find entrypoints'
+        maxSteps = 8
+        tasks = '[{"agent":"reviewer","task":"Audit code"}]'
+    })
+    Assert-True ($normSub.role -eq 'scout' -and $normSub.prompt -eq 'Find entrypoints' -and $normSub.max_steps -eq 8 -and $normSub.parallel[0].role -eq 'reviewer' -and $normSub.parallel[0].prompt -eq 'Audit code') 'Format-RunAgentArguments alias normalization failed.'
+
+    $badSubBoth = Invoke-AgentTool -Root $workspacePath -Call @{ id = 'sub-bad1'; function = @{ name = 'run_agent'; arguments = '{"prompt":"a","parallel":[{"prompt":"b"}]}' } } | ConvertFrom-Json
+    Assert-True ($badSubBoth.error -like '*only one execution mode*') 'run_agent did not reject multiple execution modes.'
+    $badSubNone = Invoke-AgentTool -Root $workspacePath -Call @{ id = 'sub-bad2'; function = @{ name = 'run_agent'; arguments = '{"role":"recon"}' } } | ConvertFrom-Json
+    Assert-True ($badSubNone.error -like '*requires one of*') 'run_agent did not reject missing execution mode.'
+    $badSubForkPar = Invoke-AgentTool -Root $workspacePath -Call @{ id = 'sub-bad3'; function = @{ name = 'run_agent'; arguments = '{"context":"fork","parallel":[{"prompt":"x"}]}' } } | ConvertFrom-Json
+    Assert-True ($badSubForkPar.error -like '*cannot be ''fork'' when using parallel*') 'run_agent did not reject context=fork with parallel[].'
+
+    # Depth guard hides run_agent inside subagents.
+    $script:SubagentDepth = 1
+    try {
+        Assert-True (-not (Test-IsToolEnabled -Name 'run_agent')) 'run_agent must be disabled when SubagentDepth >= MaxSubagentDepth.'
+        $blockedSub = Invoke-AgentTool -Root $workspacePath -Call @{ id = 'sub-depth'; function = @{ name = 'run_agent'; arguments = '{"prompt":"nested"}' } } | ConvertFrom-Json
+        Assert-True ($blockedSub.error -like '*disabled*') 'Nested run_agent call at depth 1 was not blocked.'
+    }
+    finally {
+        $script:SubagentDepth = 0
+    }
+
+    # Single recon (clamped to ReadOnly), pipeline ({previous} -> craft edit), parallel fan-out, and unified /undo rollback.
+    $script:AgentPermission = 'AutoEdit'
+    $script:CurrentTurnWrites = @()
+    Set-Content -LiteralPath (Join-Path $workspacePath 'sub-target.txt') -Value 'OLD_TOKEN' -Encoding UTF8 -NoNewline
+    $script:subMockStep = 0
+    function Invoke-WebRequest {
+        param($Uri, $Method, $Headers, $ContentType, $Body, $TimeoutSec, $ErrorAction, [switch]$UseBasicParsing, $OutFile)
+        $script:subMockStep++
+        $reqObj = $Body | ConvertFrom-Json
+        $toolNamesInReq = @($reqObj.tools | ForEach-Object { $_.function.name })
+        Assert-True ($toolNamesInReq -notcontains 'run_agent') 'Subagent request must not expose recursive run_agent tool.'
+        if ($script:subMockStep -eq 1) {
+            Assert-True ($toolNamesInReq -notcontains 'write_file') 'recon subagent must run in ReadOnly mode even when parent is AutoEdit.'
+            $r = @{ choices = @(@{ finish_reason = 'tool_calls'; message = @{
+                content = ''
+                tool_calls = @(@{ id = 'sr-1'; type = 'function'; function = @{ name = 'read_file'; arguments = '{"path":"sub-target.txt"}' } })
+            } }) } | ConvertTo-Json -Depth 10 -Compress
+        }
+        elseif ($script:subMockStep -eq 2) {
+            $r = @{ choices = @(@{ finish_reason = 'stop'; message = @{ content = 'Found OLD_TOKEN in sub-target.txt' } }) } | ConvertTo-Json -Depth 10 -Compress
+        }
+        elseif ($script:subMockStep -eq 3) {
+            Assert-True ($toolNamesInReq -contains 'edit_file') 'craft subagent in AutoEdit should have edit_file.'
+            $userMsg = [string]$reqObj.messages[-1].content
+            Assert-True ($userMsg.Contains('Found OLD_TOKEN in sub-target.txt')) 'Pipeline did not substitute {previous} output.'
+            $r = @{ choices = @(@{ finish_reason = 'tool_calls'; message = @{
+                content = ''
+                tool_calls = @(@{ id = 'sc-1'; type = 'function'; function = @{ name = 'edit_file'; arguments = '{"path":"sub-target.txt","old_text":"OLD_TOKEN","new_text":"NEW_FROM_SUBAGENT"}' } })
+            } }) } | ConvertTo-Json -Depth 10 -Compress
+        }
+        elseif ($script:subMockStep -eq 4) {
+            $r = @{ choices = @(@{ finish_reason = 'stop'; message = @{ content = 'Replaced token in sub-target.txt' } }) } | ConvertTo-Json -Depth 10 -Compress
+        }
+        else {
+            $r = @{ choices = @(@{ finish_reason = 'stop'; message = @{ content = "Parallel worker step $($script:subMockStep)" } }) } | ConvertTo-Json -Depth 10 -Compress
+        }
+        Set-Content -LiteralPath $OutFile -Value $r -Encoding UTF8 -NoNewline
+    }
+    try {
+        $pipeCall = @{
+            id = 'sub-pipe'
+            function = @{
+                name = 'subagent'
+                arguments = '{"chain":[{"agent":"scout","task":"Inspect sub-target.txt"},{"agent":"worker","task":"Update based on: {previous}"}]}'
+            }
+        }
+        $pipeRes = Invoke-AgentTool -Root $workspacePath -Call $pipeCall | ConvertFrom-Json
+        Assert-True ($pipeRes.status -eq 'completed' -and $pipeRes.mode -eq 'pipeline' -and $pipeRes.steps_count -eq 2) 'Pipeline run_agent execution failed.'
+        Assert-True ($pipeRes.output -eq 'Replaced token in sub-target.txt' -and ($pipeRes.modified_files -contains 'sub-target.txt')) 'Pipeline did not report output or modified_files.'
+        Assert-True ((Get-Content -LiteralPath (Join-Path $workspacePath 'sub-target.txt') -Raw -Encoding UTF8) -eq 'NEW_FROM_SUBAGENT') 'Subagent edit was not written to disk.'
+
+        # Parent /undo reverts the subagent's file modification.
+        $subUndoState = @{ messages = @(@{ role = 'system'; content = 'sys' }) }
+        Invoke-AgentUndo -State $subUndoState -UndoEntry @{ messages = @(@{ role = 'system'; content = 'sys' }); writes = @($script:CurrentTurnWrites) }
+        Assert-True ((Get-Content -LiteralPath (Join-Path $workspacePath 'sub-target.txt') -Raw -Encoding UTF8) -eq 'OLD_TOKEN') 'Parent /undo did not revert subagent file edit.'
+
+        $parCall = @{
+            id = 'sub-par'
+            function = @{
+                name = 'run_agent'
+                arguments = '{"parallel":[{"role":"recon","prompt":"Check A"},{"role":"audit","prompt":"Check B"}]}'
+            }
+        }
+        $parRes = Invoke-AgentTool -Root $workspacePath -Call $parCall | ConvertFrom-Json
+        Assert-True ($parRes.status -eq 'completed' -and $parRes.mode -eq 'parallel' -and $parRes.tasks_count -eq 2 -and $parRes.output.Contains('Task 1 (recon)') -and $parRes.output.Contains('Task 2 (audit)')) 'Parallel run_agent execution failed.'
+    }
+    finally {
+        Remove-Item Function:\Invoke-WebRequest -ErrorAction SilentlyContinue
+        $script:AgentPermission = 'Ask'
+    }
 }
 finally {
     Remove-TestEnvironment -Env $envData

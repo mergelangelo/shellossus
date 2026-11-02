@@ -277,7 +277,7 @@ try {
         Invoke-AgentTurn -State $modeSwitchState -Endpoint 'https://example.invalid/v1/chat/completions' -ModelId 'test-model' -ApiKey 'fake' -Root $workspacePath -Steps 4
         $roPayload = $script:capturedPayloads[2]
         $roToolNames = @($roPayload.tools | ForEach-Object { $_.function.name })
-        Assert-True ($roToolNames.Count -eq 4 -and ($roToolNames -notcontains 'write_file') -and $roPayload.messages[0].content.Contains('Permission mode: ReadOnly.')) 'ReadOnly turn payload was out of sync with active permission.'
+        Assert-True ($roToolNames.Count -eq 5 -and ($roToolNames -notcontains 'write_file') -and ($roToolNames -contains 'run_agent') -and $roPayload.messages[0].content.Contains('Permission mode: ReadOnly.')) 'ReadOnly turn payload was out of sync with active permission.'
 
         # 3. Switch to Ask: write_file is restored, transition notice replaces ReadOnly notice, and real write with WRITE confirmation succeeds.
         $script:AgentPermission = 'Ask'
@@ -485,6 +485,61 @@ try {
         Remove-Item Function:\global:shellossus -Force -ErrorAction SilentlyContinue
         Remove-Item Function:\global:shos_spaced -Force -ErrorAction SilentlyContinue
     }
+
+    # Subagent context=fork boundary safety and mutationEpoch advancement on subagent file modification.
+    $script:AgentPermission = 'AutoEdit'
+    Set-Content -LiteralPath (Join-Path $workspacePath 'fork-edit.txt') -Value 'v1' -Encoding UTF8 -NoNewline
+    $script:forkTurnStep = 0
+    $script:forkedSawPriorHistory = $false
+    function Invoke-WebRequest {
+        param($Uri, $Method, $Headers, $ContentType, $Body, $TimeoutSec, $ErrorAction, [switch]$UseBasicParsing, $OutFile)
+        $script:forkTurnStep++
+        $pObj = $Body | ConvertFrom-Json
+        if ($script:forkTurnStep -eq 1) {
+            $r = @{ choices = @(@{ finish_reason = 'tool_calls'; message = @{
+                content = ''
+                tool_calls = @(@{ id = 'fk-r1'; type = 'function'; function = @{ name = 'read_file'; arguments = '{"path":"fork-edit.txt"}' } })
+            } }) } | ConvertTo-Json -Depth 10 -Compress
+        }
+        elseif ($script:forkTurnStep -eq 2) {
+            $r = @{ choices = @(@{ finish_reason = 'tool_calls'; message = @{
+                content = ''
+                tool_calls = @(@{ id = 'fk-sub'; type = 'function'; function = @{ name = 'run_agent'; arguments = '{"role":"craft","context":"fork","prompt":"Edit fork-edit.txt based on prior history"}' } })
+            } }) } | ConvertTo-Json -Depth 10 -Compress
+        }
+        elseif ($script:forkTurnStep -eq 3) {
+            $allTxt = ($pObj.messages | ForEach-Object { [string]$_.content }) -join "`n"
+            if ($allTxt.Contains('PRIOR_SECRET_CONTEXT')) { $script:forkedSawPriorHistory = $true }
+            $r = @{ choices = @(@{ finish_reason = 'tool_calls'; message = @{
+                content = ''
+                tool_calls = @(@{ id = 'fk-e1'; type = 'function'; function = @{ name = 'edit_file'; arguments = '{"path":"fork-edit.txt","old_text":"v1","new_text":"v2"}' } })
+            } }) } | ConvertTo-Json -Depth 10 -Compress
+        }
+        elseif ($script:forkTurnStep -eq 4) {
+            $r = @{ choices = @(@{ finish_reason = 'stop'; message = @{ content = 'Subagent updated fork-edit.txt to v2.' } }) } | ConvertTo-Json -Depth 10 -Compress
+        }
+        elseif ($script:forkTurnStep -eq 5) {
+            $r = @{ choices = @(@{ finish_reason = 'tool_calls'; message = @{
+                content = ''
+                tool_calls = @(@{ id = 'fk-r2'; type = 'function'; function = @{ name = 'read_file'; arguments = '{"path":"fork-edit.txt"}' } })
+            } }) } | ConvertTo-Json -Depth 10 -Compress
+        }
+        else {
+            $r = @{ choices = @(@{ finish_reason = 'stop'; message = @{ content = 'Verified v2 after subagent edit.' } }) } | ConvertTo-Json -Depth 10 -Compress
+        }
+        Set-Content -LiteralPath $OutFile -Value $r -Encoding UTF8 -NoNewline
+    }
+    $forkParentState = @{
+        messages = @(
+            @{ role = 'system'; content = 'sys' },
+            @{ role = 'user'; content = 'Remember PRIOR_SECRET_CONTEXT' },
+            @{ role = 'assistant'; content = 'Noted.' },
+            @{ role = 'user'; content = 'Read, delegate edit, and re-read fork-edit.txt' }
+        )
+    }
+    Invoke-AgentTurn -State $forkParentState -Endpoint 'https://example.invalid/v1/chat/completions' -ModelId 'test-model' -ApiKey 'fake' -Root $workspacePath -Steps 6 -MaxRepeatCalls 2
+    Assert-True ($script:forkedSawPriorHistory -and (-not $forkParentState.loop_detected) -and $forkParentState.messages[-1].content -eq 'Verified v2 after subagent edit.') 'run_agent context=fork or mutationEpoch advancement after subagent edit failed.'
+    $script:AgentPermission = 'Ask'
 }
 finally {
     Remove-TestEnvironment -Env $envData

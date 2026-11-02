@@ -75,3 +75,26 @@ You: /review @src/Tools.ps1
 - **`@path/to/file`:** Any `@relative/path` token in your prompt automatically attaches the first 300 lines (up to 20,000 characters) of that workspace file in a `<file path="...">...</file>` block.
 - **`!command`:** Runs a PowerShell command in the workspace root, prints the output, and appends the command + output to the conversation context.
 - **`!!command`:** Runs a PowerShell command locally in the terminal without adding its output to the conversation context.
+
+---
+
+## 6. Subagent Role Profiles (`.shellossus/agents/*.md`)
+
+`shellossus` includes three built-in subagent roles (`recon`, `audit`, and `craft`) for the `run_agent` tool. You can also define custom subagent roles in:
+- `%USERPROFILE%\.shellossus\agents\<name>.md`
+- `<workspace>\.shellossus\agents\<name>.md`
+- `<workspace>\agents\<name>.md`
+
+Example `.shellossus/agents/sql-auditor.md`:
+
+```markdown
+---
+name: sql-auditor
+description: Audit SQL queries for lock contention and full table scans
+permission: ReadOnly
+tools: read_file, grep_files
+---
+Inspect the target SQL files for missing indexes, lock escalation risks, and non-SARGable predicates.
+```
+
+Use `/agents` in interactive mode to inspect available roles, or `/agent:<role> <task>` to delegate a task directly to that role.
