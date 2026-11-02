@@ -560,14 +560,14 @@ function Get-AgentEnvironment {
         'Windows'
     }
     $psVer = if ($PSVersionTable -and $PSVersionTable.PSVersion) { [string]$PSVersionTable.PSVersion } else { '5.1' }
-    $psEdition = if ($PSVersionTable -and $PSVersionTable.PSEdition) { [string]$PSVersionTable.PSEdition } else { 'Desktop' }
+    $editionName = if ($PSVersionTable -and $PSVersionTable.PSEdition) { [string]$PSVersionTable.PSEdition } else { 'Desktop' }
     $langMode = if ($ExecutionContext -and $ExecutionContext.SessionState -and $ExecutionContext.SessionState.LanguageMode) {
         [string]$ExecutionContext.SessionState.LanguageMode
     }
     else {
         'FullLanguage'
     }
-    $preferPwsh = ($psEdition -eq 'Core')
+    $preferPwsh = ($editionName -eq 'Core')
     $shellCmd = if ($preferPwsh) {
         $c = Get-Command -Name 'pwsh' -ErrorAction SilentlyContinue
         if (-not $c) { $c = Get-Command -Name 'powershell' -ErrorAction SilentlyContinue }
@@ -594,7 +594,7 @@ function Get-AgentEnvironment {
     return @{
         os = $osDesc
         ps_version = $psVer
-        ps_edition = $psEdition
+        ps_edition = $editionName
         language_mode = $langMode
         shell_exe = $shellExe
         shell_version = $shellVer

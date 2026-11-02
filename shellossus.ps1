@@ -2,7 +2,7 @@ param(
     [string]$BaseUrl = $env:SHELLOSSUS_BASE_URL,
     [string]$Model = $env:SHELLOSSUS_MODEL,
     [string]$Workspace = '.',
-    [string]$ConfigPath = "$env:USERPROFILE\.shellossus\.env",
+    [string]$ConfigPath = "$(if ($env:USERPROFILE) { $env:USERPROFILE } else { $HOME })\.shellossus\.env",
     [int]$MaxSteps = 50,
     [int]$MaxRepeatCalls = 3,
     [string]$Permission = 'Ask',
@@ -31,7 +31,7 @@ param(
 # Windows PowerShell 5.1 compatible. No downloaded executables or modules.
 # Auto-generated from src/*.ps1 by build.ps1. Edit files in src/ and run .\build.ps1.
 
-# --- Config.ps1 ---
+# --- src/Config.ps1 ---
 # Configuration, path validation, and security boundary helpers.
 # Windows PowerShell 5.1 and ConstrainedLanguage compatible.
 
@@ -214,7 +214,7 @@ function Resolve-AgentPath {
     return $item.FullName
 }
 
-# --- Theme.ps1 ---
+# --- src/Theme.ps1 ---
 # Terminal UI theme (sainnhe/gruvbox-material dark medium) and Markdown/table rendering.
 
 $script:Esc = [string][char]27
@@ -418,7 +418,7 @@ function Write-AgentReasoning {
     }
 }
 
-# --- Tools.ps1 ---
+# --- src/Tools.ps1 ---
 # Agent tools, permission modes, strict argument validation, fuzzy/batch file edits, shell runner, and disk undo.
 
 $script:CurrentTurnWrites = @()
@@ -981,14 +981,14 @@ function Get-AgentEnvironment {
         'Windows'
     }
     $psVer = if ($PSVersionTable -and $PSVersionTable.PSVersion) { [string]$PSVersionTable.PSVersion } else { '5.1' }
-    $psEdition = if ($PSVersionTable -and $PSVersionTable.PSEdition) { [string]$PSVersionTable.PSEdition } else { 'Desktop' }
+    $editionName = if ($PSVersionTable -and $PSVersionTable.PSEdition) { [string]$PSVersionTable.PSEdition } else { 'Desktop' }
     $langMode = if ($ExecutionContext -and $ExecutionContext.SessionState -and $ExecutionContext.SessionState.LanguageMode) {
         [string]$ExecutionContext.SessionState.LanguageMode
     }
     else {
         'FullLanguage'
     }
-    $preferPwsh = ($psEdition -eq 'Core')
+    $preferPwsh = ($editionName -eq 'Core')
     $shellCmd = if ($preferPwsh) {
         $c = Get-Command -Name 'pwsh' -ErrorAction SilentlyContinue
         if (-not $c) { $c = Get-Command -Name 'powershell' -ErrorAction SilentlyContinue }
@@ -1015,7 +1015,7 @@ function Get-AgentEnvironment {
     return @{
         os = $osDesc
         ps_version = $psVer
-        ps_edition = $psEdition
+        ps_edition = $editionName
         language_mode = $langMode
         shell_exe = $shellExe
         shell_version = $shellVer
@@ -2169,7 +2169,7 @@ function Invoke-AgentTool {
     catch { return (@{ error = $_.Exception.Message } | ConvertTo-Json -Compress) }
 }
 
-# --- Context.ps1 ---
+# --- src/Context.ps1 ---
 # System prompt assembly (AGENTS.md, CLAUDE.md, SYSTEM.md, skills), prompt templates, @file attachments, tree sessions, HTML export, and compaction.
 
 $script:NoContextFiles = $false
@@ -3435,7 +3435,7 @@ function Invoke-AgentCompact {
     return $true
 }
 
-# --- Cli.ps1 ---
+# --- src/Cli.ps1 ---
 # Agent turn loop (HTTP retries, finish_reason check, overflow auto-compaction, tool dispatch, JSON event stream) and interactive CLI REPL.
 
 function Write-AgentJsonEvent {

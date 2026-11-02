@@ -286,7 +286,7 @@ try {
         Invoke-AgentTurn -State $modeSwitchState -Endpoint 'https://example.invalid/v1/chat/completions' -ModelId 'test-model' -ApiKey 'fake' -Root $workspacePath -Steps 4
         $askPayload = $script:capturedPayloads[3]
         $askToolNames = @($askPayload.tools | ForEach-Object { $_.function.name })
-        $capNoticesInAsk = @($askPayload.messages | Where-Object { $_.role -eq 'user' -and $_.content -like '[Capability State Change]*' })
+        $capNoticesInAsk = @($askPayload.messages | Where-Object { $_.role -eq 'user' -and ([string]$_.content).StartsWith('[Capability State Change]') })
         Assert-True (($askToolNames -contains 'write_file') -and $askPayload.messages[0].content.Contains('Permission mode: Ask.') -and $capNoticesInAsk.Count -eq 1 -and $capNoticesInAsk[0].content.Contains('Permission mode is now Ask.')) 'Ask turn payload did not synchronize tools, system prompt, or single transition notice.'
         Assert-True ((Get-Content -LiteralPath (Join-Path $workspacePath 'mode-test.txt') -Raw -Encoding UTF8) -eq 'v2-ask-confirmed') 'Ask mode turn did not perform real confirmed write.'
     }
