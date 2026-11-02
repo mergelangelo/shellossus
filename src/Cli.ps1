@@ -120,16 +120,20 @@ function Invoke-AgentTurn {
 
 if (-not $LibraryOnly) {
     $script:AgentConfigPath = Format-ConfigPath -Path $ConfigPath
+    $resolvedCfg = Resolve-AgentConfigPath -Path $ConfigPath
+    $script:LegacyAgentConfigPath = if ($resolvedCfg -and ($resolvedCfg -ne $ConfigPath)) { Format-ConfigPath -Path $resolvedCfg } else { '' }
     $config = Read-AgentConfig -Path $ConfigPath
     if ($Setup) {
         Write-Host ($script:Gm.OscInit + $script:Gm.Fg + "Save settings to: $ConfigPath" + $script:Gm.Reset)
         Write-Host ($script:Gm.Yellow + 'API key is stored as plain text in your user profile, outside the project.' + $script:Gm.Reset)
         $defaultUrl = $BaseUrl
+        if (-not $defaultUrl) { $defaultUrl = $env:H_AGENT_BASE_URL }
         if (-not $defaultUrl) { $defaultUrl = $config.SHELLOSSUS_BASE_URL }
         $inputUrl = Read-Host "API base URL including /v1 [$defaultUrl]"
         if (-not $inputUrl) { $inputUrl = $defaultUrl }
         if ($inputUrl -notmatch '^https://[^\s]+$') { throw 'Use an HTTPS API base URL.' }
         $defaultModel = $Model
+        if (-not $defaultModel) { $defaultModel = $env:H_AGENT_MODEL }
         if (-not $defaultModel) { $defaultModel = $config.SHELLOSSUS_MODEL }
         $inputModel = Read-Host "Model ID [$defaultModel]"
         if (-not $inputModel) { $inputModel = $defaultModel }
@@ -149,10 +153,13 @@ if (-not $LibraryOnly) {
         Write-Host ($script:Gm.BoldGreen + 'Settings saved. Start shellossus from your working folder.' + $script:Gm.Reset)
         return
     }
+    if (-not $BaseUrl) { $BaseUrl = $env:H_AGENT_BASE_URL }
     if (-not $BaseUrl) { $BaseUrl = $config.SHELLOSSUS_BASE_URL }
+    if (-not $Model) { $Model = $env:H_AGENT_MODEL }
     if (-not $Model) { $Model = $config.SHELLOSSUS_MODEL }
     if ($PSBoundParameters.Keys -notcontains 'Workspace') {
         if ($env:SHELLOSSUS_WORKSPACE) { $Workspace = $env:SHELLOSSUS_WORKSPACE }
+        elseif ($env:H_AGENT_WORKSPACE) { $Workspace = $env:H_AGENT_WORKSPACE }
         elseif ($config.SHELLOSSUS_WORKSPACE) { $Workspace = $config.SHELLOSSUS_WORKSPACE }
     }
     $rootItem = Get-Item -LiteralPath $Workspace -Force -ErrorAction Stop
@@ -190,6 +197,7 @@ if (-not $LibraryOnly) {
     }
     $endpoint = $BaseUrl.TrimEnd('/') + '/chat/completions'
     $agentKey = $env:SHELLOSSUS_API_KEY
+    if (-not $agentKey) { $agentKey = $env:H_AGENT_API_KEY }
     if (-not $agentKey) { $agentKey = $config.SHELLOSSUS_API_KEY }
     $config.Clear()
     if (-not $agentKey) {

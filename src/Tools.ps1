@@ -679,6 +679,7 @@ function Invoke-ShellCommand {
     $outTemp = New-TemporaryFile -ErrorAction Stop
     $errTemp = New-TemporaryFile -ErrorAction Stop
     $savedSKey = $env:SHELLOSSUS_API_KEY
+    $savedHKey = $env:H_AGENT_API_KEY
     $savedOKey = $env:OPENAI_API_KEY
     $savedSSess = $env:SHELLOSSUS_SESSION_ID
     $savedSFile = $env:SHELLOSSUS_SESSION_FILE
@@ -690,6 +691,7 @@ function Invoke-ShellCommand {
     try {
         try {
             $env:SHELLOSSUS_API_KEY = $null
+            $env:H_AGENT_API_KEY = $null
             $env:OPENAI_API_KEY = $null
             if ($script:ActiveSessionId) {
                 $env:SHELLOSSUS_SESSION_ID = $script:ActiveSessionId
@@ -734,6 +736,7 @@ function Invoke-ShellCommand {
         }
         finally {
             $env:SHELLOSSUS_API_KEY = $savedSKey
+            $env:H_AGENT_API_KEY = $savedHKey
             $env:OPENAI_API_KEY = $savedOKey
             $env:SHELLOSSUS_SESSION_ID = $savedSSess
             $env:SHELLOSSUS_SESSION_FILE = $savedSFile

@@ -28,6 +28,13 @@ Clone the repository or copy [`shellossus.ps1`](shellossus.ps1) and [`install.ps
 .\install.ps1
 ```
 
+During installation, `install.ps1` always registers the full `shellossus` command and lets you pick an optional shortcut (`s`, `sss`, `shos`, a custom name, or no shortcut), verifying with `Get-Command -All` that the chosen shortcut does not conflict with existing commands. Non-interactive installation is also supported:
+
+```powershell
+.\install.ps1 -Shortcut s
+.\install.ps1 -NoShortcut
+```
+
 Open a new PowerShell window and configure your API endpoint, model ID, and key (stored in `%USERPROFILE%\.shellossus\.env`, outside your project):
 
 ```powershell

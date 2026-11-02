@@ -184,6 +184,11 @@ try {
     Save-AgentConfig -Path $configPath -Config $loadedConfig
     $constrainedConfig = Read-AgentConfig -Path $configPath
     Assert-True ($constrainedConfig.SHELLOSSUS_API_KEY -eq $loadedConfig.SHELLOSSUS_API_KEY) 'ConstrainedLanguage config roundtrip failed.'
+
+    $clProfilePath = Join-Path $testRoot 'cl-profile.ps1'
+    & "$PSScriptRoot\..\install.ps1" -AgentPath "$PSScriptRoot\..\shellossus.ps1" -ProfilePath $clProfilePath -Shortcut 'shoscl'
+    $clProfText = Get-Content -LiteralPath $clProfilePath -Raw -Encoding UTF8
+    Assert-True ($clProfText.Contains('function global:shellossus') -and $clProfText.Contains('function global:shoscl')) 'ConstrainedLanguage install.ps1 failed.'
 }
 finally {
     Remove-TestEnvironment -Env $envData
