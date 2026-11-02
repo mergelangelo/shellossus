@@ -94,7 +94,14 @@ function Invoke-AgentTurn {
             TimeoutSec = 180
             ErrorAction = 'Stop'
         }
-        $reply = Invoke-RestMethod @request
+        $tempResponse = New-TemporaryFile -ErrorAction Stop
+        try {
+            Invoke-WebRequest @request -UseBasicParsing -OutFile $tempResponse.FullName
+            $reply = Get-Content -LiteralPath $tempResponse.FullName -Raw -Encoding UTF8 -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+        }
+        finally {
+            Remove-Item -LiteralPath $tempResponse.FullName -Force -ErrorAction SilentlyContinue
+        }
         $message = $reply.choices[0].message
         if (-not $message) { throw 'API returned no assistant message.' }
         $assistant = @{ role = 'assistant'; content = $message.content }
