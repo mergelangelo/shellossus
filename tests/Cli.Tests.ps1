@@ -120,14 +120,130 @@ try {
     }
     Assert-True ($compactLengthThrew -and $compactTruncState.messages.Count -eq 5) 'Invoke-AgentCompact accepted a truncated summary with finish_reason=length.'
 
-    # Installer preserves profile contents and replaces its own block on rerun.
+    # Installer: first install, reinstall, shortcuts, conflict detection (alias, function, executable),
+    # profile preservation & backup, h-agent block migration, and paths with spaces + argument forwarding.
     $profileFile = Join-Path $testRoot 'profile.ps1'
-    Set-Content -LiteralPath $profileFile -Value '# keep my settings' -Encoding UTF8
-    & "$PSScriptRoot\..\install.ps1" -AgentPath "$PSScriptRoot\..\shellossus.ps1" -ProfilePath $profileFile
-    & "$PSScriptRoot\..\install.ps1" -AgentPath "$PSScriptRoot\..\shellossus.ps1" -ProfilePath $profileFile
+    $legacyBlock = "# keep my settings`r`n# >>> h-agent >>>`r`nfunction global:h-agent { & 'C:\old\h-agent.ps1' @args }`r`n# <<< h-agent <<<`r`n# footer line"
+    Set-Content -LiteralPath $profileFile -Value $legacyBlock -Encoding UTF8 -NoNewline
+
+    # 1. Migrate legacy h-agent block with -Shortcut sss and verify backup & profile preservation.
+    & "$PSScriptRoot\..\install.ps1" -AgentPath "$PSScriptRoot\..\shellossus.ps1" -ProfilePath $profileFile -Shortcut 'sss'
     $profileText = Get-Content -LiteralPath $profileFile -Raw -Encoding UTF8
-    Assert-True ($profileText.Contains('# keep my settings')) 'Profile contents were lost.'
-    Assert-True ((@($profileText -split '(?m)^# >>> shellossus >>>\r?$').Count - 1) -eq 1) 'Installer duplicated the launcher.'
+    Assert-True ($profileText.Contains('# keep my settings') -and $profileText.Contains('# footer line')) 'Profile user contents were lost during migration.'
+    Assert-True ((-not $profileText.Contains('# >>> h-agent >>>')) -and (-not $profileText.Contains('function global:h-agent'))) 'Legacy h-agent block was not migrated.'
+    Assert-True (((@($profileText -split '(?m)^# >>> shellossus >>>\r?$').Count - 1) -eq 1) -and $profileText.Contains('function global:shellossus') -and $profileText.Contains('function global:sss')) 'Expected shellossus and sss functions in migrated block.'
+    $backups = @(Get-ChildItem -LiteralPath $testRoot -Filter 'profile.ps1.shellossus-backup-*' -File)
+    Assert-True ($backups.Count -ge 1) 'Installer did not create a profile backup before modifying existing profile.'
+
+    # 2. Invalid shortcut syntax rejection (spaces, special chars, leading digit) and mutually exclusive flags.
+    foreach ($badName in @('bad space', 'bad$char', '1startdigit', 'a;b', '')) {
+        $badThrew = $false
+        try {
+            & "$PSScriptRoot\..\install.ps1" -AgentPath "$PSScriptRoot\..\shellossus.ps1" -ProfilePath $profileFile -Shortcut $badName
+        }
+        catch {
+            if ($_.Exception.Message -like '*Invalid shortcut name*') { $badThrew = $true }
+        }
+        Assert-True $badThrew "Installer accepted invalid shortcut syntax: '$badName'."
+    }
+    $bothFlagsThrew = $false
+    try {
+        & "$PSScriptRoot\..\install.ps1" -AgentPath "$PSScriptRoot\..\shellossus.ps1" -ProfilePath $profileFile -Shortcut 's' -NoShortcut
+    }
+    catch {
+        if ($_.Exception.Message -like '*Cannot specify both*') { $bothFlagsThrew = $true }
+    }
+    Assert-True $bothFlagsThrew 'Installer allowed both -Shortcut and -NoShortcut.'
+
+    # 3. Conflict detection with existing Alias, Function, and Executable (via Get-Command -All).
+    Set-Alias -Name 'sc_conflict_alias' -Value Get-ChildItem -Scope Global
+    function global:sc_conflict_func { Write-Output 'user custom function' }
+    $binDir = Join-Path $testRoot 'bin'
+    New-Item -ItemType Directory -Path $binDir -Force | Out-Null
+    $exeScript = Join-Path $binDir 'sc_conflict_exe.cmd'
+    Set-Content -LiteralPath $exeScript -Value '@echo off' -Encoding Ascii
+    Set-Content -LiteralPath (Join-Path $binDir 'sc_conflict_exe.ps1') -Value 'Write-Output "ext"' -Encoding Ascii
+    $savedPath = $env:PATH
+    $env:PATH = $binDir + [System.IO.Path]::PathSeparator + $env:PATH
+    try {
+        foreach ($conflictName in @('sc_conflict_alias', 'sc_conflict_func', 'sc_conflict_exe')) {
+            $confThrew = $false
+            try {
+                & "$PSScriptRoot\..\install.ps1" -AgentPath "$PSScriptRoot\..\shellossus.ps1" -ProfilePath $profileFile -Shortcut $conflictName
+            }
+            catch {
+                if ($_.Exception.Message -like "*conflicts with existing*") { $confThrew = $true }
+            }
+            Assert-True $confThrew "Installer did not reject conflicting command '$conflictName'."
+        }
+
+        # 4. Own previously installed shortcut function is recognized and NOT treated as a conflict on rerun.
+        . $profileFile
+        & "$PSScriptRoot\..\install.ps1" -AgentPath "$PSScriptRoot\..\shellossus.ps1" -ProfilePath $profileFile -Shortcut 'sss'
+        $profileTextAfterRerun = Get-Content -LiteralPath $profileFile -Raw -Encoding UTF8
+        Assert-True (((@($profileTextAfterRerun -split '(?m)^# >>> shellossus >>>\r?$').Count - 1) -eq 1) -and $profileTextAfterRerun.Contains('function global:sss')) 'Rerun with own existing shortcut failed or duplicated block.'
+
+        # 5. Interactive flows: first install menu (conflict retry -> custom name) and reinstall menu (keep -> change -> remove).
+        $interactiveProfile = Join-Path $testRoot 'interactive-profile.ps1'
+        $script:readQueue = @('1', '4', 'bad name!', '4', 'shos_custom')
+        Set-Alias -Name 's' -Value Get-Location -Scope Global
+        function Read-Host {
+            param($Prompt)
+            if ($script:readQueue.Count -eq 0) { return '5' }
+            $next = $script:readQueue[0]
+            if ($script:readQueue.Count -eq 1) { $script:readQueue = @() }
+            else { $script:readQueue = @($script:readQueue[1..($script:readQueue.Count - 1)]) }
+            return $next
+        }
+        try {
+            # First install: '1' ('s') conflicts with alias 's', then '4' ('bad name!') fails syntax, then '4' ('shos_custom') succeeds.
+            & "$PSScriptRoot\..\install.ps1" -AgentPath "$PSScriptRoot\..\shellossus.ps1" -ProfilePath $interactiveProfile
+            $intText1 = Get-Content -LiteralPath $interactiveProfile -Raw -Encoding UTF8
+            Assert-True ($intText1.Contains('function global:shos_custom')) 'Interactive first install with conflict retry and custom shortcut failed.'
+
+            # Reinstall 1: '1' (Keep 'shos_custom').
+            $script:readQueue = @('1')
+            & "$PSScriptRoot\..\install.ps1" -AgentPath "$PSScriptRoot\..\shellossus.ps1" -ProfilePath $interactiveProfile
+            $intText2 = Get-Content -LiteralPath $interactiveProfile -Raw -Encoding UTF8
+            Assert-True ($intText2.Contains('function global:shos_custom') -and ((@($intText2 -split '(?m)^# >>> shellossus >>>\r?$').Count - 1) -eq 1)) 'Interactive reinstall keep shortcut failed.'
+
+            # Reinstall 2: '2' (Change shortcut) -> '3' ('shos').
+            $script:readQueue = @('2', '3')
+            & "$PSScriptRoot\..\install.ps1" -AgentPath "$PSScriptRoot\..\shellossus.ps1" -ProfilePath $interactiveProfile
+            $intText3 = Get-Content -LiteralPath $interactiveProfile -Raw -Encoding UTF8
+            Assert-True ($intText3.Contains('function global:shos') -and (-not $intText3.Contains('function global:shos_custom'))) 'Interactive reinstall change shortcut failed.'
+
+            # Reinstall 3: '3' (Remove shortcut).
+            $script:readQueue = @('3')
+            & "$PSScriptRoot\..\install.ps1" -AgentPath "$PSScriptRoot\..\shellossus.ps1" -ProfilePath $interactiveProfile
+            $intText4 = Get-Content -LiteralPath $interactiveProfile -Raw -Encoding UTF8
+            Assert-True ($intText4.Contains('function global:shellossus') -and (-not $intText4.Contains('function global:shos'))) 'Interactive reinstall remove shortcut failed.'
+        }
+        finally {
+            Remove-Item Function:\Read-Host -ErrorAction SilentlyContinue
+            Remove-Item Alias:\s -Force -ErrorAction SilentlyContinue
+        }
+
+        # 6. Paths with spaces and full @args forwarding through registered functions.
+        $spacedDir = Join-Path $testRoot 'Folder With Spaces'
+        New-Item -ItemType Directory -Path $spacedDir -Force | Out-Null
+        $spacedAgent = Join-Path $spacedDir 'shellossus.ps1'
+        Set-Content -LiteralPath $spacedAgent -Value 'param([string]$Workspace, [string]$Prompt, [int]$MaxSteps) (@{ ws = $Workspace; prompt = $Prompt; steps = $MaxSteps } | ConvertTo-Json -Compress)' -Encoding Ascii
+        $spacedProfile = Join-Path $spacedDir 'spaced profile.ps1'
+        & "$PSScriptRoot\..\install.ps1" -AgentPath $spacedAgent -ProfilePath $spacedProfile -Shortcut 'shos_spaced'
+        . $spacedProfile
+        $forwardedRaw = shos_spaced -Workspace 'C:\Project With Spaces' -Prompt 'hello world' -MaxSteps 7
+        $forwardedObj = $forwardedRaw | ConvertFrom-Json
+        Assert-True ($forwardedObj.ws -eq 'C:\Project With Spaces' -and $forwardedObj.prompt -eq 'hello world' -and $forwardedObj.steps -eq 7) 'Shortcut function failed to forward arguments or path with spaces.'
+    }
+    finally {
+        $env:PATH = $savedPath
+        Remove-Item Alias:\sc_conflict_alias -Force -ErrorAction SilentlyContinue
+        Remove-Item Function:\global:sc_conflict_func -Force -ErrorAction SilentlyContinue
+        Remove-Item Function:\global:sss -Force -ErrorAction SilentlyContinue
+        Remove-Item Function:\global:shellossus -Force -ErrorAction SilentlyContinue
+        Remove-Item Function:\global:shos_spaced -Force -ErrorAction SilentlyContinue
+    }
 }
 finally {
     Remove-TestEnvironment -Env $envData

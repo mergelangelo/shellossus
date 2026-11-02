@@ -3,25 +3,55 @@
 
 $script:RegisteredSkills = @{}
 
+function Resolve-AgentConfigPath {
+    param([string]$Path)
+    if (-not $Path) { return '' }
+    if (Test-Path -LiteralPath $Path) { return $Path }
+    $leaf = Split-Path $Path -Leaf
+    $parent = Split-Path $Path -Parent
+    if (($leaf -ieq '.env') -and $parent -and ((Split-Path $parent -Leaf) -ieq '.shellossus')) {
+        $userRoot = Split-Path $parent -Parent
+        if ($userRoot) {
+            $legacyPath = Join-Path (Join-Path $userRoot '.h-agent') '.env'
+            if (Test-Path -LiteralPath $legacyPath) { return $legacyPath }
+        }
+    }
+    return $Path
+}
+
 function Read-AgentConfig {
     param([string]$Path)
     $config = @{}
-    if (-not (Test-Path -LiteralPath $Path)) { return $config }
+    $legacyConfig = @{}
+    $effectivePath = Resolve-AgentConfigPath -Path $Path
+    if (-not $effectivePath -or -not (Test-Path -LiteralPath $effectivePath)) { return $config }
     $lineNumber = 0
-    foreach ($line in @(Get-Content -LiteralPath $Path -Encoding UTF8 -ErrorAction Stop)) {
+    foreach ($line in @(Get-Content -LiteralPath $effectivePath -Encoding UTF8 -ErrorAction Stop)) {
         $lineNumber++
         $trimmed = $line.Trim()
         if (-not $trimmed -or $trimmed.StartsWith('#')) { continue }
-        if ($trimmed -notmatch '^(SHELLOSSUS_BASE_URL|SHELLOSSUS_MODEL|SHELLOSSUS_API_KEY|SHELLOSSUS_WORKSPACE)\s*=(.*)$') {
+        if ($trimmed -notmatch '^(?:(SHELLOSSUS|H_AGENT)_(BASE_URL|MODEL|API_KEY|WORKSPACE))\s*=(.*)$') {
             throw "Invalid config entry at line $lineNumber. Expected a supported SHELLOSSUS_* key=value."
         }
-        $key = $Matches[1]
-        $value = $Matches[2].Trim()
+        $prefix = $Matches[1].ToUpper()
+        $suffix = $Matches[2].ToUpper()
+        $normalizedKey = 'SHELLOSSUS_' + $suffix
+        $value = $Matches[3].Trim()
         if ($value.Length -ge 2 -and (($value.StartsWith('"') -and $value.EndsWith('"')) -or ($value.StartsWith("'") -and $value.EndsWith("'")))) {
             $value = $value.Substring(1, $value.Length - 2)
         }
         # Values are data. Never evaluate config as PowerShell code.
-        $config[$key] = $value
+        if ($prefix -eq 'SHELLOSSUS') {
+            $config[$normalizedKey] = $value
+        }
+        else {
+            $legacyConfig[$normalizedKey] = $value
+        }
+    }
+    foreach ($k in $legacyConfig.Keys) {
+        if (-not $config.ContainsKey($k)) {
+            $config[$k] = $legacyConfig[$k]
+        }
     }
     return $config
 }
@@ -81,7 +111,7 @@ function Format-PreviewText {
 function Test-IsSecretFile {
     param($Item)
     if ($Item.PSIsContainer) { return $false }
-    return ($Item.Name -eq '.env' -or ($Item.Name -like '.env.*' -and $Item.Name -ne '.env.example') -or $Item.FullName -eq $script:AgentConfigPath)
+    return ($Item.Name -eq '.env' -or ($Item.Name -like '.env.*' -and $Item.Name -ne '.env.example') -or $Item.FullName -eq $script:AgentConfigPath -or ($script:LegacyAgentConfigPath -and $Item.FullName -eq $script:LegacyAgentConfigPath))
 }
 
 function Get-WorkspaceRelativePath {

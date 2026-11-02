@@ -42,6 +42,37 @@ try {
     # Error formatting helper.
     $errText = Format-AgentError -ErrorRecord @{ Exception = @{ Message = 'HTTP 400' }; ErrorDetails = @{ Message = '{"error":{"message":"Bad model"}}' } }
     Assert-True ($errText -eq 'HTTP 400 (Bad model)') 'Format-AgentError failed.'
+
+    # Backward compatibility with legacy H_AGENT_* keys and .h-agent/.env fallback.
+    $legacyFile = Join-Path $testRoot 'legacy.env'
+    Set-Content -LiteralPath $legacyFile -Value @(
+        'H_AGENT_BASE_URL="https://legacy.invalid/v1"',
+        'H_AGENT_MODEL="legacy-model"',
+        'H_AGENT_API_KEY="legacy-secret"',
+        'H_AGENT_WORKSPACE="C:\legacy workspace"'
+    ) -Encoding UTF8
+    $parsedLegacy = Read-AgentConfig -Path $legacyFile
+    Assert-True ($parsedLegacy.SHELLOSSUS_BASE_URL -eq 'https://legacy.invalid/v1') 'Legacy H_AGENT_BASE_URL was not mapped.'
+    Assert-True ($parsedLegacy.SHELLOSSUS_MODEL -eq 'legacy-model') 'Legacy H_AGENT_MODEL was not mapped.'
+    Assert-True ($parsedLegacy.SHELLOSSUS_API_KEY -eq 'legacy-secret') 'Legacy H_AGENT_API_KEY was not mapped.'
+    Assert-True ($parsedLegacy.SHELLOSSUS_WORKSPACE -eq 'C:\legacy workspace') 'Legacy H_AGENT_WORKSPACE was not mapped.'
+
+    $mixedFile = Join-Path $testRoot 'mixed.env'
+    Set-Content -LiteralPath $mixedFile -Value @(
+        'H_AGENT_MODEL="old-model"',
+        'SHELLOSSUS_MODEL="new-model"',
+        'H_AGENT_MODEL="old-model-later"'
+    ) -Encoding UTF8
+    $parsedMixed = Read-AgentConfig -Path $mixedFile
+    Assert-True ($parsedMixed.SHELLOSSUS_MODEL -eq 'new-model') 'SHELLOSSUS_* key must take precedence over H_AGENT_*.'
+
+    $fakeUserHome = Join-Path $testRoot 'user-home'
+    $dotHAgentDir = Join-Path $fakeUserHome '.h-agent'
+    New-Item -ItemType Directory -Path $dotHAgentDir -Force | Out-Null
+    Set-Content -LiteralPath (Join-Path $dotHAgentDir '.env') -Value 'H_AGENT_MODEL="from-dot-h-agent"' -Encoding UTF8
+    $defaultShellossusCfg = Join-Path (Join-Path $fakeUserHome '.shellossus') '.env'
+    $fallbackCfg = Read-AgentConfig -Path $defaultShellossusCfg
+    Assert-True ($fallbackCfg.SHELLOSSUS_MODEL -eq 'from-dot-h-agent') 'Fallback from .shellossus/.env to existing .h-agent/.env failed.'
 }
 finally {
     Remove-TestEnvironment -Env $envData
