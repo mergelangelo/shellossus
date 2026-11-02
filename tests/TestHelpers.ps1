@@ -12,6 +12,9 @@ $script:ExcludedTools = @()
 $script:NoSkills = $false
 $script:NoPromptTemplates = $false
 $script:NoContextFiles = $false
+$script:Diagnostics = $false
+$script:MaxRepeatToolCalls = 3
+$script:ActiveWorkspace = ''
 $script:RegisteredSkillPaths = @{}
 
 function Assert-True {
@@ -24,6 +27,7 @@ function New-TestEnvironment {
     $ws = Join-Path $root 'workspace'
     New-Item -ItemType Directory -Path $ws -Force | Out-Null
     $script:AgentConfigPath = Format-ConfigPath -Path (Join-Path $root '.env')
+    $script:ActiveWorkspace = $ws
     return @{
         TestRoot = $root
         Workspace = $ws

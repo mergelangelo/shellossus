@@ -11,6 +11,9 @@ $script:ExcludedTools = @()
 $script:ActiveSessionId = ''
 $script:ActiveSessionFile = ''
 $script:ActiveModelId = ''
+$script:Diagnostics = $false
+$script:MaxRepeatToolCalls = 3
+$script:ActiveWorkspace = ''
 
 function Resolve-ToolCanonicalName {
     param([string]$Name)
@@ -147,19 +150,18 @@ function Invoke-TruncateHead {
             maxBytes = $MaxBytes
         }
     }
-    $outLines = @()
     $outBytes = 0
     $truncBy = 'lines'
-    for ($i = 0; $i -lt $lines.Count -and $i -lt $MaxLines; $i++) {
+    $outLines = @(for ($i = 0; $i -lt $lines.Count -and $i -lt $MaxLines; $i++) {
         $ln = [string]$lines[$i]
         $lnBytes = $ln.Length + $(if ($i -gt 0) { 1 } else { 0 })
         if (($outBytes + $lnBytes) -gt $MaxBytes) {
             $truncBy = 'bytes'
             break
         }
-        $outLines += $ln
         $outBytes += $lnBytes
-    }
+        $ln
+    })
     if ($outLines.Count -ge $MaxLines -and $outBytes -le $MaxBytes) {
         $truncBy = 'lines'
     }
@@ -234,28 +236,27 @@ function Invoke-TruncateTail {
             maxBytes = $MaxBytes
         }
     }
-    $revLines = @()
     $outBytes = 0
     $truncBy = 'lines'
     $lastPartial = $false
-    for ($i = $lines.Count - 1; $i -ge 0 -and $revLines.Count -lt $MaxLines; $i--) {
+    $revLines = @(for ($i = $lines.Count - 1; $i -ge 0 -and (($lines.Count - 1 - $i) -lt $MaxLines); $i--) {
         $ln = [string]$lines[$i]
-        $lnBytes = $ln.Length + $(if ($revLines.Count -gt 0) { 1 } else { 0 })
+        $isFirst = ($i -eq ($lines.Count - 1))
+        $lnBytes = $ln.Length + $(if (-not $isFirst) { 1 } else { 0 })
         if (($outBytes + $lnBytes) -gt $MaxBytes) {
             $truncBy = 'bytes'
-            if ($revLines.Count -eq 0 -and $ln.Length -gt $MaxBytes) {
-                $revLines += $ln.Substring($ln.Length - $MaxBytes)
+            if ($isFirst -and $ln.Length -gt $MaxBytes) {
                 $lastPartial = $true
+                $ln.Substring($ln.Length - $MaxBytes)
             }
             break
         }
-        $revLines += $ln
         $outBytes += $lnBytes
-    }
-    $outLines = @()
-    for ($j = $revLines.Count - 1; $j -ge 0; $j--) {
-        $outLines += $revLines[$j]
-    }
+        $ln
+    })
+    $outLines = @(for ($j = $revLines.Count - 1; $j -ge 0; $j--) {
+        $revLines[$j]
+    })
     if ($outLines.Count -ge $MaxLines -and $outBytes -le $MaxBytes) {
         $truncBy = 'lines'
     }
@@ -327,54 +328,134 @@ function Convert-IgnorePatternToRule {
     }
 }
 
-function Get-WorkspaceIgnoreRules {
-    param([string]$Root, [string]$SearchPath = '')
-    $rules = @()
-    if (-not $Root -or -not (Test-Path -LiteralPath $Root)) { return $rules }
-    $rootFull = (Get-Item -LiteralPath $Root -Force).FullName.TrimEnd('\').TrimEnd('/')
-    $scanItem = if ($SearchPath -and (Test-Path -LiteralPath $SearchPath)) { Get-Item -LiteralPath $SearchPath -Force } else { Get-Item -LiteralPath $Root -Force }
-    $scanDir = if ($scanItem.PSIsContainer) { $scanItem.FullName.TrimEnd('\').TrimEnd('/') } else { (Split-Path $scanItem.FullName -Parent).TrimEnd('\').TrimEnd('/') }
+function Compress-IgnoreRules {
+    param([array]$Rules)
+    if (-not $Rules -or $Rules.Count -eq 0) { return @() }
+    if ($Rules.Count -eq 1 -and $Rules[0].combined) { return $Rules }
+    $valid = @(foreach ($r in $Rules) {
+        if ($null -ne $r -and $r.regex) { $r }
+    })
+    if ($valid.Count -eq 0) { return @() }
+    $firstNeg = [bool]$valid[0].negated
+    $allSame = $true
+    foreach ($v in $valid) {
+        if ([bool]$v.negated -ne $firstNeg) {
+            $allSame = $false
+            break
+        }
+    }
+    if ($allSame) {
+        $rxParts = @(foreach ($v in $valid) {
+            if ($v.combined) { [string]$v.regex } else { "(?:$($v.regex))" }
+        })
+        return @(@{
+            regex = ($rxParts -join '|')
+            negated = $firstNeg
+            combined = $true
+        })
+    }
+    $segments = @()
+    $startIdx = 0
+    $currNeg = $firstNeg
+    for ($i = 1; $i -le $valid.Count; $i++) {
+        $isEnd = ($i -eq $valid.Count)
+        $nextNeg = if (-not $isEnd) { [bool]$valid[$i].negated } else { (-not $currNeg) }
+        if ($isEnd -or ($nextNeg -ne $currNeg)) {
+            $rxParts = @(for ($j = $startIdx; $j -lt $i; $j++) {
+                $item = $valid[$j]
+                if ($item.combined) { [string]$item.regex } else { "(?:$($item.regex))" }
+            })
+            $segments += @{
+                regex = ($rxParts -join '|')
+                negated = $currNeg
+                combined = $true
+            }
+            $startIdx = $i
+            $currNeg = $nextNeg
+        }
+    }
+    return $segments
+}
+
+function Read-DirectoryIgnoreRules {
+    param([string]$RootFull, [string]$DirFull)
+    $relDir = Get-WorkspaceRelativePath -Root $RootFull -FullPath $DirFull
+    $dirPrefix = if ($DirFull -ieq $RootFull -or -not $relDir -or $relDir -eq '.') { '' } else { $relDir.Replace('\', '/').Trim('/') + '/' }
+    $localRules = @(foreach ($igName in @('.gitignore', '.ignore', '.fdignore')) {
+        $igFile = Join-Path $DirFull $igName
+        if (-not (Test-Path -LiteralPath $igFile)) { continue }
+        $igItem = Get-Item -LiteralPath $igFile -Force -ErrorAction SilentlyContinue
+        if (-not $igItem -or $igItem.PSIsContainer -or (($igItem.Attributes -band 1024) -ne 0) -or $igItem.Length -gt 256KB) { continue }
+        foreach ($line in @(Get-Content -LiteralPath $igFile -Encoding UTF8 -ErrorAction SilentlyContinue)) {
+            $r = Convert-IgnorePatternToRule -Line ([string]$line) -DirPrefix $dirPrefix
+            if ($null -ne $r) { $r }
+        }
+    })
+    return $localRules
+}
+
+function Get-AncestorIgnoreRules {
+    param([string]$RootFull, [string]$ScanDir)
     $ancestorsRev = @()
-    $currDir = $scanDir
+    $currDir = $ScanDir
     $guard = 0
-    while ($currDir -and ($currDir -ine $rootFull) -and ($guard -lt 100)) {
+    while ($currDir -and ($currDir -ine $RootFull) -and ($guard -lt 100)) {
         $guard++
-        $ancestorsRev += $currDir
         $parentDir = Split-Path $currDir -Parent
         if (-not $parentDir -or ($parentDir -ieq $currDir)) { break }
         $currDir = $parentDir.TrimEnd('\').TrimEnd('/')
+        $ancestorsRev += $currDir
     }
-    $dirsToCheck = @($rootFull)
+    $ancestorDirs = @()
     for ($i = $ancestorsRev.Count - 1; $i -ge 0; $i--) {
-        if (-not ($dirsToCheck -contains $ancestorsRev[$i])) {
-            $dirsToCheck += $ancestorsRev[$i]
+        if (-not ($ancestorDirs -contains $ancestorsRev[$i])) {
+            $ancestorDirs += $ancestorsRev[$i]
         }
     }
-    if ($scanItem.PSIsContainer) {
-        foreach ($subDir in @(Get-ChildItem -LiteralPath $scanDir -Recurse -Force -Directory -ErrorAction SilentlyContinue | Sort-Object FullName)) {
-            if (($subDir.Attributes -band 1024) -ne 0) { continue }
-            if ($subDir.FullName -match '[/\\](\.git|node_modules)([/\\]|$)') { continue }
-            $subFull = $subDir.FullName.TrimEnd('\').TrimEnd('/')
-            if (-not ($dirsToCheck -contains $subFull)) {
-                $dirsToCheck += $subFull
-            }
-        }
+    if (($ScanDir -ine $RootFull) -and (-not ($ancestorDirs -contains $RootFull))) {
+        $ancestorDirs = @($RootFull) + $ancestorDirs
     }
-    foreach ($d in $dirsToCheck) {
-        $relDir = Get-WorkspaceRelativePath -Root $rootFull -FullPath $d
-        $dirPrefix = if ($d -ieq $rootFull -or -not $relDir -or $relDir -eq '.') { '' } else { $relDir.Replace('\', '/').Trim('/') + '/' }
-        foreach ($igName in @('.gitignore', '.ignore', '.fdignore')) {
-            $igFile = Join-Path $d $igName
-            if (-not (Test-Path -LiteralPath $igFile)) { continue }
-            $igItem = Get-Item -LiteralPath $igFile -Force -ErrorAction SilentlyContinue
-            if (-not $igItem -or $igItem.PSIsContainer -or (($igItem.Attributes -band 1024) -ne 0) -or $igItem.Length -gt 256KB) { continue }
-            foreach ($line in @(Get-Content -LiteralPath $igFile -Encoding UTF8 -ErrorAction SilentlyContinue)) {
-                $r = Convert-IgnorePatternToRule -Line ([string]$line) -DirPrefix $dirPrefix
-                if ($null -ne $r) { $rules += $r }
-            }
-        }
+    $rawRules = @(foreach ($d in $ancestorDirs) {
+        Read-DirectoryIgnoreRules -RootFull $RootFull -DirFull $d
+    })
+    return @(Compress-IgnoreRules -Rules $rawRules)
+}
+
+function Invoke-WorkspaceIgnoreScan {
+    param([string]$RootFull, [string]$CurrentDir, [array]$ParentRules = @(), [int]$Depth = 0, [int]$MaxDepth = 64)
+    if ($Depth -gt $MaxDepth) { return }
+    $localRules = @(Read-DirectoryIgnoreRules -RootFull $RootFull -DirFull $CurrentDir)
+    foreach ($lr in $localRules) { $lr }
+    $activeRules = if ($localRules.Count -gt 0) {
+        @(Compress-IgnoreRules -Rules (@($ParentRules) + $localRules))
     }
-    return $rules
+    else {
+        $ParentRules
+    }
+    $subDirs = @(Get-ChildItem -LiteralPath $CurrentDir -Force -Directory -ErrorAction SilentlyContinue | Sort-Object FullName)
+    foreach ($sd in $subDirs) {
+        if (($sd.Attributes -band 1024) -ne 0) { continue }
+        if ($sd.Name -ieq '.git' -or $sd.Name -ieq 'node_modules') { continue }
+        $relDir = Get-WorkspaceRelativePath -Root $RootFull -FullPath $sd.FullName
+        if (Test-PathIgnored -RelativePath $relDir -IsDir $true -Rules $activeRules) { continue }
+        Invoke-WorkspaceIgnoreScan -RootFull $RootFull -CurrentDir $sd.FullName -ParentRules $activeRules -Depth ($Depth + 1) -MaxDepth $MaxDepth
+    }
+}
+
+function Get-WorkspaceIgnoreRules {
+    param([string]$Root, [string]$SearchPath = '')
+    if (-not $Root -or -not (Test-Path -LiteralPath $Root)) { return @() }
+    $rootFull = (Get-Item -LiteralPath $Root -Force).FullName.TrimEnd('\').TrimEnd('/')
+    $scanItem = if ($SearchPath -and (Test-Path -LiteralPath $SearchPath)) { Get-Item -LiteralPath $SearchPath -Force } else { Get-Item -LiteralPath $Root -Force }
+    $scanDir = if ($scanItem.PSIsContainer) { $scanItem.FullName.TrimEnd('\').TrimEnd('/') } else { (Split-Path $scanItem.FullName -Parent).TrimEnd('\').TrimEnd('/') }
+    $ancestorRules = @(Get-AncestorIgnoreRules -RootFull $rootFull -ScanDir $scanDir)
+    $scannedRules = if ($scanItem.PSIsContainer) {
+        @(Invoke-WorkspaceIgnoreScan -RootFull $rootFull -CurrentDir $scanDir -ParentRules $ancestorRules)
+    }
+    else {
+        @(Read-DirectoryIgnoreRules -RootFull $rootFull -DirFull $scanDir)
+    }
+    return @(Compress-IgnoreRules -Rules ($ancestorRules + $scannedRules))
 }
 
 function Test-PathIgnored {
@@ -384,14 +465,149 @@ function Test-PathIgnored {
     $check = if ($IsDir) { $norm.TrimEnd('/') + '/' } else { $norm }
     $ignored = $false
     foreach ($r in $Rules) {
+        $rNeg = [bool]$r.negated
+        if ($rNeg -ne $ignored) { continue }
         if ($check -match $r.regex) {
-            $ignored = (-not $r.negated)
+            $ignored = (-not $rNeg)
         }
     }
     return $ignored
 }
 
-function Get-AgentTools {
+function Invoke-WorkspaceWalk {
+    param(
+        [string]$RootFull,
+        [string]$CurrentDir,
+        [array]$ParentRules = @(),
+        [switch]$FilesOnly,
+        [int]$Depth = 0,
+        [int]$MaxDepth = 64
+    )
+    if ($Depth -gt $MaxDepth) { return }
+    $localRules = @(Read-DirectoryIgnoreRules -RootFull $RootFull -DirFull $CurrentDir)
+    $activeRules = if ($localRules.Count -gt 0) {
+        @(Compress-IgnoreRules -Rules (@($ParentRules) + $localRules))
+    }
+    elseif ($Depth -eq 0 -and $ParentRules.Count -gt 0) {
+        @(Compress-IgnoreRules -Rules $ParentRules)
+    }
+    else {
+        $ParentRules
+    }
+    $entries = @(Get-ChildItem -LiteralPath $CurrentDir -Force -ErrorAction SilentlyContinue | Sort-Object FullName)
+    $dirsToEnter = @(foreach ($child in $entries) {
+        if (($child.Attributes -band 1024) -ne 0) { continue }
+        if ($child.PSIsContainer) {
+            if ($child.Name -ieq '.git' -or $child.Name -ieq 'node_modules') { continue }
+            $relDir = Get-WorkspaceRelativePath -Root $RootFull -FullPath $child.FullName
+            if (Test-PathIgnored -RelativePath $relDir -IsDir $true -Rules $activeRules) { continue }
+            if (-not $FilesOnly) {
+                @{ item = $child; rel_path = $relDir; is_dir = $true }
+            }
+            $child
+        }
+        else {
+            if (Test-IsSecretFile $child) { continue }
+            $relFile = Get-WorkspaceRelativePath -Root $RootFull -FullPath $child.FullName
+            if (Test-PathIgnored -RelativePath $relFile -IsDir $false -Rules $activeRules) { continue }
+            @{ item = $child; rel_path = $relFile; is_dir = $false }
+        }
+    })
+    foreach ($entryOrDir in $dirsToEnter) {
+        if ($entryOrDir -is [hashtable]) {
+            $entryOrDir
+        }
+        else {
+            Invoke-WorkspaceWalk -RootFull $RootFull -CurrentDir $entryOrDir.FullName -ParentRules $activeRules -FilesOnly:$FilesOnly -Depth ($Depth + 1) -MaxDepth $MaxDepth
+        }
+    }
+}
+
+function Get-WorkspaceWalkEntries {
+    param([string]$Root, [string]$SearchPath = '', [switch]$FilesOnly)
+    if (-not $Root -or -not (Test-Path -LiteralPath $Root)) { return @() }
+    $rootFull = (Get-Item -LiteralPath $Root -Force).FullName.TrimEnd('\').TrimEnd('/')
+    $scanItem = if ($SearchPath -and (Test-Path -LiteralPath $SearchPath)) { Get-Item -LiteralPath $SearchPath -Force } else { Get-Item -LiteralPath $Root -Force }
+    if (-not $scanItem.PSIsContainer) {
+        if (($scanItem.Attributes -band 1024) -ne 0 -or (Test-IsSecretFile $scanItem)) { return @() }
+        $relFile = Get-WorkspaceRelativePath -Root $rootFull -FullPath $scanItem.FullName
+        $rules = @(Get-WorkspaceIgnoreRules -Root $rootFull -SearchPath $scanItem.FullName)
+        if (Test-PathIgnored -RelativePath $relFile -IsDir $false -Rules $rules) { return @() }
+        return @(@{ item = $scanItem; rel_path = $relFile; is_dir = $false })
+    }
+    $scanDir = $scanItem.FullName.TrimEnd('\').TrimEnd('/')
+    $ancestorRules = @(Get-AncestorIgnoreRules -RootFull $rootFull -ScanDir $scanDir)
+    return @(Invoke-WorkspaceWalk -RootFull $rootFull -CurrentDir $scanDir -ParentRules $ancestorRules -FilesOnly:$FilesOnly)
+}
+
+function Get-AgentEnvironment {
+    param([string]$Root = '')
+    $effRoot = if ($Root) { $Root } elseif ($script:ActiveWorkspace) { $script:ActiveWorkspace } else { (Get-Location).Path }
+    if ($effRoot -and (Test-Path -LiteralPath $effRoot)) {
+        $item = Get-Item -LiteralPath $effRoot -Force -ErrorAction SilentlyContinue
+        if ($item) { $effRoot = $item.FullName }
+    }
+    $osDesc = if ($PSVersionTable -and $PSVersionTable.OS) {
+        [string]$PSVersionTable.OS
+    }
+    elseif ($env:OS) {
+        [string]$env:OS
+    }
+    elseif ($PSVersionTable -and $PSVersionTable.Platform) {
+        [string]$PSVersionTable.Platform
+    }
+    else {
+        'Windows'
+    }
+    $psVer = if ($PSVersionTable -and $PSVersionTable.PSVersion) { [string]$PSVersionTable.PSVersion } else { '5.1' }
+    $psEdition = if ($PSVersionTable -and $PSVersionTable.PSEdition) { [string]$PSVersionTable.PSEdition } else { 'Desktop' }
+    $langMode = if ($ExecutionContext -and $ExecutionContext.SessionState -and $ExecutionContext.SessionState.LanguageMode) {
+        [string]$ExecutionContext.SessionState.LanguageMode
+    }
+    else {
+        'FullLanguage'
+    }
+    $preferPwsh = ($psEdition -eq 'Core')
+    $shellCmd = if ($preferPwsh) {
+        $c = Get-Command -Name 'pwsh' -ErrorAction SilentlyContinue
+        if (-not $c) { $c = Get-Command -Name 'powershell' -ErrorAction SilentlyContinue }
+        $c
+    }
+    else {
+        $c = Get-Command -Name 'powershell' -ErrorAction SilentlyContinue
+        if (-not $c) { $c = Get-Command -Name 'pwsh' -ErrorAction SilentlyContinue }
+        $c
+    }
+    $shellExe = if ($shellCmd -and $shellCmd.Name) {
+        if ($shellCmd.Name -match '(?i)^pwsh') { 'pwsh' } else { 'powershell' }
+    }
+    elseif ($preferPwsh) {
+        'pwsh'
+    }
+    else {
+        'powershell'
+    }
+    $shellVer = $psVer
+    if ($shellCmd -and $shellCmd.Version -and ([string]$shellCmd.Version -ne '0.0.0.0')) {
+        $shellVer = [string]$shellCmd.Version
+    }
+    return @{
+        os = $osDesc
+        ps_version = $psVer
+        ps_edition = $psEdition
+        language_mode = $langMode
+        shell_exe = $shellExe
+        shell_version = $shellVer
+        workspace = [string]$effRoot
+    }
+}
+
+function Get-AgentCapabilities {
+    param([string]$Root = '')
+    $envInfo = Get-AgentEnvironment -Root $Root
+    $perm = if ($script:AgentPermission -in @('ReadOnly', 'Ask', 'AutoEdit', 'Auto')) { $script:AgentPermission } else { 'Ask' }
+    $tools = @()
+    $toolNames = @()
     foreach ($name in @('list_files', 'read_file')) {
         if (-not (Test-IsToolEnabled -Name $name)) { continue }
         $description = 'List up to 200 entries in a directory. Names only; no file contents.'
@@ -409,7 +625,8 @@ function Get-AgentTools {
             $properties.offset = @{ type = 'integer'; description = 'Optional alias for start_line (1-based line offset).' }
             $properties.limit = @{ type = 'integer'; description = 'Optional alias for max_lines (1..300).' }
         }
-        @{
+        $toolNames += $name
+        $tools += @{
             type = 'function'
             function = @{
                 name = $name
@@ -423,7 +640,8 @@ function Get-AgentTools {
         }
     }
     if (Test-IsToolEnabled -Name 'find_files') {
-        @{
+        $toolNames += 'find_files'
+        $tools += @{
             type = 'function'
             function = @{
                 name = 'find_files'
@@ -441,7 +659,8 @@ function Get-AgentTools {
         }
     }
     if (Test-IsToolEnabled -Name 'grep_files') {
-        @{
+        $toolNames += 'grep_files'
+        $tools += @{
             type = 'function'
             function = @{
                 name = 'grep_files'
@@ -464,53 +683,78 @@ function Get-AgentTools {
             }
         }
     }
-    if ($script:AgentPermission -eq 'ReadOnly') { return }
-    foreach ($name in @('write_file', 'edit_file')) {
-        if (-not (Test-IsToolEnabled -Name $name)) { continue }
-        $properties = @{ path = @{ type = 'string'; description = 'Workspace-relative text file path. Parent directory must exist.' } }
-        if ($name -eq 'write_file') {
-            $description = 'Create a UTF-8 text file (or overwrite when overwrite=true).'
-            $properties.content = @{ type = 'string'; description = 'Complete file contents, up to 1 MiB.' }
-            $properties.overwrite = @{ type = 'boolean'; description = 'Set true to overwrite an existing file (saves a backup).' }
-            $required = @('path', 'content')
-        }
-        else {
-            $description = 'Replace one or more unique blocks in a UTF-8 text file (supports single old_text/new_text or batch edits[] array; saves a backup).'
-            $properties.old_text = @{ type = 'string'; description = 'Single edit: nonempty text occurring once in the file.' }
-            $properties.new_text = @{ type = 'string'; description = 'Single edit: replacement text.' }
-            $properties.edits = @{
-                type = 'array'
-                description = 'Optional batch of non-overlapping edits: array of {old_text, new_text} objects.'
-                items = @{
-                    type = 'object'
-                    properties = @{
-                        old_text = @{ type = 'string' }
-                        new_text = @{ type = 'string' }
+    if ($perm -ne 'ReadOnly') {
+        foreach ($name in @('write_file', 'edit_file')) {
+            if (-not (Test-IsToolEnabled -Name $name)) { continue }
+            $properties = @{ path = @{ type = 'string'; description = 'Workspace-relative text file path. Parent directory must exist.' } }
+            if ($name -eq 'write_file') {
+                $description = 'Create a UTF-8 text file (or overwrite when overwrite=true).'
+                $properties.content = @{ type = 'string'; description = 'Complete file contents, up to 1 MiB.' }
+                $properties.overwrite = @{ type = 'boolean'; description = 'Set true to overwrite an existing file (saves a backup).' }
+                $required = @('path', 'content')
+            }
+            else {
+                $description = 'Replace one or more unique blocks in a UTF-8 text file (supports single old_text/new_text or batch edits[] array; saves a backup).'
+                $properties.old_text = @{ type = 'string'; description = 'Single edit: nonempty text occurring once in the file.' }
+                $properties.new_text = @{ type = 'string'; description = 'Single edit: replacement text.' }
+                $properties.edits = @{
+                    type = 'array'
+                    description = 'Optional batch of non-overlapping edits: array of {old_text, new_text} objects.'
+                    items = @{
+                        type = 'object'
+                        properties = @{
+                            old_text = @{ type = 'string' }
+                            new_text = @{ type = 'string' }
+                        }
+                        required = @('old_text', 'new_text')
                     }
-                    required = @('old_text', 'new_text')
+                }
+                $required = @('path')
+            }
+            $toolNames += $name
+            $tools += @{ type = 'function'; function = @{ name = $name; description = $description; parameters = @{ type = 'object'; properties = $properties; required = $required } } }
+        }
+        if (Test-IsToolEnabled -Name 'run_command') {
+            $toolNames += 'run_command'
+            $tools += @{
+                type = 'function'
+                function = @{
+                    name = 'run_command'
+                    description = 'Execute a PowerShell command in the workspace directory.'
+                    parameters = @{
+                        type = 'object'
+                        properties = @{
+                            command = @{ type = 'string'; description = 'PowerShell command to execute.' }
+                            timeout_sec = @{ type = 'integer'; description = 'Optional timeout in seconds (1..600, default 60).' }
+                        }
+                        required = @('command')
+                    }
                 }
             }
-            $required = @('path')
-        }
-        @{ type = 'function'; function = @{ name = $name; description = $description; parameters = @{ type = 'object'; properties = $properties; required = $required } } }
-    }
-    if (Test-IsToolEnabled -Name 'run_command') {
-        @{
-            type = 'function'
-            function = @{
-                name = 'run_command'
-                description = 'Execute a PowerShell command in the workspace directory.'
-                parameters = @{
-                    type = 'object'
-                    properties = @{
-                        command = @{ type = 'string'; description = 'PowerShell command to execute.' }
-                        timeout_sec = @{ type = 'integer'; description = 'Optional timeout in seconds (1..600, default 60).' }
-                    }
-                    required = @('command')
-                }
-            }
         }
     }
+    $canRead = [bool]($toolNames | Where-Object { $_ -in @('list_files', 'read_file', 'find_files', 'grep_files') })
+    $canWrite = [bool]($toolNames | Where-Object { $_ -in @('write_file', 'edit_file') })
+    $canExec = ($toolNames -contains 'run_command')
+    return @{
+        permission = $perm
+        no_tools = [bool]$script:NoTools
+        enabled_filter = @($script:EnabledTools)
+        excluded_filter = @($script:ExcludedTools)
+        tool_names = $toolNames
+        tools = $tools
+        can_read = $canRead
+        can_write = $canWrite
+        can_exec = $canExec
+        write_requires_confirmation = (($perm -eq 'Ask') -and $canWrite)
+        exec_requires_confirmation = (($perm -in @('Ask', 'AutoEdit')) -and $canExec)
+        environment = $envInfo
+        signature = ("{0}|{1}" -f $perm, ($toolNames -join ','))
+    }
+}
+
+function Get-AgentTools {
+    return @((Get-AgentCapabilities).tools)
 }
 
 function Get-ObjectPropertyNames {
@@ -675,7 +919,8 @@ function Invoke-ShellCommand {
     if (-not $Command -or -not $Command.Trim()) { throw 'Command must not be empty.' }
     if ($TimeoutSec -lt 1 -or $TimeoutSec -gt 600) { throw 'timeout_sec must be between 1 and 600.' }
     $rootFull = (Get-Item -LiteralPath $Root -Force -ErrorAction Stop).FullName
-    $shellExe = if (Get-Command -Name 'powershell' -ErrorAction SilentlyContinue) { 'powershell' } else { 'pwsh' }
+    $envInfo = Get-AgentEnvironment -Root $rootFull
+    $shellExe = $envInfo.shell_exe
     $outTemp = New-TemporaryFile -ErrorAction Stop
     $errTemp = New-TemporaryFile -ErrorAction Stop
     $savedSKey = $env:SHELLOSSUS_API_KEY
@@ -1261,20 +1506,16 @@ function Invoke-AgentTool {
                 $maxFind = [int]$arguments.limit
                 if ($maxFind -lt 1 -or $maxFind -gt 1000) { throw 'limit must be between 1 and 1000.' }
             }
-            $ignoreRules = @(Get-WorkspaceIgnoreRules -Root $Root -SearchPath $path)
             $rawPat = $arguments.pattern.Trim()
             $isPathPat = ($rawPat.Contains('/') -or $rawPat.Contains('\'))
             $normPat = $rawPat.Replace('\', '/').TrimStart('/')
             $altPat = if ($normPat.StartsWith('**/')) { $normPat.Substring(3) } else { '' }
-            $found = @()
             $truncated = $false
-            foreach ($child in @(Get-ChildItem -LiteralPath $path -Recurse -Force -ErrorAction SilentlyContinue)) {
-                if (($child.Attributes -band 1024) -ne 0) { continue }
-                if ($child.FullName -match '[/\\](\.git|node_modules)([/\\]|$)') { continue }
-                if (Test-IsSecretFile $child) { continue }
-                $relPath = Get-WorkspaceRelativePath -Root $Root -FullPath $child.FullName
+            $matchCount = 0
+            $found = @(foreach ($walkEntry in @(Get-WorkspaceWalkEntries -Root $Root -SearchPath $path)) {
+                $child = $walkEntry.item
+                $relPath = $walkEntry.rel_path
                 $relToSearch = Get-WorkspaceRelativePath -Root $path -FullPath $child.FullName
-                if (Test-PathIgnored -RelativePath $relPath -IsDir ([bool]$child.PSIsContainer) -Rules $ignoreRules) { continue }
                 $isMatch = if ($isPathPat) {
                     ($relPath -like $normPat) -or ($relToSearch -like $normPat) -or ($altPat -and (($relPath -like $altPat) -or ($relToSearch -like $altPat)))
                 }
@@ -1282,15 +1523,16 @@ function Invoke-AgentTool {
                     ($child.Name -like $rawPat)
                 }
                 if ($isMatch) {
-                    if ($found.Count -ge $maxFind) { $truncated = $true; break }
-                    $found += @{
+                    if ($matchCount -ge $maxFind) { $truncated = $true; break }
+                    $matchCount++
+                    @{
                         path = $relPath
                         relative_path = $relToSearch
-                        is_dir = [bool]$child.PSIsContainer
-                        length = if ($child.PSIsContainer) { $null } else { $child.Length }
+                        is_dir = [bool]$walkEntry.is_dir
+                        length = if ($walkEntry.is_dir) { $null } else { $child.Length }
                     }
                 }
-            }
+            })
             $notice = if ($truncated) { "[${maxFind} results limit reached. Refine pattern or increase limit]" } else { $null }
             return (@{ matches = $found; files = $found; count = $found.Count; truncated = $truncated; notice = $notice } | ConvertTo-Json -Depth 5 -Compress)
         }
@@ -1322,37 +1564,33 @@ function Invoke-AgentTool {
                 $fileOffset = [int]$arguments.file_offset
                 if ($fileOffset -lt 0) { throw 'file_offset must be at least 0.' }
             }
-            $ignoreRules = @(Get-WorkspaceIgnoreRules -Root $Root -SearchPath $path)
-            $allCandidateFiles = @()
-            if ($item.PSIsContainer) {
-                foreach ($child in @(Get-ChildItem -LiteralPath $path -Recurse -Force -File -ErrorAction SilentlyContinue | Sort-Object FullName)) {
-                    if (($child.Attributes -band 1024) -ne 0) { continue }
-                    if ($child.FullName -match '[/\\](\.git|node_modules)([/\\]|$)') { continue }
-                    if (Test-IsSecretFile $child) { continue }
-                    $relCandidate = Get-WorkspaceRelativePath -Root $Root -FullPath $child.FullName
-                    if (Test-PathIgnored -RelativePath $relCandidate -IsDir $false -Rules $ignoreRules) { continue }
+            $allCandidateFiles = if ($item.PSIsContainer) {
+                @(foreach ($walkEntry in @(Get-WorkspaceWalkEntries -Root $Root -SearchPath $path -FilesOnly)) {
+                    $child = $walkEntry.item
+                    $relCandidate = $walkEntry.rel_path
                     if ($includeFilter -and ($child.Name -notlike $includeFilter) -and ($relCandidate -notlike $includeFilter)) { continue }
-                    if ($child.Length -le 1MB) { $allCandidateFiles += $child.FullName }
-                }
+                    if ($child.Length -le 1MB) { $child.FullName }
+                })
             }
             else {
                 if ($item.Length -gt 1MB) { throw 'File exceeds 1 MiB.' }
-                $allCandidateFiles = @($item.FullName)
+                @($item.FullName)
             }
             $totalFiles = $allCandidateFiles.Count
             $targetFiles = @($allCandidateFiles | Select-Object -Skip $fileOffset -First 500)
             $filesScanned = $targetFiles.Count
             $fileLimitReached = (($fileOffset + $filesScanned) -lt $totalFiles)
-            $hits = @()
             $matchLimitReached = $false
             $linesTruncated = $false
-            if ($targetFiles.Count -gt 0) {
+            $hitCount = 0
+            $hits = if ($targetFiles.Count -gt 0) {
                 $selParams = @{ LiteralPath = $targetFiles; Pattern = $arguments.pattern; Encoding = 'UTF8'; ErrorAction = 'Stop' }
                 if ($isLiteral) { $selParams.SimpleMatch = $true }
                 if ($isCaseSensitive) { $selParams.CaseSensitive = $true }
                 if ($ctxLines -gt 0) { $selParams.Context = @($ctxLines, $ctxLines) }
-                foreach ($m in @(Select-String @selParams)) {
-                    if ($hits.Count -ge $maxMatches) { $matchLimitReached = $true; break }
+                @(foreach ($m in @(Select-String @selParams)) {
+                    if ($hitCount -ge $maxMatches) { $matchLimitReached = $true; break }
+                    $hitCount++
                     $lineText = [string]$m.Line
                     if ($lineText.Length -gt 300) {
                         $lineText = $lineText.Substring(0, 300) + '...'
@@ -1367,8 +1605,11 @@ function Invoke-AgentTool {
                     if ($ctxLines -gt 0 -and $m.Context) {
                         $hitObj.context = @($m.Context.PreContext) + @($lineText) + @($m.Context.PostContext)
                     }
-                    $hits += $hitObj
-                }
+                    $hitObj
+                })
+            }
+            else {
+                @()
             }
             $truncated = ($fileLimitReached -or $matchLimitReached)
             $truncReason = if ($matchLimitReached -and $fileLimitReached) {

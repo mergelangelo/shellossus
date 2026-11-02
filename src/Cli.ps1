@@ -11,36 +11,239 @@ function Write-AgentJsonEvent {
     Write-Host ($ev | ConvertTo-Json -Depth 20 -Compress)
 }
 
+function Wait-AgentProcessWithSpinner {
+    param($Process, [string]$StatusLabel = 'Waiting for model', [int]$TimeoutSec = 180, [int]$PollMs = 200)
+    $frames = @('|', '/', '-', '\')
+    $frameIdx = 0
+    $startWait = Get-Date
+    $showSpinner = ($script:OutputMode -ne 'json') -and (-not $script:HideSpinner)
+    try {
+        while (-not $Process.HasExited) {
+            $elapsed = ((Get-Date) - $startWait).TotalSeconds
+            if ($showSpinner) {
+                $spinChar = $frames[$frameIdx % $frames.Count]
+                $frameIdx++
+                $statusLine = ("`r" + $script:Gm.Grey1 + ("  [{0}] {1} ({2:0.0}s)..." -f $spinChar, $StatusLabel, $elapsed) + $script:Gm.Reset)
+                Write-Host $statusLine -NoNewline
+            }
+            if ($elapsed -ge ($TimeoutSec + 5)) {
+                if (-not $Process.HasExited) {
+                    Stop-Process -InputObject $Process -Force -ErrorAction SilentlyContinue
+                    Stop-Process -Id $Process.Id -Force -ErrorAction SilentlyContinue
+                }
+                throw "Request timed out after ${TimeoutSec}s."
+            }
+            Start-Sleep -Milliseconds $PollMs
+        }
+    }
+    finally {
+        if ($showSpinner -and $frameIdx -gt 0) {
+            $clearLine = "`r" + (' ' * ($StatusLabel.Length + 28)) + "`r"
+            Write-Host $clearLine -NoNewline
+        }
+        if (-not $Process.HasExited) {
+            Stop-Process -InputObject $Process -Force -ErrorAction SilentlyContinue
+            Stop-Process -Id $Process.Id -Force -ErrorAction SilentlyContinue
+            Wait-Process -InputObject $Process -Timeout 2 -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+function Invoke-AgentHttpRequest {
+    param(
+        [string]$Uri,
+        [string]$ApiKey,
+        [string]$Body,
+        [string]$OutFile,
+        [int]$TimeoutSec = 180,
+        [string]$StatusLabel = 'Waiting for model',
+        [switch]$ForceBackgroundWorker
+    )
+    $iwrCmd = Get-Command -Name 'Invoke-WebRequest' -ErrorAction SilentlyContinue
+    if ((-not $ForceBackgroundWorker) -and (($iwrCmd -and $iwrCmd.CommandType -eq 'Function') -or $script:DisableAsyncHttp)) {
+        $request = @{
+            Uri = $Uri
+            Method = 'Post'
+            Headers = @{ Authorization = "Bearer $ApiKey" }
+            ContentType = 'application/json; charset=utf-8'
+            Body = $Body
+            TimeoutSec = $TimeoutSec
+            ErrorAction = 'Stop'
+        }
+        Invoke-WebRequest @request -UseBasicParsing -OutFile $OutFile
+        return
+    }
+    $shellExe = (Get-AgentEnvironment).shell_exe
+    $reqTemp = New-TemporaryFile -ErrorAction Stop
+    $errTemp = New-TemporaryFile -ErrorAction Stop
+    $stdoutTemp = New-TemporaryFile -ErrorAction Stop
+    $stderrTemp = New-TemporaryFile -ErrorAction Stop
+    try {
+        Set-Content -LiteralPath $reqTemp.FullName -Value $Body -Encoding UTF8 -NoNewline -ErrorAction Stop
+        $workerCmd = @'
+$ErrorActionPreference = 'Stop'
+try {
+    Invoke-WebRequest -Uri $env:SHELLOSSUS_HTTP_URI -Method 'Post' -Headers @{ Authorization = ('Bearer ' + $env:SHELLOSSUS_HTTP_KEY) } -ContentType 'application/json; charset=utf-8' -InFile $env:SHELLOSSUS_HTTP_IN -OutFile $env:SHELLOSSUS_HTTP_OUT -TimeoutSec ([int]$env:SHELLOSSUS_HTTP_TIMEOUT) -UseBasicParsing -ErrorAction Stop
+}
+catch {
+    $msg = $_.Exception.Message
+    $details = $null
+    if ($_.ErrorDetails -and $_.ErrorDetails.Message) {
+        $details = $_.ErrorDetails.Message.Trim()
+    }
+    if ($details) {
+        try {
+            $parsed = $details | ConvertFrom-Json -ErrorAction Stop
+            if ($parsed.error -and $parsed.error.message) { $details = [string]$parsed.error.message }
+        }
+        catch {}
+        if ($details.Length -gt 300) { $details = $details.Substring(0, 300) + '...' }
+        $msg = $msg + ' (' + $details + ')'
+    }
+    Set-Content -LiteralPath $env:SHELLOSSUS_HTTP_ERR -Value $msg -Encoding UTF8 -NoNewline
+    exit 1
+}
+'@
+        $argList = if ($env:OS -eq 'Windows_NT') {
+            $escaped = ($workerCmd -replace '(\\*)"', '$1$1\"') -replace '(\\*)$', '$1$1'
+            "-NoProfile -NonInteractive -Command `"$escaped`""
+        }
+        else {
+            @('-NoProfile', '-NonInteractive', '-Command', $workerCmd)
+        }
+        $proc = $null
+        try {
+            $env:SHELLOSSUS_HTTP_URI = $Uri
+            $env:SHELLOSSUS_HTTP_KEY = $ApiKey
+            $env:SHELLOSSUS_HTTP_IN = $reqTemp.FullName
+            $env:SHELLOSSUS_HTTP_OUT = $OutFile
+            $env:SHELLOSSUS_HTTP_ERR = $errTemp.FullName
+            $env:SHELLOSSUS_HTTP_TIMEOUT = [string]$TimeoutSec
+            $proc = Start-Process -FilePath $shellExe -ArgumentList $argList -RedirectStandardOutput $stdoutTemp.FullName -RedirectStandardError $stderrTemp.FullName -NoNewWindow -PassThru -ErrorAction Stop
+        }
+        finally {
+            $env:SHELLOSSUS_HTTP_URI = $null
+            $env:SHELLOSSUS_HTTP_KEY = $null
+            $env:SHELLOSSUS_HTTP_IN = $null
+            $env:SHELLOSSUS_HTTP_OUT = $null
+            $env:SHELLOSSUS_HTTP_ERR = $null
+            $env:SHELLOSSUS_HTTP_TIMEOUT = $null
+        }
+        Wait-AgentProcessWithSpinner -Process $proc -StatusLabel $StatusLabel -TimeoutSec $TimeoutSec
+        $errItem = Get-Item -LiteralPath $errTemp.FullName -Force -ErrorAction SilentlyContinue
+        if ($errItem -and $errItem.Length -gt 0) {
+            $errText = Get-Content -LiteralPath $errTemp.FullName -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
+            if ($errText) { throw $errText.Trim() }
+        }
+        if ($null -ne $proc.ExitCode -and [int]$proc.ExitCode -ne 0) {
+            $stdErrText = Get-Content -LiteralPath $stderrTemp.FullName -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
+            if ($stdErrText -and $stdErrText.Trim()) { throw $stdErrText.Trim() }
+            throw "HTTP worker exited with code $($proc.ExitCode)."
+        }
+    }
+    finally {
+        Remove-Item -LiteralPath $reqTemp.FullName -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $errTemp.FullName -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $stdoutTemp.FullName -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $stderrTemp.FullName -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function ConvertTo-CanonicalToolArgs {
+    param([string]$RawArguments)
+    if (-not $RawArguments -or -not $RawArguments.Trim()) { return '{}' }
+    try {
+        $parsed = $RawArguments | ConvertFrom-Json -ErrorAction Stop
+        if ($null -eq $parsed -or $parsed -is [string] -or $parsed -is [ValueType] -or $parsed -is [array]) {
+            return $RawArguments.Trim()
+        }
+        $props = @(Get-ObjectPropertyNames -InputObject $parsed | Sort-Object)
+        $parts = @()
+        foreach ($p in $props) {
+            $valJson = ($parsed.$p | ConvertTo-Json -Depth 10 -Compress)
+            $parts += ($p + ':' + $valJson)
+        }
+        return '{' + ($parts -join ',') + '}'
+    }
+    catch {
+        return $RawArguments.Trim()
+    }
+}
+
+function Get-ToolCallSignature {
+    param($Call, [int]$Epoch = 0)
+    $fnName = if ($Call -and $Call.function -and $Call.function.name) { Resolve-ToolCanonicalName -Name ([string]$Call.function.name) } else { '' }
+    $rawArgs = if ($Call -and $Call.function -and $Call.function.arguments) { [string]$Call.function.arguments } else { '{}' }
+    $canonArgs = ConvertTo-CanonicalToolArgs -RawArguments $rawArgs
+    return ("{0}|{1}|{2}" -f $Epoch, $fnName, $canonArgs)
+}
+
 function Invoke-AgentTurn {
-    param($State, [string]$Endpoint, [string]$ModelId, [string]$ApiKey, [string]$Root, [int]$Steps)
+    param($State, [string]$Endpoint, [string]$ModelId, [string]$ApiKey, [string]$Root, [int]$Steps = 50, [int]$MaxRepeatCalls = 0)
     $overflowRetried = $false
     $script:ActiveModelId = $ModelId
+    if ($Root) { $script:ActiveWorkspace = $Root }
+    $State.step_limit_reached = $false
+    $State.loop_detected = $false
+    $State.repeated_tool = $null
+    $repeatLimit = if ($MaxRepeatCalls -gt 0) { $MaxRepeatCalls } elseif ($script:MaxRepeatToolCalls -gt 0) { [int]$script:MaxRepeatToolCalls } else { 3 }
+    $mutationEpoch = 0
+    $toolCallCounts = @{}
     for ($step = 0; $step -lt $Steps; $step++) {
+        if ($step -gt 0) {
+            $stStep = Get-ContextStats -State $State
+            if ($stStep.chars -gt 60000) {
+                if ($script:OutputMode -ne 'json') {
+                    Write-Host ($script:Gm.Yellow + '  [auto-compact] Context exceeds 60k chars, compacting older history...' + $script:Gm.Reset)
+                }
+                try {
+                    if (Invoke-AgentCompact -State $State -Endpoint $Endpoint -ModelId $ModelId -ApiKey $ApiKey) {
+                        $mutationEpoch++
+                        $toolCallCounts = @{}
+                    }
+                }
+                catch {}
+            }
+        }
+        $capSync = Sync-AgentCapabilities -State $State -Root $Root
+        $activeTools = @(Get-AgentTools)
+        $diagEntry = @{
+            step = $step
+            model = $ModelId
+            permission = $capSync.permission
+            tools = @($capSync.tools)
+            capabilities_updated = [bool]$capSync.prompt_updated
+            consistent = [bool]$capSync.consistent
+        }
+        $State.last_diagnostics = $diagEntry
+        if ($null -eq $State.diagnostics_log) { $State.diagnostics_log = @() }
+        $State.diagnostics_log += $diagEntry
+        if ($script:Diagnostics) {
+            if ($script:OutputMode -eq 'json') {
+                Write-AgentJsonEvent -EventType 'diagnostics' -Payload $diagEntry
+            }
+            else {
+                $toolsCsv = if ($capSync.tools.Count -gt 0) { $capSync.tools -join ',' } else { 'none' }
+                Write-Host ($script:Gm.Grey1 + ("  [diag] mode={0} | tools={1} | capabilities_updated={2} | consistent={3}" -f $capSync.permission, $toolsCsv, $capSync.prompt_updated, $capSync.consistent) + $script:Gm.Reset)
+            }
+        }
         Write-AgentJsonEvent -EventType 'turn_start' -Payload @{ model = $ModelId; step = $step }
         $bodyObj = @{
             model = $ModelId
             messages = @($State.messages)
-            tools = @(Get-AgentTools)
+            tools = $activeTools
             stream = $false
         }
         if ($script:ReasoningEffort) { $bodyObj.reasoning_effort = $script:ReasoningEffort }
         $body = $bodyObj | ConvertTo-Json -Depth 40 -Compress
-        $request = @{
-            Uri = $Endpoint
-            Method = 'Post'
-            Headers = @{ Authorization = "Bearer $ApiKey" }
-            ContentType = 'application/json; charset=utf-8'
-            Body = $body
-            TimeoutSec = 180
-            ErrorAction = 'Stop'
-        }
+        $statusLabel = "[step {0}/{1}] Waiting for {2}" -f ($step + 1), $Steps, $ModelId
         $tempResponse = New-TemporaryFile -ErrorAction Stop
         $reply = $null
         try {
             $maxRetries = 2
             for ($attempt = 0; $attempt -le $maxRetries; $attempt++) {
                 try {
-                    Invoke-WebRequest @request -UseBasicParsing -OutFile $tempResponse.FullName
+                    Invoke-AgentHttpRequest -Uri $Endpoint -ApiKey $ApiKey -Body $body -OutFile $tempResponse.FullName -TimeoutSec 180 -StatusLabel $statusLabel
                     $reply = Get-Content -LiteralPath $tempResponse.FullName -Raw -Encoding UTF8 -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
                     break
                 }
@@ -60,6 +263,8 @@ function Invoke-AgentTurn {
                             Write-Host ($script:Gm.Yellow + '  [auto-recovery] Context overflow detected; compacting history and retrying...' + $script:Gm.Reset)
                         }
                         if (Invoke-AgentCompact -State $State -Endpoint $Endpoint -ModelId $ModelId -ApiKey $ApiKey) {
+                            $mutationEpoch++
+                            $toolCallCounts = @{}
                             $step--
                             $reply = $null
                             break
@@ -104,18 +309,85 @@ function Invoke-AgentTurn {
             Write-AgentJsonEvent -EventType 'turn_end' -Payload @{ step = $step; status = 'completed' }
             return
         }
+        $loopAborted = $false
         foreach ($call in $message.tool_calls) {
+            $canonToolName = Resolve-ToolCanonicalName -Name ([string]$call.function.name)
+            $sig = Get-ToolCallSignature -Call $call -Epoch $mutationEpoch
+            $prevCount = if ($toolCallCounts.ContainsKey($sig)) { [int]$toolCallCounts[$sig] } else { 0 }
+            $newCount = $prevCount + 1
+            $toolCallCounts[$sig] = $newCount
             Write-AgentJsonEvent -EventType 'tool_execution_start' -Payload @{ id = [string]$call.id; name = [string]$call.function.name }
+            if ($loopAborted -or ($newCount -gt $repeatLimit)) {
+                if (-not $loopAborted) {
+                    $State.loop_detected = $true
+                    $State.repeated_tool = $canonToolName
+                    $loopAborted = $true
+                }
+                $stopObj = @{
+                    status = 'loop_detected'
+                    error = "Turn stopped: tool '$canonToolName' was called repeatedly with identical arguments ($newCount times) without state changes."
+                }
+                $output = ($stopObj | ConvertTo-Json -Compress)
+                Write-AgentJsonEvent -EventType 'tool_execution_end' -Payload @{ id = [string]$call.id; name = [string]$call.function.name; result = $output }
+                $State.messages += @{ role = 'tool'; tool_call_id = $call.id; content = $output }
+                Ensure-SessionTree -State $State
+                continue
+            }
+            if ($newCount -eq $repeatLimit) {
+                $warnObj = @{
+                    status = 'repeated_call_warning'
+                    warning = "Repeated identical tool call '$canonToolName' with the same arguments without any intervening file or state changes. Do not repeat identical calls; use the result already in context, try different arguments, or explain why you cannot proceed."
+                }
+                $output = ($warnObj | ConvertTo-Json -Compress)
+                if ($script:OutputMode -ne 'json') {
+                    Write-Host ($script:Gm.Yellow + "  [loop-guard] Repeated identical call to $canonToolName; returning warning." + $script:Gm.Reset)
+                }
+                Write-AgentJsonEvent -EventType 'tool_execution_end' -Payload @{ id = [string]$call.id; name = [string]$call.function.name; result = $output }
+                $State.messages += @{ role = 'tool'; tool_call_id = $call.id; content = $output }
+                Ensure-SessionTree -State $State
+                continue
+            }
             $output = Invoke-AgentTool -Root $Root -Call $call
             Write-AgentJsonEvent -EventType 'tool_execution_end' -Payload @{ id = [string]$call.id; name = [string]$call.function.name; result = $output }
             $State.messages += @{ role = 'tool'; tool_call_id = $call.id; content = $output }
             Ensure-SessionTree -State $State
+            if ($canonToolName -in @('write_file', 'edit_file', 'run_command')) {
+                try {
+                    $parsedOut = $output | ConvertFrom-Json -ErrorAction Stop
+                    if ($parsedOut.status -in @('written', 'executed', 'timed_out')) {
+                        $mutationEpoch++
+                    }
+                }
+                catch {}
+            }
+        }
+        if ($loopAborted) {
+            if ($script:OutputMode -ne 'json') {
+                Write-Host ($script:Gm.Yellow + "Loop detected: repeated identical calls to '$($State.repeated_tool)'. Turn stopped (completed edits are preserved; use /undo to revert)." + $script:Gm.Reset)
+            }
+            Write-AgentJsonEvent -EventType 'turn_end' -Payload @{ step = $step; status = 'loop_detected'; tool = $State.repeated_tool }
+            return
         }
     }
+    $State.step_limit_reached = $true
     if ($script:OutputMode -ne 'json') {
-        Write-Host ($script:Gm.Yellow + 'Step limit reached. Ask to continue, or use /clear.' + $script:Gm.Reset)
+        Write-Host ($script:Gm.Yellow + 'Step limit reached. Use /continue to keep going, or /clear to start over.' + $script:Gm.Reset)
     }
     Write-AgentJsonEvent -EventType 'turn_end' -Payload @{ step = $Steps; status = 'step_limit_reached' }
+}
+
+function Invoke-AgentContinue {
+    param($State, [string]$Endpoint, [string]$ModelId, [string]$ApiKey, [string]$Root, [int]$Steps = 50)
+    if (-not $State -or -not $State.messages -or $State.messages.Count -eq 0) { return $false }
+    $nonSystem = @($State.messages | Where-Object { $_.role -ne 'system' })
+    if ($nonSystem.Count -eq 0) { return $false }
+    $lastMsg = $State.messages[$State.messages.Count - 1]
+    if ($lastMsg.role -eq 'assistant' -and (-not $lastMsg.tool_calls -or @($lastMsg.tool_calls).Count -eq 0)) {
+        $State.messages += @{ role = 'user'; content = 'Continue.' }
+        Ensure-SessionTree -State $State
+    }
+    Invoke-AgentTurn -State $State -Endpoint $Endpoint -ModelId $ModelId -ApiKey $ApiKey -Root $Root -Steps $Steps
+    return $true
 }
 
 if (-not $LibraryOnly) {
@@ -165,6 +437,7 @@ if (-not $LibraryOnly) {
     $rootItem = Get-Item -LiteralPath $Workspace -Force -ErrorAction Stop
     if (-not $rootItem.PSIsContainer) { throw 'Workspace must be a directory.' }
     $rootPath = Resolve-AgentPath -Root $rootItem.FullName -RelativePath '.'
+    $script:ActiveWorkspace = $rootPath
     $configDir = Split-Path $script:AgentConfigPath -Parent
     $sessionDir = if ($SessionDir) { $SessionDir } else { Join-Path $configDir 'sessions' }
     if ($Export -and ($Export -match '\.jsonl$') -and (Test-Path -LiteralPath $Export)) {
@@ -179,9 +452,12 @@ if (-not $LibraryOnly) {
     if ($BaseUrl -notmatch '^https://[^\s]+$') { throw 'Use an HTTPS API base URL.' }
     if (-not $Model) { $Model = Read-Host 'Model ID' }
     if (-not $Model) { throw 'Model ID is required.' }
-    if ($MaxSteps -lt 1 -or $MaxSteps -gt 30) { throw 'MaxSteps must be between 1 and 30.' }
+    if ($MaxSteps -lt 1 -or $MaxSteps -gt 500) { throw 'MaxSteps must be between 1 and 500.' }
+    if ($MaxRepeatCalls -lt 1 -or $MaxRepeatCalls -gt 50) { throw 'MaxRepeatCalls must be between 1 and 50.' }
+    $script:MaxRepeatToolCalls = $MaxRepeatCalls
     if ($Permission -notin @('ReadOnly', 'Ask', 'AutoEdit', 'Auto')) { throw 'Permission must be one of: ReadOnly, Ask, AutoEdit, Auto.' }
     $script:AgentPermission = $Permission
+    $script:Diagnostics = [bool]$Diagnostics
     $script:OutputMode = if ($Mode) { $Mode.ToLower() } else { 'text' }
     if ($script:OutputMode -notin @('text', 'json')) { throw 'Mode must be text or json.' }
     $script:NoTools = [bool]$NoTools
@@ -222,6 +498,7 @@ if (-not $LibraryOnly) {
     $script:ActiveSessionId = $sessionId
     $script:ActiveSessionFile = $sessionFile
     $script:ActiveModelId = $Model
+    Sync-AgentCapabilities -State $state | Out-Null
     $undoStack = @()
     $lastFailedQuestion = ''
     if ($Session) {
@@ -272,7 +549,7 @@ if (-not $LibraryOnly) {
         Write-Host ($script:Gm.OscInit + $script:Gm.BoldGreen + "shellossus | model: $Model | permission: $($script:AgentPermission) | workspace: $rootPath" + $script:Gm.Reset)
         if (Get-AgentsContext -Root $rootPath -ConfigDir $configDir) { Write-Host ($script:Gm.Aqua + 'Loaded AGENTS.md/CLAUDE.md instructions.' + $script:Gm.Reset) }
         if (Get-SkillsCatalog -Root $rootPath -ConfigDir $configDir) { Write-Host ($script:Gm.Aqua + 'Loaded skills catalog.' + $script:Gm.Reset) }
-        Write-Host ($script:Gm.Grey1 + 'Commands: /help /status /session /permission /reasoning /undo /retry /compact /tree /fork /export /copy /reload /model /sessions /resume /save /new /exit' + $script:Gm.Reset)
+        Write-Host ($script:Gm.Grey1 + 'Commands: /help /status /session /permission /reasoning /continue /undo /retry /compact /tree /fork /export /copy /reload /model /sessions /resume /save /new /exit' + $script:Gm.Reset)
         while ($true) {
             Write-Host ("`n" + $script:Gm.Grey0 + ('-' * 40) + $script:Gm.Reset)
             Write-Host ($script:Gm.BoldBlue + 'You: ' + $script:Gm.Fg) -NoNewline
@@ -283,6 +560,8 @@ if (-not $LibraryOnly) {
             if ($trimmedQ -eq '/exit' -or $trimmedQ -eq '/quit') { break }
             if ($trimmedQ -eq '/clear' -or $trimmedQ -eq '/new') {
                 $newId = 'sess-' + (Get-Date -Format 'yyyyMMdd-HHmmss') + '-' + (Get-Random -Minimum 100000 -Maximum 999999)
+                $fullSystemPrompt = Build-SystemPrompt -Root $rootPath -ConfigDir $configDir
+                $system = @{ role = 'system'; content = $fullSystemPrompt }
                 $state.session_id = $newId
                 $state.session_name = ''
                 $state.parent_session = ''
@@ -291,6 +570,7 @@ if (-not $LibraryOnly) {
                 $state.messages = @($system)
                 $state.tree_entries = @()
                 $state.leaf_id = $null
+                Sync-AgentCapabilities -State $state | Out-Null
                 $undoStack = @()
                 $sessionFile = if ($NoSession) { '' } else { Join-Path $sessionDir ($newId + '.jsonl') }
                 $script:ActiveSessionId = $newId
@@ -301,7 +581,9 @@ if (-not $LibraryOnly) {
             if ($trimmedQ -eq '/help') {
                 Write-Host ($script:Gm.Aqua + '  /status (/session, /tokens)  ' + $script:Gm.Fg + 'Show context size, token usage, model, permission, and session info' + $script:Gm.Reset)
                 Write-Host ($script:Gm.Aqua + '  /permission <mode>           ' + $script:Gm.Fg + 'Set mode: ReadOnly | Ask | AutoEdit (no-ask writes) | Auto' + $script:Gm.Reset)
+                Write-Host ($script:Gm.Aqua + '  /diagnostics [on|off]        ' + $script:Gm.Fg + 'Show or toggle pre-request capability/tool diagnostics' + $script:Gm.Reset)
                 Write-Host ($script:Gm.Aqua + '  /reasoning (/thinking) <arg> ' + $script:Gm.Fg + 'View: compact | full | hide; Effort: low | medium | high | off' + $script:Gm.Reset)
+                Write-Host ($script:Gm.Aqua + '  /continue [steps]            ' + $script:Gm.Fg + 'Continue after hitting step limit (or continue last response)' + $script:Gm.Reset)
                 Write-Host ($script:Gm.Aqua + '  /undo                        ' + $script:Gm.Fg + 'Revert last turn AND restore modified/created files on disk' + $script:Gm.Reset)
                 Write-Host ($script:Gm.Aqua + '  /retry                       ' + $script:Gm.Fg + 'Retry the last failed user request' + $script:Gm.Reset)
                 Write-Host ($script:Gm.Aqua + '  /compact [focus]             ' + $script:Gm.Fg + 'Summarize older turns into a structured context handoff' + $script:Gm.Reset)
@@ -340,7 +622,9 @@ if (-not $LibraryOnly) {
                     $matchedPerm = @('ReadOnly', 'Ask', 'AutoEdit', 'Auto') | Where-Object { $_ -ieq $reqPerm } | Select-Object -First 1
                     if ($matchedPerm) {
                         $script:AgentPermission = $matchedPerm
-                        Write-Host ($script:Gm.Green + "  Permission mode set to: $($script:AgentPermission)" + $script:Gm.Reset)
+                        $syncRes = Sync-AgentCapabilities -State $state -RecordTransition
+                        $toolsInfo = if ($syncRes.tools.Count -gt 0) { $syncRes.tools -join ', ' } else { 'none' }
+                        Write-Host ($script:Gm.Green + "  Permission mode set to: $($script:AgentPermission) (tools: $toolsInfo)" + $script:Gm.Reset)
                     }
                     else {
                         Write-Host ($script:Gm.Red + '  Invalid permission mode. Choose: ReadOnly, Ask, AutoEdit, Auto' + $script:Gm.Reset)
@@ -348,6 +632,28 @@ if (-not $LibraryOnly) {
                 }
                 else {
                     Write-Host ($script:Gm.Aqua + "  Current permission mode: $($script:AgentPermission) (use /permission ReadOnly|Ask|AutoEdit|Auto)" + $script:Gm.Reset)
+                }
+                continue
+            }
+            if ($trimmedQ -match '^/diagnostics(?:\s+(.+))?$') {
+                if ($Matches[1]) {
+                    $dArg = $Matches[1].Trim().ToLower()
+                    if ($dArg -in @('on', 'true', '1')) {
+                        $script:Diagnostics = $true
+                        Write-Host ($script:Gm.Green + '  Diagnostics enabled.' + $script:Gm.Reset)
+                    }
+                    elseif ($dArg -in @('off', 'false', '0')) {
+                        $script:Diagnostics = $false
+                        Write-Host ($script:Gm.Green + '  Diagnostics disabled.' + $script:Gm.Reset)
+                    }
+                    else {
+                        Write-Host ($script:Gm.Red + '  Usage: /diagnostics [on|off]' + $script:Gm.Reset)
+                    }
+                }
+                else {
+                    $capNow = Get-AgentCapabilities -Root $rootPath
+                    $tList = if ($capNow.tool_names.Count -gt 0) { $capNow.tool_names -join ', ' } else { 'none' }
+                    Write-Host ($script:Gm.Aqua + "  Diagnostics: $($script:Diagnostics) | Mode: $($capNow.permission) | Shell: $($capNow.environment.shell_exe) $($capNow.environment.shell_version) | Tools: $tList" + $script:Gm.Reset)
                 }
                 continue
             }
@@ -509,6 +815,7 @@ if (-not $LibraryOnly) {
                 if ($state.messages.Count -gt 0 -and $state.messages[0].role -eq 'system') {
                     $state.messages[0].content = $fullSystemPrompt
                 }
+                Sync-AgentCapabilities -State $state | Out-Null
                 Write-Host ($script:Gm.Green + '  Reloaded AGENTS.md/CLAUDE.md, SYSTEM.md, skills catalog, and prompt templates.' + $script:Gm.Reset)
                 continue
             }
@@ -546,7 +853,7 @@ if (-not $LibraryOnly) {
                 $outTok = if ($state.usage_output_tokens) { [int]$state.usage_output_tokens } else { 0 }
                 $nmInfo = if ($state.session_name) { " | Name: $($state.session_name)" } else { '' }
                 $leafInfo = if ($state.leaf_id) { " | Leaf: $($state.leaf_id)" } else { '' }
-                Write-Host ($script:Gm.Aqua + "  Model: $($Model) | Permission: $($script:AgentPermission) | Messages: $($st.messages) | Chars: $($st.chars) (~$($st.est_tokens) tokens)" + $script:Gm.Reset)
+                Write-Host ($script:Gm.Aqua + "  Model: $($Model) | Permission: $($script:AgentPermission) | MaxSteps: $($MaxSteps) | Messages: $($st.messages) | Chars: $($st.chars) (~$($st.est_tokens) tokens)" + $script:Gm.Reset)
                 Write-Host ($script:Gm.Grey1 + "  Session ID: $($state.session_id)$nmInfo$leafInfo | API Usage: in=$inTok out=$outTok" + $script:Gm.Reset)
                 Write-Host ($script:Gm.Grey1 + "  Session File: $(if ($sessionFile) { $sessionFile } else { '(ephemeral -NoSession)' })" + $script:Gm.Reset)
                 continue
@@ -632,6 +939,7 @@ if (-not $LibraryOnly) {
                         $lastFailedQuestion = ''
                         if ($state.model) { $Model = $state.model }
                         if ($PSBoundParameters.Keys -notcontains 'Permission') { $script:AgentPermission = 'Ask' }
+                        Sync-AgentCapabilities -State $state | Out-Null
                         Write-Host ($script:Gm.Green + "  Resumed session: $sessionFile ($($state.messages.Count) messages, model=$Model, permission=$($script:AgentPermission))" + $script:Gm.Reset)
                     }
                     catch {
@@ -640,6 +948,51 @@ if (-not $LibraryOnly) {
                 }
                 else {
                     Write-Host ($script:Gm.Red + "  Session not found: $arg" + $script:Gm.Reset)
+                }
+                continue
+            }
+            if ($trimmedQ -match '^/continue(?:\s+(.+))?$') {
+                $contSteps = $MaxSteps
+                if ($Matches[1]) {
+                    $rawSteps = $Matches[1].Trim()
+                    if ($rawSteps -notmatch '^\d+$') {
+                        Write-Host ($script:Gm.Red + '  Usage: /continue [steps]' + $script:Gm.Reset)
+                        continue
+                    }
+                    $contSteps = [int]$rawSteps
+                    if ($contSteps -lt 1 -or $contSteps -gt 500) {
+                        Write-Host ($script:Gm.Red + '  Steps must be between 1 and 500.' + $script:Gm.Reset)
+                        continue
+                    }
+                }
+                $nonSys = @($state.messages | Where-Object { $_.role -ne 'system' })
+                if ($nonSys.Count -eq 0) {
+                    Write-Host ($script:Gm.Grey1 + '  Nothing to continue.' + $script:Gm.Reset)
+                    continue
+                }
+                $beforeTurn = @($state.messages)
+                $script:CurrentTurnWrites = @()
+                $stBefore = Get-ContextStats -State $state
+                if ($stBefore.chars -gt 60000) {
+                    Write-Host ($script:Gm.Yellow + '  [auto-compact] Context exceeds 60k chars, compacting older history...' + $script:Gm.Reset)
+                    try { Invoke-AgentCompact -State $state -Endpoint $endpoint -ModelId $Model -ApiKey $agentKey | Out-Null } catch {}
+                }
+                Write-Host ($script:Gm.Aqua + "  [continue] Continuing agent turn (up to $contSteps steps)..." + $script:Gm.Reset)
+                try {
+                    Invoke-AgentContinue -State $state -Endpoint $endpoint -ModelId $Model -ApiKey $agentKey -Root $rootPath -Steps $contSteps | Out-Null
+                    $lastFailedQuestion = ''
+                    $undoStack += @{ messages = $beforeTurn; writes = @($script:CurrentTurnWrites) }
+                    Save-AgentSession -SessionFile $sessionFile -State $state -Workspace $rootPath -Model $Model
+                }
+                catch {
+                    $state.messages = $beforeTurn
+                    try {
+                        Invoke-AgentUndo -State $state -UndoEntry @{ messages = $beforeTurn; writes = @($script:CurrentTurnWrites) }
+                    }
+                    catch {
+                        Write-Host ($script:Gm.Red + 'Rollback warning: ' + $_.Exception.Message + $script:Gm.Reset)
+                    }
+                    Write-Host ($script:Gm.Red + 'Continue failed; turn rolled back: ' + (Format-AgentError -ErrorRecord $_) + $script:Gm.Reset)
                 }
                 continue
             }

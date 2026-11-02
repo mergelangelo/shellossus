@@ -63,7 +63,9 @@ shellossus -Prompt "Explain @src/Tools.ps1" # Single-shot non-interactive mode
 | `/help` | List available interactive commands |
 | `/status` | Show active model, permission mode, token estimate, and session path |
 | `/permission <mode>` | Switch mode: `ReadOnly`, `Ask`, `AutoEdit`, `Auto` |
+| `/diagnostics [on\|off]` | Show or toggle pre-request capability and tool diagnostics |
 | `/reasoning <opt>` | Display: `compact`, `full`, `hide`; Effort: `low`, `medium`, `high`, `default` |
+| `/continue [steps]` | Continue execution after hitting the step limit (or continue the last response) |
 | `/undo` | Revert last turn in conversation and restore modified/created files on disk |
 | `/retry` | Resend the last failed user prompt |
 | `/compact [focus]` | Summarize older turns into a structured context handoff |
