@@ -1,9 +1,9 @@
-# Zero Dependencies. One Script. Full Agent Power.
-### 100% Native PowerShell Agent for Windows PowerShell 5.1+
+# Zero Dependencies. One File. Full Agent Power.
+### Pure PowerShell 5.1+ Agent for Desktops & Servers
 
-**No Python. No Node.js. No external modules or binaries.** While other agents demand heavy runtimes, `shellossus` runs out of the box on every Windows machine.
+**No Python. No Node.js. No third-party modules.** `shellossus` needs nothing but PowerShell itself — built into Windows by default, and available on Linux and macOS via `pwsh`.
 
-Drop a single `.ps1` file onto any Windows desktop or server and connect to any OpenAI-compatible API (cloud, local Ollama/vLLM, or internal corporate gateway).
+Drop [`shellossus.ps1`](shellossus.ps1) onto any machine and connect to any OpenAI-compatible API (cloud, local Ollama/vLLM, or internal corporate gateway).
 
 ## Key Features
 
