@@ -123,11 +123,11 @@ try {
     # Installer preserves profile contents and replaces its own block on rerun.
     $profileFile = Join-Path $testRoot 'profile.ps1'
     Set-Content -LiteralPath $profileFile -Value '# keep my settings' -Encoding UTF8
-    & "$PSScriptRoot\..\install.ps1" -AgentPath "$PSScriptRoot\..\h-agent.ps1" -ProfilePath $profileFile
-    & "$PSScriptRoot\..\install.ps1" -AgentPath "$PSScriptRoot\..\h-agent.ps1" -ProfilePath $profileFile
+    & "$PSScriptRoot\..\install.ps1" -AgentPath "$PSScriptRoot\..\shellossus.ps1" -ProfilePath $profileFile
+    & "$PSScriptRoot\..\install.ps1" -AgentPath "$PSScriptRoot\..\shellossus.ps1" -ProfilePath $profileFile
     $profileText = Get-Content -LiteralPath $profileFile -Raw -Encoding UTF8
     Assert-True ($profileText.Contains('# keep my settings')) 'Profile contents were lost.'
-    Assert-True ((@($profileText -split '(?m)^# >>> h-agent >>>\r?$').Count - 1) -eq 1) 'Installer duplicated the launcher.'
+    Assert-True ((@($profileText -split '(?m)^# >>> shellossus >>>\r?$').Count - 1) -eq 1) 'Installer duplicated the launcher.'
 }
 finally {
     Remove-TestEnvironment -Env $envData

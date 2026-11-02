@@ -12,8 +12,8 @@ function Read-AgentConfig {
         $lineNumber++
         $trimmed = $line.Trim()
         if (-not $trimmed -or $trimmed.StartsWith('#')) { continue }
-        if ($trimmed -notmatch '^(H_AGENT_BASE_URL|H_AGENT_MODEL|H_AGENT_API_KEY|H_AGENT_WORKSPACE)\s*=(.*)$') {
-            throw "Invalid config entry at line $lineNumber. Expected a supported H_AGENT_* key=value."
+        if ($trimmed -notmatch '^(SHELLOSSUS_BASE_URL|SHELLOSSUS_MODEL|SHELLOSSUS_API_KEY|SHELLOSSUS_WORKSPACE)\s*=(.*)$') {
+            throw "Invalid config entry at line $lineNumber. Expected a supported SHELLOSSUS_* key=value."
         }
         $key = $Matches[1]
         $value = $Matches[2].Trim()
@@ -28,8 +28,8 @@ function Read-AgentConfig {
 
 function Save-AgentConfig {
     param([string]$Path, $Config)
-    $lines = @('# h-agent settings. Contains an API key: do not commit or share.')
-    foreach ($key in @('H_AGENT_BASE_URL', 'H_AGENT_MODEL', 'H_AGENT_API_KEY', 'H_AGENT_WORKSPACE')) {
+    $lines = @('# shellossus settings. Contains an API key: do not commit or share.')
+    foreach ($key in @('SHELLOSSUS_BASE_URL', 'SHELLOSSUS_MODEL', 'SHELLOSSUS_API_KEY', 'SHELLOSSUS_WORKSPACE')) {
         $value = [string]$Config[$key]
         if ($value -match "[`r`n]") { throw 'Config values must be single-line.' }
         # Quotes preserve paths, # and = without interpreting backslashes.

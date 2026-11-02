@@ -1,5 +1,5 @@
 $ErrorActionPreference = 'Stop'
-. "$PSScriptRoot\..\h-agent.ps1" -LibraryOnly
+. "$PSScriptRoot\..\shellossus.ps1" -LibraryOnly
 
 $script:CurrentTurnWrites = @()
 $script:AgentPermission = 'Ask'
@@ -20,7 +20,7 @@ function Assert-True {
 }
 
 function New-TestEnvironment {
-    $root = Join-Path $env:TEMP ('h-agent-' + [guid]::NewGuid().ToString('N'))
+    $root = Join-Path $env:TEMP ('shellossus-' + [guid]::NewGuid().ToString('N'))
     $ws = Join-Path $root 'workspace'
     New-Item -ItemType Directory -Path $ws -Force | Out-Null
     $script:AgentConfigPath = Format-ConfigPath -Path (Join-Path $root '.env')

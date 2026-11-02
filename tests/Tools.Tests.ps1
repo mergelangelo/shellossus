@@ -10,7 +10,7 @@ try {
     Set-Content -LiteralPath (Join-Path $testRoot 'outside.txt') -Value 'private' -Encoding UTF8
     Set-Content -LiteralPath (Join-Path $workspacePath '.env') -Value 'SECRET=hidden' -Encoding UTF8
     $customCfg = Join-Path $workspacePath 'custom.cfg'
-    Set-Content -LiteralPath $customCfg -Value 'H_AGENT_API_KEY="secret"' -Encoding UTF8
+    Set-Content -LiteralPath $customCfg -Value 'SHELLOSSUS_API_KEY="secret"' -Encoding UTF8
     $script:AgentConfigPath = Format-ConfigPath -Path (Join-Path $workspacePath '.\custom.cfg')
 
     # Basic read_file, unknown tool, malformed JSON arguments.
@@ -62,7 +62,7 @@ try {
 
     # list_files hides .env and custom ConfigPath while showing .gitignore and .env.example.
     Set-Content -LiteralPath (Join-Path $workspacePath '.gitignore') -Value '*.log' -Encoding UTF8
-    Set-Content -LiteralPath (Join-Path $workspacePath '.env.example') -Value 'H_AGENT_MODEL=""' -Encoding UTF8
+    Set-Content -LiteralPath (Join-Path $workspacePath '.env.example') -Value 'SHELLOSSUS_MODEL=""' -Encoding UTF8
     $call.function.name = 'list_files'
     $call.function.arguments = '{"path":"."}'
     $listing = Invoke-AgentTool -Root $workspacePath -Call $call | ConvertFrom-Json

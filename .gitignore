@@ -4,5 +4,5 @@
 *.log
 sessions/
 secrets/
-.h-agent/output/
+.shellossus/output/
 .DS_Store

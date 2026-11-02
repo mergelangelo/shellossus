@@ -11,7 +11,7 @@ try {
 
     # AGENTS.md, APPEND_SYSTEM.md, Skills catalog, Prompt templates, and @file prompt expansion.
     Set-Content -LiteralPath (Join-Path $workspacePath 'AGENTS.md') -Value 'Always use snake_case.' -Encoding UTF8
-    $dotH = Join-Path $workspacePath '.h-agent'
+    $dotH = Join-Path $workspacePath '.shellossus'
     $skillFolder = Join-Path $dotH 'skills\sql-tuning'
     $promptFolder = Join-Path $dotH 'prompts'
     New-Item -ItemType Directory -Path $skillFolder -Force | Out-Null

@@ -18,7 +18,7 @@ $script:Gm = @{
     Yellow      = "$script:Esc[38;2;216;166;87m"     # #d8a657
     BoldYellow  = "$script:Esc[1;38;2;216;166;87m"   # #d8a657 bold (H3)
     Green       = "$script:Esc[38;2;169;182;101m"    # #a9b665
-    BoldGreen   = "$script:Esc[1;38;2;169;182;101m"  # #a9b665 bold (H: / H4)
+    BoldGreen   = "$script:Esc[1;38;2;169;182;101m"  # #a9b665 bold (Shellossus: / H4)
     Aqua        = "$script:Esc[38;2;137;180;130m"    # #89b482
     Blue        = "$script:Esc[38;2;125;174;163m"    # #7daea3
     BoldBlue    = "$script:Esc[1;38;2;125;174;163m"  # #7daea3 bold (You: / Table header)
@@ -119,7 +119,7 @@ function Format-MarkdownTable {
 function Write-AgentReply {
     param([string]$Content)
     if ($script:OutputMode -eq 'json') { return }
-    Write-Host ("`n" + $script:Gm.BoldGreen + 'H: ' + $script:Gm.Reset) -NoNewline
+    Write-Host ("`n" + $script:Gm.BoldGreen + 'Shellossus: ' + $script:Gm.Reset) -NoNewline
     $inCode = $false
     $first = $true
     $tableBuf = @()

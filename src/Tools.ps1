@@ -678,30 +678,30 @@ function Invoke-ShellCommand {
     $shellExe = if (Get-Command -Name 'powershell' -ErrorAction SilentlyContinue) { 'powershell' } else { 'pwsh' }
     $outTemp = New-TemporaryFile -ErrorAction Stop
     $errTemp = New-TemporaryFile -ErrorAction Stop
-    $savedHKey = $env:H_AGENT_API_KEY
+    $savedSKey = $env:SHELLOSSUS_API_KEY
     $savedOKey = $env:OPENAI_API_KEY
-    $savedHSess = $env:H_AGENT_SESSION_ID
-    $savedHFile = $env:H_AGENT_SESSION_FILE
-    $savedHMod = $env:H_AGENT_MODEL
-    $savedHReas = $env:H_AGENT_REASONING_LEVEL
+    $savedSSess = $env:SHELLOSSUS_SESSION_ID
+    $savedSFile = $env:SHELLOSSUS_SESSION_FILE
+    $savedSMod = $env:SHELLOSSUS_MODEL
+    $savedSReas = $env:SHELLOSSUS_REASONING_LEVEL
     $timedOut = $false
     $exitCode = 0
     $startTime = Get-Date
     try {
         try {
-            $env:H_AGENT_API_KEY = $null
+            $env:SHELLOSSUS_API_KEY = $null
             $env:OPENAI_API_KEY = $null
             if ($script:ActiveSessionId) {
-                $env:H_AGENT_SESSION_ID = $script:ActiveSessionId
+                $env:SHELLOSSUS_SESSION_ID = $script:ActiveSessionId
             }
             if ($script:ActiveSessionFile) {
-                $env:H_AGENT_SESSION_FILE = $script:ActiveSessionFile
+                $env:SHELLOSSUS_SESSION_FILE = $script:ActiveSessionFile
             }
             if ($script:ActiveModelId) {
-                $env:H_AGENT_MODEL = $script:ActiveModelId
+                $env:SHELLOSSUS_MODEL = $script:ActiveModelId
             }
             if ($script:ReasoningEffort) {
-                $env:H_AGENT_REASONING_LEVEL = $script:ReasoningEffort
+                $env:SHELLOSSUS_REASONING_LEVEL = $script:ReasoningEffort
             }
             $wrappedCmd = "try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch {}`n" + $Command
             $argList = if ($env:OS -eq 'Windows_NT') {
@@ -733,12 +733,12 @@ function Invoke-ShellCommand {
             }
         }
         finally {
-            $env:H_AGENT_API_KEY = $savedHKey
+            $env:SHELLOSSUS_API_KEY = $savedSKey
             $env:OPENAI_API_KEY = $savedOKey
-            $env:H_AGENT_SESSION_ID = $savedHSess
-            $env:H_AGENT_SESSION_FILE = $savedHFile
-            $env:H_AGENT_MODEL = $savedHMod
-            $env:H_AGENT_REASONING_LEVEL = $savedHReas
+            $env:SHELLOSSUS_SESSION_ID = $savedSSess
+            $env:SHELLOSSUS_SESSION_FILE = $savedSFile
+            $env:SHELLOSSUS_MODEL = $savedSMod
+            $env:SHELLOSSUS_REASONING_LEVEL = $savedSReas
         }
         $elapsedSec = [int](((Get-Date) - $startTime).TotalSeconds * 10) / 10.0
         $outItem = Get-Item -LiteralPath $outTemp.FullName -Force -ErrorAction Stop
@@ -752,7 +752,7 @@ function Invoke-ShellCommand {
         $fullLogRel = $null
         if ($truncated) {
             try {
-                $outDir = Join-Path (Join-Path $rootFull '.h-agent') 'output'
+                $outDir = Join-Path (Join-Path $rootFull '.shellossus') 'output'
                 if (-not (Test-Path -LiteralPath $outDir)) { New-Item -ItemType Directory -Path $outDir -Force -ErrorAction Stop | Out-Null }
                 $logName = 'cmd-' + (Get-Date -Format 'yyyyMMdd-HHmmss') + '-' + (Get-Random -Minimum 100000 -Maximum 999999) + '.log'
                 $logFull = Join-Path $outDir $logName

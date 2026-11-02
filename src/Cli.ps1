@@ -125,35 +125,35 @@ if (-not $LibraryOnly) {
         Write-Host ($script:Gm.OscInit + $script:Gm.Fg + "Save settings to: $ConfigPath" + $script:Gm.Reset)
         Write-Host ($script:Gm.Yellow + 'API key is stored as plain text in your user profile, outside the project.' + $script:Gm.Reset)
         $defaultUrl = $BaseUrl
-        if (-not $defaultUrl) { $defaultUrl = $config.H_AGENT_BASE_URL }
+        if (-not $defaultUrl) { $defaultUrl = $config.SHELLOSSUS_BASE_URL }
         $inputUrl = Read-Host "API base URL including /v1 [$defaultUrl]"
         if (-not $inputUrl) { $inputUrl = $defaultUrl }
         if ($inputUrl -notmatch '^https://[^\s]+$') { throw 'Use an HTTPS API base URL.' }
         $defaultModel = $Model
-        if (-not $defaultModel) { $defaultModel = $config.H_AGENT_MODEL }
+        if (-not $defaultModel) { $defaultModel = $config.SHELLOSSUS_MODEL }
         $inputModel = Read-Host "Model ID [$defaultModel]"
         if (-not $inputModel) { $inputModel = $defaultModel }
         if (-not $inputModel) { throw 'Model ID is required.' }
         Write-Host ($script:Gm.Yellow + 'Key input is visible. Enter keeps the saved key, if any.' + $script:Gm.Reset)
         $inputKey = Read-Host 'API key'
-        if (-not $inputKey) { $inputKey = $config.H_AGENT_API_KEY }
+        if (-not $inputKey) { $inputKey = $config.SHELLOSSUS_API_KEY }
         if (-not $inputKey) { throw 'API key is required.' }
         $inputWorkspace = Read-Host 'Default workspace (Enter = current folder at each launch)'
         Save-AgentConfig -Path $ConfigPath -Config @{
-            H_AGENT_BASE_URL = $inputUrl
-            H_AGENT_MODEL = $inputModel
-            H_AGENT_API_KEY = $inputKey
-            H_AGENT_WORKSPACE = $inputWorkspace
+            SHELLOSSUS_BASE_URL = $inputUrl
+            SHELLOSSUS_MODEL = $inputModel
+            SHELLOSSUS_API_KEY = $inputKey
+            SHELLOSSUS_WORKSPACE = $inputWorkspace
         }
         Remove-Variable inputKey -ErrorAction SilentlyContinue
-        Write-Host ($script:Gm.BoldGreen + 'Settings saved. Start h-agent from your working folder.' + $script:Gm.Reset)
+        Write-Host ($script:Gm.BoldGreen + 'Settings saved. Start shellossus from your working folder.' + $script:Gm.Reset)
         return
     }
-    if (-not $BaseUrl) { $BaseUrl = $config.H_AGENT_BASE_URL }
-    if (-not $Model) { $Model = $config.H_AGENT_MODEL }
+    if (-not $BaseUrl) { $BaseUrl = $config.SHELLOSSUS_BASE_URL }
+    if (-not $Model) { $Model = $config.SHELLOSSUS_MODEL }
     if ($PSBoundParameters.Keys -notcontains 'Workspace') {
-        if ($env:H_AGENT_WORKSPACE) { $Workspace = $env:H_AGENT_WORKSPACE }
-        elseif ($config.H_AGENT_WORKSPACE) { $Workspace = $config.H_AGENT_WORKSPACE }
+        if ($env:SHELLOSSUS_WORKSPACE) { $Workspace = $env:SHELLOSSUS_WORKSPACE }
+        elseif ($config.SHELLOSSUS_WORKSPACE) { $Workspace = $config.SHELLOSSUS_WORKSPACE }
     }
     $rootItem = Get-Item -LiteralPath $Workspace -Force -ErrorAction Stop
     if (-not $rootItem.PSIsContainer) { throw 'Workspace must be a directory.' }
@@ -189,11 +189,11 @@ if (-not $LibraryOnly) {
         $script:ReasoningEffort = $ReasoningEffort
     }
     $endpoint = $BaseUrl.TrimEnd('/') + '/chat/completions'
-    $agentKey = $env:H_AGENT_API_KEY
-    if (-not $agentKey) { $agentKey = $config.H_AGENT_API_KEY }
+    $agentKey = $env:SHELLOSSUS_API_KEY
+    if (-not $agentKey) { $agentKey = $config.SHELLOSSUS_API_KEY }
     $config.Clear()
     if (-not $agentKey) {
-        Write-Host ($script:Gm.Yellow + 'Key input is visible. Run h-agent -Setup to save settings for next time.' + $script:Gm.Reset)
+        Write-Host ($script:Gm.Yellow + 'Key input is visible. Run shellossus -Setup to save settings for next time.' + $script:Gm.Reset)
         $agentKey = Read-Host 'API key'
     }
     if (-not $agentKey) { throw 'API key is required.' }
@@ -261,7 +261,7 @@ if (-not $LibraryOnly) {
             Save-AgentSession -SessionFile $sessionFile -State $state -Workspace $rootPath -Model $Model
             return
         }
-        Write-Host ($script:Gm.OscInit + $script:Gm.BoldGreen + "h-agent | model: $Model | permission: $($script:AgentPermission) | workspace: $rootPath" + $script:Gm.Reset)
+        Write-Host ($script:Gm.OscInit + $script:Gm.BoldGreen + "shellossus | model: $Model | permission: $($script:AgentPermission) | workspace: $rootPath" + $script:Gm.Reset)
         if (Get-AgentsContext -Root $rootPath -ConfigDir $configDir) { Write-Host ($script:Gm.Aqua + 'Loaded AGENTS.md/CLAUDE.md instructions.' + $script:Gm.Reset) }
         if (Get-SkillsCatalog -Root $rootPath -ConfigDir $configDir) { Write-Host ($script:Gm.Aqua + 'Loaded skills catalog.' + $script:Gm.Reset) }
         Write-Host ($script:Gm.Grey1 + 'Commands: /help /status /session /permission /reasoning /undo /retry /compact /tree /fork /export /copy /reload /model /sessions /resume /save /new /exit' + $script:Gm.Reset)
@@ -306,13 +306,13 @@ if (-not $LibraryOnly) {
                 Write-Host ($script:Gm.Aqua + '  /reload                      ' + $script:Gm.Fg + 'Reload AGENTS.md, CLAUDE.md, SYSTEM.md, skills, and prompt templates' + $script:Gm.Reset)
                 Write-Host ($script:Gm.Aqua + '  /hotkeys                     ' + $script:Gm.Fg + 'Display input shortcuts and syntax reference' + $script:Gm.Reset)
                 Write-Host ($script:Gm.Aqua + '  /model <id>                  ' + $script:Gm.Fg + 'Switch active model ID for this session' + $script:Gm.Reset)
-                Write-Host ($script:Gm.Aqua + '  /sessions                    ' + $script:Gm.Fg + 'List saved sessions in ~/.h-agent/sessions' + $script:Gm.Reset)
+                Write-Host ($script:Gm.Aqua + '  /sessions                    ' + $script:Gm.Fg + 'List saved sessions in ~/.shellossus/sessions' + $script:Gm.Reset)
                 Write-Host ($script:Gm.Aqua + '  /resume <num|name>           ' + $script:Gm.Fg + 'Resume a saved session by number or filename' + $script:Gm.Reset)
                 Write-Host ($script:Gm.Aqua + '  /save [name]                 ' + $script:Gm.Fg + 'Save conversation to current or named session file' + $script:Gm.Reset)
                 Write-Host ($script:Gm.Aqua + '  /new (/clear)                ' + $script:Gm.Fg + 'Start a fresh session while keeping old session files' + $script:Gm.Reset)
-                Write-Host ($script:Gm.Aqua + '  /exit (/quit)                ' + $script:Gm.Fg + 'Exit h-agent' + $script:Gm.Reset)
+                Write-Host ($script:Gm.Aqua + '  /exit (/quit)                ' + $script:Gm.Fg + 'Exit shellossus' + $script:Gm.Reset)
                 Write-Host ($script:Gm.Aqua + '  /skill:<name> [args]         ' + $script:Gm.Fg + 'Invoke a skill directly with arguments' + $script:Gm.Reset)
-                Write-Host ($script:Gm.Aqua + '  /<template> [args]           ' + $script:Gm.Fg + 'Run a custom Markdown prompt from .h-agent/prompts/<name>.md' + $script:Gm.Reset)
+                Write-Host ($script:Gm.Aqua + '  /<template> [args]           ' + $script:Gm.Fg + 'Run a custom Markdown prompt from .shellossus/prompts/<name>.md' + $script:Gm.Reset)
                 Write-Host ($script:Gm.Aqua + '  @path/to/file                ' + $script:Gm.Fg + 'Inline-attach a workspace file into your prompt' + $script:Gm.Reset)
                 Write-Host ($script:Gm.Aqua + '  !command / !!command         ' + $script:Gm.Fg + 'Run shell command (! adds to context, !! local only)' + $script:Gm.Reset)
                 continue

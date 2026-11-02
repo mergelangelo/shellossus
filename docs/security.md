@@ -1,6 +1,6 @@
 # Security, Permissions & Enterprise Guide
 
-`h-agent` is designed for environments where installing third-party runtimes, binaries, or unverified PowerShell Gallery modules is prohibited or impractical.
+`shellossus` is designed for environments where installing third-party runtimes, binaries, or unverified PowerShell Gallery modules is prohibited or impractical.
 
 ---
 
@@ -15,7 +15,7 @@ You can set the permission mode at launch (`-Permission <Mode>`) or switch it at
 | `AutoEdit` | Allowed | Auto-approved (saves backup) | Requires typing `RUN` | Fast iterative coding while keeping shell commands gated |
 | `Auto` | Allowed | Auto-approved (saves backup) | Auto-approved | Trusted automation or sandboxed environments |
 
-When resuming a saved session via `/resume`, `h-agent` resets the active permission mode to `Ask` unless `-Permission` was explicitly passed at launch.
+When resuming a saved session via `/resume`, `shellossus` resets the active permission mode to `Ask` unless `-Permission` was explicitly passed at launch.
 
 ---
 
@@ -24,7 +24,7 @@ When resuming a saved session via `/resume`, `h-agent` resets the active permiss
 1. **Workspace Boundary Enforcement:**
    - Every tool path is resolved through `Resolve-AgentPath`.
    - Paths resolving outside the workspace directory are rejected (`Path is outside the workspace.`).
-   - The only exception is read-only access (`read_file`) to `SKILL.md` files explicitly registered during startup by `Get-SkillsCatalog` from `%USERPROFILE%\.h-agent\skills`.
+   - The only exception is read-only access (`read_file`) to `SKILL.md` files explicitly registered during startup by `Get-SkillsCatalog` from `%USERPROFILE%\.shellossus\skills`.
 2. **Reparse Point Rejection:**
    - `Resolve-AgentPath`, `find_files`, `grep_files`, and `Get-SkillsCatalog` inspect file and ancestor directory attributes and reject any NTFS junction, symlink, or reparse point (`Attributes -band 1024`).
    - *Note:* Application-level path validation is not an OS kernel sandbox and does not protect against concurrent TOCTOU race conditions by external processes.
@@ -46,14 +46,14 @@ When resuming a saved session via `/resume`, `h-agent` resets the active permiss
 
 ## Process Isolation & Command Timeouts
 
-- **API Key Scrubbing:** `Invoke-ShellCommand` clears `H_AGENT_API_KEY` and `OPENAI_API_KEY` before spawning a child PowerShell process and restores them afterward.
-- **Disk-Backed Output Streaming:** Standard output and standard error are redirected directly to temporary files on disk (`Start-Process -RedirectStandardOutput -RedirectStandardError`). Only the first 300 lines (up to 20,000 characters) are read into memory for the model response; if truncated, the full log is preserved under `.h-agent/output/cmd-*.log`.
-- **Timeout & Termination:** Commands default to a 60-second timeout (`timeout_sec`, configurable from 1 to 600 seconds). If a command exceeds the timeout, `h-agent` terminates the process (`Stop-Process -Force`) and reports `status = "timed_out"`.
+- **API Key Scrubbing:** `Invoke-ShellCommand` clears `SHELLOSSUS_API_KEY` and `OPENAI_API_KEY` before spawning a child PowerShell process and restores them afterward.
+- **Disk-Backed Output Streaming:** Standard output and standard error are redirected directly to temporary files on disk (`Start-Process -RedirectStandardOutput -RedirectStandardError`). Only the first 300 lines (up to 20,000 characters) are read into memory for the model response; if truncated, the full log is preserved under `.shellossus/output/cmd-*.log`.
+- **Timeout & Termination:** Commands default to a 60-second timeout (`timeout_sec`, configurable from 1 to 600 seconds). If a command exceeds the timeout, `shellossus` terminates the process (`Stop-Process -Force`) and reports `status = "timed_out"`.
 
 ---
 
 ## Enterprise / Citrix / VDI Notes
 
-- `h-agent` does **not** modify `ExecutionPolicy`, language mode, or system security settings.
+- `shellossus` does **not** modify `ExecutionPolicy`, language mode, or system security settings.
 - All code is tested in Windows PowerShell 5.1 under `ConstrainedLanguage` mode.
-- The user API key is stored in plain text in `%USERPROFILE%\.h-agent\.env` (outside the project directory). Do not commit `.env` files or share terminal recordings taken during `h-agent -Setup`.
+- The user API key is stored in plain text in `%USERPROFILE%\.shellossus\.env` (outside the project directory). Do not commit `.env` files or share terminal recordings taken during `shellossus -Setup`.

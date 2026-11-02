@@ -13,7 +13,7 @@ try {
     $longLine25k = ('A' * 20000) + ('B' * 5000)
     Set-Content -LiteralPath (Join-Path $workspacePath 'longline25k.txt') -Value $longLine25k -Encoding UTF8 -NoNewline
     Set-Content -LiteralPath (Join-Path $workspacePath 'AGENTS.md') -Value 'Always use snake_case.' -Encoding UTF8
-    $dotH = Join-Path $workspacePath '.h-agent'
+    $dotH = Join-Path $workspacePath '.shellossus'
     $skillFolder = Join-Path $dotH 'skills\sql-tuning'
     New-Item -ItemType Directory -Path $skillFolder -Force | Out-Null
     Set-Content -LiteralPath (Join-Path $skillFolder 'SKILL.md') -Value "---`nname: sql-tuning`ndescription: Optimize heavy SQL queries`n---`nCheck indexes." -Encoding UTF8
@@ -70,10 +70,10 @@ try {
 
     $configPath = Join-Path $testRoot '.env'
     $loadedConfig = @{
-        H_AGENT_BASE_URL = 'https://example.invalid/v1'
-        H_AGENT_MODEL = 'test-model'
-        H_AGENT_API_KEY = 'fake=key#$(throw injected)'
-        H_AGENT_WORKSPACE = 'C:\folder with spaces'
+        SHELLOSSUS_BASE_URL = 'https://example.invalid/v1'
+        SHELLOSSUS_MODEL = 'test-model'
+        SHELLOSSUS_API_KEY = 'fake=key#$(throw injected)'
+        SHELLOSSUS_WORKSPACE = 'C:\folder with spaces'
     }
 
     $script:approval = 'WRITE'
@@ -82,9 +82,9 @@ try {
         return $script:approval
     }
 
-    # Switch to ConstrainedLanguage and re-source h-agent.ps1.
+    # Switch to ConstrainedLanguage and re-source shellossus.ps1.
     $ExecutionContext.SessionState.LanguageMode = 'ConstrainedLanguage'
-    . "$PSScriptRoot\..\h-agent.ps1" -LibraryOnly
+    . "$PSScriptRoot\..\shellossus.ps1" -LibraryOnly
 
     $call = @{ id = 'cl'; function = @{ name = 'read_file'; arguments = '{"path":"long.txt","start_line":301}' } }
     $result = Invoke-AgentTool -Root $workspacePath -Call $call | ConvertFrom-Json
@@ -183,7 +183,7 @@ try {
     Write-AgentReply -Content "# Title`n## Subtitle`n> quote`n- **item** with ``code```n| A | B |`n|---|---|`n| 1 | 2 |`n``````sql`nSELECT 1;`n``````"
     Save-AgentConfig -Path $configPath -Config $loadedConfig
     $constrainedConfig = Read-AgentConfig -Path $configPath
-    Assert-True ($constrainedConfig.H_AGENT_API_KEY -eq $loadedConfig.H_AGENT_API_KEY) 'ConstrainedLanguage config roundtrip failed.'
+    Assert-True ($constrainedConfig.SHELLOSSUS_API_KEY -eq $loadedConfig.SHELLOSSUS_API_KEY) 'ConstrainedLanguage config roundtrip failed.'
 }
 finally {
     Remove-TestEnvironment -Env $envData
