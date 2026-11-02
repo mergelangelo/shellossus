@@ -185,14 +185,14 @@ try {
 
         # 5. Interactive flows: first install menu (conflict retry -> custom name) and reinstall menu (keep -> change -> remove).
         $interactiveProfile = Join-Path $testRoot 'interactive-profile.ps1'
-        $script:readQueue = @('1', '4', 'bad name!', '4', 'shos_custom')
+        $global:readQueue = @('1', '4', 'bad name!', '4', 'shos_custom')
         Set-Alias -Name 's' -Value Get-Location -Scope Global
-        function Read-Host {
+        function global:Read-Host {
             param($Prompt)
-            if ($script:readQueue.Count -eq 0) { return '5' }
-            $next = $script:readQueue[0]
-            if ($script:readQueue.Count -eq 1) { $script:readQueue = @() }
-            else { $script:readQueue = @($script:readQueue[1..($script:readQueue.Count - 1)]) }
+            if (-not $global:readQueue -or $global:readQueue.Count -eq 0) { return '5' }
+            $next = $global:readQueue[0]
+            if ($global:readQueue.Count -eq 1) { $global:readQueue = @() }
+            else { $global:readQueue = @($global:readQueue[1..($global:readQueue.Count - 1)]) }
             return $next
         }
         try {
@@ -202,25 +202,26 @@ try {
             Assert-True ($intText1.Contains('function global:shos_custom')) 'Interactive first install with conflict retry and custom shortcut failed.'
 
             # Reinstall 1: '1' (Keep 'shos_custom').
-            $script:readQueue = @('1')
+            $global:readQueue = @('1')
             & "$PSScriptRoot\..\install.ps1" -AgentPath "$PSScriptRoot\..\shellossus.ps1" -ProfilePath $interactiveProfile
             $intText2 = Get-Content -LiteralPath $interactiveProfile -Raw -Encoding UTF8
             Assert-True ($intText2.Contains('function global:shos_custom') -and ((@($intText2 -split '(?m)^# >>> shellossus >>>\r?$').Count - 1) -eq 1)) 'Interactive reinstall keep shortcut failed.'
 
             # Reinstall 2: '2' (Change shortcut) -> '3' ('shos').
-            $script:readQueue = @('2', '3')
+            $global:readQueue = @('2', '3')
             & "$PSScriptRoot\..\install.ps1" -AgentPath "$PSScriptRoot\..\shellossus.ps1" -ProfilePath $interactiveProfile
             $intText3 = Get-Content -LiteralPath $interactiveProfile -Raw -Encoding UTF8
             Assert-True ($intText3.Contains('function global:shos') -and (-not $intText3.Contains('function global:shos_custom'))) 'Interactive reinstall change shortcut failed.'
 
             # Reinstall 3: '3' (Remove shortcut).
-            $script:readQueue = @('3')
+            $global:readQueue = @('3')
             & "$PSScriptRoot\..\install.ps1" -AgentPath "$PSScriptRoot\..\shellossus.ps1" -ProfilePath $interactiveProfile
             $intText4 = Get-Content -LiteralPath $interactiveProfile -Raw -Encoding UTF8
             Assert-True ($intText4.Contains('function global:shellossus') -and (-not $intText4.Contains('function global:shos'))) 'Interactive reinstall remove shortcut failed.'
         }
         finally {
-            Remove-Item Function:\Read-Host -ErrorAction SilentlyContinue
+            Remove-Item Function:\global:Read-Host -ErrorAction SilentlyContinue
+            Remove-Variable -Name readQueue -Scope Global -ErrorAction SilentlyContinue
             Remove-Item Alias:\s -Force -ErrorAction SilentlyContinue
         }
 
