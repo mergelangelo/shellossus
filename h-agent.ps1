@@ -47,6 +47,38 @@ function Save-AgentConfig {
     Set-Content -LiteralPath $Path -Value $lines -Encoding UTF8 -ErrorAction Stop
 }
 
+function Format-ConfigPath {
+    param([string]$Path)
+    if (-not $Path) { return '' }
+    if (Test-Path -LiteralPath $Path) { return (Get-Item -LiteralPath $Path -Force).FullName }
+    $parent = Split-Path $Path -Parent
+    $leaf = Split-Path $Path -Leaf
+    if (-not $parent) { $parent = '.' }
+    if (Test-Path -LiteralPath $parent) {
+        return (Join-Path (Get-Item -LiteralPath $parent -Force).FullName $leaf)
+    }
+    return $Path
+}
+
+function Format-AgentError {
+    param($ErrorRecord)
+    $msg = $ErrorRecord.Exception.Message
+    $details = $null
+    if ($ErrorRecord.ErrorDetails -and $ErrorRecord.ErrorDetails.Message) {
+        $details = $ErrorRecord.ErrorDetails.Message.Trim()
+    }
+    if ($details) {
+        try {
+            $parsed = $details | ConvertFrom-Json -ErrorAction Stop
+            if ($parsed.error -and $parsed.error.message) { $details = [string]$parsed.error.message }
+        }
+        catch {}
+        if ($details.Length -gt 300) { $details = $details.Substring(0, 300) + '...' }
+        return ($msg + ' (' + $details + ')')
+    }
+    return $msg
+}
+
 function Resolve-AgentPath {
     param([string]$Root, [string]$RelativePath)
     if (-not $RelativePath) { $RelativePath = '.' }
@@ -74,7 +106,11 @@ function Resolve-AgentPath {
 function Get-AgentTools {
     foreach ($name in @('list_files', 'read_file')) {
         $description = 'List up to 200 entries in a directory. Names only; no file contents.'
-        if ($name -eq 'read_file') { $description = 'Read a UTF-8 text file: up to 300 lines and 20000 characters, maximum file size 1 MiB.' }
+        $properties = @{ path = @{ type = 'string'; description = 'Workspace-relative path; . means the root.' } }
+        if ($name -eq 'read_file') {
+            $description = 'Read a UTF-8 text file: up to 300 lines and 20000 characters, maximum file size 1 MiB.'
+            $properties.start_line = @{ type = 'integer'; description = 'Optional 1-based first line to read (default 1).' }
+        }
         @{
             type = 'function'
             function = @{
@@ -82,7 +118,7 @@ function Get-AgentTools {
                 description = $description
                 parameters = @{
                     type = 'object'
-                    properties = @{ path = @{ type = 'string'; description = 'Workspace-relative path; . means the root.' } }
+                    properties = $properties
                     required = @('path')
                 }
             }
@@ -107,18 +143,17 @@ function Get-AgentTools {
 
 function Invoke-AgentWrite {
     param([string]$Root, [string]$Name, $Arguments)
-    $candidate = Join-Path $Root $Arguments.path
-    $exists = Test-Path -LiteralPath $candidate
     $before = $null
     if ($Name -eq 'write_file') {
-        if ($exists) { throw 'File already exists. Use edit_file.' }
+        if ($Arguments.path -match '[/\\]$') { throw 'Invalid file name.' }
         $parent = Resolve-AgentPath -Root $Root -RelativePath (Split-Path $Arguments.path -Parent)
         if (-not (Get-Item -LiteralPath $parent -Force).PSIsContainer) { throw 'Parent must be a directory.' }
         $leaf = Split-Path $Arguments.path -Leaf
-        if ($leaf -eq '.env' -or ($leaf -like '.env.*' -and $leaf -ne '.env.example')) { throw 'Agent tools cannot write credential configuration files.' }
         if (-not $leaf -or $leaf -match '[<>:"/\\|?*\x00-\x1f]' -or $leaf -match '[. ]$') { throw 'Invalid file name.' }
         if ($leaf -match '^(?i:CON|PRN|AUX|NUL|COM[0-9]|LPT[0-9])(?:\.|$)') { throw 'Reserved file name.' }
         $path = Join-Path $parent $leaf
+        if ($leaf -eq '.env' -or ($leaf -like '.env.*' -and $leaf -ne '.env.example') -or $path -eq $script:AgentConfigPath) { throw 'Agent tools cannot write credential configuration files.' }
+        if (Test-Path -LiteralPath $path) { throw 'File already exists. Use edit_file.' }
         if ($Arguments.content -isnot [string]) { throw 'content must be a string.' }
         $after = $Arguments.content
     }
@@ -129,10 +164,17 @@ function Invoke-AgentWrite {
         $before = Get-Content -LiteralPath $path -Raw -Encoding UTF8 -ErrorAction Stop
         if ($null -eq $before) { $before = '' }
         if ($Arguments.old_text -isnot [string] -or -not $Arguments.old_text -or $Arguments.new_text -isnot [string]) { throw 'Expected nonempty old_text and string new_text.' }
-        $index = $before.IndexOf($Arguments.old_text, [StringComparison]::Ordinal)
+        $oldText = $Arguments.old_text
+        $newText = $Arguments.new_text
+        $index = $before.IndexOf($oldText, [StringComparison]::Ordinal)
+        if ($index -lt 0 -and $before.Contains("`r`n")) {
+            $oldText = $oldText.Replace("`r`n", "`n").Replace("`n", "`r`n")
+            $index = $before.IndexOf($oldText, [StringComparison]::Ordinal)
+        }
         if ($index -lt 0) { throw 'old_text was not found. Read the file again.' }
-        if ($before.IndexOf($Arguments.old_text, $index + $Arguments.old_text.Length, [StringComparison]::Ordinal) -ge 0) { throw 'old_text occurs more than once. Provide more context.' }
-        $after = $before.Substring(0, $index) + $Arguments.new_text + $before.Substring($index + $Arguments.old_text.Length)
+        if ($before.IndexOf($oldText, $index + $oldText.Length, [StringComparison]::Ordinal) -ge 0) { throw 'old_text occurs more than once. Provide more context.' }
+        if ($before.Contains("`r`n")) { $newText = $newText.Replace("`r`n", "`n").Replace("`n", "`r`n") }
+        $after = $before.Substring(0, $index) + $newText + $before.Substring($index + $oldText.Length)
         if ($after -ceq $before) { return (@{ status = 'unchanged' } | ConvertTo-Json -Compress) }
     }
     if ($after.Length -gt 20000 -or ($null -ne $before -and $before.Length -gt 20000)) { throw 'Write preview is limited to 20000 characters.' }
@@ -180,7 +222,9 @@ function Invoke-AgentTool {
         Write-Host ('  [{0}] {1}' -f $name, $arguments.path) -ForegroundColor DarkCyan
         if ($name -eq 'list_files') {
             if (-not $item.PSIsContainer) { throw 'Expected a directory.' }
-            $entries = @(Get-ChildItem -LiteralPath $path -ErrorAction Stop | Select-Object -First 201)
+            $entries = @(Get-ChildItem -LiteralPath $path -Force -ErrorAction Stop | Where-Object {
+                $_.PSIsContainer -or ($_.Name -ne '.env' -and (-not ($_.Name -like '.env.*' -and $_.Name -ne '.env.example')) -and $_.FullName -ne $script:AgentConfigPath)
+            } | Select-Object -First 201)
             return (@{
                 entries = @($entries | Select-Object -First 200 -Property Name, PSIsContainer, Length)
                 truncated = ($entries.Count -gt 200)
@@ -188,11 +232,18 @@ function Invoke-AgentTool {
         }
         if ($item.PSIsContainer) { throw 'Expected a text file.' }
         if ($item.Length -gt 1MB) { throw 'File exceeds 1 MiB.' }
-        $lines = @(Get-Content -LiteralPath $path -Encoding UTF8 -TotalCount 301 -ErrorAction Stop)
+        $startLine = 1
+        if ($null -ne $arguments.start_line) {
+            if ($arguments.start_line -isnot [int] -and $arguments.start_line -isnot [long]) { throw 'start_line must be an integer.' }
+            $startLine = [int]$arguments.start_line
+            if ($startLine -lt 1) { throw 'start_line must be at least 1.' }
+        }
+        $skip = $startLine - 1
+        $lines = @(Get-Content -LiteralPath $path -Encoding UTF8 -TotalCount ($skip + 301) -ErrorAction Stop | Select-Object -Skip $skip)
         $text = ($lines | Select-Object -First 300) -join "`n"
         $truncated = $lines.Count -gt 300
         if ($text.Length -gt 20000) { $text = $text.Substring(0, 20000); $truncated = $true }
-        return (@{ text = $text; truncated = $truncated } | ConvertTo-Json -Compress)
+        return (@{ text = $text; start_line = $startLine; truncated = $truncated } | ConvertTo-Json -Compress)
     }
     catch { return (@{ error = $_.Exception.Message } | ConvertTo-Json -Compress) }
 }
@@ -240,7 +291,7 @@ function Invoke-AgentTurn {
 }
 
 if (-not $LibraryOnly) {
-    $script:AgentConfigPath = $ConfigPath
+    $script:AgentConfigPath = Format-ConfigPath -Path $ConfigPath
     $config = Read-AgentConfig -Path $ConfigPath
     if ($Setup) {
         Write-Host "Save settings to: $ConfigPath"
@@ -313,7 +364,7 @@ if (-not $LibraryOnly) {
             }
             catch {
                 $state.messages = $beforeTurn
-                Write-Host ('Request failed; turn rolled back: ' + $_.Exception.Message) -ForegroundColor Red
+                Write-Host ('Request failed; turn rolled back: ' + (Format-AgentError -ErrorRecord $_)) -ForegroundColor Red
             }
         }
     }
