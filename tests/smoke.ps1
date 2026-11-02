@@ -545,7 +545,9 @@ try {
     Assert-True ($skillCmdOut.Contains('<skill name="sql-tuning"') -and $skillCmdOut.Contains('User: orders_table')) '/skill:name command expansion failed.'
 
     # Pi port: Session Tree, Branch Switching, Session Forking, and HTML Export.
-    $treeSessionFile = Join-Path $sessionDirTest 'tree-test.jsonl'
+    $treeSessionDir = Join-Path $testRoot 'tree-sessions'
+    New-Item -ItemType Directory -Path $treeSessionDir -Force | Out-Null
+    $treeSessionFile = Join-Path $treeSessionDir 'tree-test.jsonl'
     $treeState = @{
         session_id = 'sess-tree-1'
         session_name = 'Tree Test'
@@ -572,7 +574,7 @@ try {
     Invoke-SessionResume -SessionFile $treeSessionFile -State $reloadedTreeState -CurrentWorkspace $workspacePath | Out-Null
     Switch-SessionBranch -State $reloadedTreeState -TargetId $branchALeafId | Out-Null
     Assert-True ($reloadedTreeState.messages[-1].content -eq 'Branch A reply') 'Saved session lost inactive tree branch on reload.'
-    $forkResult = Invoke-SessionFork -State $reloadedTreeState -SessionDir $sessionDirTest -EntryId $firstUserEntryId -NewName 'Forked Session'
+    $forkResult = Invoke-SessionFork -State $reloadedTreeState -SessionDir $treeSessionDir -EntryId $firstUserEntryId -NewName 'Forked Session'
     Assert-True ((Test-Path -LiteralPath $forkResult.session_file) -and $forkResult.state.messages.Count -eq 2 -and $forkResult.state.parent_session -eq 'sess-tree-1') 'Invoke-SessionFork failed.'
     $htmlOutPath = Join-Path $testRoot 'exported-session.html'
     $exportedHtml = Export-AgentSessionHtml -State $reloadedTreeState -OutputPath $htmlOutPath
