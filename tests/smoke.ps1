@@ -32,6 +32,25 @@ try {
     Assert-True $result.truncated 'Long file was not marked truncated.'
     Assert-True (($result.text -split "`n").Count -eq 300) 'Line limit failed.'
 
+    # Config is parsed as data; embedded PowerShell expressions stay literal.
+    $configPath = Join-Path $testRoot '.env'
+    Save-AgentConfig -Path $configPath -Config @{
+        H_AGENT_BASE_URL = 'https://example.invalid/v1'
+        H_AGENT_MODEL = 'test-model'
+        H_AGENT_API_KEY = 'fake=key#$(throw injected)'
+        H_AGENT_WORKSPACE = 'C:\folder with spaces'
+    }
+    $loadedConfig = Read-AgentConfig -Path $configPath
+    Assert-True ($loadedConfig.H_AGENT_API_KEY -eq 'fake=key#$(throw injected)') 'Config value was corrupted or evaluated.'
+    Assert-True ($loadedConfig.H_AGENT_WORKSPACE -eq 'C:\folder with spaces') 'Config path changed.'
+    $absentConfig = Read-AgentConfig -Path (Join-Path $testRoot 'missing.env')
+    Assert-True ($absentConfig.Count -eq 0) 'Missing config should produce empty settings.'
+    Set-Content -LiteralPath (Join-Path $workspacePath '.env') -Value 'SECRET=hidden' -Encoding UTF8
+    $call.function.name = 'read_file'
+    $call.function.arguments = '{"path":".env"}'
+    $result = Invoke-AgentTool -Root $workspacePath -Call $call | ConvertFrom-Json
+    Assert-True ([bool]$result.error) 'Agent must not read .env.'
+
     $script:approval = ''
     $script:prompts = 0
     function Read-Host {
@@ -96,6 +115,15 @@ try {
     Assert-True ($script:requests -eq 2) 'Expected two API calls.'
     Assert-True ($state.messages[-1].content -eq 'Files inspected.') 'Missing final answer.'
 
+    # Installer preserves profile contents and replaces its own block on rerun.
+    $profileFile = Join-Path $testRoot 'profile.ps1'
+    Set-Content -LiteralPath $profileFile -Value '# keep my settings' -Encoding UTF8
+    & "$PSScriptRoot\..\install.ps1" -AgentPath "$PSScriptRoot\..\h-agent.ps1" -ProfilePath $profileFile
+    & "$PSScriptRoot\..\install.ps1" -AgentPath "$PSScriptRoot\..\h-agent.ps1" -ProfilePath $profileFile
+    $profileText = Get-Content -LiteralPath $profileFile -Raw -Encoding UTF8
+    Assert-True ($profileText.Contains('# keep my settings')) 'Profile contents were lost.'
+    Assert-True ((@($profileText -split '(?m)^# >>> h-agent >>>\r?$').Count - 1) -eq 1) 'Installer duplicated the launcher.'
+
     # Reload the implementation in ConstrainedLanguage and repeat file reading.
     $ExecutionContext.SessionState.LanguageMode = 'ConstrainedLanguage'
     . "$PSScriptRoot\..\h-agent.ps1" -LibraryOnly
@@ -105,6 +133,9 @@ try {
     $call = @{ id = 'cl-write'; function = @{ name = 'write_file'; arguments = '{"path":"constrained.txt","content":"ok"}' } }
     $result = Invoke-AgentTool -Root $workspacePath -Call $call | ConvertFrom-Json
     Assert-True ($result.status -eq 'written') 'ConstrainedLanguage creation failed.'
+    Save-AgentConfig -Path $configPath -Config $loadedConfig
+    $constrainedConfig = Read-AgentConfig -Path $configPath
+    Assert-True ($constrainedConfig.H_AGENT_API_KEY -eq $loadedConfig.H_AGENT_API_KEY) 'ConstrainedLanguage config roundtrip failed.'
     Write-Host 'All smoke checks passed.'
 }
 finally {

@@ -2,17 +2,60 @@ param(
     [string]$BaseUrl = $env:H_AGENT_BASE_URL,
     [string]$Model = $env:H_AGENT_MODEL,
     [string]$Workspace = '.',
+    [string]$ConfigPath = "$env:USERPROFILE\.h-agent\.env",
     [int]$MaxSteps = 8,
+    [switch]$Setup,
     [switch]$LibraryOnly
 )
 
 # Windows PowerShell 5.1 compatible. No downloaded executables or modules.
+function Read-AgentConfig {
+    param([string]$Path)
+    $config = @{}
+    if (-not (Test-Path -LiteralPath $Path)) { return $config }
+    $lineNumber = 0
+    foreach ($line in @(Get-Content -LiteralPath $Path -Encoding UTF8 -ErrorAction Stop)) {
+        $lineNumber++
+        $trimmed = $line.Trim()
+        if (-not $trimmed -or $trimmed.StartsWith('#')) { continue }
+        if ($trimmed -notmatch '^(H_AGENT_BASE_URL|H_AGENT_MODEL|H_AGENT_API_KEY|H_AGENT_WORKSPACE)\s*=(.*)$') {
+            throw "Invalid config entry at line $lineNumber. Expected a supported H_AGENT_* key=value."
+        }
+        $key = $Matches[1]
+        $value = $Matches[2].Trim()
+        if ($value.Length -ge 2 -and (($value.StartsWith('"') -and $value.EndsWith('"')) -or ($value.StartsWith("'") -and $value.EndsWith("'")))) {
+            $value = $value.Substring(1, $value.Length - 2)
+        }
+        # Values are data. Never evaluate config as PowerShell code.
+        $config[$key] = $value
+    }
+    return $config
+}
+
+function Save-AgentConfig {
+    param([string]$Path, $Config)
+    $lines = @('# h-agent settings. Contains an API key: do not commit or share.')
+    foreach ($key in @('H_AGENT_BASE_URL', 'H_AGENT_MODEL', 'H_AGENT_API_KEY', 'H_AGENT_WORKSPACE')) {
+        $value = [string]$Config[$key]
+        if ($value -match "[`r`n]") { throw 'Config values must be single-line.' }
+        # Quotes preserve paths, # and = without interpreting backslashes.
+        if ($value.Contains('"')) { throw 'Config values cannot contain double quotes.' }
+        $lines += $key + '="' + $value + '"'
+    }
+    $parent = Split-Path $Path -Parent
+    if ($parent -and -not (Test-Path -LiteralPath $parent)) { New-Item -ItemType Directory -Path $parent -ErrorAction Stop | Out-Null }
+    Set-Content -LiteralPath $Path -Value $lines -Encoding UTF8 -ErrorAction Stop
+}
+
 function Resolve-AgentPath {
     param([string]$Root, [string]$RelativePath)
     if (-not $RelativePath) { $RelativePath = '.' }
     $rootItem = Get-Item -LiteralPath $Root -Force -ErrorAction Stop
     $item = Get-Item -LiteralPath (Join-Path $rootItem.FullName $RelativePath) -Force -ErrorAction Stop
     if ($item.PSProvider.Name -ne 'FileSystem') { throw 'Only filesystem paths are supported.' }
+    if (-not $item.PSIsContainer -and ($item.Name -eq '.env' -or ($item.Name -like '.env.*' -and $item.Name -ne '.env.example') -or $item.FullName -eq $script:AgentConfigPath)) {
+        throw 'Agent tools cannot access credential configuration files.'
+    }
     $prefix = $rootItem.FullName.TrimEnd('\') + '\'
     if (($item.FullName -ne $rootItem.FullName) -and
         (-not $item.FullName.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase))) {
@@ -72,6 +115,7 @@ function Invoke-AgentWrite {
         $parent = Resolve-AgentPath -Root $Root -RelativePath (Split-Path $Arguments.path -Parent)
         if (-not (Get-Item -LiteralPath $parent -Force).PSIsContainer) { throw 'Parent must be a directory.' }
         $leaf = Split-Path $Arguments.path -Leaf
+        if ($leaf -eq '.env' -or ($leaf -like '.env.*' -and $leaf -ne '.env.example')) { throw 'Agent tools cannot write credential configuration files.' }
         if (-not $leaf -or $leaf -match '[<>:"/\\|?*\x00-\x1f]' -or $leaf -match '[. ]$') { throw 'Invalid file name.' }
         if ($leaf -match '^(?i:CON|PRN|AUX|NUL|COM[0-9]|LPT[0-9])(?:\.|$)') { throw 'Reserved file name.' }
         $path = Join-Path $parent $leaf
@@ -196,6 +240,42 @@ function Invoke-AgentTurn {
 }
 
 if (-not $LibraryOnly) {
+    $script:AgentConfigPath = $ConfigPath
+    $config = Read-AgentConfig -Path $ConfigPath
+    if ($Setup) {
+        Write-Host "Save settings to: $ConfigPath"
+        Write-Host 'API key is stored as plain text in your user profile, outside the project.' -ForegroundColor Yellow
+        $defaultUrl = $BaseUrl
+        if (-not $defaultUrl) { $defaultUrl = $config.H_AGENT_BASE_URL }
+        $inputUrl = Read-Host "API base URL including /v1 [$defaultUrl]"
+        if (-not $inputUrl) { $inputUrl = $defaultUrl }
+        if ($inputUrl -notmatch '^https://[^\s]+$') { throw 'Use an HTTPS API base URL.' }
+        $defaultModel = $Model
+        if (-not $defaultModel) { $defaultModel = $config.H_AGENT_MODEL }
+        $inputModel = Read-Host "Model ID [$defaultModel]"
+        if (-not $inputModel) { $inputModel = $defaultModel }
+        if (-not $inputModel) { throw 'Model ID is required.' }
+        Write-Host 'Key input is visible. Enter keeps the saved key, if any.' -ForegroundColor Yellow
+        $inputKey = Read-Host 'API key'
+        if (-not $inputKey) { $inputKey = $config.H_AGENT_API_KEY }
+        if (-not $inputKey) { throw 'API key is required.' }
+        $inputWorkspace = Read-Host 'Default workspace (Enter = current folder at each launch)'
+        Save-AgentConfig -Path $ConfigPath -Config @{
+            H_AGENT_BASE_URL = $inputUrl
+            H_AGENT_MODEL = $inputModel
+            H_AGENT_API_KEY = $inputKey
+            H_AGENT_WORKSPACE = $inputWorkspace
+        }
+        Remove-Variable inputKey -ErrorAction SilentlyContinue
+        Write-Host 'Settings saved. Start h-agent from your working folder.' -ForegroundColor Green
+        return
+    }
+    if (-not $BaseUrl) { $BaseUrl = $config.H_AGENT_BASE_URL }
+    if (-not $Model) { $Model = $config.H_AGENT_MODEL }
+    if ($PSBoundParameters.Keys -notcontains 'Workspace') {
+        if ($env:H_AGENT_WORKSPACE) { $Workspace = $env:H_AGENT_WORKSPACE }
+        elseif ($config.H_AGENT_WORKSPACE) { $Workspace = $config.H_AGENT_WORKSPACE }
+    }
     if (-not $BaseUrl) { $BaseUrl = Read-Host 'API base URL (including /v1)' }
     if ($BaseUrl -notmatch '^https://[^\s]+$') { throw 'Use an HTTPS API base URL.' }
     if (-not $Model) { $Model = Read-Host 'Model ID' }
@@ -205,9 +285,13 @@ if (-not $LibraryOnly) {
     if (-not $rootItem.PSIsContainer) { throw 'Workspace must be a directory.' }
     $rootPath = Resolve-AgentPath -Root $rootItem.FullName -RelativePath '.'
     $endpoint = $BaseUrl.TrimEnd('/') + '/chat/completions'
-    # Plain input works in ConstrainedLanguage; the key is not saved to disk.
-    Write-Host 'The API key will be visible while entering it. Do not share that screen.' -ForegroundColor Yellow
-    $agentKey = Read-Host 'API key'
+    $agentKey = $env:H_AGENT_API_KEY
+    if (-not $agentKey) { $agentKey = $config.H_AGENT_API_KEY }
+    $config.Clear()
+    if (-not $agentKey) {
+        Write-Host 'Key input is visible. Run h-agent -Setup to save settings for next time.' -ForegroundColor Yellow
+        $agentKey = Read-Host 'API key'
+    }
     if (-not $agentKey) { throw 'API key is required.' }
     $system = @{
         role = 'system'
