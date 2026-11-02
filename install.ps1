@@ -83,7 +83,7 @@ function Get-MarkerBlockRange {
     }
 }
 
-if ($NoShortcut -and $PSBoundParameters.ContainsKey('Shortcut')) {
+if ($NoShortcut -and ($PSBoundParameters.Keys -contains 'Shortcut')) {
     throw 'Cannot specify both -Shortcut and -NoShortcut.'
 }
 
@@ -126,7 +126,7 @@ $chosenShortcut = ''
 if ($NoShortcut) {
     $chosenShortcut = ''
 }
-elseif ($PSBoundParameters.ContainsKey('Shortcut')) {
+elseif ($PSBoundParameters.Keys -contains 'Shortcut') {
     $cand = $Shortcut.Trim()
     if (-not (Test-ShortcutSyntax -Name $cand)) {
         throw "Invalid shortcut name '$Shortcut'. Use only letters, numbers, hyphens, or underscores (must start with a letter, no spaces or special characters)."
