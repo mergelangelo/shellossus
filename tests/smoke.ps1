@@ -445,7 +445,7 @@ try {
         Assert-True ($Method -eq 'Post') 'Expected POST.'
         Assert-True ($payload.model -eq 'test-model') 'Wrong model.'
         if ($payload.messages[0].content -like '*compaction assistant*') {
-            $script:lastCompactBody = $Body
+            $script:lastCompactBody = [string]$payload.messages[1].content
             return @{ choices = @(@{ finish_reason = 'stop'; message = @{ content = "## Goal`nTest summary" } }) }
         }
         if ($script:requests -eq 1) {
@@ -521,10 +521,10 @@ try {
     Set-Content -LiteralPath (Join-Path $ignoreTestDir 'sub\q1.sql') -Value 'SELECT 1' -Encoding UTF8
     $call = @{ id = 'ig-find'; function = @{ name = 'find_files'; arguments = '{"path":"igtest","pattern":"*.log"}' } }
     $igFind = Invoke-AgentTool -Root $workspacePath -Call $call | ConvertFrom-Json
-    Assert-True ($igFind.count -eq 1 -and $igFind.files[0].path -eq 'keep.log') '.gitignore negation (!) in find_files failed.'
+    Assert-True ($igFind.count -eq 1 -and $igFind.files[0].relative_path -eq 'keep.log') '.gitignore negation (!) in find_files failed.'
     $call = @{ id = 'ig-pathglob'; function = @{ name = 'find_files'; arguments = '{"path":"igtest","pattern":"sub/*.sql"}' } }
     $igPathGlob = Invoke-AgentTool -Root $workspacePath -Call $call | ConvertFrom-Json
-    Assert-True ($igPathGlob.count -eq 1 -and $igPathGlob.files[0].path -eq 'sub/q1.sql') 'Path glob (sub/*.sql) in find_files failed.'
+    Assert-True ($igPathGlob.count -eq 1 -and $igPathGlob.files[0].relative_path -eq 'sub/q1.sql') 'Path glob (sub/*.sql) in find_files failed.'
     $call = @{ id = 'ig-grep'; function = @{ name = 'grep_files'; arguments = '{"path":"igtest","pattern":"findme_"}' } }
     $igGrep = Invoke-AgentTool -Root $workspacePath -Call $call | ConvertFrom-Json
     Assert-True ($igGrep.matches.Count -eq 1 -and $igGrep.matches[0].file -eq 'keep.log') '.gitignore filtering in grep_files failed.'
