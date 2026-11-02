@@ -63,5 +63,5 @@
 2. Run `.\build.ps1` to generate `h-agent.ps1` (pure ASCII, LF-normalized).
 3. Run `.\tests\smoke.ps1`, which:
    - Calls `.\build.ps1 -Check` to ensure `h-agent.ps1` matches `src/*.ps1`.
-   - Runs unit and integration tests across all tools, permissions, sessions, compaction, and error handling.
-   - Switches the active PowerShell session to `ConstrainedLanguage` mode and re-verifies core operations.
+   - Executes modular test suites (`Config.Tests.ps1`, `Theme.Tests.ps1`, `Tools.Tests.ps1`, `Context.Tests.ps1`, `Cli.Tests.ps1`) with isolated temporary workspaces.
+   - Runs `ConstrainedLanguage.Tests.ps1` to verify core operations under PowerShell `ConstrainedLanguage` mode.
