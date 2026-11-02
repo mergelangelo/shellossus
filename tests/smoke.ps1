@@ -1,4 +1,5 @@
 $ErrorActionPreference = 'Stop'
+& "$PSScriptRoot\..\build.ps1" -Check
 . "$PSScriptRoot\..\h-agent.ps1" -LibraryOnly
 
 function Assert-True {

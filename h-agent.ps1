@@ -14,6 +14,12 @@ param(
 )
 
 # Windows PowerShell 5.1 compatible. No downloaded executables or modules.
+# Auto-generated from src/*.ps1 by build.ps1. Edit files in src/ and run .\build.ps1.
+
+# --- src/Config.ps1 ---
+# Configuration, path validation, and security boundary helpers.
+# Windows PowerShell 5.1 and ConstrainedLanguage compatible.
+
 function Read-AgentConfig {
     param([string]$Path)
     $config = @{}
@@ -88,6 +94,49 @@ function Format-PreviewText {
     param([string]$Text)
     return ($Text -replace '[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]', '?')
 }
+
+function Test-IsSecretFile {
+    param($Item)
+    if ($Item.PSIsContainer) { return $false }
+    return ($Item.Name -eq '.env' -or ($Item.Name -like '.env.*' -and $Item.Name -ne '.env.example') -or $Item.FullName -eq $script:AgentConfigPath)
+}
+
+function Get-WorkspaceRelativePath {
+    param([string]$Root, [string]$FullPath)
+    $prefix = (Get-Item -LiteralPath $Root -Force).FullName.TrimEnd('\') + '\'
+    $resolvedFull = if (Test-Path -LiteralPath $FullPath) { (Get-Item -LiteralPath $FullPath -Force).FullName } else { $FullPath }
+    if ($resolvedFull.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) {
+        return $resolvedFull.Substring($prefix.Length).Replace('\', '/')
+    }
+    return $FullPath
+}
+
+function Resolve-AgentPath {
+    param([string]$Root, [string]$RelativePath)
+    if (-not $RelativePath) { $RelativePath = '.' }
+    $rootItem = Get-Item -LiteralPath $Root -Force -ErrorAction Stop
+    $item = Get-Item -LiteralPath (Join-Path $rootItem.FullName $RelativePath) -Force -ErrorAction Stop
+    if ($item.PSProvider.Name -ne 'FileSystem') { throw 'Only filesystem paths are supported.' }
+    if (Test-IsSecretFile $item) {
+        throw 'Agent tools cannot access credential configuration files.'
+    }
+    $prefix = $rootItem.FullName.TrimEnd('\') + '\'
+    if (($item.FullName -ne $rootItem.FullName) -and
+        (-not $item.FullName.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase))) {
+        throw 'Path is outside the workspace.'
+    }
+    # Reject junctions/symlinks, including those in workspace ancestors.
+    $cursor = $item
+    while ($null -ne $cursor) {
+        if (($cursor.Attributes -band 1024) -ne 0) { throw 'Reparse points are not allowed.' }
+        if ($cursor.PSIsContainer) { $cursor = $cursor.Parent }
+        else { $cursor = $cursor.Directory }
+    }
+    return $item.FullName
+}
+
+# --- src/Theme.ps1 ---
+# Terminal UI theme (sainnhe/gruvbox-material dark medium) and Markdown/table rendering.
 
 $script:Esc = [string][char]27
 $script:Bel = [string][char]7
@@ -289,45 +338,8 @@ function Write-AgentReasoning {
     }
 }
 
-function Test-IsSecretFile {
-    param($Item)
-    if ($Item.PSIsContainer) { return $false }
-    return ($Item.Name -eq '.env' -or ($Item.Name -like '.env.*' -and $Item.Name -ne '.env.example') -or $Item.FullName -eq $script:AgentConfigPath)
-}
-
-function Get-WorkspaceRelativePath {
-    param([string]$Root, [string]$FullPath)
-    $prefix = (Get-Item -LiteralPath $Root -Force).FullName.TrimEnd('\') + '\'
-    $resolvedFull = if (Test-Path -LiteralPath $FullPath) { (Get-Item -LiteralPath $FullPath -Force).FullName } else { $FullPath }
-    if ($resolvedFull.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) {
-        return $resolvedFull.Substring($prefix.Length).Replace('\', '/')
-    }
-    return $FullPath
-}
-
-function Resolve-AgentPath {
-    param([string]$Root, [string]$RelativePath)
-    if (-not $RelativePath) { $RelativePath = '.' }
-    $rootItem = Get-Item -LiteralPath $Root -Force -ErrorAction Stop
-    $item = Get-Item -LiteralPath (Join-Path $rootItem.FullName $RelativePath) -Force -ErrorAction Stop
-    if ($item.PSProvider.Name -ne 'FileSystem') { throw 'Only filesystem paths are supported.' }
-    if (Test-IsSecretFile $item) {
-        throw 'Agent tools cannot access credential configuration files.'
-    }
-    $prefix = $rootItem.FullName.TrimEnd('\') + '\'
-    if (($item.FullName -ne $rootItem.FullName) -and
-        (-not $item.FullName.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase))) {
-        throw 'Path is outside the workspace.'
-    }
-    # Reject junctions/symlinks, including those in workspace ancestors.
-    $cursor = $item
-    while ($null -ne $cursor) {
-        if (($cursor.Attributes -band 1024) -ne 0) { throw 'Reparse points are not allowed.' }
-        if ($cursor.PSIsContainer) { $cursor = $cursor.Parent }
-        else { $cursor = $cursor.Directory }
-    }
-    return $item.FullName
-}
+# --- src/Tools.ps1 ---
+# Agent tools, permission modes, fuzzy/batch file edits, shell runner, and disk undo.
 
 $script:CurrentTurnWrites = @()
 $script:AgentPermission = 'Ask'
@@ -864,6 +876,9 @@ function Invoke-AgentTool {
     catch { return (@{ error = $_.Exception.Message } | ConvertTo-Json -Compress) }
 }
 
+# --- src/Context.ps1 ---
+# System prompt assembly (AGENTS.md, SYSTEM.md, skills), prompt templates, @file attachments, sessions, and compaction.
+
 function Get-AgentsContext {
     param([string]$Root, [string]$ConfigDir)
     $parts = @()
@@ -1074,6 +1089,9 @@ function Invoke-AgentCompact {
     $State.messages = @($systemMsg, $summaryMsg) + $recent
     return $true
 }
+
+# --- src/Cli.ps1 ---
+# Agent turn loop (HTTP retries, overflow auto-compaction, tool dispatch) and interactive CLI REPL.
 
 function Invoke-AgentTurn {
     param($State, [string]$Endpoint, [string]$ModelId, [string]$ApiKey, [string]$Root, [int]$Steps)
