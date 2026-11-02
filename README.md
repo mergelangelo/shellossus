@@ -83,7 +83,7 @@ h-agent -Prompt "Explain @src/Tools.ps1" # Single-shot non-interactive mode
 
 ```text
 .
-├── CONSTITUTION.md     # Foundational principles, architectural laws, and invariants
+├── CONSTITUTION.md     # Project constitution: core principles, safety guarantees, and invariants
 ├── h-agent.ps1         # Standalone single-file distribution (built from src/*.ps1)
 ├── build.ps1           # Bundler and sync verifier (.\build.ps1 / .\build.ps1 -Check)
 ├── install.ps1         # PowerShell profile launcher installer
@@ -114,7 +114,7 @@ Edit modular files under [`src/`](src/), rebuild [`h-agent.ps1`](h-agent.ps1), a
 
 ## Documentation
 
-- [The Constitution of `h-agent`](CONSTITUTION.md)
+- [Project Constitution](CONSTITUTION.md)
 - [Architecture & Build Pipeline](docs/architecture.md)
 - [Security, Permissions & Enterprise Guide](docs/security.md)
 - [Customization: AGENTS.md, Skills & Prompt Templates](docs/customization.md)
