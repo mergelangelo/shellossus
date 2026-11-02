@@ -159,7 +159,8 @@ if (-not $LibraryOnly) {
         $latestProjectSession = Find-ProjectSession -SessionDir $sessionDir -Workspace $rootPath
         if ($latestProjectSession) {
             $sessionFile = $latestProjectSession
-            $state.messages = @(Read-AgentSession -SessionFile $sessionFile -State $state)
+            Invoke-SessionResume -SessionFile $sessionFile -State $state -CurrentWorkspace $rootPath | Out-Null
+            if ($PSBoundParameters.Keys -notcontains 'Model' -and $state.model) { $Model = $state.model }
         }
     }
     try {
@@ -322,11 +323,19 @@ if (-not $LibraryOnly) {
                     Write-Host ($script:Gm.Grey1 + '  No saved sessions yet.' + $script:Gm.Reset)
                     continue
                 }
-                $list = @(Get-ChildItem -LiteralPath $sessionDir -Filter '*.jsonl' -File | Sort-Object LastWriteTime -Descending | Select-Object -First 15)
+                $wsNorm = $rootPath.TrimEnd('\').TrimEnd('/')
+                $list = @(Get-ChildItem -LiteralPath $sessionDir -Filter '*.jsonl' -File | Sort-Object LastWriteTime -Descending | Where-Object {
+                    $m = Get-AgentSessionMeta -SessionFile $_.FullName
+                    (-not $m) -or (-not $m.workspace) -or ($m.workspace.TrimEnd('\').TrimEnd('/') -ieq $wsNorm)
+                } | Select-Object -First 15)
+                if ($list.Count -eq 0) {
+                    Write-Host ($script:Gm.Grey1 + '  No saved sessions for this workspace.' + $script:Gm.Reset)
+                    continue
+                }
                 for ($i = 0; $i -lt $list.Count; $i++) {
                     $meta = Get-AgentSessionMeta -SessionFile $list[$i].FullName
-                    $wsInfo = if ($meta -and $meta.workspace) { " [$($meta.workspace)]" } else { '' }
-                    Write-Host ($script:Gm.Yellow + ("  [{0}] " -f ($i + 1)) + $script:Gm.Fg + $list[$i].Name + $script:Gm.Grey1 + (" ({0}){1}" -f $list[$i].LastWriteTime.ToString('yyyy-MM-dd HH:mm'), $wsInfo) + $script:Gm.Reset)
+                    $mdlInfo = if ($meta -and $meta.model) { " [model: $($meta.model)]" } else { '' }
+                    Write-Host ($script:Gm.Yellow + ("  [{0}] " -f ($i + 1)) + $script:Gm.Fg + $list[$i].Name + $script:Gm.Grey1 + (" ({0}){1}" -f $list[$i].LastWriteTime.ToString('yyyy-MM-dd HH:mm'), $mdlInfo) + $script:Gm.Reset)
                 }
                 continue
             }
@@ -336,21 +345,37 @@ if (-not $LibraryOnly) {
                     Write-Host ($script:Gm.Grey1 + '  No saved sessions found.' + $script:Gm.Reset)
                     continue
                 }
-                $list = @(Get-ChildItem -LiteralPath $sessionDir -Filter '*.jsonl' -File | Sort-Object LastWriteTime -Descending)
+                $wsNorm = $rootPath.TrimEnd('\').TrimEnd('/')
+                $list = @(Get-ChildItem -LiteralPath $sessionDir -Filter '*.jsonl' -File | Sort-Object LastWriteTime -Descending | Where-Object {
+                    $m = Get-AgentSessionMeta -SessionFile $_.FullName
+                    (-not $m) -or (-not $m.workspace) -or ($m.workspace.TrimEnd('\').TrimEnd('/') -ieq $wsNorm)
+                })
                 $chosen = $null
                 if ($arg -match '^\d+$') {
                     $idx = [int]$arg - 1
                     if ($idx -ge 0 -and $idx -lt $list.Count) { $chosen = $list[$idx].FullName }
                 }
                 else {
-                    $cand = Join-Path $sessionDir $arg
+                    $cand = Join-Path $sessionDir (Split-Path $arg -Leaf)
                     if (Test-Path -LiteralPath $cand) { $chosen = $cand }
+                    elseif (-not ($arg -match '\.jsonl$')) {
+                        $candJsonl = Join-Path $sessionDir ((Split-Path $arg -Leaf) + '.jsonl')
+                        if (Test-Path -LiteralPath $candJsonl) { $chosen = $candJsonl }
+                    }
                 }
                 if ($chosen) {
-                    $state.messages = @(Read-AgentSession -SessionFile $chosen -State $state)
-                    $sessionFile = $chosen
-                    if ($PSBoundParameters.Keys -notcontains 'Permission') { $script:AgentPermission = 'Ask' }
-                    Write-Host ($script:Gm.Green + "  Resumed session: $sessionFile ($($state.messages.Count) messages, permission=$($script:AgentPermission))" + $script:Gm.Reset)
+                    try {
+                        Invoke-SessionResume -SessionFile $chosen -State $state -CurrentWorkspace $rootPath | Out-Null
+                        $sessionFile = $chosen
+                        $undoStack = @()
+                        $lastFailedQuestion = ''
+                        if ($state.model) { $Model = $state.model }
+                        if ($PSBoundParameters.Keys -notcontains 'Permission') { $script:AgentPermission = 'Ask' }
+                        Write-Host ($script:Gm.Green + "  Resumed session: $sessionFile ($($state.messages.Count) messages, model=$Model, permission=$($script:AgentPermission))" + $script:Gm.Reset)
+                    }
+                    catch {
+                        Write-Host ($script:Gm.Red + '  ' + $_.Exception.Message + $script:Gm.Reset)
+                    }
                 }
                 else {
                     Write-Host ($script:Gm.Red + "  Session not found: $arg" + $script:Gm.Reset)

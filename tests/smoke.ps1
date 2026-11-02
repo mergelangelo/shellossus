@@ -269,16 +269,35 @@ try {
     Save-AgentSession -SessionFile $otherSessionFile -State $sampleState -Workspace $otherWs -Model 'model-b' -SessionId 'sid-2'
     $foundWs1 = Find-ProjectSession -SessionDir $sessionDirTest -Workspace $workspacePath
     Assert-True ($foundWs1 -eq (Get-Item -LiteralPath $sessionFile -Force).FullName) 'Find-ProjectSession did not select the current workspace session.'
+    $crossResumeThrew = $false
+    try {
+        Invoke-SessionResume -SessionFile $otherSessionFile -State @{} -CurrentWorkspace $workspacePath | Out-Null
+    }
+    catch {
+        if ($_.Exception.Message -like '*different workspace*') { $crossResumeThrew = $true }
+    }
+    Assert-True $crossResumeThrew 'Invoke-SessionResume must reject sessions from a different workspace.'
+    $dirtyState = @{
+        model = 'stale-model'
+        undo_stack = @(@{ dummy = 1 })
+        last_failed_question = 'old-failure'
+        messages = @()
+    }
+    Invoke-SessionResume -SessionFile $sessionFile -State $dirtyState -CurrentWorkspace $workspacePath | Out-Null
+    Assert-True ($dirtyState.model -eq 'model-a' -and $dirtyState.undo_stack.Count -eq 0 -and $dirtyState.last_failed_question -eq '' -and $dirtyState.messages.Count -eq 3) 'Invoke-SessionResume did not synchronize model or clear undo_stack/last_failed_question.'
 
-    # Failed /undo preserves backup and refuses to overwrite manual edits made after agent write.
+    # Failed /undo preserves backup, refuses to overwrite manual edits, and succeeds on retry after conflict resolution.
     $script:AgentPermission = 'AutoEdit'
     $script:CurrentTurnWrites = @()
-    Set-Content -LiteralPath (Join-Path $workspacePath 'manual-guard.txt') -Value 'v1' -Encoding UTF8 -NoNewline
+    Set-Content -LiteralPath (Join-Path $workspacePath 'manual-guard-1.txt') -Value 'v1-a' -Encoding UTF8 -NoNewline
+    Set-Content -LiteralPath (Join-Path $workspacePath 'manual-guard-2.txt') -Value 'v1-b' -Encoding UTF8 -NoNewline
     $call.function.name = 'edit_file'
-    $call.function.arguments = '{"path":"manual-guard.txt","old_text":"v1","new_text":"v2"}'
-    $mgRes = Invoke-AgentTool -Root $workspacePath -Call $call | ConvertFrom-Json
-    Assert-True ($mgRes.status -eq 'written' -and (Test-Path -LiteralPath $mgRes.backup)) 'Setup for undo guard test failed.'
-    Set-Content -LiteralPath (Join-Path $workspacePath 'manual-guard.txt') -Value 'v3-manual-user-edit' -Encoding UTF8 -NoNewline
+    $call.function.arguments = '{"path":"manual-guard-1.txt","old_text":"v1-a","new_text":"v2-a"}'
+    $mgRes1 = Invoke-AgentTool -Root $workspacePath -Call $call | ConvertFrom-Json
+    $call.function.arguments = '{"path":"manual-guard-2.txt","old_text":"v1-b","new_text":"v2-b"}'
+    $mgRes2 = Invoke-AgentTool -Root $workspacePath -Call $call | ConvertFrom-Json
+    Assert-True ($mgRes1.status -eq 'written' -and $mgRes2.status -eq 'written') 'Setup for multi-file undo guard test failed.'
+    Set-Content -LiteralPath (Join-Path $workspacePath 'manual-guard-1.txt') -Value 'v3-manual-user-edit' -Encoding UTF8 -NoNewline
     $mgUndoEntry = @{ messages = @(@{ role = 'system'; content = 'sys' }); writes = @($script:CurrentTurnWrites) }
     $mgState = @{ messages = @(@{ role = 'system'; content = 'sys' }, @{ role = 'user'; content = 'edit' }) }
     $undoThrew = $false
@@ -289,9 +308,17 @@ try {
         $undoThrew = $true
     }
     Assert-True $undoThrew 'Invoke-AgentUndo must throw when manual edits would be overwritten.'
-    Assert-True (Test-Path -LiteralPath $mgRes.backup) 'Failed undo deleted the backup file.'
-    Assert-True ((Get-Content -LiteralPath (Join-Path $workspacePath 'manual-guard.txt') -Raw -Encoding UTF8) -eq 'v3-manual-user-edit') 'Undo overwrote manual user edits.'
-    Remove-Item -LiteralPath $mgRes.backup -Force
+    Assert-True ((Test-Path -LiteralPath $mgRes1.backup) -and (Test-Path -LiteralPath $mgRes2.backup)) 'Failed undo deleted a backup file during preflight.'
+    Assert-True ((Get-Content -LiteralPath (Join-Path $workspacePath 'manual-guard-1.txt') -Raw -Encoding UTF8) -eq 'v3-manual-user-edit') 'Undo overwrote manual user edits.'
+    # Resolve conflict on manual-guard-1.txt and retry /undo on the same UndoEntry (including partial undone state where one backup was already consumed).
+    Copy-Item -LiteralPath $mgRes2.backup -Destination (Join-Path $workspacePath 'manual-guard-2.txt') -Force
+    Remove-Item -LiteralPath $mgRes2.backup -Force
+    $mgUndoEntry.writes[1].undone = $true
+    Set-Content -LiteralPath (Join-Path $workspacePath 'manual-guard-1.txt') -Value 'v2-a' -Encoding UTF8 -NoNewline
+    Invoke-AgentUndo -State $mgState -UndoEntry $mgUndoEntry
+    Assert-True ($mgState.messages.Count -eq 1) 'Retry undo after resolving conflict did not restore message state.'
+    Assert-True ((Get-Content -LiteralPath (Join-Path $workspacePath 'manual-guard-1.txt') -Raw -Encoding UTF8) -eq 'v1-a') 'Retry undo did not restore first file.'
+    Assert-True ((Get-Content -LiteralPath (Join-Path $workspacePath 'manual-guard-2.txt') -Raw -Encoding UTF8) -eq 'v1-b') 'Retry undo did not preserve second file.'
 
     # Large file (>20,000 chars) edit_file works without hitting preview limit.
     $largePrefix = ('A' * 15000) + "`r`n"
@@ -409,6 +436,21 @@ try {
     }
     Assert-True $lengthThrew 'Truncated response (finish_reason=length) was not rejected.'
     Assert-True ($truncState.messages.Count -eq 1 -and (-not (Test-Path -LiteralPath (Join-Path $workspacePath 'should-not-exist.txt')))) 'Truncated response modified state or executed tool.'
+    $compactTruncState = @{ messages = @(
+        @{ role = 'system'; content = 'sys' },
+        @{ role = 'user'; content = 'm1' },
+        @{ role = 'assistant'; content = 'm2' },
+        @{ role = 'user'; content = 'm3' },
+        @{ role = 'assistant'; content = 'm4' }
+    ) }
+    $compactLengthThrew = $false
+    try {
+        Invoke-AgentCompact -State $compactTruncState -Endpoint 'https://example.invalid/v1/chat/completions' -ModelId 'test-model' -ApiKey 'fake' -KeepRecent 2 | Out-Null
+    }
+    catch {
+        if ($_.Exception.Message -like '*finish_reason=length*') { $compactLengthThrew = $true }
+    }
+    Assert-True ($compactLengthThrew -and $compactTruncState.messages.Count -eq 5) 'Invoke-AgentCompact accepted a truncated summary with finish_reason=length.'
 
     # Installer preserves profile contents and replaces its own block on rerun.
     $profileFile = Join-Path $testRoot 'profile.ps1'

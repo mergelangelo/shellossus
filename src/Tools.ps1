@@ -603,22 +603,58 @@ function Invoke-AgentUndo {
     param($State, $UndoEntry)
     if (-not $UndoEntry) { return }
     $writes = @($UndoEntry.writes)
+    $preflightErrors = @()
+    for ($i = $writes.Count - 1; $i -ge 0; $i--) {
+        $w = $writes[$i]
+        if (-not $w -or $w.undone) { continue }
+        if ($w.action -eq 'modified') {
+            if (-not $w.backup -or -not (Test-Path -LiteralPath $w.backup)) {
+                $preflightErrors += "Backup file missing for $($w.rel_path)."
+                continue
+            }
+            if (Test-Path -LiteralPath $w.full_path) {
+                $targetItem = Get-Item -LiteralPath $w.full_path -Force -ErrorAction SilentlyContinue
+                if ($targetItem -and $targetItem.PSIsContainer) {
+                    $preflightErrors += "Target path $($w.rel_path) is now a directory."
+                    continue
+                }
+                if ($null -ne $w.after_content) {
+                    $diskNow = Get-Content -LiteralPath $w.full_path -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
+                    if ($null -eq $diskNow) { $diskNow = '' }
+                    if (($diskNow -cne $w.after_content) -and ($null -eq $w.before_content -or $diskNow -cne $w.before_content)) {
+                        $preflightErrors += "File $($w.rel_path) was modified after the agent write; refusing to overwrite manual changes (backup kept at $($w.backup))."
+                        continue
+                    }
+                }
+            }
+        }
+        elseif ($w.action -eq 'created') {
+            if (Test-Path -LiteralPath $w.full_path) {
+                $targetItem = Get-Item -LiteralPath $w.full_path -Force -ErrorAction SilentlyContinue
+                if ($targetItem -and $targetItem.PSIsContainer) {
+                    $preflightErrors += "Created path $($w.rel_path) is now a directory."
+                    continue
+                }
+                if ($null -ne $w.after_content) {
+                    $diskNow = Get-Content -LiteralPath $w.full_path -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
+                    if ($null -eq $diskNow) { $diskNow = '' }
+                    if ($diskNow -cne $w.after_content) {
+                        $preflightErrors += "Created file $($w.rel_path) was modified after creation; refusing to delete manual changes."
+                        continue
+                    }
+                }
+            }
+        }
+    }
+    if ($preflightErrors.Count -gt 0) {
+        throw ('Undo failed: ' + ($preflightErrors -join '; '))
+    }
     $undoErrors = @()
     for ($i = $writes.Count - 1; $i -ge 0; $i--) {
         $w = $writes[$i]
-        if (-not $w) { continue }
+        if (-not $w -or $w.undone) { continue }
         try {
             if ($w.action -eq 'modified') {
-                if (-not $w.backup -or -not (Test-Path -LiteralPath $w.backup)) {
-                    throw "Backup file missing for $($w.rel_path)."
-                }
-                if ((Test-Path -LiteralPath $w.full_path) -and ($null -ne $w.after_content)) {
-                    $diskNow = Get-Content -LiteralPath $w.full_path -Raw -Encoding UTF8 -ErrorAction Stop
-                    if ($null -eq $diskNow) { $diskNow = '' }
-                    if (($diskNow -cne $w.after_content) -and ($null -eq $w.before_content -or $diskNow -cne $w.before_content)) {
-                        throw "File $($w.rel_path) was modified after the agent write; refusing to overwrite manual changes (backup kept at $($w.backup))."
-                    }
-                }
                 $expectedOrig = Get-Content -LiteralPath $w.backup -Raw -Encoding UTF8 -ErrorAction Stop
                 if ($null -eq $expectedOrig) { $expectedOrig = '' }
                 Copy-Item -LiteralPath $w.backup -Destination $w.full_path -Force -ErrorAction Stop
@@ -628,20 +664,15 @@ function Invoke-AgentUndo {
                     throw "Restored content verification failed for $($w.rel_path) (backup kept at $($w.backup))."
                 }
                 Remove-Item -LiteralPath $w.backup -Force -ErrorAction Stop
+                $w.undone = $true
                 Write-Host ($script:Gm.Aqua + '  [undo] Restored ' + $w.rel_path + $script:Gm.Reset)
             }
             elseif ($w.action -eq 'created') {
                 if (Test-Path -LiteralPath $w.full_path) {
-                    if ($null -ne $w.after_content) {
-                        $diskNow = Get-Content -LiteralPath $w.full_path -Raw -Encoding UTF8 -ErrorAction Stop
-                        if ($null -eq $diskNow) { $diskNow = '' }
-                        if ($diskNow -cne $w.after_content) {
-                            throw "Created file $($w.rel_path) was modified after creation; refusing to delete manual changes."
-                        }
-                    }
                     Remove-Item -LiteralPath $w.full_path -Force -ErrorAction Stop
                     Write-Host ($script:Gm.Aqua + '  [undo] Removed created file ' + $w.rel_path + $script:Gm.Reset)
                 }
+                $w.undone = $true
             }
         }
         catch {
