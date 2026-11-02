@@ -235,7 +235,7 @@ try {
     Assert-True ($autoCmd.status -eq 'executed' -and $script:prompts -eq $promptsBefore) 'Auto mode should execute run_command without prompting.'
 
     # Truncated run_command saves full log under .h-agent/output/*.log.
-    $call.function.arguments = '{"command":"1..320 | ForEach-Object { \"line-$_\" }"}'
+    $call.function.arguments = '{"command":"1..320 | ForEach-Object { $_ }"}'
     $truncCmd = Invoke-AgentTool -Root $workspacePath -Call $call | ConvertFrom-Json
     Assert-True ($truncCmd.truncated -and [bool]$truncCmd.full_output_path -and (Test-Path -LiteralPath (Join-Path $workspacePath $truncCmd.full_output_path))) 'Truncated run_command did not save full output log.'
     $script:AgentPermission = 'Ask'
