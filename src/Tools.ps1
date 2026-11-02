@@ -665,10 +665,6 @@ function Invoke-ShellCommand {
     $savedHFile = $env:H_AGENT_SESSION_FILE
     $savedHMod = $env:H_AGENT_MODEL
     $savedHReas = $env:H_AGENT_REASONING_LEVEL
-    $savedSess = $env:SHELLOSSUS_SESSION_ID
-    $savedFile = $env:SHELLOSSUS_SESSION_FILE
-    $savedMod = $env:SHELLOSSUS_MODEL
-    $savedReas = $env:SHELLOSSUS_REASONING_LEVEL
     $timedOut = $false
     $exitCode = 0
     $startTime = Get-Date
@@ -678,19 +674,15 @@ function Invoke-ShellCommand {
             $env:OPENAI_API_KEY = $null
             if ($script:ActiveSessionId) {
                 $env:H_AGENT_SESSION_ID = $script:ActiveSessionId
-                $env:SHELLOSSUS_SESSION_ID = $script:ActiveSessionId
             }
             if ($script:ActiveSessionFile) {
                 $env:H_AGENT_SESSION_FILE = $script:ActiveSessionFile
-                $env:SHELLOSSUS_SESSION_FILE = $script:ActiveSessionFile
             }
             if ($script:ActiveModelId) {
                 $env:H_AGENT_MODEL = $script:ActiveModelId
-                $env:SHELLOSSUS_MODEL = $script:ActiveModelId
             }
             if ($script:ReasoningEffort) {
                 $env:H_AGENT_REASONING_LEVEL = $script:ReasoningEffort
-                $env:SHELLOSSUS_REASONING_LEVEL = $script:ReasoningEffort
             }
             $wrappedCmd = "try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch {}`n" + $Command
             $argList = if ($env:OS -eq 'Windows_NT') {
@@ -728,10 +720,6 @@ function Invoke-ShellCommand {
             $env:H_AGENT_SESSION_FILE = $savedHFile
             $env:H_AGENT_MODEL = $savedHMod
             $env:H_AGENT_REASONING_LEVEL = $savedHReas
-            $env:SHELLOSSUS_SESSION_ID = $savedSess
-            $env:SHELLOSSUS_SESSION_FILE = $savedFile
-            $env:SHELLOSSUS_MODEL = $savedMod
-            $env:SHELLOSSUS_REASONING_LEVEL = $savedReas
         }
         $elapsedSec = [int](((Get-Date) - $startTime).TotalSeconds * 10) / 10.0
         $outItem = Get-Item -LiteralPath $outTemp.FullName -Force -ErrorAction Stop
