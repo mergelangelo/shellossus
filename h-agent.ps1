@@ -1623,9 +1623,10 @@ function Invoke-AgentTool {
                 if ($child.FullName -match '[/\\](\.git|node_modules)([/\\]|$)') { continue }
                 if (Test-IsSecretFile $child) { continue }
                 $relPath = Get-WorkspaceRelativePath -Root $Root -FullPath $child.FullName
+                $relToSearch = Get-WorkspaceRelativePath -Root $path -FullPath $child.FullName
                 if (Test-PathIgnored -RelativePath $relPath -IsDir ([bool]$child.PSIsContainer) -Rules $ignoreRules) { continue }
                 $isMatch = if ($isPathPat) {
-                    ($relPath -like $normPat) -or ($altPat -and ($relPath -like $altPat))
+                    ($relPath -like $normPat) -or ($relToSearch -like $normPat) -or ($altPat -and (($relPath -like $altPat) -or ($relToSearch -like $altPat)))
                 }
                 else {
                     ($child.Name -like $rawPat)
@@ -1634,13 +1635,14 @@ function Invoke-AgentTool {
                     if ($found.Count -ge $maxFind) { $truncated = $true; break }
                     $found += @{
                         path = $relPath
+                        relative_path = $relToSearch
                         is_dir = [bool]$child.PSIsContainer
                         length = if ($child.PSIsContainer) { $null } else { $child.Length }
                     }
                 }
             }
             $notice = if ($truncated) { "[${maxFind} results limit reached. Refine pattern or increase limit]" } else { $null }
-            return (@{ matches = $found; truncated = $truncated; notice = $notice } | ConvertTo-Json -Depth 5 -Compress)
+            return (@{ matches = $found; files = $found; count = $found.Count; truncated = $truncated; notice = $notice } | ConvertTo-Json -Depth 5 -Compress)
         }
         if ($name -eq 'grep_files') {
             if (-not $arguments.pattern) { throw 'pattern must be a nonempty string.' }
@@ -1708,6 +1710,7 @@ function Invoke-AgentTool {
                     }
                     $hitObj = @{
                         path = (Get-WorkspaceRelativePath -Root $Root -FullPath $m.Path)
+                        file = (Get-WorkspaceRelativePath -Root $path -FullPath $m.Path)
                         line_number = [int]$m.LineNumber
                         line = $lineText
                     }
