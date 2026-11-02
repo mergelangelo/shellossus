@@ -17,7 +17,7 @@ param(
     [string]$BaseUrl = $env:SHELLOSSUS_BASE_URL,
     [string]$Model = $env:SHELLOSSUS_MODEL,
     [string]$Workspace = '.',
-    [string]$ConfigPath = "$env:USERPROFILE\.shellossus\.env",
+    [string]$ConfigPath = "$(if ($env:USERPROFILE) { $env:USERPROFILE } else { $HOME })\.shellossus\.env",
     [int]$MaxSteps = 50,
     [int]$MaxRepeatCalls = 3,
     [string]$Permission = 'Ask',

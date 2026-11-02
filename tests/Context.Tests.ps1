@@ -239,13 +239,13 @@ try {
     $script:AgentPermission = 'ReadOnly'
     $sync1 = Sync-AgentCapabilities -State $syncState -RecordTransition
     Assert-True ($sync1.prompt_updated -and $sync1.consistent -and $syncState.messages[0].content.Contains('Permission mode: ReadOnly.')) 'Sync-AgentCapabilities did not update system prompt to ReadOnly.'
-    $notices1 = @($syncState.messages | Where-Object { $_.role -eq 'user' -and $_.content -like '[Capability State Change]*' })
+    $notices1 = @($syncState.messages | Where-Object { $_.role -eq 'user' -and ([string]$_.content).StartsWith('[Capability State Change]') })
     Assert-True ($notices1.Count -eq 1 -and $notices1[0].content.Contains('Permission mode is now ReadOnly.')) 'Expected exactly one capability transition notice after switching to ReadOnly.'
 
     $script:AgentPermission = 'Ask'
     $sync2 = Sync-AgentCapabilities -State $syncState -RecordTransition
-    $notices2 = @($syncState.messages | Where-Object { $_.role -eq 'user' -and $_.content -like '[Capability State Change]*' })
-    Assert-True ($sync2.prompt_updated -and $sync2.consistent -and $syncState.messages[0].content.Contains('Permission mode: Ask.') -and $notices2.Count -eq 1 -and $notices2[0].content.Contains('Permission mode is now Ask.')) 'Repeated permission changes accumulated multiple capability notices or failed to update to Ask.'
+    $notices2 = @($syncState.messages | Where-Object { $_.role -eq 'user' -and ([string]$_.content).StartsWith('[Capability State Change]') })
+    Assert-True ($notices2.Count -eq 1 -and $sync2.prompt_updated -and $sync2.consistent -and $syncState.messages[0].content.Contains('Permission mode: Ask.') -and $notices2[0].content.Contains('Permission mode is now Ask.')) 'Repeated permission changes accumulated multiple capability notices or failed to update to Ask.'
     Assert-True ($compTreeState.messages[0].content.Contains('<capabilities>') -and $compTreeState.messages[0].content.Contains('Get-Command') -and $resumedCompState.messages[0].content.Contains('<capabilities>')) 'Capabilities and environment block was not preserved across compaction and session resume.'
 }
 finally {

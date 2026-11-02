@@ -23,7 +23,8 @@ function Assert-True {
 }
 
 function New-TestEnvironment {
-    $root = Join-Path $env:TEMP ('shellossus-' + [guid]::NewGuid().ToString('N'))
+    $baseTemp = if ($env:TEMP) { $env:TEMP } elseif ($env:TMPDIR) { $env:TMPDIR } else { '/tmp' }
+    $root = Join-Path $baseTemp ('shellossus-' + [guid]::NewGuid().ToString('N'))
     $ws = Join-Path $root 'workspace'
     New-Item -ItemType Directory -Path $ws -Force | Out-Null
     $script:AgentConfigPath = Format-ConfigPath -Path (Join-Path $root '.env')

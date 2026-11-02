@@ -68,7 +68,7 @@ try {
         )
     }
 
-    $configPath = Join-Path $testRoot '.env'
+    $clConfigPath = Join-Path $testRoot '.env'
     $loadedConfig = @{
         SHELLOSSUS_BASE_URL = 'https://example.invalid/v1'
         SHELLOSSUS_MODEL = 'test-model'
@@ -181,8 +181,8 @@ try {
     $script:AgentPermission = 'Ask'
     Write-AgentReasoning -Text "Step 1`nStep 2`nStep 3`nStep 4"
     Write-AgentReply -Content "# Title`n## Subtitle`n> quote`n- **item** with ``code```n| A | B |`n|---|---|`n| 1 | 2 |`n``````sql`nSELECT 1;`n``````"
-    Save-AgentConfig -Path $configPath -Config $loadedConfig
-    $constrainedConfig = Read-AgentConfig -Path $configPath
+    Save-AgentConfig -Path $clConfigPath -Config $loadedConfig
+    $constrainedConfig = Read-AgentConfig -Path $clConfigPath
     Assert-True ($constrainedConfig.SHELLOSSUS_API_KEY -eq $loadedConfig.SHELLOSSUS_API_KEY) 'ConstrainedLanguage config roundtrip failed.'
 
     $clProfilePath = Join-Path $testRoot 'cl-profile.ps1'
