@@ -27,11 +27,13 @@ function New-TestEnvironment {
     $root = Join-Path $baseTemp ('shellossus-' + [guid]::NewGuid().ToString('N'))
     $ws = Join-Path $root 'workspace'
     New-Item -ItemType Directory -Path $ws -Force | Out-Null
-    $script:AgentConfigPath = Format-ConfigPath -Path (Join-Path $root '.env')
-    $script:ActiveWorkspace = $ws
+    $rootFull = (Get-Item -LiteralPath $root -Force).FullName
+    $wsFull = (Get-Item -LiteralPath $ws -Force).FullName
+    $script:AgentConfigPath = Format-ConfigPath -Path (Join-Path $rootFull '.env')
+    $script:ActiveWorkspace = $wsFull
     return @{
-        TestRoot = $root
-        Workspace = $ws
+        TestRoot = $rootFull
+        Workspace = $wsFull
     }
 }
 
