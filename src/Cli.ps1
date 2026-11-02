@@ -1,9 +1,22 @@
-# Agent turn loop (HTTP retries, finish_reason check, overflow auto-compaction, tool dispatch) and interactive CLI REPL.
+# Agent turn loop (HTTP retries, finish_reason check, overflow auto-compaction, tool dispatch, JSON event stream) and interactive CLI REPL.
+
+function Write-AgentJsonEvent {
+    param([string]$EventType, [hashtable]$Payload = @{})
+    if ($script:OutputMode -ne 'json') { return }
+    $ev = @{
+        type = $EventType
+        timestamp = (Get-Date -Format 'yyyy-MM-ddTHH:mm:ssK')
+    }
+    foreach ($k in $Payload.Keys) { $ev[$k] = $Payload[$k] }
+    Write-Host ($ev | ConvertTo-Json -Depth 20 -Compress)
+}
 
 function Invoke-AgentTurn {
     param($State, [string]$Endpoint, [string]$ModelId, [string]$ApiKey, [string]$Root, [int]$Steps)
     $overflowRetried = $false
+    $script:ActiveModelId = $ModelId
     for ($step = 0; $step -lt $Steps; $step++) {
+        Write-AgentJsonEvent -EventType 'turn_start' -Payload @{ model = $ModelId; step = $step }
         $bodyObj = @{
             model = $ModelId
             messages = @($State.messages)
@@ -35,13 +48,17 @@ function Invoke-AgentTurn {
                     $errFormatted = Format-AgentError -ErrorRecord $_
                     if (($attempt -lt $maxRetries) -and ($errFormatted -match '(?i)\b(408|429|500|502|503|504|timeout|timed out)\b')) {
                         $delay = ($attempt + 1) * 2
-                        Write-Host ($script:Gm.Yellow + ("  [retry {0}/{1}] Transient error ({2}); waiting {3}s..." -f ($attempt + 1), $maxRetries, $errFormatted, $delay) + $script:Gm.Reset)
+                        if ($script:OutputMode -ne 'json') {
+                            Write-Host ($script:Gm.Yellow + ("  [retry {0}/{1}] Transient error ({2}); waiting {3}s..." -f ($attempt + 1), $maxRetries, $errFormatted, $delay) + $script:Gm.Reset)
+                        }
                         Start-Sleep -Seconds $delay
                         continue
                     }
                     if ((-not $overflowRetried) -and ($errFormatted -match '(?i)(context_length|maximum context|too many tokens|token limit)')) {
                         $overflowRetried = $true
-                        Write-Host ($script:Gm.Yellow + '  [auto-recovery] Context overflow detected; compacting history and retrying...' + $script:Gm.Reset)
+                        if ($script:OutputMode -ne 'json') {
+                            Write-Host ($script:Gm.Yellow + '  [auto-recovery] Context overflow detected; compacting history and retrying...' + $script:Gm.Reset)
+                        }
                         if (Invoke-AgentCompact -State $State -Endpoint $Endpoint -ModelId $ModelId -ApiKey $ApiKey) {
                             $step--
                             $reply = $null
@@ -56,6 +73,10 @@ function Invoke-AgentTurn {
             Remove-Item -LiteralPath $tempResponse.FullName -Force -ErrorAction SilentlyContinue
         }
         if ($null -eq $reply) { continue }
+        if ($reply.usage) {
+            if ($reply.usage.prompt_tokens) { $State.usage_input_tokens = [int]$State.usage_input_tokens + [int]$reply.usage.prompt_tokens }
+            if ($reply.usage.completion_tokens) { $State.usage_output_tokens = [int]$State.usage_output_tokens + [int]$reply.usage.completion_tokens }
+        }
         $choice = $reply.choices[0]
         if (-not $choice -or -not $choice.message) { throw 'API returned no assistant message.' }
         $finishReason = [string]$choice.finish_reason
@@ -66,18 +87,35 @@ function Invoke-AgentTurn {
         $assistant = @{ role = 'assistant'; content = $message.content }
         if ($message.reasoning_content) {
             $assistant.reasoning_content = $message.reasoning_content
-            Write-AgentReasoning -Text ([string]$message.reasoning_content)
+            if ($script:OutputMode -ne 'json') {
+                Write-AgentReasoning -Text ([string]$message.reasoning_content)
+            }
         }
         if ($message.tool_calls) { $assistant.tool_calls = @($message.tool_calls) }
         $State.messages += $assistant
-        if ($message.content) { Write-AgentReply -Content $message.content }
-        if (-not $message.tool_calls) { return }
+        Ensure-SessionTree -State $State
+        Write-AgentJsonEvent -EventType 'message_end' -Payload @{
+            role = 'assistant'
+            content = $message.content
+            tool_calls = if ($message.tool_calls) { @($message.tool_calls) } else { @() }
+        }
+        if ($message.content -and $script:OutputMode -ne 'json') { Write-AgentReply -Content $message.content }
+        if (-not $message.tool_calls) {
+            Write-AgentJsonEvent -EventType 'turn_end' -Payload @{ step = $step; status = 'completed' }
+            return
+        }
         foreach ($call in $message.tool_calls) {
+            Write-AgentJsonEvent -EventType 'tool_execution_start' -Payload @{ id = [string]$call.id; name = [string]$call.function.name }
             $output = Invoke-AgentTool -Root $Root -Call $call
+            Write-AgentJsonEvent -EventType 'tool_execution_end' -Payload @{ id = [string]$call.id; name = [string]$call.function.name; result = $output }
             $State.messages += @{ role = 'tool'; tool_call_id = $call.id; content = $output }
+            Ensure-SessionTree -State $State
         }
     }
-    Write-Host ($script:Gm.Yellow + 'Step limit reached. Ask to continue, or use /clear.' + $script:Gm.Reset)
+    if ($script:OutputMode -ne 'json') {
+        Write-Host ($script:Gm.Yellow + 'Step limit reached. Ask to continue, or use /clear.' + $script:Gm.Reset)
+    }
+    Write-AgentJsonEvent -EventType 'turn_end' -Payload @{ step = $Steps; status = 'step_limit_reached' }
 }
 
 if (-not $LibraryOnly) {
@@ -117,6 +155,19 @@ if (-not $LibraryOnly) {
         if ($env:H_AGENT_WORKSPACE) { $Workspace = $env:H_AGENT_WORKSPACE }
         elseif ($config.H_AGENT_WORKSPACE) { $Workspace = $config.H_AGENT_WORKSPACE }
     }
+    $rootItem = Get-Item -LiteralPath $Workspace -Force -ErrorAction Stop
+    if (-not $rootItem.PSIsContainer) { throw 'Workspace must be a directory.' }
+    $rootPath = Resolve-AgentPath -Root $rootItem.FullName -RelativePath '.'
+    $configDir = Split-Path $script:AgentConfigPath -Parent
+    $sessionDir = if ($SessionDir) { $SessionDir } else { Join-Path $configDir 'sessions' }
+    if ($Export -and ($Export -match '\.jsonl$') -and (Test-Path -LiteralPath $Export)) {
+        $expState = @{ session_id = ''; workspace = $rootPath; model = $Model; messages = @() }
+        Invoke-SessionResume -SessionFile $Export -State $expState | Out-Null
+        $outHtml = $Export -replace '\.jsonl$', '.html'
+        $exported = Export-AgentSessionHtml -State $expState -OutputPath $outHtml
+        Write-Host ($script:Gm.Green + "Exported session HTML: $exported" + $script:Gm.Reset)
+        return
+    }
     if (-not $BaseUrl) { $BaseUrl = Read-Host 'API base URL (including /v1)' }
     if ($BaseUrl -notmatch '^https://[^\s]+$') { throw 'Use an HTTPS API base URL.' }
     if (-not $Model) { $Model = Read-Host 'Model ID' }
@@ -124,14 +175,19 @@ if (-not $LibraryOnly) {
     if ($MaxSteps -lt 1 -or $MaxSteps -gt 30) { throw 'MaxSteps must be between 1 and 30.' }
     if ($Permission -notin @('ReadOnly', 'Ask', 'AutoEdit', 'Auto')) { throw 'Permission must be one of: ReadOnly, Ask, AutoEdit, Auto.' }
     $script:AgentPermission = $Permission
+    $script:OutputMode = if ($Mode) { $Mode.ToLower() } else { 'text' }
+    if ($script:OutputMode -notin @('text', 'json')) { throw 'Mode must be text or json.' }
+    $script:NoTools = [bool]$NoTools
+    $script:EnabledTools = if ($Tools) { @($Tools -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ }) } else { @() }
+    $script:ExcludedTools = if ($ExcludeTools) { @($ExcludeTools -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ }) } else { @() }
+    $script:NoSkills = [bool]$NoSkills
+    $script:NoPromptTemplates = [bool]$NoPromptTemplates
+    $script:NoContextFiles = [bool]$NoContextFiles
     if ($HideReasoning) { $script:ShowReasoning = 'hide' }
     if ($ReasoningEffort) {
         if ($ReasoningEffort -notin @('low', 'medium', 'high')) { throw 'ReasoningEffort must be low, medium, or high.' }
         $script:ReasoningEffort = $ReasoningEffort
     }
-    $rootItem = Get-Item -LiteralPath $Workspace -Force -ErrorAction Stop
-    if (-not $rootItem.PSIsContainer) { throw 'Workspace must be a directory.' }
-    $rootPath = Resolve-AgentPath -Root $rootItem.FullName -RelativePath '.'
     $endpoint = $BaseUrl.TrimEnd('/') + '/chat/completions'
     $agentKey = $env:H_AGENT_API_KEY
     if (-not $agentKey) { $agentKey = $config.H_AGENT_API_KEY }
@@ -141,27 +197,59 @@ if (-not $LibraryOnly) {
         $agentKey = Read-Host 'API key'
     }
     if (-not $agentKey) { throw 'API key is required.' }
-    $configDir = Split-Path $script:AgentConfigPath -Parent
-    $sessionDir = Join-Path $configDir 'sessions'
     $sessionId = 'sess-' + (Get-Date -Format 'yyyyMMdd-HHmmss') + '-' + (Get-Random -Minimum 100000 -Maximum 999999)
-    $sessionFile = Join-Path $sessionDir ($sessionId + '.jsonl')
+    $sessionFile = if ($NoSession) { '' } else { Join-Path $sessionDir ($sessionId + '.jsonl') }
     $fullSystemPrompt = Build-SystemPrompt -Root $rootPath -ConfigDir $configDir
     $system = @{ role = 'system'; content = $fullSystemPrompt }
     $state = @{
         session_id = $sessionId
+        session_name = $SessionName
         workspace = $rootPath
         model = $Model
         messages = @($system)
+        tree_entries = @()
+        usage_input_tokens = 0
+        usage_output_tokens = 0
     }
+    $script:ActiveSessionId = $sessionId
+    $script:ActiveSessionFile = $sessionFile
+    $script:ActiveModelId = $Model
     $undoStack = @()
     $lastFailedQuestion = ''
-    if ($Continue) {
-        $latestProjectSession = Find-ProjectSession -SessionDir $sessionDir -Workspace $rootPath
-        if ($latestProjectSession) {
-            $sessionFile = $latestProjectSession
-            Invoke-SessionResume -SessionFile $sessionFile -State $state -CurrentWorkspace $rootPath | Out-Null
+    if ($Session) {
+        $candSess = if (Test-Path -LiteralPath $Session) { $Session } else { Join-Path $sessionDir (Split-Path $Session -Leaf) }
+        if (-not (Test-Path -LiteralPath $candSess) -and ($candSess -notmatch '\.jsonl$')) { $candSess += '.jsonl' }
+        if (Test-Path -LiteralPath $candSess) {
+            $sessionFile = if ($NoSession) { '' } else { $candSess }
+            Invoke-SessionResume -SessionFile $candSess -State $state -CurrentWorkspace $rootPath | Out-Null
             if ($PSBoundParameters.Keys -notcontains 'Model' -and $state.model) { $Model = $state.model }
         }
+        elseif (-not $NoSession) {
+            $sessionFile = $candSess
+        }
+    }
+    elseif ($Fork) {
+        $candFork = if (Test-Path -LiteralPath $Fork) { $Fork } else { Join-Path $sessionDir (Split-Path $Fork -Leaf) }
+        if (-not (Test-Path -LiteralPath $candFork) -and ($candFork -notmatch '\.jsonl$')) { $candFork += '.jsonl' }
+        if (-not (Test-Path -LiteralPath $candFork)) { throw "Session file to fork not found: $Fork" }
+        $srcState = @{ session_id = ''; workspace = $rootPath; model = $Model; messages = @() }
+        Invoke-SessionResume -SessionFile $candFork -State $srcState -CurrentWorkspace $rootPath | Out-Null
+        $forkRes = Invoke-SessionFork -State $srcState -SessionDir $sessionDir -NewName $SessionName
+        $state = $forkRes.state
+        $sessionFile = if ($NoSession) { '' } else { $forkRes.session_file }
+    }
+    elseif ($Continue) {
+        $latestProjectSession = Find-ProjectSession -SessionDir $sessionDir -Workspace $rootPath
+        if ($latestProjectSession) {
+            $sessionFile = if ($NoSession) { '' } else { $latestProjectSession }
+            Invoke-SessionResume -SessionFile $latestProjectSession -State $state -CurrentWorkspace $rootPath | Out-Null
+            if ($PSBoundParameters.Keys -notcontains 'Model' -and $state.model) { $Model = $state.model }
+        }
+    }
+    if ($Export) {
+        $exported = Export-AgentSessionHtml -State $state -OutputPath $Export
+        Write-Host ($script:Gm.Green + "Exported session HTML: $exported" + $script:Gm.Reset)
+        return
     }
     try {
         if ($Prompt) {
@@ -174,9 +262,9 @@ if (-not $LibraryOnly) {
             return
         }
         Write-Host ($script:Gm.OscInit + $script:Gm.BoldGreen + "h-agent | model: $Model | permission: $($script:AgentPermission) | workspace: $rootPath" + $script:Gm.Reset)
-        if (Get-AgentsContext -Root $rootPath -ConfigDir $configDir) { Write-Host ($script:Gm.Aqua + 'Loaded AGENTS.md instructions.' + $script:Gm.Reset) }
+        if (Get-AgentsContext -Root $rootPath -ConfigDir $configDir) { Write-Host ($script:Gm.Aqua + 'Loaded AGENTS.md/CLAUDE.md instructions.' + $script:Gm.Reset) }
         if (Get-SkillsCatalog -Root $rootPath -ConfigDir $configDir) { Write-Host ($script:Gm.Aqua + 'Loaded skills catalog.' + $script:Gm.Reset) }
-        Write-Host ($script:Gm.Grey1 + 'Commands: /help /status /permission /reasoning /undo /retry /compact /model /sessions /resume /save /new /exit' + $script:Gm.Reset)
+        Write-Host ($script:Gm.Grey1 + 'Commands: /help /status /session /permission /reasoning /undo /retry /compact /tree /fork /export /copy /reload /model /sessions /resume /save /new /exit' + $script:Gm.Reset)
         while ($true) {
             Write-Host ("`n" + $script:Gm.Grey0 + ('-' * 40) + $script:Gm.Reset)
             Write-Host ($script:Gm.BoldBlue + 'You: ' + $script:Gm.Fg) -NoNewline
@@ -184,34 +272,58 @@ if (-not $LibraryOnly) {
             Write-Host $script:Gm.Reset -NoNewline
             if (-not $question) { continue }
             $trimmedQ = $question.Trim()
-            if ($trimmedQ -eq '/exit') { break }
+            if ($trimmedQ -eq '/exit' -or $trimmedQ -eq '/quit') { break }
             if ($trimmedQ -eq '/clear' -or $trimmedQ -eq '/new') {
                 $newId = 'sess-' + (Get-Date -Format 'yyyyMMdd-HHmmss') + '-' + (Get-Random -Minimum 100000 -Maximum 999999)
                 $state.session_id = $newId
+                $state.session_name = ''
+                $state.parent_session = ''
                 $state.workspace = $rootPath
                 $state.model = $Model
                 $state.messages = @($system)
+                $state.tree_entries = @()
+                $state.leaf_id = $null
                 $undoStack = @()
-                $sessionFile = Join-Path $sessionDir ($newId + '.jsonl')
+                $sessionFile = if ($NoSession) { '' } else { Join-Path $sessionDir ($newId + '.jsonl') }
+                $script:ActiveSessionId = $newId
+                $script:ActiveSessionFile = $sessionFile
                 Write-Host ($script:Gm.Grey1 + 'Started a new conversation session.' + $script:Gm.Reset)
                 continue
             }
             if ($trimmedQ -eq '/help') {
-                Write-Host ($script:Gm.Aqua + '  /status                      ' + $script:Gm.Fg + 'Show context size, model, permission mode, and session file' + $script:Gm.Reset)
+                Write-Host ($script:Gm.Aqua + '  /status (/session, /tokens)  ' + $script:Gm.Fg + 'Show context size, token usage, model, permission, and session info' + $script:Gm.Reset)
                 Write-Host ($script:Gm.Aqua + '  /permission <mode>           ' + $script:Gm.Fg + 'Set mode: ReadOnly | Ask | AutoEdit (no-ask writes) | Auto' + $script:Gm.Reset)
-                Write-Host ($script:Gm.Aqua + '  /reasoning <mode|effort>     ' + $script:Gm.Fg + 'View: compact | full | hide; Effort: low | medium | high' + $script:Gm.Reset)
+                Write-Host ($script:Gm.Aqua + '  /reasoning (/thinking) <arg> ' + $script:Gm.Fg + 'View: compact | full | hide; Effort: low | medium | high | off' + $script:Gm.Reset)
                 Write-Host ($script:Gm.Aqua + '  /undo                        ' + $script:Gm.Fg + 'Revert last turn AND restore modified/created files on disk' + $script:Gm.Reset)
                 Write-Host ($script:Gm.Aqua + '  /retry                       ' + $script:Gm.Fg + 'Retry the last failed user request' + $script:Gm.Reset)
                 Write-Host ($script:Gm.Aqua + '  /compact [focus]             ' + $script:Gm.Fg + 'Summarize older turns into a structured context handoff' + $script:Gm.Reset)
+                Write-Host ($script:Gm.Aqua + '  /name [name]                 ' + $script:Gm.Fg + 'Set or display the human-friendly session name' + $script:Gm.Reset)
+                Write-Host ($script:Gm.Aqua + '  /tree [entry-id]             ' + $script:Gm.Fg + 'Show conversation tree or switch active branch to <entry-id>' + $script:Gm.Reset)
+                Write-Host ($script:Gm.Aqua + '  /fork [entry-id] (/clone)    ' + $script:Gm.Fg + 'Fork current branch (or from <entry-id>) into a new session file' + $script:Gm.Reset)
+                Write-Host ($script:Gm.Aqua + '  /export [path.html|.jsonl]   ' + $script:Gm.Fg + 'Export session to standalone HTML (or JSONL)' + $script:Gm.Reset)
+                Write-Host ($script:Gm.Aqua + '  /import <path.jsonl>         ' + $script:Gm.Fg + 'Import and resume a JSONL session file' + $script:Gm.Reset)
+                Write-Host ($script:Gm.Aqua + '  /copy                        ' + $script:Gm.Fg + 'Copy the last assistant response to clipboard' + $script:Gm.Reset)
+                Write-Host ($script:Gm.Aqua + '  /reload                      ' + $script:Gm.Fg + 'Reload AGENTS.md, CLAUDE.md, SYSTEM.md, skills, and prompt templates' + $script:Gm.Reset)
+                Write-Host ($script:Gm.Aqua + '  /hotkeys                     ' + $script:Gm.Fg + 'Display input shortcuts and syntax reference' + $script:Gm.Reset)
                 Write-Host ($script:Gm.Aqua + '  /model <id>                  ' + $script:Gm.Fg + 'Switch active model ID for this session' + $script:Gm.Reset)
                 Write-Host ($script:Gm.Aqua + '  /sessions                    ' + $script:Gm.Fg + 'List saved sessions in ~/.h-agent/sessions' + $script:Gm.Reset)
                 Write-Host ($script:Gm.Aqua + '  /resume <num|name>           ' + $script:Gm.Fg + 'Resume a saved session by number or filename' + $script:Gm.Reset)
                 Write-Host ($script:Gm.Aqua + '  /save [name]                 ' + $script:Gm.Fg + 'Save conversation to current or named session file' + $script:Gm.Reset)
                 Write-Host ($script:Gm.Aqua + '  /new (/clear)                ' + $script:Gm.Fg + 'Start a fresh session while keeping old session files' + $script:Gm.Reset)
-                Write-Host ($script:Gm.Aqua + '  /exit                        ' + $script:Gm.Fg + 'Exit h-agent' + $script:Gm.Reset)
+                Write-Host ($script:Gm.Aqua + '  /exit (/quit)                ' + $script:Gm.Fg + 'Exit h-agent' + $script:Gm.Reset)
+                Write-Host ($script:Gm.Aqua + '  /skill:<name> [args]         ' + $script:Gm.Fg + 'Invoke a skill directly with arguments' + $script:Gm.Reset)
                 Write-Host ($script:Gm.Aqua + '  /<template> [args]           ' + $script:Gm.Fg + 'Run a custom Markdown prompt from .h-agent/prompts/<name>.md' + $script:Gm.Reset)
                 Write-Host ($script:Gm.Aqua + '  @path/to/file                ' + $script:Gm.Fg + 'Inline-attach a workspace file into your prompt' + $script:Gm.Reset)
                 Write-Host ($script:Gm.Aqua + '  !command / !!command         ' + $script:Gm.Fg + 'Run shell command (! adds to context, !! local only)' + $script:Gm.Reset)
+                continue
+            }
+            if ($trimmedQ -eq '/hotkeys') {
+                Write-Host ($script:Gm.Aqua + '  @path/to/file     ' + $script:Gm.Fg + 'Attach file contents inline into prompt' + $script:Gm.Reset)
+                Write-Host ($script:Gm.Aqua + '  !cmd              ' + $script:Gm.Fg + 'Execute shell command and append output to conversation context' + $script:Gm.Reset)
+                Write-Host ($script:Gm.Aqua + '  !!cmd             ' + $script:Gm.Fg + 'Execute shell command locally without adding to context' + $script:Gm.Reset)
+                Write-Host ($script:Gm.Aqua + '  /skill:<name>     ' + $script:Gm.Fg + 'Expand a skill SKILL.md into the prompt' + $script:Gm.Reset)
+                Write-Host ($script:Gm.Aqua + '  /<template>       ' + $script:Gm.Fg + 'Expand a prompt template with $1, $2, $@, ${1:-default}' + $script:Gm.Reset)
+                Write-Host ($script:Gm.Aqua + '  Ctrl+C            ' + $script:Gm.Fg + 'Interrupt running command or exit interactive prompt' + $script:Gm.Reset)
                 continue
             }
             if ($trimmedQ -match '^/permission(?:\s+(.+))?$') {
@@ -231,7 +343,7 @@ if (-not $LibraryOnly) {
                 }
                 continue
             }
-            if ($trimmedQ -match '^/reasoning(?:\s+(.+))?$') {
+            if ($trimmedQ -match '^/(?:reasoning|thinking)(?:\s+(.+))?$') {
                 if ($Matches[1]) {
                     $argR = $Matches[1].Trim().ToLower()
                     if ($argR -in @('compact', 'full', 'hide')) {
@@ -254,6 +366,142 @@ if (-not $LibraryOnly) {
                     $effLabel = if ($script:ReasoningEffort) { $script:ReasoningEffort } else { 'default' }
                     Write-Host ($script:Gm.Aqua + "  Reasoning view: $($script:ShowReasoning) | effort: $effLabel" + $script:Gm.Reset)
                 }
+                continue
+            }
+            if ($trimmedQ -match '^/name(?:\s+(.+))?$') {
+                if ($Matches[1]) {
+                    $state.session_name = $Matches[1].Trim()
+                    Save-AgentSession -SessionFile $sessionFile -State $state -Workspace $rootPath -Model $Model
+                    Write-Host ($script:Gm.Green + "  Session name set to: $($state.session_name)" + $script:Gm.Reset)
+                }
+                else {
+                    $nm = if ($state.session_name) { $state.session_name } else { '(unnamed)' }
+                    Write-Host ($script:Gm.Aqua + "  Session name: $nm (use /name <text> to set)" + $script:Gm.Reset)
+                }
+                continue
+            }
+            if ($trimmedQ -match '^/tree(?:\s+(.+))?$') {
+                if ($Matches[1]) {
+                    $targetEntryId = $Matches[1].Trim()
+                    try {
+                        Switch-SessionBranch -State $state -TargetId $targetEntryId | Out-Null
+                        $undoStack = @()
+                        Save-AgentSession -SessionFile $sessionFile -State $state -Workspace $rootPath -Model $Model
+                        Write-Host ($script:Gm.Green + "  Switched active branch to entry $targetEntryId ($($state.messages.Count) messages in active path)." + $script:Gm.Reset)
+                    }
+                    catch {
+                        Write-Host ($script:Gm.Red + '  ' + $_.Exception.Message + $script:Gm.Reset)
+                    }
+                }
+                else {
+                    $treeNodes = @(Get-SessionTree -State $state)
+                    if ($treeNodes.Count -eq 0) {
+                        Write-Host ($script:Gm.Grey1 + '  Session tree is empty.' + $script:Gm.Reset)
+                    }
+                    else {
+                        foreach ($node in $treeNodes) {
+                            $marker = if ($node.is_leaf) { '*' } elseif ($node.active) { '+' } else { '-' }
+                            $parentInfo = if ($node.parent_id) { " <- $($node.parent_id)" } else { ' (root)' }
+                            $color = if ($node.is_leaf) { $script:Gm.BoldGreen } elseif ($node.active) { $script:Gm.Aqua } else { $script:Gm.Grey1 }
+                            Write-Host ($color + ("  {0} [{1}] ({2}{3}) " -f $marker, $node.id, $node.role, $parentInfo) + $script:Gm.Fg + $node.preview + $script:Gm.Reset)
+                        }
+                        Write-Host ($script:Gm.Grey1 + '  (Use /tree <entry-id> to switch branch, or /fork <entry-id> to fork)' + $script:Gm.Reset)
+                    }
+                }
+                continue
+            }
+            if ($trimmedQ -match '^/(?:fork|clone)(?:\s+(.+))?$') {
+                $forkEntryId = if ($Matches[1]) { $Matches[1].Trim() } else { '' }
+                try {
+                    $forkRes = Invoke-SessionFork -State $state -SessionDir $sessionDir -EntryId $forkEntryId
+                    $state = $forkRes.state
+                    $sessionFile = if ($NoSession) { '' } else { $forkRes.session_file }
+                    $undoStack = @()
+                    Write-Host ($script:Gm.Green + "  Forked session to: $($forkRes.session_file) (id=$($forkRes.session_id))" + $script:Gm.Reset)
+                }
+                catch {
+                    Write-Host ($script:Gm.Red + '  Fork failed: ' + $_.Exception.Message + $script:Gm.Reset)
+                }
+                continue
+            }
+            if ($trimmedQ -match '^/(?:export|share)(?:\s+(.+))?$') {
+                $expArg = if ($Matches[1]) { $Matches[1].Trim() } else { '' }
+                try {
+                    if (-not $expArg) {
+                        $baseName = if ($state.session_id) { [string]$state.session_id } else { 'session-export' }
+                        $expArg = Join-Path $rootPath ($baseName + '.html')
+                    }
+                    elseif ($expArg -notmatch '^([a-zA-Z]:[\\/]|[\\/])') {
+                        $expArg = Join-Path $rootPath $expArg
+                    }
+                    if ($expArg -match '\.jsonl$') {
+                        Save-AgentSession -SessionFile $expArg -State $state -Workspace $rootPath -Model $Model
+                        Write-Host ($script:Gm.Green + "  Exported session JSONL: $expArg" + $script:Gm.Reset)
+                    }
+                    else {
+                        if ($expArg -notmatch '\.html?$') { $expArg += '.html' }
+                        $outHtml = Export-AgentSessionHtml -State $state -OutputPath $expArg
+                        Write-Host ($script:Gm.Green + "  Exported session HTML: $outHtml" + $script:Gm.Reset)
+                    }
+                }
+                catch {
+                    Write-Host ($script:Gm.Red + '  Export failed: ' + $_.Exception.Message + $script:Gm.Reset)
+                }
+                continue
+            }
+            if ($trimmedQ -match '^/import(?:\s+(.+))?$') {
+                if (-not $Matches[1]) {
+                    Write-Host ($script:Gm.Red + '  Usage: /import <path-to-session.jsonl>' + $script:Gm.Reset)
+                    continue
+                }
+                $impArg = $Matches[1].Trim()
+                $impPath = if (Test-Path -LiteralPath $impArg) { $impArg } else { Join-Path $rootPath $impArg }
+                if (-not (Test-Path -LiteralPath $impPath)) {
+                    Write-Host ($script:Gm.Red + "  File not found: $impArg" + $script:Gm.Reset)
+                    continue
+                }
+                try {
+                    Invoke-SessionResume -SessionFile $impPath -State $state -CurrentWorkspace $rootPath | Out-Null
+                    $sessionFile = if ($NoSession) { '' } else { $impPath }
+                    $undoStack = @()
+                    $lastFailedQuestion = ''
+                    if ($state.model) { $Model = $state.model }
+                    Write-Host ($script:Gm.Green + "  Imported session: $impPath ($($state.messages.Count) messages)" + $script:Gm.Reset)
+                }
+                catch {
+                    Write-Host ($script:Gm.Red + '  Import failed: ' + $_.Exception.Message + $script:Gm.Reset)
+                }
+                continue
+            }
+            if ($trimmedQ -eq '/copy') {
+                $lastAssistant = $null
+                for ($i = $state.messages.Count - 1; $i -ge 0; $i--) {
+                    if ($state.messages[$i].role -eq 'assistant' -and $state.messages[$i].content) {
+                        $lastAssistant = [string]$state.messages[$i].content
+                        break
+                    }
+                }
+                if (-not $lastAssistant) {
+                    Write-Host ($script:Gm.Grey1 + '  No assistant message to copy.' + $script:Gm.Reset)
+                }
+                else {
+                    try {
+                        Set-Clipboard -Value $lastAssistant -ErrorAction Stop
+                        Write-Host ($script:Gm.Green + "  Copied last assistant response ($($lastAssistant.Length) chars) to clipboard." + $script:Gm.Reset)
+                    }
+                    catch {
+                        Write-Host ($script:Gm.Red + '  Clipboard copy failed: ' + $_.Exception.Message + $script:Gm.Reset)
+                    }
+                }
+                continue
+            }
+            if ($trimmedQ -eq '/reload') {
+                $fullSystemPrompt = Build-SystemPrompt -Root $rootPath -ConfigDir $configDir
+                $system.content = $fullSystemPrompt
+                if ($state.messages.Count -gt 0 -and $state.messages[0].role -eq 'system') {
+                    $state.messages[0].content = $fullSystemPrompt
+                }
+                Write-Host ($script:Gm.Green + '  Reloaded AGENTS.md/CLAUDE.md, SYSTEM.md, skills catalog, and prompt templates.' + $script:Gm.Reset)
                 continue
             }
             if ($trimmedQ -match '^/save(?:\s+(.+))?$') {
@@ -284,10 +532,15 @@ if (-not $LibraryOnly) {
                 }
                 continue
             }
-            if ($trimmedQ -eq '/status' -or $trimmedQ -eq '/tokens') {
+            if ($trimmedQ -eq '/status' -or $trimmedQ -eq '/tokens' -or $trimmedQ -eq '/session') {
                 $st = Get-ContextStats -State $state
+                $inTok = if ($state.usage_input_tokens) { [int]$state.usage_input_tokens } else { 0 }
+                $outTok = if ($state.usage_output_tokens) { [int]$state.usage_output_tokens } else { 0 }
+                $nmInfo = if ($state.session_name) { " | Name: $($state.session_name)" } else { '' }
+                $leafInfo = if ($state.leaf_id) { " | Leaf: $($state.leaf_id)" } else { '' }
                 Write-Host ($script:Gm.Aqua + "  Model: $($Model) | Permission: $($script:AgentPermission) | Messages: $($st.messages) | Chars: $($st.chars) (~$($st.est_tokens) tokens)" + $script:Gm.Reset)
-                Write-Host ($script:Gm.Grey1 + "  Session: $sessionFile" + $script:Gm.Reset)
+                Write-Host ($script:Gm.Grey1 + "  Session ID: $($state.session_id)$nmInfo$leafInfo | API Usage: in=$inTok out=$outTok" + $script:Gm.Reset)
+                Write-Host ($script:Gm.Grey1 + "  Session File: $(if ($sessionFile) { $sessionFile } else { '(ephemeral -NoSession)' })" + $script:Gm.Reset)
                 continue
             }
             if ($trimmedQ -match '^/model(?:\s+(.+))?$') {

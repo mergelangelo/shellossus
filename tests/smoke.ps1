@@ -484,6 +484,100 @@ try {
     ) }
     $didCompact = Invoke-AgentCompact -State $compactState -Endpoint 'https://example.invalid/v1/chat/completions' -ModelId 'test-model' -ApiKey 'fake' -KeepRecent 2
     Assert-True ($didCompact -and $script:lastCompactBody.Contains('edit_file') -and $script:lastCompactBody.Contains('important-query.sql')) 'Compaction dropped tool call name or file path.'
+    Assert-True ($compactState.messages[1].content.Contains('<modified-files>') -and $compactState.messages[1].content.Contains('important-query.sql')) 'Compaction summary missing <modified-files> XML.'
+
+    # Iterative compaction passes <previous-summary> and Find-CompactionCutPoint never cuts on a tool result.
+    $compactState.messages += @(
+        @{ role = 'user'; content = 'Read another file' },
+        @{ role = 'assistant'; content = $null; tool_calls = @(@{ id = 'tc10'; type = 'function'; function = @{ name = 'read_file'; arguments = '{"path":"schema.sql"}' } }) },
+        @{ role = 'tool'; tool_call_id = 'tc10'; content = '{"path":"schema.sql","text":"CREATE TABLE t(id INT);"}' },
+        @{ role = 'assistant'; content = 'Schema inspected.' },
+        @{ role = 'user'; content = 'Final question' },
+        @{ role = 'assistant'; content = 'Final answer' }
+    )
+    $cutInfo = Find-CompactionCutPoint -Messages $compactState.messages -StartIndex 1 -KeepRecentTokens 10
+    Assert-True ($compactState.messages[$cutInfo.first_kept_index].role -ne 'tool') 'Find-CompactionCutPoint cut directly on a tool message.'
+    $didIterativeCompact = Invoke-AgentCompact -State $compactState -Endpoint 'https://example.invalid/v1/chat/completions' -ModelId 'test-model' -ApiKey 'fake' -KeepRecent 2
+    Assert-True ($didIterativeCompact -and $script:lastCompactBody.Contains('<previous-summary>')) 'Iterative compaction did not pass <previous-summary>.'
+    Assert-True ($compactState.messages[1].content.Contains('<read-files>') -and $compactState.messages[1].content.Contains('schema.sql') -and $compactState.messages[1].content.Contains('important-query.sql')) 'Iterative compaction lost cumulative file operations.'
+
+    # Truncation helpers (Invoke-TruncateHead, Invoke-TruncateTail, Invoke-TruncateLine, Format-ByteSize).
+    Assert-True ((Format-ByteSize -Bytes 1536) -eq '1.5KB') 'Format-ByteSize failed.'
+    $headRes = Invoke-TruncateHead -Content ("line1`nline2`nline3`nline4") -MaxLines 2 -MaxBytes 1000
+    Assert-True ($headRes.truncated -and $headRes.truncated_by -eq 'lines' -and $headRes.output_lines -eq 2 -and $headRes.content -eq "line1`nline2") 'Invoke-TruncateHead lines limit failed.'
+    $tailRes = Invoke-TruncateTail -Content ("line1`nline2`nline3`nline4") -MaxLines 2 -MaxBytes 1000
+    Assert-True ($tailRes.truncated -and $tailRes.truncated_by -eq 'lines' -and $tailRes.output_lines -eq 2 -and $tailRes.content -eq "line3`nline4") 'Invoke-TruncateTail lines limit failed.'
+    $lineTrunc = Invoke-TruncateLine -Line ('x' * 600) -MaxChars 500
+    Assert-True ($lineTrunc.was_truncated -and $lineTrunc.text.EndsWith('... [truncated]')) 'Invoke-TruncateLine failed.'
+
+    # .gitignore / .ignore with negation (!) and path globs in find_files and grep_files.
+    $ignoreTestDir = Join-Path $workspacePath 'igtest'
+    New-Item -ItemType Directory -Path (Join-Path $ignoreTestDir 'build') -Force | Out-Null
+    New-Item -ItemType Directory -Path (Join-Path $ignoreTestDir 'sub') -Force | Out-Null
+    Set-Content -LiteralPath (Join-Path $ignoreTestDir '.gitignore') -Value @('# comment', 'build/', '*.log', '!keep.log') -Encoding UTF8
+    Set-Content -LiteralPath (Join-Path $ignoreTestDir 'build\out.txt') -Value 'findme_ignored' -Encoding UTF8
+    Set-Content -LiteralPath (Join-Path $ignoreTestDir 'debug.log') -Value 'findme_ignored' -Encoding UTF8
+    Set-Content -LiteralPath (Join-Path $ignoreTestDir 'keep.log') -Value 'findme_kept' -Encoding UTF8
+    Set-Content -LiteralPath (Join-Path $ignoreTestDir 'sub\q1.sql') -Value 'SELECT 1' -Encoding UTF8
+    $call = @{ id = 'ig-find'; function = @{ name = 'find_files'; arguments = '{"path":"igtest","pattern":"*.log"}' } }
+    $igFind = Invoke-AgentTool -Root $workspacePath -Call $call | ConvertFrom-Json
+    Assert-True ($igFind.count -eq 1 -and $igFind.files[0].path -eq 'keep.log') '.gitignore negation (!) in find_files failed.'
+    $call = @{ id = 'ig-pathglob'; function = @{ name = 'find_files'; arguments = '{"path":"igtest","pattern":"sub/*.sql"}' } }
+    $igPathGlob = Invoke-AgentTool -Root $workspacePath -Call $call | ConvertFrom-Json
+    Assert-True ($igPathGlob.count -eq 1 -and $igPathGlob.files[0].path -eq 'sub/q1.sql') 'Path glob (sub/*.sql) in find_files failed.'
+    $call = @{ id = 'ig-grep'; function = @{ name = 'grep_files'; arguments = '{"path":"igtest","pattern":"findme_"}' } }
+    $igGrep = Invoke-AgentTool -Root $workspacePath -Call $call | ConvertFrom-Json
+    Assert-True ($igGrep.matches.Count -eq 1 -and $igGrep.matches[0].file -eq 'keep.log') '.gitignore filtering in grep_files failed.'
+    Remove-Item -LiteralPath $ignoreTestDir -Recurse -Force
+
+    # Format-EditArguments (oldText/newText camelCase and JSON-string edits) + Tool filtering.
+    $normArgs = Format-EditArguments -ArgsObj ([pscustomobject]@{ path = 'hello.txt'; oldText = 'a'; newText = 'b'; edits = '[{"oldText":"x","newText":"y"}]' })
+    Assert-True ($normArgs.old_text -eq 'a' -and $normArgs.new_text -eq 'b' -and $normArgs.edits[0].old_text -eq 'x' -and $normArgs.edits[0].new_text -eq 'y') 'Format-EditArguments camelCase / JSON edits normalization failed.'
+    $script:EnabledTools = @('read', 'grep')
+    $filteredTools = @(Get-AgentTools)
+    Assert-True ($filteredTools.Count -eq 2) 'Tool filtering via $script:EnabledTools failed.'
+    $script:EnabledTools = @()
+
+    # Expand-TemplateArgs ($1, $@, $ARGUMENTS, ${2:-default}, ${@:2}, ${@:1:2}, non-recursive) & /skill:name.
+    $tplOut = Expand-TemplateArgs -Content 'A=$1 B=${2:-fallback} ALL=$@ SLICE=${@:2} LEN=${@:1:2}' -ArgsString '"hello $2" world three'
+    Assert-True ($tplOut -eq 'A=hello $2 B=world ALL=hello $2 world three SLICE=world three LEN=hello $2 world') 'Expand-TemplateArgs bash-style positional/slice/default substitution failed.'
+    $skillCmdOut = Resolve-PromptTemplate -Root $workspacePath -ConfigDir $globalCfgDir -InputText '/skill:sql-tuning orders_table'
+    Assert-True ($skillCmdOut.Contains('<skill name="sql-tuning"') -and $skillCmdOut.Contains('User: orders_table')) '/skill:name command expansion failed.'
+
+    # Session Tree, Branch Switching, Session Forking, and HTML Export.
+    $treeSessionFile = Join-Path $sessionDirTest 'tree-test.jsonl'
+    $treeState = @{
+        session_id = 'sess-tree-1'
+        session_name = 'Tree Test'
+        workspace = $workspacePath
+        model = 'test-model'
+        messages = @(
+            @{ role = 'system'; content = 'sys' },
+            @{ role = 'user'; content = 'Branch A user' },
+            @{ role = 'assistant'; content = 'Branch A reply' }
+        )
+    }
+    Ensure-SessionTree -State $treeState
+    $firstUserEntryId = $treeState.messages[1].id
+    $branchALeafId = $treeState.leaf_id
+    Switch-SessionBranch -State $treeState -TargetId $firstUserEntryId | Out-Null
+    Assert-True ($treeState.messages.Count -eq 2 -and $treeState.leaf_id -eq $firstUserEntryId) 'Switch-SessionBranch to earlier entry failed.'
+    $treeState.messages += @{ role = 'assistant'; content = 'Branch B reply' }
+    Ensure-SessionTree -State $treeState
+    $branchBLeafId = $treeState.leaf_id
+    $allNodes = @(Get-SessionTree -State $treeState)
+    Assert-True ($allNodes.Count -eq 3 -and $branchALeafId -ne $branchBLeafId) 'Session tree failed to retain both branches.'
+    Save-AgentSession -SessionFile $treeSessionFile -State $treeState -Workspace $workspacePath -Model 'test-model'
+    $reloadedTreeState = @{ session_id = ''; workspace = $workspacePath; model = ''; messages = @() }
+    Invoke-SessionResume -SessionFile $treeSessionFile -State $reloadedTreeState -CurrentWorkspace $workspacePath | Out-Null
+    Switch-SessionBranch -State $reloadedTreeState -TargetId $branchALeafId | Out-Null
+    Assert-True ($reloadedTreeState.messages[-1].content -eq 'Branch A reply') 'Saved session lost inactive tree branch on reload.'
+    $forkResult = Invoke-SessionFork -State $reloadedTreeState -SessionDir $sessionDirTest -EntryId $firstUserEntryId -NewName 'Forked Session'
+    Assert-True ((Test-Path -LiteralPath $forkResult.session_file) -and $forkResult.state.messages.Count -eq 2 -and $forkResult.state.parent_session -eq 'sess-tree-1') 'Invoke-SessionFork failed.'
+    $htmlOutPath = Join-Path $testRoot 'exported-session.html'
+    $exportedHtml = Export-AgentSessionHtml -State $reloadedTreeState -OutputPath $htmlOutPath
+    $htmlContent = Get-Content -LiteralPath $exportedHtml -Raw -Encoding UTF8
+    Assert-True ($htmlContent.Contains('<!DOCTYPE html>') -and $htmlContent.Contains('Branch A reply')) 'Export-AgentSessionHtml failed.'
 
     # Truncated model response (finish_reason=length) is rejected before accepting message or running tools.
     function Invoke-RestMethod {
@@ -586,6 +680,15 @@ try {
     $call = @{ id = 'cl-ll'; function = @{ name = 'read_file'; arguments = '{"path":"longline25k.txt","start_line":1,"start_char":20001}' } }
     $clLl = Invoke-AgentTool -Root $workspacePath -Call $call | ConvertFrom-Json
     Assert-True ($clLl.text.Length -eq 5000 -and (-not $clLl.truncated)) 'ConstrainedLanguage read_file start_char failed.'
+    $clTpl = Expand-TemplateArgs -Content 'Hello $1 ${2:-world} ${@:2}' -ArgsString 'there a b'
+    Assert-True ($clTpl -eq 'Hello there a a b') 'ConstrainedLanguage Expand-TemplateArgs failed.'
+    $clTrunc = Invoke-TruncateHead -Content ("a`nb`nc") -MaxLines 2 -MaxBytes 100
+    Assert-True ($clTrunc.truncated -and $clTrunc.content -eq "a`nb") 'ConstrainedLanguage Invoke-TruncateHead failed.'
+    $clTreeNodes = @(Get-SessionTree -State $reloadedTreeState)
+    Assert-True ($clTreeNodes.Count -eq 3) 'ConstrainedLanguage Get-SessionTree failed.'
+    $clHtmlPath = Join-Path $testRoot 'cl-export.html'
+    $null = Export-AgentSessionHtml -State $reloadedTreeState -OutputPath $clHtmlPath
+    Assert-True (Test-Path -LiteralPath $clHtmlPath) 'ConstrainedLanguage Export-AgentSessionHtml failed.'
     $script:AgentPermission = 'Ask'
     Write-AgentReasoning -Text "Step 1`nStep 2`nStep 3`nStep 4"
     Write-AgentReply -Content "# Title`n## Subtitle`n> quote`n- **item** with ``code```n| A | B |`n|---|---|`n| 1 | 2 |`n``````sql`nSELECT 1;`n``````"

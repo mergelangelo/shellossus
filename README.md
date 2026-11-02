@@ -62,15 +62,24 @@ h-agent -Prompt "Explain @src/Tools.ps1" # Single-shot non-interactive mode
 | `/undo` | Revert last turn in conversation and restore modified/created files on disk |
 | `/retry` | Resend the last failed user prompt |
 | `/compact [focus]` | Summarize older turns into a structured context handoff |
+| `/name [name]` | Set or display the session name |
+| `/tree [entry-id]` | Show the conversation tree or switch active branch to `<entry-id>` |
+| `/fork [entry-id]` (`/clone`) | Fork the active branch (or from `<entry-id>`) into a new session file |
+| `/export [path.html\|.jsonl]` | Export the session to a standalone Gruvbox Material HTML page or JSONL |
+| `/import <path.jsonl>` | Import and resume a JSONL session file |
+| `/copy` | Copy the last assistant message to the clipboard |
+| `/reload` | Reload `AGENTS.md`, `CLAUDE.md`, `SYSTEM.md`, skills, and prompt templates |
+| `/hotkeys` | Show input shortcuts and syntax reference |
 | `/model <id>` | Switch model ID for the current session |
 | `/sessions` | List recent saved sessions |
 | `/resume <num\|name>` | Load a saved session |
 | `/save [name]` | Save current session (optionally under a custom filename) |
 | `/new` (`/clear`) | Start a fresh session |
-| `/<template> [args]` | Expand a prompt template from `.h-agent/prompts/<name>.md` |
+| `/skill:<name> [args]` | Invoke a skill directly with arguments |
+| `/<template> [args]` | Expand a prompt template from `.h-agent/prompts/<name>.md` (`$1`, `$@`, `${1:-default}`, `${@:2}`) |
 | `@path/to/file` | Attach a workspace file inline into your prompt |
 | `!cmd` / `!!cmd` | Execute a shell command (`!` appends output to context; `!!` is local-only) |
-| `/exit` | Quit `h-agent` |
+| `/exit` (`/quit`) | Quit `h-agent` |
 
 ## Repository Structure
 
