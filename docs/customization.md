@@ -1,16 +1,18 @@
 # Customization Guide
 
-`shellossus` supports project-level and user-level customization: project instructions (`AGENTS.md`, `CLAUDE.md`), system prompt overrides (`SYSTEM.md` / `APPEND_SYSTEM.md`), domain skills (`SKILL.md`), and reusable prompt templates (`/template`).
+`shellossus` supports project-level and user-level customization: project instructions (`AGENTS.md`, `CLAUDE.md`), persona and ethos (`SOUL.md`), persistent cross-session memory (`MEMORY.md`), system prompt overrides (`SYSTEM.md` / `APPEND_SYSTEM.md`), domain skills (`SKILL.md`), and reusable prompt templates (`/template`).
 
 ---
 
-## 1. Project Instructions (`AGENTS.md`)
+## 1. Project Instructions & Ethos (`AGENTS.md`, `SOUL.md`)
 
-`shellossus` automatically loads `AGENTS.md` from:
-1. `%USERPROFILE%\.shellossus\AGENTS.md` (global user rules)
-2. `<workspace>\AGENTS.md` (project-specific rules)
+`shellossus` automatically loads `AGENTS.md` and persona ethos `SOUL.md` from:
+1. `%USERPROFILE%\.shellossus\AGENTS.md` / `SOUL.md` (global rules and agent persona)
+2. `<workspace>\.shellossus\SOUL.md` or `<workspace>\SOUL.md` (project persona and tone)
+3. `<workspace>\AGENTS.md` (project-specific rules)
 
-Use `AGENTS.md` to document coding conventions, build/test commands, database dialects, or architecture constraints.
+- Use `AGENTS.md` to document coding conventions, build/test commands, database dialects, or architecture constraints.
+- Use `SOUL.md` (or `ETHOS.md` / `SHELLOSSUS.md`) to define the agent's persona, communication principles, craftsmanship philosophy, and core behavioral invariants.
 
 ---
 
@@ -98,3 +100,15 @@ Inspect the target SQL files for missing indexes, lock escalation risks, and non
 ```
 
 Use `/agents` in interactive mode to inspect available roles, or `/agent:<role> <task>` to delegate a task directly to that role.
+
+---
+
+## 7. Persistent Memory (`MEMORY.md` & `/memory`)
+
+`shellossus` supports persistent long-term memory across CLI sessions:
+- **Automatic Loading:** At launch or turn start, `<workspace>\.shellossus\MEMORY.md` (or `<workspace>\MEMORY.md`) and `%USERPROFILE%\.shellossus\MEMORY.md` are injected directly into the system prompt inside a `<memory>` block.
+- **Agent Tool (`memory`):** The model can call the `memory` tool with actions `append`, `view`, `set`, and `clear` to record architecture invariants, user preferences, and important facts.
+- **Interactive Commands:**
+  - `/memory` (or `/mem`) — view currently saved project memories.
+  - `/memory add <fact>` — quickly record a persistent memory note.
+  - `/memory clear` — clear the project memory file.

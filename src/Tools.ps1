@@ -56,6 +56,11 @@ function Resolve-ToolCanonicalName {
         'plan-review' { return 'ask_user' }
         'question' { return 'ask_user' }
         'user_question' { return 'ask_user' }
+        'memory' { return 'memory' }
+        'remember' { return 'memory' }
+        'manage_memory' { return 'memory' }
+        'recall' { return 'memory' }
+        'note' { return 'memory' }
         default { return $lower }
     }
 }
@@ -818,6 +823,35 @@ function Get-AgentCapabilities {
             }
         }
     }
+    if (Test-IsToolEnabled -Name 'memory') {
+        $toolNames += 'memory'
+        $tools += @{
+            type = 'function'
+            function = @{
+                name = 'memory'
+                description = 'Record, view, or manage persistent long-term memories, user preferences, and project invariants that survive across CLI sessions in MEMORY.md.'
+                parameters = @{
+                    type = 'object'
+                    properties = @{
+                        action = @{
+                            type = 'string'
+                            description = "Action to perform: 'append' to add a new memory note (default), 'view' to read memory, 'set' to replace memory content, or 'clear' to reset."
+                            enum = @('append', 'view', 'set', 'clear')
+                        }
+                        content = @{
+                            type = 'string'
+                            description = "The fact, preference, or architectural invariant to record (required for 'append' and 'set')."
+                        }
+                        scope = @{
+                            type = 'string'
+                            description = "Storage scope: 'workspace' (default, stored in .shellossus/MEMORY.md) or 'global' (stored in global config MEMORY.md)."
+                            enum = @('workspace', 'global')
+                        }
+                    }
+                }
+            }
+        }
+    }
     if ($perm -ne 'ReadOnly') {
         foreach ($name in @('write_file', 'edit_file')) {
             if (-not (Test-IsToolEnabled -Name $name)) { continue }
@@ -1217,6 +1251,45 @@ function Format-AskUserArguments {
     return $out
 }
 
+function Format-MemoryArguments {
+    param($Arguments, $ArgsObj = $null)
+    if ($null -eq $Arguments -and $null -ne $ArgsObj) { $Arguments = $ArgsObj }
+    if ($null -eq $Arguments -or $Arguments -is [string] -or $Arguments -is [ValueType] -or $Arguments -is [array]) {
+        return $Arguments
+    }
+    $props = @(Get-ObjectPropertyNames -InputObject $Arguments)
+    $action = 'append'
+    if ($props -contains 'action' -and $Arguments.action) {
+        $action = ([string]$Arguments.action).Trim().ToLower()
+    }
+    elseif ($props -contains 'view' -and [bool]$Arguments.view) {
+        $action = 'view'
+    }
+    elseif ($props -contains 'clear' -and [bool]$Arguments.clear) {
+        $action = 'clear'
+    }
+
+    $scope = 'workspace'
+    if ($props -contains 'scope' -and $Arguments.scope) {
+        $scope = ([string]$Arguments.scope).Trim().ToLower()
+    }
+
+    $content = ''
+    foreach ($p in @('content', 'note', 'text', 'memory', 'value')) {
+        if ($props -contains $p -and $Arguments.$p) {
+            $content = [string]$Arguments.$p
+            break
+        }
+    }
+
+    $out = @{
+        action = $action
+        scope = $scope
+    }
+    if ($content) { $out['content'] = $content }
+    return $out
+}
+
 function Test-AgentToolArguments {
     param([string]$Name, $Arguments)
     if ($null -eq $Arguments -or $Arguments -is [string] -or $Arguments -is [ValueType] -or $Arguments -is [array]) {
@@ -1270,6 +1343,10 @@ function Test-AgentToolArguments {
         ask_user = @{
             required = @('question')
             types = @{ question = 'string'; options = 'array'; intent = 'string'; plan = 'string'; allow_custom = 'boolean' }
+        }
+        memory = @{
+            required = @()
+            types = @{ action = 'string'; content = 'string'; scope = 'string' }
         }
     }
     $schema = $schemas[$Name]
@@ -1440,6 +1517,19 @@ function Test-AgentToolArguments {
         }
         if ($Arguments.intent -and $Arguments.intent.ToLower() -notin @('question', 'plan-review')) {
             throw "intent must be 'question' or 'plan-review'."
+        }
+    }
+    if ($Name -eq 'memory') {
+        $act = if ($Arguments.action) { ([string]$Arguments.action).Trim().ToLower() } else { 'append' }
+        if ($act -notin @('append', 'view', 'set', 'clear')) {
+            throw "action must be 'append', 'view', 'set', or 'clear'."
+        }
+        $scope = if ($Arguments.scope) { ([string]$Arguments.scope).Trim().ToLower() } else { 'workspace' }
+        if ($scope -notin @('workspace', 'global')) {
+            throw "scope must be 'workspace' or 'global'."
+        }
+        if (($act -eq 'append' -or $act -eq 'set') -and (-not $Arguments.content -or -not [string]$Arguments.content.Trim())) {
+            throw "content must be a nonempty string for action '$act'."
         }
     }
 }
@@ -2904,12 +2994,116 @@ function Invoke-AgentAskUser {
     return ($resultObj | ConvertTo-Json -Depth 5 -Compress)
 }
 
+function Invoke-AgentMemory {
+    param([string]$Root, $Arguments)
+    $toolStart = Get-Date
+    $action = if ($Arguments.action) { ([string]$Arguments.action).Trim().ToLower() } else { 'append' }
+    $scope = if ($Arguments.scope) { ([string]$Arguments.scope).Trim().ToLower() } else { 'workspace' }
+    $content = if ($Arguments.content) { [string]$Arguments.content } else { '' }
+
+    if ($script:AgentPermission -eq 'ReadOnly' -and $action -in @('append', 'set', 'clear')) {
+        throw 'Permission mode ReadOnly does not allow memory modifications.'
+    }
+
+    $configDir = if ($script:AgentConfigPath) { Split-Path $script:AgentConfigPath -Parent } else { Join-Path (if ($env:USERPROFILE) { $env:USERPROFILE } else { $HOME }) '.shellossus' }
+
+    $targetPath = $null
+    $displayRel = $null
+    if ($scope -eq 'global') {
+        if (-not (Test-Path -LiteralPath $configDir)) {
+            New-Item -ItemType Directory -Path $configDir -Force -ErrorAction Stop | Out-Null
+        }
+        $targetPath = Join-Path $configDir 'MEMORY.md'
+        $displayRel = '~/.shellossus/MEMORY.md'
+    }
+    else {
+        $dotDir = Join-Path $Root '.shellossus'
+        $wsDotMem = Join-Path $dotDir 'MEMORY.md'
+        $wsRootMem = Join-Path $Root 'MEMORY.md'
+        if (Test-Path -LiteralPath $wsRootMem) {
+            $targetPath = $wsRootMem
+            $displayRel = 'MEMORY.md'
+        }
+        else {
+            if (-not (Test-Path -LiteralPath $dotDir)) {
+                New-Item -ItemType Directory -Path $dotDir -Force -ErrorAction Stop | Out-Null
+            }
+            $targetPath = $wsDotMem
+            $displayRel = '.shellossus/MEMORY.md'
+        }
+    }
+
+    if (Test-Path -LiteralPath $targetPath) {
+        $candItem = Get-Item -LiteralPath $targetPath -Force -ErrorAction Stop
+        if (($candItem.Attributes -band 1024) -ne 0) { throw 'Reparse points are not allowed.' }
+    }
+
+    $existing = ''
+    if (Test-Path -LiteralPath $targetPath) {
+        $existing = Get-Content -LiteralPath $targetPath -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
+        if ($null -eq $existing) { $existing = '' }
+    }
+
+    $summaryText = ''
+    $cardContent = ''
+
+    if ($action -eq 'view') {
+        $summaryText = if ($existing.Trim()) { "$($existing.Length) chars read" } else { 'empty' }
+        $cardContent = if ($existing.Trim()) { $existing.Trim() } else { '(no memories recorded yet)' }
+    }
+    elseif ($action -eq 'append') {
+        $newBullet = $content.Trim()
+        if (-not $newBullet.StartsWith('-') -and -not $newBullet.StartsWith('*') -and -not $newBullet.StartsWith('#')) {
+            $newBullet = "- $newBullet"
+        }
+        $trimmedExisting = $existing.TrimEnd()
+        $updatedText = if ($trimmedExisting) {
+            $trimmedExisting + "`n" + $newBullet + "`n"
+        }
+        else {
+            "# Project Memory`n`n" + $newBullet + "`n"
+        }
+        Set-Content -LiteralPath $targetPath -Value $updatedText -Encoding UTF8 -ErrorAction Stop
+        $existing = $updatedText
+        $summaryText = "appended to $displayRel"
+        $cardContent = "+ $newBullet"
+    }
+    elseif ($action -eq 'set') {
+        $updatedText = $content.Trim() + "`n"
+        Set-Content -LiteralPath $targetPath -Value $updatedText -Encoding UTF8 -ErrorAction Stop
+        $existing = $updatedText
+        $summaryText = "updated $displayRel ($($updatedText.Length) chars)"
+        $cardContent = $updatedText.Trim()
+    }
+    elseif ($action -eq 'clear') {
+        if (Test-Path -LiteralPath $targetPath) {
+            Remove-Item -LiteralPath $targetPath -Force -ErrorAction SilentlyContinue
+        }
+        $existing = ''
+        $summaryText = "cleared $displayRel"
+        $cardContent = '(memory cleared)'
+    }
+
+    $elapsedMs = [int](((Get-Date) - $toolStart).TotalMilliseconds)
+    Write-ToolCallCard -Name 'memory' -Target $displayRel -Detail $action -Status 'ok' -Summary $summaryText -ElapsedMs $elapsedMs
+    Write-MemoryCard -Scope $scope -Action $action -Content $cardContent
+
+    $resObj = @{
+        success = $true
+        action = $action
+        scope = $scope
+        path = $displayRel
+        memory = $existing
+    }
+    return ($resObj | ConvertTo-Json -Depth 5 -Compress)
+}
+
 function Invoke-AgentTool {
     param([string]$Root, $Call)
     try {
         $rawName = [string]$Call.function.name
         $name = Resolve-ToolCanonicalName -Name $rawName
-        if ($name -notin @('list_files', 'read_file', 'find_files', 'grep_files', 'fetch_url', 'web_search', 'write_file', 'edit_file', 'run_command', 'run_agent', 'todo', 'ask_user')) { throw 'Unknown tool.' }
+        if ($name -notin @('list_files', 'read_file', 'find_files', 'grep_files', 'fetch_url', 'web_search', 'write_file', 'edit_file', 'run_command', 'run_agent', 'todo', 'ask_user', 'memory')) { throw 'Unknown tool.' }
         if ($script:AgentPermission -eq 'ReadOnly' -and $name -in @('write_file', 'edit_file', 'run_command')) {
             throw 'Permission mode ReadOnly does not allow file modifications or commands.'
         }
@@ -2929,7 +3123,11 @@ function Invoke-AgentTool {
         elseif ($name -eq 'ask_user') {
             $arguments = Format-AskUserArguments -Arguments $arguments
         }
+        elseif ($name -eq 'memory') {
+            $arguments = Format-MemoryArguments -Arguments $arguments
+        }
         Test-AgentToolArguments -Name $name -Arguments $arguments
+        if ($name -eq 'memory') { return (Invoke-AgentMemory -Root $Root -Arguments $arguments) }
         if ($name -eq 'ask_user') { return (Invoke-AgentAskUser -Arguments $arguments) }
         if ($name -eq 'todo') { return (Invoke-AgentTodo -Arguments $arguments) }
         if ($name -eq 'fetch_url') { return (Invoke-AgentFetchUrl -Arguments $arguments) }

@@ -231,7 +231,7 @@ try {
     # Dynamic <capabilities> block in Build-SystemPrompt and Sync-AgentCapabilities across mode switches without notice bloat.
     $script:AgentPermission = 'ReadOnly'
     $roSys = Build-SystemPrompt -Root $workspacePath -ConfigDir ''
-    Assert-True ($roSys.Contains('Permission mode: ReadOnly.') -and $roSys.Contains('Available tools: list_files, read_file, find_files, grep_files, fetch_url, web_search, todo, ask_user, run_agent.') -and $roSys.Contains('File modification and shell execution are unavailable.')) 'Build-SystemPrompt in ReadOnly mode did not render expected dynamic <capabilities> block.'
+    Assert-True ($roSys.Contains('Permission mode: ReadOnly.') -and $roSys.Contains('Available tools: list_files, read_file, find_files, grep_files, fetch_url, web_search, todo, ask_user, memory, run_agent.') -and $roSys.Contains('File modification and shell execution are unavailable.')) 'Build-SystemPrompt in ReadOnly mode did not render expected dynamic <capabilities> block.'
     Assert-True ($roSys.Contains('Environment: OS=') -and $roSys.Contains('Command shell (run_command):') -and $roSys.Contains('Get-Command') -and $roSys.Contains($workspacePath)) 'Build-SystemPrompt missing environment, run_command shell, workspace, or Get-Command guidance.'
     Assert-True (-not $roSys.Contains('Available tools: list_files, read_file, find_files, grep_files, write_file')) 'ReadOnly system prompt listed write_file as available.'
 
@@ -281,6 +281,14 @@ try {
     $customLim = Set-AgentContextLimits -WindowSpec '64k' -CompactSpec '48k'
     Assert-True ($customLim.context_window_tokens -eq 64000 -and $customLim.compact_threshold_tokens -eq 48000 -and $customLim.compact_pct -eq 75) 'Set-AgentContextLimits 64k/48k failed.'
     $null = Set-AgentContextLimits -WindowSpec '128k' -CompactSpec '75%'
+
+    # SOUL.md and MEMORY.md injection into Build-SystemPrompt
+    Set-Content -LiteralPath (Join-Path $workspacePath 'SOUL.md') -Value "# Agent Soul`nBe precise and helpful." -Encoding UTF8
+    Set-Content -LiteralPath (Join-Path $workspacePath 'MEMORY.md') -Value "# Project Memory`n- Use ASCII everywhere" -Encoding UTF8
+    $sysWithSoul = Build-SystemPrompt -Root $workspacePath -ConfigDir $globalCfgDir
+    Assert-True ($sysWithSoul.Contains('<soul source=') -and $sysWithSoul.Contains('Be precise and helpful.') -and $sysWithSoul.Contains('</soul>')) 'SOUL.md not injected into Build-SystemPrompt.'
+    Assert-True ($sysWithSoul.Contains('<memory source=') -and $sysWithSoul.Contains('Use ASCII everywhere') -and $sysWithSoul.Contains('</memory>')) 'MEMORY.md not injected into Build-SystemPrompt.'
+    Assert-True ($sysWithSoul.Contains('Persistent project memory: call memory tool')) 'memory capability guidance not found in Build-SystemPrompt.'
 }
 finally {
     Remove-TestEnvironment -Env $envData

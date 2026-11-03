@@ -279,7 +279,7 @@ try {
         Invoke-AgentTurn -State $modeSwitchState -Endpoint 'https://example.invalid/v1/chat/completions' -ModelId 'test-model' -ApiKey 'fake' -Root $workspacePath -Steps 4
         $roPayload = $script:capturedPayloads[2]
         $roToolNames = @($roPayload.tools | ForEach-Object { $_.function.name })
-        Assert-True ($roToolNames.Count -eq 9 -and ($roToolNames -contains 'ask_user') -and ($roToolNames -contains 'todo') -and ($roToolNames -notcontains 'write_file') -and ($roToolNames -contains 'fetch_url') -and ($roToolNames -contains 'web_search') -and ($roToolNames -contains 'run_agent') -and $roPayload.messages[0].content.Contains('Permission mode: ReadOnly.')) 'ReadOnly turn payload was out of sync with active permission.'
+        Assert-True ($roToolNames.Count -eq 10 -and ($roToolNames -contains 'memory') -and ($roToolNames -contains 'ask_user') -and ($roToolNames -contains 'todo') -and ($roToolNames -notcontains 'write_file') -and ($roToolNames -contains 'fetch_url') -and ($roToolNames -contains 'web_search') -and ($roToolNames -contains 'run_agent') -and $roPayload.messages[0].content.Contains('Permission mode: ReadOnly.')) 'ReadOnly turn payload was out of sync with active permission.'
 
         # 3. Switch to Ask: write_file is restored, transition notice replaces ReadOnly notice, and real write with WRITE confirmation succeeds.
         $script:AgentPermission = 'Ask'
@@ -550,6 +550,8 @@ try {
     Assert-True ((Resolve-ReplCommandAlias -InputText '/u') -eq '/undo') 'Alias /u -> /undo failed.'
     Assert-True ((Resolve-ReplCommandAlias -InputText '/t e0002') -eq '/tree e0002') 'Alias /t -> /tree failed.'
     Assert-True ((Resolve-ReplCommandAlias -InputText '/ctx 128k 80k') -eq '/context 128k 80k') 'Alias /ctx -> /context failed.'
+    Assert-True ((Resolve-ReplCommandAlias -InputText '/mem') -eq '/memory') 'Alias /mem -> /memory failed.'
+    Assert-True ((Resolve-ReplCommandAlias -InputText '/mem add invariant') -eq '/memory add invariant') 'Alias /mem add -> /memory add failed.'
 
     Ensure-SessionTree -State $forkParentState
     $statusCard = @(Format-TuiStatusCard -State $forkParentState -Model 'test-model' -MaxSteps 50 -SessionFile 'test.jsonl' -UndoCount 1)
