@@ -251,6 +251,10 @@ try {
     )
     Assert-True ($clPicked -eq 'v2') 'ConstrainedLanguage Invoke-TuiSelector failed.'
     $script:approval = 'WRITE'
+
+    $clCyr = ([string][char]0x0447) + ([string][char]0x0442) + ([string][char]0x043E) + '?'
+    $clAsciiJson = ConvertTo-AsciiJson -Json (@{ q = $clCyr } | ConvertTo-Json -Compress)
+    Assert-True (($clAsciiJson -notmatch '[^\x00-\x7F]') -and (([string]($clAsciiJson | ConvertFrom-Json).q) -eq $clCyr)) 'ConstrainedLanguage ConvertTo-AsciiJson failed.'
 }
 finally {
     Remove-TestEnvironment -Env $envData

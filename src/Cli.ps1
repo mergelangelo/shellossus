@@ -1,5 +1,18 @@
 # Agent turn loop (HTTP retries, finish_reason check, overflow auto-compaction, tool dispatch, JSON event stream) and interactive CLI REPL.
 
+function ConvertTo-AsciiJson {
+    param([string]$Json)
+    if (-not $Json -or ($Json -notmatch '[^\x00-\x7F]')) { return $Json }
+    $parts = @($Json -split '([^\x00-\x7F]+)')
+    for ($i = 1; $i -lt $parts.Count; $i += 2) {
+        $escaped = foreach ($ch in [char[]]$parts[$i]) {
+            '\u{0:x4}' -f [int][char]$ch
+        }
+        $parts[$i] = ($escaped -join '')
+    }
+    return ($parts -join '')
+}
+
 function Write-AgentJsonEvent {
     param([string]$EventType, [hashtable]$Payload = @{})
     if ($script:OutputMode -ne 'json') { return }
@@ -8,7 +21,7 @@ function Write-AgentJsonEvent {
         timestamp = (Get-Date -Format 'yyyy-MM-ddTHH:mm:ssK')
     }
     foreach ($k in $Payload.Keys) { $ev[$k] = $Payload[$k] }
-    Write-Host ($ev | ConvertTo-Json -Depth 20 -Compress)
+    Write-Host (ConvertTo-AsciiJson -Json ($ev | ConvertTo-Json -Depth 20 -Compress))
 }
 
 function Wait-AgentProcessWithSpinner {
@@ -59,6 +72,7 @@ function Invoke-AgentHttpRequest {
         [string]$StatusLabel = 'Waiting for model',
         [switch]$ForceBackgroundWorker
     )
+    $asciiBody = ConvertTo-AsciiJson -Json $Body
     $iwrCmd = Get-Command -Name 'Invoke-WebRequest' -ErrorAction SilentlyContinue
     if ((-not $ForceBackgroundWorker) -and (($iwrCmd -and $iwrCmd.CommandType -eq 'Function') -or $script:DisableAsyncHttp)) {
         $request = @{
@@ -66,7 +80,7 @@ function Invoke-AgentHttpRequest {
             Method = 'Post'
             Headers = @{ Authorization = "Bearer $ApiKey" }
             ContentType = 'application/json; charset=utf-8'
-            Body = $Body
+            Body = $asciiBody
             TimeoutSec = $TimeoutSec
             ErrorAction = 'Stop'
         }
@@ -79,7 +93,7 @@ function Invoke-AgentHttpRequest {
     $stdoutTemp = New-TemporaryFile -ErrorAction Stop
     $stderrTemp = New-TemporaryFile -ErrorAction Stop
     try {
-        Set-Content -LiteralPath $reqTemp.FullName -Value $Body -Encoding UTF8 -NoNewline -ErrorAction Stop
+        Set-Content -LiteralPath $reqTemp.FullName -Value $asciiBody -Encoding Ascii -NoNewline -ErrorAction Stop
         $workerCmd = @'
 $ErrorActionPreference = 'Stop'
 try {

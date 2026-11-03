@@ -87,6 +87,9 @@ if ($NoShortcut -and ($PSBoundParameters.Keys -contains 'Shortcut')) {
     throw 'Cannot specify both -Shortcut and -NoShortcut.'
 }
 
+if ((-not (Test-Path -LiteralPath $AgentPath)) -and (Test-Path -LiteralPath "$PSScriptRoot\build.ps1") -and (Test-Path -LiteralPath "$PSScriptRoot\src")) {
+    & "$PSScriptRoot\build.ps1"
+}
 $resolvedAgent = (Resolve-Path -LiteralPath $AgentPath -ErrorAction Stop).ProviderPath
 if ((Get-Item -LiteralPath $resolvedAgent).PSIsContainer) { throw 'AgentPath must be a script file.' }
 if (-not $ProfilePath) { throw 'No PowerShell profile path is available.' }
