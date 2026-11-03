@@ -11,6 +11,7 @@ $suiteOrder = @(
     'Tools.Tests.ps1',
     'Context.Tests.ps1',
     'Cli.Tests.ps1',
+    'Reliability.Tests.ps1',
     'ConstrainedLanguage.Tests.ps1'
 )
 
@@ -34,6 +35,18 @@ foreach ($suite in $matchedSuites) {
     Write-Host "==> Running $leaf ..."
     & $suite
     Write-Host "[PASS] $leaf"
+    if ($leaf -eq 'Reliability.Tests.ps1') {
+        # Run the same regression scenarios against freshly loaded constrained
+        # functions, without changing the language mode of the smoke runner.
+        $testShellName = if ($PSVersionTable.PSEdition -eq 'Core') {
+            if ($env:OS -eq 'Windows_NT') { 'pwsh.exe' } else { 'pwsh' }
+        }
+        else { 'powershell.exe' }
+        Write-Host '==> Running Reliability.Tests.ps1 in ConstrainedLanguage ...'
+        & (Join-Path $PSHOME $testShellName) -NoProfile -File $suite -ConstrainedLanguage
+        if ($LASTEXITCODE -ne 0) { throw 'ConstrainedLanguage reliability checks failed.' }
+        Write-Host '[PASS] Reliability.Tests.ps1 (ConstrainedLanguage)'
+    }
 }
 
 Write-Host 'All smoke checks passed.'

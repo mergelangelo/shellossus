@@ -41,6 +41,10 @@ try {
             @{ role = 'system'; content = 'sys' },
             @{ role = 'user'; content = ('a' * 4000) }
         )
+        todos = @(
+            @{ content = 'Task A'; status = 'completed' },
+            @{ content = 'Task B'; status = 'in_progress' }
+        )
         usage_input_tokens = 1200
         usage_output_tokens = 350
     }
@@ -48,9 +52,13 @@ try {
     $script:ReasoningEffort = 'high'
     $barLines = @(Format-TuiStatusBar -State $statusState -Root $ws -Model 'glm-5' -UndoCount 2 -Width 90)
     $plainBar = ($barLines | ForEach-Object { Strip-AnsiCodes -Text $_ }) -join "`n"
-    Assert-True ($barLines.Count -ge 2 -and $plainBar.Contains('glm-5') -and $plainBar.Contains('AutoEdit') -and $plainBar.Contains('a1b2c3d') -and $plainBar.Contains('undo:2')) "Format-TuiStatusBar missing expected segments: $plainBar"
+    Assert-True ($barLines.Count -ge 2 -and $plainBar.Contains('glm-5') -and $plainBar.Contains('AutoEdit') -and $plainBar.Contains('a1b2c3d') -and $plainBar.Contains('undo:2') -and $plainBar.Contains('todo:1/2')) "Format-TuiStatusBar missing expected segments: $plainBar"
     $script:AgentPermission = 'Ask'
     $script:ReasoningEffort = ''
+
+    $todoCard = @(Format-TodoCard -Todos @(@{ content = 'Task 1'; status = 'completed' }, @{ content = 'Task 2'; status = 'in_progress' }, @{ content = 'Task 3'; status = 'pending' }))
+    $plainTodo = ($todoCard | ForEach-Object { Strip-AnsiCodes -Text $_ }) -join "`n"
+    Assert-True ($plainTodo.Contains('TODO') -and $plainTodo.Contains('1/3 completed') -and $plainTodo.Contains('[x] Task 1') -and $plainTodo.Contains('[>] Task 2') -and $plainTodo.Contains('[ ] Task 3')) "Format-TodoCard output unexpected: $plainTodo"
 
     $diffCard = @(Format-UnifiedDiff -Path 'src/App.ps1' -ToolName 'edit_file' -Before "line1`nold_a`nold_b`nline4" -After "line1`nnew_a`nline4" -ContextLines 1)
     $plainDiff = ($diffCard | ForEach-Object { Strip-AnsiCodes -Text $_ }) -join "`n"

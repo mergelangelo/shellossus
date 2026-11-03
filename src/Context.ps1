@@ -353,6 +353,9 @@ function Format-CapabilitiesPromptBlock {
     $lines += '- When write_file or edit_file is available and requested, call the tool so the user receives the diff preview; never claim a file was written or a command was executed until the tool result reports status=written or status=executed.'
     $lines += '- Never retry a cancelled write or command unless the user asks again.'
     $lines += '- Session memory: conversation history is saved to disk (.jsonl) and can be resumed across launches via -Continue or /resume.'
+    if ($cap.tool_names -contains 'todo') {
+        $lines += '- Multi-step task tracking: call todo tool to record, update, and track task plan progress on multi-step work.'
+    }
     $lines += '</capabilities>'
     return ($lines -join "`n")
 }
@@ -946,6 +949,12 @@ function Save-AgentSession {
         leaf_id = $State.leaf_id
         updated_at = (Get-Date -Format 'yyyy-MM-ddTHH:mm:ssK')
     }
+    if ($script:ActiveSessionTodos -and $script:ActiveSessionTodos.Count -gt 0) {
+        $meta.todos = @($script:ActiveSessionTodos)
+    }
+    elseif ($State -and $State.todos -and $State.todos.Count -gt 0) {
+        $meta.todos = @($State.todos)
+    }
     $lines = @($meta | ConvertTo-Json -Depth 5 -Compress)
     $activeIds = @{}
     foreach ($m in @($State.messages)) {
@@ -1025,6 +1034,13 @@ function Read-AgentSession {
                 if ($obj.name) { $State.session_name = [string]$obj.name }
                 if ($obj.parent_session) { $State.parent_session = [string]$obj.parent_session }
                 if ($obj.leaf_id) { $State.leaf_id = [string]$obj.leaf_id }
+                if ($obj.todos) {
+                    $State.todos = @($obj.todos)
+                    $script:ActiveSessionTodos = @($obj.todos)
+                }
+            }
+            elseif ($obj.todos) {
+                $script:ActiveSessionTodos = @($obj.todos)
             }
             continue
         }

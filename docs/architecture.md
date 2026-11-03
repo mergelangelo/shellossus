@@ -22,11 +22,14 @@
 - **Reasoning Display (`Write-AgentReasoning`):** Renders model `reasoning_content` in `compact` (last 3 lines), `full`, or `hide` mode.
 
 ### 3. [`src/Tools.ps1`](../src/Tools.ps1)
-- **Tool Definitions (`Get-AgentTools`):** Exposes 7 tools (`list_files`, `read_file`, `find_files`, `grep_files`, `write_file`, `edit_file`, `run_command`), dynamically hiding write and command tools when `$script:AgentPermission -eq 'ReadOnly'`.
+- **Search Continuation (`grep_files`):** Truncated results return `next_file_offset` (0-based) and `next_start_line` (1-based). Pass both back as `file_offset` and `start_line` with the same search arguments. The line cursor applies only to the first file on the next page. Candidate paths are sorted; pagination assumes the file set and contents remain unchanged between requests. `files_scanned` counts only files actually visited on the current page.
+- **Tool Definitions (`Get-AgentTools`):** Exposes built-in tools (`list_files`, `read_file`, `find_files`, `grep_files`, `fetch_url`, `web_search`, `todo`, `run_agent`, `write_file`, `edit_file`, `run_command`), dynamically hiding write and command tools when `$script:AgentPermission -eq 'ReadOnly'`.
+- **Task Planning & Progress (`Invoke-AgentTodo`):** Log-only task board tool (`todo`) with whole-list atomic replacement, resilient argument formatting (`Format-TodoArguments`), validation, and live TUI checklist cards (`Format-TodoCard`).
 - **Strict Schema Validation (`Test-AgentToolArguments`):**
   - Uses `Get-Member -MemberType NoteProperty` (compatible with `ConstrainedLanguage` mode) to inspect parsed JSON objects.
   - Verifies required parameters, rejects unknown parameters, and enforces actual runtime types (`[string]`, `[bool]`, `[int]`/`[long]`, `[array]`) without PowerShell truthy string coercion (e.g. rejecting `"overwrite": "false"`).
 - **Fuzzy & Batch File Edits (`Find-EditMatch`, `Invoke-AgentWrite`):**
+  - Both full overwrites and edit replacements preserve an existing CRLF or LF newline convention. Empty and single-line files retain the incoming text's line endings.
   - Supports exact replacement, CRLF-normalized replacement, and line-by-line fuzzy matching (`Format-FuzzyLine`) that normalizes trailing whitespace, UTF-8 BOM, and typographic quotes/dashes.
   - Supports atomic batch `edits[]`: validates all blocks against the original file, rejects overlapping ranges, and applies replacements bottom-to-top.
   - Stages output to a temporary file (`New-TemporaryFile`), verifies the staged write, creates and verifies a backup copy, registers the rollback entry in `$script:CurrentTurnWrites` before touching the target file, and replaces the target via `Move-Item -Force`.
@@ -63,5 +66,5 @@
 2. Run `.\build.ps1` to generate `shellossus.ps1` (pure ASCII, LF-normalized).
 3. Run `.\tests\smoke.ps1`, which:
    - Calls `.\build.ps1 -Check` to ensure `shellossus.ps1` matches `src/*.ps1`.
-   - Executes modular test suites (`Config.Tests.ps1`, `Theme.Tests.ps1`, `Tools.Tests.ps1`, `Context.Tests.ps1`, `Cli.Tests.ps1`) with isolated temporary workspaces.
+   - Executes modular test suites (`Config.Tests.ps1`, `Theme.Tests.ps1`, `Tools.Tests.ps1`, `Context.Tests.ps1`, `Cli.Tests.ps1`, `Reliability.Tests.ps1`) with isolated temporary workspaces. Reliability regressions also run in a fresh PowerShell process with `ConstrainedLanguage`, including real process-tree termination and separate-process subagent tool filtering.
    - Runs `ConstrainedLanguage.Tests.ps1` to verify core operations under PowerShell `ConstrainedLanguage` mode.

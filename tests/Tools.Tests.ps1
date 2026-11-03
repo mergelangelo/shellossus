@@ -237,6 +237,13 @@ try {
     $call.function.arguments = '{"path":"grep501","pattern":"NEEDLE_501","literal":true,"file_offset":500}'
     $g501Page2 = Invoke-AgentTool -Root $workspacePath -Call $call | ConvertFrom-Json
     Assert-True ($g501Page2.matches.Count -eq 1 -and $g501Page2.truncated -eq $false -and $g501Page2.files_scanned -eq 1) 'grep_files failed to find match in 501st file using file_offset.'
+    Set-Content -LiteralPath (Join-Path $grepDir501 'f0500.txt') -Value 'NEEDLE_501' -Encoding UTF8 -NoNewline
+    $call.function.arguments = '{"path":"grep501","pattern":"NEEDLE_501","literal":true,"limit":1}'
+    $combinedLimit = Invoke-AgentTool -Root $workspacePath -Call $call | ConvertFrom-Json
+    Assert-True ($combinedLimit.truncation_reason -eq 'max_matches_and_max_files' -and $combinedLimit.files_scanned -eq 500 -and $combinedLimit.next_file_offset -eq 500 -and $combinedLimit.next_start_line -eq 1) 'Combined grep file/match limit lost the continuation cursor.'
+    $call.function.arguments = '{"path":"grep501","pattern":"NEEDLE_501","literal":true,"limit":1,"file_offset":500,"start_line":1}'
+    $combinedTail = Invoke-AgentTool -Root $workspacePath -Call $call | ConvertFrom-Json
+    Assert-True ($combinedTail.matches.Count -eq 1 -and -not $combinedTail.truncated -and $combinedTail.matches[0].file -eq 'f0501.txt') 'Combined-limit continuation skipped the final file.'
     Remove-Item -LiteralPath $grepDir501 -Recurse -Force
 
     # Large file (>20,000 chars) edit_file and strict argument validation.
@@ -341,7 +348,7 @@ try {
     $script:EnabledTools = @()
     $script:AgentPermission = 'ReadOnly'
     $capRo = Get-AgentCapabilities
-    Assert-True ($capRo.permission -eq 'ReadOnly' -and $capRo.tool_names.Count -eq 7 -and ($capRo.tool_names -contains 'fetch_url') -and ($capRo.tool_names -contains 'web_search') -and ($capRo.tool_names -contains 'run_agent') -and (-not $capRo.can_write) -and (-not $capRo.can_exec)) 'Get-AgentCapabilities in ReadOnly mode failed.'
+    Assert-True ($capRo.permission -eq 'ReadOnly' -and $capRo.tool_names.Count -eq 8 -and ($capRo.tool_names -contains 'todo') -and ($capRo.tool_names -contains 'fetch_url') -and ($capRo.tool_names -contains 'web_search') -and ($capRo.tool_names -contains 'run_agent') -and (-not $capRo.can_write) -and (-not $capRo.can_exec)) 'Get-AgentCapabilities in ReadOnly mode failed.'
     $script:AgentPermission = 'AutoEdit'
     $capAe = Get-AgentCapabilities
     Assert-True ($capAe.permission -eq 'AutoEdit' -and $capAe.can_write -and (-not $capAe.write_requires_confirmation) -and $capAe.exec_requires_confirmation) 'Get-AgentCapabilities in AutoEdit mode failed.'
@@ -560,6 +567,34 @@ try {
     finally {
         Remove-Item Function:\Invoke-WebRequest -ErrorAction SilentlyContinue
     }
+
+    # Todo tool: aliases, argument normalization, validation, and checklist execution.
+    Assert-True ((Resolve-ToolCanonicalName -Name 'manage_todo') -eq 'todo') 'Resolve-ToolCanonicalName manage_todo alias failed.'
+    Assert-True ((Resolve-ToolCanonicalName -Name 'todos') -eq 'todo') 'Resolve-ToolCanonicalName todos alias failed.'
+    Assert-True ((Resolve-ToolCanonicalName -Name 'tasks') -eq 'todo') 'Resolve-ToolCanonicalName tasks alias failed.'
+    Assert-True ((Resolve-ToolCanonicalName -Name 'task_board') -eq 'todo') 'Resolve-ToolCanonicalName task_board alias failed.'
+
+    $normTodoArgs = Format-TodoArguments -Arguments ([pscustomobject]@{ tasks = '[{"title":"Step 1","done":true},{"task":"Step 2","status":"in_progress"},{"text":"Step 3","status":"pending"}]' })
+    Assert-True ($normTodoArgs.todos.Count -eq 3 -and $normTodoArgs.todos[0].content -eq 'Step 1' -and $normTodoArgs.todos[0].status -eq 'completed' -and $normTodoArgs.todos[1].content -eq 'Step 2' -and $normTodoArgs.todos[2].content -eq 'Step 3') 'Format-TodoArguments normalization failed.'
+
+    $todoCall = @{
+        id = 'td-1'
+        function = @{
+            name = 'todo'
+            arguments = '{"todos":[{"content":"Setup environment","status":"completed"},{"content":"Implement feature","status":"in_progress"},{"content":"Add unit tests","status":"pending"}]}'
+        }
+    }
+    $todoRes = Invoke-AgentTool -Root $workspacePath -Call $todoCall | ConvertFrom-Json
+    Assert-True ($todoRes.success -and $todoRes.total -eq 3 -and $todoRes.completed -eq 1 -and $todoRes.in_progress -eq 1 -and $todoRes.pending -eq 1) 'Invoke-AgentTool todo execution failed.'
+    Assert-True ($script:ActiveSessionTodos.Count -eq 3 -and $script:ActiveSessionTodos[0].content -eq 'Setup environment' -and $script:ActiveSessionTodos[0].status -eq 'completed') 'Invoke-AgentTool did not update $script:ActiveSessionTodos.'
+
+    $badTodoCall = @{ id = 'td-bad'; function = @{ name = 'todo'; arguments = '{"todos":[{"content":"","status":"pending"}]}' } }
+    $badTodoRes = Invoke-AgentTool -Root $workspacePath -Call $badTodoCall | ConvertFrom-Json
+    Assert-True ($badTodoRes.error -like '*content*') 'todo tool did not reject empty content.'
+
+    $badStatusCall = @{ id = 'td-bad-st'; function = @{ name = 'todo'; arguments = '{"todos":[{"content":"Valid task","status":"invalid_status"}]}' } }
+    $badStatusRes = Invoke-AgentTool -Root $workspacePath -Call $badStatusCall | ConvertFrom-Json
+    Assert-True ($badStatusRes.error -like '*status*') 'todo tool did not reject invalid status.'
 }
 finally {
     Remove-TestEnvironment -Env $envData
