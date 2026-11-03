@@ -9,7 +9,7 @@ Drop [`shellossus.ps1`](shellossus.ps1) onto any machine and connect to any Open
 
 | Capability | What It Does |
 | --- | --- |
-| **8 Built-in Tools** | `list_files`, `read_file` (line & character pagination), `find_files` (path globs + `.gitignore`), `grep_files` (regex/literal, `include` filter, `context_lines`, file-offset pagination), `write_file`, `edit_file` (fuzzy whitespace/quote matching + atomic batch `edits[]`), `run_command` (timeout, streaming disk logs, API key scrubbing), and `run_agent` (single, `parallel[]` fan-out, and `pipeline[]` subagents with `clean`/`fork` context) |
+| **Built-in Tools** | `list_files`, `read_file` (line & character pagination), `find_files` (path globs + `.gitignore`), `grep_files` (regex/literal, `include` filter, `context_lines`, file-offset pagination), `write_file`, `edit_file` (fuzzy whitespace/quote matching + atomic batch `edits[]`), `run_command` (timeout, streaming disk logs, API key scrubbing), `run_agent` (single, `parallel[]` fan-out, and `pipeline[]` subagents with `clean`/`fork` context), `fetch_url`, `web_search`, and `todo` (in-session task planning and checklist progress tracking) |
 | **Subagent Delegation** | Built-in roles (`recon`, `audit`, `craft`) + custom `.shellossus/agents/*.md` profiles, `/agents` catalog, `/agent:<role> <task>` shortcut, and unified parent `/undo` across subagent file edits |
 | **4 Permission Modes** | `ReadOnly` (reads/search only), `Ask` *(default: prompts `WRITE` / `RUN`)*, `AutoEdit` (auto-approves file writes with backup; asks `RUN`), `Auto` (auto-approves writes and commands) |
 | **Transactional Disk `/undo`** | Staged writes via temporary files with verification, colored diff previews, automatic backups, manual-edit conflict detection, and full multi-step disk rollback via `/undo` |
@@ -68,6 +68,7 @@ shellossus -Prompt "Explain @src/Tools.ps1" # Single-shot non-interactive mode
 | `/reasoning <opt>` | Display: `compact`, `full`, `hide`; Effort: `low`, `medium`, `high`, `default` |
 | `/continue [steps]` | Continue execution after hitting the step limit (or continue the last response) |
 | `/undo` | Revert last turn in conversation and restore modified/created files on disk |
+| `/todo [clear]` (`/td`) | Display or clear active task plan checklist |
 | `/retry` | Resend the last failed user prompt |
 | `/compact [focus]` | Summarize older turns into a structured context handoff |
 | `/name [name]` | Set or display the session name |

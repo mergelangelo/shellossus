@@ -39,6 +39,7 @@ When resuming a saved session via `/resume`, `shellossus` resets the active perm
 - **Staged Writes:** `Invoke-AgentWrite` writes new content to a temporary file first, verifies the written content, verifies that the target file did not change during user confirmation, creates and verifies a backup copy, and then replaces the target file via `Move-Item -Force`.
 - **Conflict-Aware `/undo`:**
   - Every write records both `before_content` and `after_content`.
+  - Before changing any file, undo verifies every pending backup against its recorded `before_content`, including intermediate backups from repeated edits to the same file. Missing, unreadable, or corrupted backups stop the entire preflight; files, backups, and conversation state are preserved for a retry.
   - When `/undo` is invoked, `Invoke-AgentUndo` checks whether the file on disk was modified manually after the agent's write. If manual edits are detected, `/undo` refuses to overwrite the file and preserves the backup path.
   - Backup files are only deleted after restoration succeeds and the restored content is verified against the backup.
 
@@ -48,7 +49,12 @@ When resuming a saved session via `/resume`, `shellossus` resets the active perm
 
 - **API Key Scrubbing:** `Invoke-ShellCommand` clears `SHELLOSSUS_API_KEY` and `OPENAI_API_KEY` before spawning a child PowerShell process and restores them afterward.
 - **Disk-Backed Output Streaming:** Standard output and standard error are redirected directly to temporary files on disk (`Start-Process -RedirectStandardOutput -RedirectStandardError`). Only the first 300 lines (up to 20,000 characters) are read into memory for the model response; if truncated, the full log is preserved under `.shellossus/output/cmd-*.log`.
-- **Timeout & Termination:** Commands default to a 60-second timeout (`timeout_sec`, configurable from 1 to 600 seconds). If a command exceeds the timeout, `shellossus` terminates the process (`Stop-Process -Force`) and reports `status = "timed_out"`.
+- **Timeout & Termination:** Commands default to a 60-second timeout (`timeout_sec`, configurable from 1 to 600 seconds). While waiting, `shellossus` tracks child and descendant processes. On timeout or interrupted execution it stops the command and tracked descendants using built-in cmdlets. Windows PowerShell 5.1 uses `Get-CimInstance Win32_Process` for parent relationships; PowerShell on Linux/macOS uses `Get-Process`. Start times are checked before termination to avoid stopping an unrelated process that reused a PID. Timeout results include `termination_errors` if cleanup could not be completed.
+- **Process Tracking Limits:** Tracking is based on periodic snapshots, not an OS process sandbox. A detached descendant whose parent exits between snapshots can escape discovery; command execution retains the user's OS permissions. Normal successful commands may intentionally leave background processes running.
+
+## Subagent Tool Restrictions
+
+In-process and separate-process subagents receive the intersection of the parent's effective tool permissions and the role's tool filter. Parent exclusions, aliases, and wildcard filters are respected. An empty intersection disables all tools; it never means unrestricted access. Parallel workers remain `ReadOnly`, and recursive `run_agent` calls are disabled.
 
 ---
 

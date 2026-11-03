@@ -208,12 +208,27 @@ function Format-TuiStatusBar {
         ' ' + $script:Gm.Grey0 + $script:Box.V + ' ' + $script:Gm.Grey1 + 'in:' + (Format-TokenCount -Tokens $inTok) + ' out:' + (Format-TokenCount -Tokens $outTok) + $script:Gm.Reset
     }
     else { '' }
+    $todoList = if ($script:ActiveSessionTodos -and $script:ActiveSessionTodos.Count -gt 0) {
+        $script:ActiveSessionTodos
+    }
+    elseif ($State -and $State.todos -and $State.todos.Count -gt 0) {
+        $State.todos
+    }
+    else { @() }
+    $todoSeg = if ($todoList.Count -gt 0) {
+        $tTotal = $todoList.Count
+        $tDone = @($todoList | Where-Object { $_.status -eq 'completed' }).Count
+        $tInProg = @($todoList | Where-Object { $_.status -eq 'in_progress' }).Count
+        $tColor = if ($tDone -eq $tTotal) { $script:Gm.Green } elseif ($tInProg -gt 0) { $script:Gm.Yellow } else { $script:Gm.Aqua }
+        ' ' + $script:Gm.Grey0 + $script:Box.V + ' ' + $tColor + "todo:$tDone/$tTotal" + $script:Gm.Reset
+    }
+    else { '' }
     $undoSeg = if ($UndoCount -gt 0) {
         ' ' + $script:Gm.Grey0 + $script:Box.V + ' ' + $script:Gm.Yellow + "undo:$UndoCount" + $script:Gm.Reset
     }
     else { '' }
     $sep = ' ' + $script:Gm.Grey0 + $script:Box.V + $script:Gm.Reset + ' '
-    $midContent = $modelSeg + $sep + $permSeg + $sep + $gaugeSeg + $tokSeg + $undoSeg
+    $midContent = $modelSeg + $sep + $permSeg + $sep + $gaugeSeg + $tokSeg + $todoSeg + $undoSeg
     $midVisLen = (Strip-AnsiCodes -Text $midContent).Length
     $padRight = $innerW - $midVisLen
     $padStr = if ($padRight -gt 0) { ' ' * $padRight } else { '' }
@@ -270,6 +285,44 @@ function Write-ToolCallCard {
     )
     if ($script:OutputMode -eq 'json') { return }
     foreach ($ln in @(Format-ToolCallCard -Name $Name -Target $Target -Detail $Detail -Status $Status -Summary $Summary -ElapsedMs $ElapsedMs)) {
+        Write-Host $ln
+    }
+}
+
+function Format-TodoCard {
+    param($Todos)
+    if ($null -eq $Todos -or $Todos.Count -eq 0) { return @() }
+    $w = Get-TerminalWidth
+    $total = $Todos.Count
+    $done = @($Todos | Where-Object { $_.status -eq 'completed' }).Count
+    $hdr = ' ' + $script:Gm.BoldAqua + 'TODO ' + $script:Gm.Fg1 + "($done/$total completed)" + $script:Gm.Reset + ' '
+    $hdrVis = (Strip-AnsiCodes -Text $hdr).Length
+    $dashes = $w - 5 - $hdrVis
+    if ($dashes -lt 2) { $dashes = 2 }
+    $out = @('  ' + $script:Gm.Grey0 + $script:Box.TL + $script:Box.H + $script:Gm.Reset + $hdr + $script:Gm.Grey0 + ($script:Box.H * $dashes) + $script:Box.TR + $script:Gm.Reset)
+    foreach ($item in $Todos) {
+        $st = [string]$item.status
+        $icon = switch ($st) {
+            'completed'   { $script:Gm.Green + '[x]' + $script:Gm.Reset }
+            'in_progress' { $script:Gm.Yellow + '[>]' + $script:Gm.Reset }
+            default       { $script:Gm.Grey1 + '[ ]' + $script:Gm.Reset }
+        }
+        $txtColor = switch ($st) {
+            'completed'   { $script:Gm.Grey1 }
+            'in_progress' { $script:Gm.BoldYellow }
+            default       { $script:Gm.Fg1 }
+        }
+        $lineText = '  ' + $script:Gm.Grey0 + $script:Box.V + ' ' + $icon + ' ' + $txtColor + (Format-PreviewText $item.content) + $script:Gm.Reset
+        $out += $lineText
+    }
+    $out += ('  ' + $script:Gm.Grey0 + $script:Box.BL + ($script:Box.H * ($w - 4)) + $script:Box.BR + $script:Gm.Reset)
+    return $out
+}
+
+function Write-TodoCard {
+    param($Todos)
+    if ($script:OutputMode -eq 'json') { return }
+    foreach ($ln in @(Format-TodoCard -Todos $Todos)) {
         Write-Host $ln
     }
 }

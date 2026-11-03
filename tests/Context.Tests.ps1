@@ -52,17 +52,25 @@ try {
     $sessionFile = Join-Path $sessionDirTest 'test-ws1.jsonl'
     $otherWs = Join-Path $testRoot 'other-workspace'
     New-Item -ItemType Directory -Path $otherWs -Force | Out-Null
-    $sampleState = @{ messages = @(
-        @{ role = 'system'; content = 'sys' },
-        @{ role = 'user'; content = 'hi' },
-        @{ role = 'assistant'; content = 'hello' }
-    ) }
+    $sampleState = @{
+        messages = @(
+            @{ role = 'system'; content = 'sys' },
+            @{ role = 'user'; content = 'hi' },
+            @{ role = 'assistant'; content = 'hello' }
+        )
+        todos = @(
+            @{ content = 'Task 1'; status = 'completed' },
+            @{ content = 'Task 2'; status = 'pending' }
+        )
+    }
+    $script:ActiveSessionTodos = @($sampleState.todos)
     Save-AgentSession -SessionFile $sessionFile -State $sampleState -Workspace $workspacePath -Model 'model-a' -SessionId 'sid-1'
     $meta1 = Get-AgentSessionMeta -SessionFile $sessionFile
     Assert-True ($meta1.version -eq 1 -and $meta1.id -eq 'sid-1' -and $meta1.model -eq 'model-a') 'Session metadata header missing or invalid.'
+    $script:ActiveSessionTodos = @()
     $restoredState = @{}
     $restoredMsgs = @(Read-AgentSession -SessionFile $sessionFile -State $restoredState)
-    Assert-True ($restoredMsgs.Count -eq 3 -and $restoredMsgs[2].content -eq 'hello' -and $restoredState.session_id -eq 'sid-1') 'Session JSONL roundtrip failed.'
+    Assert-True ($restoredMsgs.Count -eq 3 -and $restoredMsgs[2].content -eq 'hello' -and $restoredState.session_id -eq 'sid-1' -and $restoredState.todos.Count -eq 2 -and $script:ActiveSessionTodos.Count -eq 2 -and $script:ActiveSessionTodos[0].content -eq 'Task 1') 'Session JSONL roundtrip with todos failed.'
     Start-Sleep -Milliseconds 50
     $otherSessionFile = Join-Path $sessionDirTest 'test-ws2.jsonl'
     Save-AgentSession -SessionFile $otherSessionFile -State $sampleState -Workspace $otherWs -Model 'model-b' -SessionId 'sid-2'

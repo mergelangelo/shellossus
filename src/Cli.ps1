@@ -445,6 +445,9 @@ function Resolve-ReplCommandAlias {
     if ($t -match '^/ctx(?:\s+(.+))?$') {
         return $(if ($Matches[1]) { '/context ' + $Matches[1] } else { '/context' })
     }
+    if ($t -match '^/td(?:\s+(.+))?$') {
+        return $(if ($Matches[1]) { '/todo ' + $Matches[1] } else { '/todo' })
+    }
     return $t
 }
 
@@ -474,9 +477,15 @@ function Format-TuiStatusCard {
         ($barV + $script:Gm.Grey1 + 'API Tokens:  ' + $script:Gm.Aqua + "in=$inTok out=$outTok" + $script:Gm.Grey1 + " (total=$(Format-TokenCount -Tokens ($inTok + $outTok)))" + $script:Gm.Reset),
         ($barV + $script:Gm.Grey1 + 'Session:     ' + $script:Gm.Fg + "$($State.session_id) " + $script:Gm.Grey1 + "| Name: $nmInfo | Leaf: $leafInfo" + $script:Gm.Reset),
         ($barV + $script:Gm.Grey1 + 'File:        ' + $script:Gm.Grey2 + $sessFileStr + $script:Gm.Reset),
-        ($barV + $script:Gm.Grey1 + 'Tools:       ' + $script:Gm.Aqua + $toolsStr + $script:Gm.Reset),
-        ('  ' + $script:Gm.Grey0 + $script:Box.BL + ($script:Box.H * ($w - 4)) + $script:Box.BR + $script:Gm.Reset)
+        ($barV + $script:Gm.Grey1 + 'Tools:       ' + $script:Gm.Aqua + $toolsStr + $script:Gm.Reset)
     )
+    $tdList = if ($script:ActiveSessionTodos -and $script:ActiveSessionTodos.Count -gt 0) { $script:ActiveSessionTodos } elseif ($State -and $State.todos -and $State.todos.Count -gt 0) { $State.todos } else { @() }
+    if ($tdList.Count -gt 0) {
+        $tDone = @($tdList | Where-Object { $_.status -eq 'completed' }).Count
+        $tTot = $tdList.Count
+        $lines += ($barV + $script:Gm.Grey1 + 'Tasks (Todo): ' + $script:Gm.BoldAqua + "$tDone/$tTot completed" + $script:Gm.Reset)
+    }
+    $lines += ('  ' + $script:Gm.Grey0 + $script:Box.BL + ($script:Box.H * ($w - 4)) + $script:Box.BR + $script:Gm.Reset)
     return $lines
 }
 
@@ -523,6 +532,7 @@ function Write-TuiHelpCard {
     Write-Host ($barV + $script:Gm.Aqua + '  /status (/s, /tokens)        ' + $script:Gm.Fg + 'Show TUI dashboard (context gauge, tokens, tools, session)' + $script:Gm.Reset)
     Write-Host ($barV + $script:Gm.Aqua + '  /diagnostics [on|off]        ' + $script:Gm.Fg + 'Toggle pre-request capability/tool diagnostics' + $script:Gm.Reset)
     Write-Host ($barV + $script:Gm.BoldYellow + 'History, Undo & Compaction' + $script:Gm.Reset)
+    Write-Host ($barV + $script:Gm.Aqua + '  /todo (/td) [clear]          ' + $script:Gm.Fg + 'View or clear active task plan checklist' + $script:Gm.Reset)
     Write-Host ($barV + $script:Gm.Aqua + '  /undo (/u)                   ' + $script:Gm.Fg + 'Revert last turn AND restore modified/created files on disk' + $script:Gm.Reset)
     Write-Host ($barV + $script:Gm.Aqua + '  /retry                       ' + $script:Gm.Fg + 'Retry the last failed user request' + $script:Gm.Reset)
     Write-Host ($barV + $script:Gm.Aqua + '  /continue [steps]            ' + $script:Gm.Fg + 'Continue after hitting step limit (or continue last response)' + $script:Gm.Reset)
@@ -758,12 +768,32 @@ if (-not $LibraryOnly) {
                 $state.messages = @($system)
                 $state.tree_entries = @()
                 $state.leaf_id = $null
+                $state.todos = @()
+                $script:ActiveSessionTodos = @()
                 Sync-AgentCapabilities -State $state | Out-Null
                 $undoStack = @()
                 $sessionFile = if ($NoSession) { '' } else { Join-Path $sessionDir ($newId + '.jsonl') }
                 $script:ActiveSessionId = $newId
                 $script:ActiveSessionFile = $sessionFile
                 Write-Host ($script:Gm.Grey1 + '  Started a new conversation session.' + $script:Gm.Reset)
+                continue
+            }
+            if ($trimmedQ -match '^/(?:todo|todos)(?:\s+(.+))?$') {
+                $sub = if ($Matches[1]) { $Matches[1].Trim().ToLower() } else { '' }
+                if ($sub -eq 'clear') {
+                    $script:ActiveSessionTodos = @()
+                    if ($state) { $state.todos = @() }
+                    Write-Host ($script:Gm.Grey1 + '  Cleared active todo list.' + $script:Gm.Reset)
+                }
+                else {
+                    $currTodos = if ($script:ActiveSessionTodos -and $script:ActiveSessionTodos.Count -gt 0) { $script:ActiveSessionTodos } elseif ($state -and $state.todos -and $state.todos.Count -gt 0) { $state.todos } else { @() }
+                    if ($currTodos.Count -gt 0) {
+                        Write-TodoCard -Todos $currTodos
+                    }
+                    else {
+                        Write-Host ($script:Gm.Grey1 + '  No active tasks in todo list.' + $script:Gm.Reset)
+                    }
+                }
                 continue
             }
             if ($trimmedQ -eq '/help') {

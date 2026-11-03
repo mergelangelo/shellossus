@@ -19,6 +19,7 @@ $script:ActiveApiKey = ''
 $script:ActiveState = $null
 $script:SubagentDepth = 0
 $script:MaxSubagentDepth = 1
+$script:ActiveSessionTodos = @()
 
 function Resolve-ToolCanonicalName {
     param([string]$Name)
@@ -42,6 +43,11 @@ function Resolve-ToolCanonicalName {
         'webfetch' { return 'fetch_url' }
         'search_web' { return 'web_search' }
         'websearch' { return 'web_search' }
+        'todo' { return 'todo' }
+        'todos' { return 'todo' }
+        'manage_todo' { return 'todo' }
+        'task_board' { return 'todo' }
+        'tasks' { return 'todo' }
         default { return $lower }
     }
 }
@@ -693,7 +699,8 @@ function Get-AgentCapabilities {
                         glob = @{ type = 'string'; description = 'Optional alias for include wildcard filter.' }
                         context_lines = @{ type = 'integer'; description = 'Optional surrounding context lines (0..5).' }
                         limit = @{ type = 'integer'; description = 'Optional maximum number of matches to return (1..500, default 100).' }
-                        file_offset = @{ type = 'integer'; description = 'Optional 0-based file offset to continue searching when truncated by max_files (default 0).' }
+                        file_offset = @{ type = 'integer'; description = 'Optional 0-based file offset. To continue, use next_file_offset together with next_start_line from the previous result (default 0).' }
+                        start_line = @{ type = 'integer'; description = 'Optional 1-based first matching line to include in the file at file_offset; later files start at line 1 (default 1).' }
                     }
                     required = @('path', 'pattern')
                 }
@@ -733,6 +740,34 @@ function Get-AgentCapabilities {
                         limit = @{ type = 'integer'; description = 'Optional maximum number of results (1..20, default 8).' }
                     }
                     required = @('query')
+                }
+            }
+        }
+    }
+    if (Test-IsToolEnabled -Name 'todo') {
+        $toolNames += 'todo'
+        $tools += @{
+            type = 'function'
+            function = @{
+                name = 'todo'
+                description = 'Track task plan and progress during multi-step work. Call this to initialize or update the active todo list (replaces entire list on each call).'
+                parameters = @{
+                    type = 'object'
+                    properties = @{
+                        todos = @{
+                            type = 'array'
+                            description = 'Complete ordered list of task items: array of {content, status}. Status must be pending, in_progress, or completed.'
+                            items = @{
+                                type = 'object'
+                                properties = @{
+                                    content = @{ type = 'string'; description = 'Clear, concise description of the task.' }
+                                    status = @{ type = 'string'; description = 'Task status: pending, in_progress, or completed.' }
+                                }
+                                required = @('content', 'status')
+                            }
+                        }
+                    }
+                    required = @('todos')
                 }
             }
         }
@@ -972,6 +1007,69 @@ function Format-RunAgentArguments {
     return $out
 }
 
+function Format-TodoArguments {
+    param($Arguments, $ArgsObj = $null)
+    if ($null -eq $Arguments -and $null -ne $ArgsObj) { $Arguments = $ArgsObj }
+    if ($null -eq $Arguments -or $Arguments -is [string] -or $Arguments -is [ValueType] -or $Arguments -is [array]) {
+        return $Arguments
+    }
+    $props = @(Get-ObjectPropertyNames -InputObject $Arguments)
+    $out = @{}
+    foreach ($p in $props) {
+        if (($p -eq 'tasks' -or $p -eq 'items' -or $p -eq 'checklist') -and ($props -notcontains 'todos')) {
+            $out['todos'] = $Arguments.$p
+        }
+        else {
+            $out[$p] = $Arguments.$p
+        }
+    }
+    if ($out.ContainsKey('todos') -and $null -ne $out['todos']) {
+        $rawTodos = $out['todos']
+        if ($rawTodos -is [string]) {
+            try {
+                $parsed = $rawTodos | ConvertFrom-Json -ErrorAction Stop
+                if ($parsed -is [array]) { $rawTodos = $parsed }
+                elseif ($null -ne $parsed) { $rawTodos = @($parsed) }
+            }
+            catch {}
+        }
+        elseif ($rawTodos -isnot [array] -and $rawTodos -isnot [ValueType]) {
+            $rawTodos = @($rawTodos)
+        }
+        if ($rawTodos -is [array]) {
+            $normArr = @()
+            foreach ($item in $rawTodos) {
+                if ($null -ne $item -and $item -isnot [string] -and $item -isnot [ValueType] -and $item -isnot [array]) {
+                    $ip = @(Get-ObjectPropertyNames -InputObject $item)
+                    $normItem = @{}
+                    foreach ($k in $ip) {
+                        if (($k -eq 'task' -or $k -eq 'title' -or $k -eq 'text' -or $k -eq 'description') -and ($ip -notcontains 'content')) {
+                            $normItem['content'] = $item.$k
+                        }
+                        elseif (($k -eq 'state' -or $k -eq 'done') -and ($ip -notcontains 'status')) {
+                            if ($k -eq 'done' -and $item.$k -is [bool]) {
+                                $normItem['status'] = if ($item.$k) { 'completed' } else { 'pending' }
+                            }
+                            else {
+                                $normItem['status'] = $item.$k
+                            }
+                        }
+                        else {
+                            $normItem[$k] = $item.$k
+                        }
+                    }
+                    $normArr += $normItem
+                }
+                else {
+                    $normArr += $item
+                }
+            }
+            $out['todos'] = $normArr
+        }
+    }
+    return $out
+}
+
 function Test-AgentToolArguments {
     param([string]$Name, $Arguments)
     if ($null -eq $Arguments -or $Arguments -is [string] -or $Arguments -is [ValueType] -or $Arguments -is [array]) {
@@ -992,7 +1090,7 @@ function Test-AgentToolArguments {
         }
         grep_files = @{
             required = @('path', 'pattern')
-            types = @{ path = 'string'; pattern = 'string'; literal = 'boolean'; case_sensitive = 'boolean'; include = 'string'; glob = 'string'; context_lines = 'integer'; limit = 'integer'; file_offset = 'integer' }
+            types = @{ path = 'string'; pattern = 'string'; literal = 'boolean'; case_sensitive = 'boolean'; include = 'string'; glob = 'string'; context_lines = 'integer'; limit = 'integer'; file_offset = 'integer'; start_line = 'integer' }
         }
         write_file = @{
             required = @('path', 'content')
@@ -1017,6 +1115,10 @@ function Test-AgentToolArguments {
         web_search = @{
             required = @('query')
             types = @{ query = 'string'; limit = 'integer' }
+        }
+        todo = @{
+            required = @('todos')
+            types = @{ todos = 'array' }
         }
     }
     $schema = $schemas[$Name]
@@ -1159,6 +1261,118 @@ function Test-AgentToolArguments {
             }
         }
     }
+    if ($Name -eq 'todo') {
+        if ($null -eq $Arguments.todos -or $Arguments.todos -isnot [array]) {
+            throw 'todos must be an array.'
+        }
+        foreach ($item in $Arguments.todos) {
+            if ($null -eq $item -or $item -is [string] -or $item -is [ValueType] -or $item -is [array]) {
+                throw 'Each item in todos[] must be an object with content and status.'
+            }
+            $itemProps = @(Get-ObjectPropertyNames -InputObject $item)
+            foreach ($ip in $itemProps) {
+                if ($ip -notin @('content', 'status')) {
+                    throw "Unknown property '$ip' in todo item."
+                }
+            }
+            if ($itemProps -notcontains 'content' -or $item.content -isnot [string] -or -not $item.content.Trim()) {
+                throw 'Each todo item must have a nonempty string content.'
+            }
+            if ($itemProps -notcontains 'status' -or $item.status -isnot [string] -or $item.status.ToLower() -notin @('pending', 'in_progress', 'completed')) {
+                throw "Each todo item must have status 'pending', 'in_progress', or 'completed'."
+            }
+        }
+    }
+}
+
+function Get-AgentProcessParents {
+    if ($env:OS -eq 'Windows_NT') {
+        # Built-in CIM cmdlets work in Windows PowerShell 5.1/ConstrainedLanguage.
+        # Get-Process only exposes Parent in newer PowerShell versions.
+        $startTimes = @{}
+        foreach ($p in @(Get-Process -ErrorAction Stop)) {
+            try {
+                if ($p.StartTime) { $startTimes[[string]$p.Id] = $p.StartTime.Ticks }
+            }
+            catch { }
+        }
+        foreach ($p in @(Get-CimInstance -ClassName Win32_Process -Property ProcessId, ParentProcessId -OperationTimeoutSec 2 -ErrorAction Stop)) {
+            $key = [string]$p.ProcessId
+            if ($startTimes.ContainsKey($key)) {
+                @{ id = [int]$p.ProcessId; parent_id = [int]$p.ParentProcessId; start_ticks = $startTimes[$key] }
+            }
+        }
+    }
+    else {
+        foreach ($p in @(Get-Process -ErrorAction Stop)) {
+            try {
+                $parent = $p.Parent
+                if ($parent) { @{ id = [int]$p.Id; parent_id = [int]$parent.Id; start_ticks = $p.StartTime.Ticks } }
+            }
+            catch { } # Processes can exit while the snapshot is being collected.
+        }
+    }
+}
+
+function Update-AgentProcessTree {
+    param([hashtable]$Tracked)
+    $parents = @(Get-AgentProcessParents)
+    $live = @{}
+    foreach ($key in @($Tracked.Keys)) {
+        $p = Get-Process -Id $Tracked[$key].id -ErrorAction SilentlyContinue
+        if ($p) {
+            try {
+                if ($p.StartTime.Ticks -eq $Tracked[$key].start_ticks) { $live[$key] = $true }
+            }
+            catch { }
+        }
+    }
+    # Repeat to discover grandchildren even if they precede their parents in
+    # the snapshot. Retain discovered identities after a parent exits/reparents.
+    do {
+        $added = $false
+        foreach ($row in $parents) {
+            $key = [string]$row.id
+            $parentKey = [string]$row.parent_id
+            if ($Tracked.ContainsKey($key) -or -not $live.ContainsKey($parentKey)) { continue }
+            $p = Get-Process -Id $row.id -ErrorAction SilentlyContinue
+            if (-not $p) { continue }
+            try { $ticks = $p.StartTime.Ticks } catch { continue }
+            if ($ticks -ne $row.start_ticks -or $ticks -lt $Tracked[$parentKey].start_ticks) { continue }
+            $Tracked[$key] = @{ id = $row.id; start_ticks = $ticks; depth = $Tracked[$parentKey].depth + 1 }
+            $live[$key] = $true
+            $added = $true
+        }
+    } while ($added)
+}
+
+function Stop-AgentProcessTree {
+    param($Process, [hashtable]$Tracked)
+    $cleanupErrors = @()
+    try { Update-AgentProcessTree -Tracked $Tracked }
+    catch { $cleanupErrors += "Cannot inspect process descendants: $($_.Exception.Message)" }
+    # Stop parents first to prevent them starting more work while cleaning up
+    # the descendants already discovered. Check identity to avoid PID reuse.
+    foreach ($entry in @($Tracked.Values | Sort-Object { $_.depth })) {
+        $p = Get-Process -Id $entry.id -ErrorAction SilentlyContinue
+        if (-not $p) { continue }
+        try {
+            if ($p.StartTime.Ticks -ne $entry.start_ticks) { continue }
+            Stop-Process -InputObject $p -Force -ErrorAction Stop
+            Wait-Process -InputObject $p -Timeout 2 -ErrorAction SilentlyContinue
+            if (-not $p.HasExited) { throw 'Process is still running.' }
+        }
+        catch { $cleanupErrors += "Cannot terminate process $($entry.id): $($_.Exception.Message)" }
+    }
+    # Covers cancellation immediately after Start-Process, before registration.
+    if ($Process -and -not $Process.HasExited) {
+        try {
+            Stop-Process -InputObject $Process -Force -ErrorAction Stop
+            Wait-Process -InputObject $Process -Timeout 2 -ErrorAction SilentlyContinue
+        }
+        catch { $cleanupErrors += "Cannot terminate command process: $($_.Exception.Message)" }
+    }
+    return $cleanupErrors
 }
 
 function Invoke-ShellCommand {
@@ -1178,6 +1392,10 @@ function Invoke-ShellCommand {
     $savedSMod = $env:SHELLOSSUS_MODEL
     $savedSReas = $env:SHELLOSSUS_REASONING_LEVEL
     $timedOut = $false
+    $proc = $null
+    $trackedProcesses = @{}
+    $commandFinished = $false
+    $terminationErrors = @()
     $exitCode = 0
     $startTime = Get-Date
     try {
@@ -1208,17 +1426,24 @@ function Invoke-ShellCommand {
             $proc = Start-Process -FilePath $shellExe -ArgumentList $argList -WorkingDirectory $rootFull -RedirectStandardOutput $outTemp.FullName -RedirectStandardError $errTemp.FullName -NoNewWindow -PassThru -ErrorAction Stop
             if (-not $proc.HasExited) {
                 try {
-                    Wait-Process -InputObject $proc -Timeout $TimeoutSec -ErrorAction Stop
+                    $trackedProcesses[[string]$proc.Id] = @{ id = $proc.Id; start_ticks = $proc.StartTime.Ticks; depth = 0 }
                 }
-                catch {
-                    if (-not $proc.HasExited) {
-                        $timedOut = $true
-                        Stop-Process -InputObject $proc -Force -ErrorAction SilentlyContinue
-                        Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
-                        Wait-Process -InputObject $proc -Timeout 2 -ErrorAction SilentlyContinue
-                    }
-                }
+                catch { if (-not $proc.HasExited) { throw } }
             }
+            $waitStart = Get-Date
+            while (-not $proc.HasExited) {
+                Update-AgentProcessTree -Tracked $trackedProcesses
+                if ($proc.HasExited) { break }
+                $remainingSeconds = $TimeoutSec - ((Get-Date) - $waitStart).TotalSeconds
+                if ($remainingSeconds -le 0) {
+                    $timedOut = $true
+                    $terminationErrors = @(Stop-AgentProcessTree -Process $proc -Tracked $trackedProcesses)
+                    break
+                }
+                if ($remainingSeconds -ge 1) { Wait-Process -InputObject $proc -Timeout 1 -ErrorAction SilentlyContinue }
+                else { Start-Sleep -Milliseconds 50 }
+            }
+            $commandFinished = $true
             if (-not $timedOut) {
                 if ($null -ne $proc.ExitCode) { $exitCode = [int]$proc.ExitCode }
             }
@@ -1260,7 +1485,12 @@ function Invoke-ShellCommand {
             catch {}
         }
         if ($timedOut) {
-            $timeoutNote = "[Command timed out after ${TimeoutSec}s and was terminated]"
+            $timeoutNote = if ($terminationErrors.Count -eq 0) {
+                "[Command timed out after ${TimeoutSec}s; command and tracked descendants were terminated]"
+            }
+            else {
+                "[Command timed out after ${TimeoutSec}s; process cleanup incomplete: " + ($terminationErrors -join '; ') + ']'
+            }
             $text = if ($text) { $text + "`n" + $timeoutNote } else { $timeoutNote }
         }
         return @{
@@ -1269,10 +1499,14 @@ function Invoke-ShellCommand {
             truncated = $truncated
             full_output_path = $fullLogRel
             timed_out = $timedOut
+            termination_errors = @($terminationErrors)
             wall_time_seconds = $elapsedSec
         }
     }
     finally {
+        if ($proc -and -not $commandFinished) {
+            $null = Stop-AgentProcessTree -Process $proc -Tracked $trackedProcesses
+        }
         if (Test-Path -LiteralPath $outTemp.FullName) { Remove-Item -LiteralPath $outTemp.FullName -Force -ErrorAction SilentlyContinue }
         if (Test-Path -LiteralPath $errTemp.FullName) { Remove-Item -LiteralPath $errTemp.FullName -Force -ErrorAction SilentlyContinue }
     }
@@ -1332,6 +1566,7 @@ function Invoke-AgentCommand {
         truncated = $res.truncated
         full_output_path = $res.full_output_path
         timed_out = $res.timed_out
+        termination_errors = @($res.termination_errors)
         wall_time_seconds = $res.wall_time_seconds
     } | ConvertTo-Json -Compress)
 }
@@ -1417,6 +1652,16 @@ function Format-DiffSnippet {
     return ((Format-PreviewText $Text.Substring(0, $MaxChars)) + ' ...')
 }
 
+function ConvertTo-ExistingLineEndings {
+    param([string]$Content, [string]$Original)
+    if ($Original.Contains("`r`n")) {
+        return $Content.Replace("`r`n", "`n").Replace("`n", "`r`n")
+    }
+    if ($Original.Contains("`n")) { return $Content.Replace("`r`n", "`n") }
+    # Empty and single-line files do not establish a newline convention.
+    return $Content
+}
+
 function Invoke-AgentWrite {
     param([string]$Root, [string]$Name, $Arguments)
     $before = $null
@@ -1444,7 +1689,10 @@ function Invoke-AgentWrite {
             $oldText = $before
             $newText = $Arguments.content
         }
-        $after = $Arguments.content
+        $after = if ($null -ne $before) {
+            ConvertTo-ExistingLineEndings -Content $Arguments.content -Original $before
+        }
+        else { $Arguments.content }
     }
     else {
         $path = Resolve-AgentPath -Root $Root -RelativePath $Arguments.path
@@ -1462,8 +1710,7 @@ function Invoke-AgentWrite {
         foreach ($ed in $rawEdits) {
             if ($ed.old_text -isnot [string] -or -not $ed.old_text -or $ed.new_text -isnot [string]) { throw 'Each edit must have nonempty old_text and string new_text.' }
             $m = Find-EditMatch -Content $before -OldText $ed.old_text
-            $repText = $ed.new_text
-            if ($before.Contains("`r`n")) { $repText = $repText.Replace("`r`n", "`n").Replace("`n", "`r`n") }
+            $repText = ConvertTo-ExistingLineEndings -Content $ed.new_text -Original $before
             $resolvedEdits += @{ index = $m.index; length = $m.length; matched_text = $m.matched_text; new_text = $repText }
         }
         for ($i = 0; $i -lt $resolvedEdits.Count; $i++) {
@@ -1597,6 +1844,17 @@ function Invoke-AgentUndo {
                 $preflightErrors += "Backup file missing for $($w.rel_path)."
                 continue
             }
+            try {
+                $backupContent = Get-Content -LiteralPath $w.backup -Raw -Encoding UTF8 -ErrorAction Stop
+                if ($null -eq $backupContent) { $backupContent = '' }
+                if ($null -eq $w.before_content -or $backupContent -cne $w.before_content) {
+                    throw 'Backup does not match the recorded original content.'
+                }
+            }
+            catch {
+                $preflightErrors += "Backup verification failed for $($w.rel_path); backup kept at $($w.backup): $($_.Exception.Message)"
+                continue
+            }
             if ($isLatestForPath) {
                 if (Test-Path -LiteralPath $w.full_path) {
                     $targetItem = Get-Item -LiteralPath $w.full_path -Force -ErrorAction SilentlyContinue
@@ -1660,8 +1918,10 @@ function Invoke-AgentUndo {
         if (-not $w -or $w.undone) { continue }
         try {
             if ($w.action -eq 'modified') {
-                $expectedOrig = Get-Content -LiteralPath $w.backup -Raw -Encoding UTF8 -ErrorAction Stop
-                if ($null -eq $expectedOrig) { $expectedOrig = '' }
+                $expectedOrig = [string]$w.before_content
+                $backupNow = Get-Content -LiteralPath $w.backup -Raw -Encoding UTF8 -ErrorAction Stop
+                if ($null -eq $backupNow) { $backupNow = '' }
+                if ($backupNow -cne $expectedOrig) { throw "Backup changed after preflight for $($w.rel_path)." }
                 Copy-Item -LiteralPath $w.backup -Destination $w.full_path -Force -ErrorAction Stop
                 $restoredNow = Get-Content -LiteralPath $w.full_path -Raw -Encoding UTF8 -ErrorAction Stop
                 if ($null -eq $restoredNow) { $restoredNow = '' }
@@ -1726,6 +1986,25 @@ function Get-ForkedSubagentMessages {
     return $forked
 }
 
+function Get-SubagentToolNames {
+    param($Role, [switch]$ForceReadOnly)
+    # Resolve patterns against the parent's effective capabilities, including
+    # exclusions and NoTools. Never interpret an empty intersection as allow-all.
+    foreach ($tool in @(Get-AgentTools)) {
+        $name = [string]$tool.function.name
+        if ($name -eq 'run_agent') { continue }
+        if (($ForceReadOnly -or $Role.permission -eq 'ReadOnly') -and $name -in @('write_file', 'edit_file', 'run_command')) { continue }
+        if ($Role.tools -and $Role.tools.Count -gt 0) {
+            $matched = $false
+            foreach ($pattern in $Role.tools) {
+                if ($name -like (Resolve-ToolCanonicalName -Name $pattern)) { $matched = $true; break }
+            }
+            if (-not $matched) { continue }
+        }
+        $name
+    }
+}
+
 function Invoke-SubagentInProcess {
     param(
         [string]$Root,
@@ -1749,26 +2028,15 @@ function Invoke-SubagentInProcess {
     $savedPerm = $script:AgentPermission
     $savedDepth = $script:SubagentDepth
     $savedTools = @($script:EnabledTools)
+    $savedNoTools = $script:NoTools
+    $childTools = @(Get-SubagentToolNames -Role $roleObj -ForceReadOnly:$ForceReadOnly)
     $savedModel = $script:ActiveModelId
     $savedState = $script:ActiveState
     try {
         $script:SubagentDepth = $savedDepth + 1
         $script:AgentPermission = $effPerm
-        if ($roleObj.tools -and $roleObj.tools.Count -gt 0) {
-            if ($savedTools.Count -gt 0) {
-                $intersect = @()
-                foreach ($rt in $roleObj.tools) {
-                    $cRt = Resolve-ToolCanonicalName -Name $rt
-                    foreach ($st in $savedTools) {
-                        if ($cRt -eq (Resolve-ToolCanonicalName -Name $st)) { $intersect += $cRt; break }
-                    }
-                }
-                $script:EnabledTools = $intersect
-            }
-            else {
-                $script:EnabledTools = @($roleObj.tools)
-            }
-        }
+        $script:EnabledTools = $childTools
+        $script:NoTools = ($savedNoTools -or $childTools.Count -eq 0)
         $baseSys = Build-SystemPrompt -Root $Root -ConfigDir $configDir
         $subSys = $baseSys + "`n`n[Subagent Role: $($roleObj.name)]`n" + $roleObj.system_prompt
         $initMsgs = @(if ($ContextMode -eq 'fork') {
@@ -1827,6 +2095,7 @@ function Invoke-SubagentInProcess {
         $script:AgentPermission = $savedPerm
         $script:SubagentDepth = $savedDepth
         $script:EnabledTools = $savedTools
+        $script:NoTools = $savedNoTools
         $script:ActiveModelId = $savedModel
         $script:ActiveState = $savedState
     }
@@ -1860,7 +2129,21 @@ function Invoke-ParallelSubagentProcesses {
     $workerCmd = @'
 $ErrorActionPreference = 'Stop'
 $pText = Get-Content -LiteralPath $env:SHELLOSSUS_SUB_PROMPT -Raw -Encoding UTF8
-& $env:SHELLOSSUS_SUB_SCRIPT -Workspace $env:SHELLOSSUS_SUB_ROOT -BaseUrl $env:SHELLOSSUS_SUB_BASEURL -Model $env:SHELLOSSUS_SUB_MODEL -Permission 'ReadOnly' -Mode 'json' -NoSession -MaxSteps ([int]$env:SHELLOSSUS_SUB_STEPS) -ExcludeTools 'run_agent' -Prompt $pText
+$workerArgs = @{
+    Workspace = $env:SHELLOSSUS_SUB_ROOT
+    BaseUrl = $env:SHELLOSSUS_SUB_BASEURL
+    Model = $env:SHELLOSSUS_SUB_MODEL
+    Permission = 'ReadOnly'
+    Mode = 'json'
+    NoSession = $true
+    MaxSteps = [int]$env:SHELLOSSUS_SUB_STEPS
+    Tools = $env:SHELLOSSUS_SUB_TOOLS
+    NoTools = ($env:SHELLOSSUS_SUB_NO_TOOLS -eq '1')
+    ExcludeTools = 'run_agent'
+    Prompt = $pText
+}
+if ($env:SHELLOSSUS_SUB_CONFIG) { $workerArgs.ConfigPath = $env:SHELLOSSUS_SUB_CONFIG }
+& $env:SHELLOSSUS_SUB_SCRIPT @workerArgs
 '@
     $argList = if ($env:OS -eq 'Windows_NT') {
         $escaped = ($workerCmd -replace '(\\*)"', '$1$1\"') -replace '(\\*)$', '$1$1'
@@ -1880,6 +2163,7 @@ $pText = Get-Content -LiteralPath $env:SHELLOSSUS_SUB_PROMPT -Raw -Encoding UTF8
                 $t = $Tasks[$i]
                 $rName = if ($t.role) { [string]$t.role } else { 'recon' }
                 $roleObj = Resolve-AgentRole -Name $rName -Root $Root -ConfigDir $configDir
+                $childTools = @(Get-SubagentToolNames -Role $roleObj -ForceReadOnly)
                 $effModel = if ($roleObj.model) { [string]$roleObj.model } elseif ($script:ActiveModelId) { $script:ActiveModelId } else { 'test-model' }
                 $promptTemp = New-TemporaryFile -ErrorAction Stop
                 $outTemp = New-TemporaryFile -ErrorAction Stop
@@ -1891,6 +2175,10 @@ $pText = Get-Content -LiteralPath $env:SHELLOSSUS_SUB_PROMPT -Raw -Encoding UTF8
                 }
                 $proc = $null
                 $savedSKey = $env:SHELLOSSUS_API_KEY
+                $savedWorkerEnv = @{}
+                foreach ($envName in @('SHELLOSSUS_SUB_SCRIPT', 'SHELLOSSUS_SUB_ROOT', 'SHELLOSSUS_SUB_BASEURL', 'SHELLOSSUS_SUB_MODEL', 'SHELLOSSUS_SUB_STEPS', 'SHELLOSSUS_SUB_PROMPT', 'SHELLOSSUS_SUB_TOOLS', 'SHELLOSSUS_SUB_NO_TOOLS', 'SHELLOSSUS_SUB_CONFIG')) {
+                    $savedWorkerEnv[$envName] = (Get-Item -LiteralPath ("Env:" + $envName) -ErrorAction SilentlyContinue).Value
+                }
                 try {
                     $env:SHELLOSSUS_API_KEY = $effKey
                     $env:SHELLOSSUS_SUB_SCRIPT = $ScriptPath
@@ -1899,16 +2187,17 @@ $pText = Get-Content -LiteralPath $env:SHELLOSSUS_SUB_PROMPT -Raw -Encoding UTF8
                     $env:SHELLOSSUS_SUB_MODEL = $effModel
                     $env:SHELLOSSUS_SUB_STEPS = [string]$MaxSteps
                     $env:SHELLOSSUS_SUB_PROMPT = $promptTemp.FullName
+                    $env:SHELLOSSUS_SUB_TOOLS = $childTools -join ','
+                    $env:SHELLOSSUS_SUB_NO_TOOLS = if ($childTools.Count -eq 0) { '1' } else { '0' }
+                    $env:SHELLOSSUS_SUB_CONFIG = $script:AgentConfigPath
                     $proc = Start-Process -FilePath $shellExe -ArgumentList $argList -WorkingDirectory $Root -RedirectStandardOutput $outTemp.FullName -RedirectStandardError $errTemp.FullName -NoNewWindow -PassThru -ErrorAction Stop
                 }
                 finally {
                     $env:SHELLOSSUS_API_KEY = $savedSKey
-                    $env:SHELLOSSUS_SUB_SCRIPT = $null
-                    $env:SHELLOSSUS_SUB_ROOT = $null
-                    $env:SHELLOSSUS_SUB_BASEURL = $null
-                    $env:SHELLOSSUS_SUB_MODEL = $null
-                    $env:SHELLOSSUS_SUB_STEPS = $null
-                    $env:SHELLOSSUS_SUB_PROMPT = $null
+                    foreach ($envName in $savedWorkerEnv.Keys) {
+                        if ($null -eq $savedWorkerEnv[$envName]) { Remove-Item -LiteralPath ("Env:" + $envName) -ErrorAction SilentlyContinue }
+                        else { Set-Item -LiteralPath ("Env:" + $envName) -Value $savedWorkerEnv[$envName] }
+                    }
                 }
                 $workers += @{
                     role = $roleObj.name
@@ -2299,12 +2588,52 @@ function Invoke-AgentWebSearch {
     }
 }
 
+function Invoke-AgentTodo {
+    param($Arguments)
+    $toolStart = Get-Date
+    $normList = @()
+    foreach ($item in @($Arguments.todos)) {
+        $cnt = [string]$item.content
+        $st = ([string]$item.status).Trim().ToLower()
+        if ($st -notin @('pending', 'in_progress', 'completed')) {
+            $st = 'pending'
+        }
+        $normList += @{
+            content = $cnt.Trim()
+            status = $st
+        }
+    }
+    $script:ActiveSessionTodos = @($normList)
+    if ($null -ne $script:ActiveState) {
+        $script:ActiveState.todos = @($normList)
+    }
+    $total = $normList.Count
+    $completed = @($normList | Where-Object { $_.status -eq 'completed' }).Count
+    $inProgress = @($normList | Where-Object { $_.status -eq 'in_progress' }).Count
+    $pending = @($normList | Where-Object { $_.status -eq 'pending' }).Count
+    $elapsedMs = [int](((Get-Date) - $toolStart).TotalMilliseconds)
+
+    $summaryText = "$completed/$total completed" + $(if ($inProgress -gt 0) { ", $inProgress in progress" } else { '' })
+    Write-ToolCallCard -Name 'todo' -Target "$total tasks" -Status 'ok' -Summary $summaryText -ElapsedMs $elapsedMs
+    Write-TodoCard -Todos $normList
+
+    $resultObj = @{
+        success = $true
+        total = $total
+        completed = $completed
+        in_progress = $inProgress
+        pending = $pending
+        todos = @($normList)
+    }
+    return ($resultObj | ConvertTo-Json -Depth 5 -Compress)
+}
+
 function Invoke-AgentTool {
     param([string]$Root, $Call)
     try {
         $rawName = [string]$Call.function.name
         $name = Resolve-ToolCanonicalName -Name $rawName
-        if ($name -notin @('list_files', 'read_file', 'find_files', 'grep_files', 'fetch_url', 'web_search', 'write_file', 'edit_file', 'run_command', 'run_agent')) { throw 'Unknown tool.' }
+        if ($name -notin @('list_files', 'read_file', 'find_files', 'grep_files', 'fetch_url', 'web_search', 'write_file', 'edit_file', 'run_command', 'run_agent', 'todo')) { throw 'Unknown tool.' }
         if ($script:AgentPermission -eq 'ReadOnly' -and $name -in @('write_file', 'edit_file', 'run_command')) {
             throw 'Permission mode ReadOnly does not allow file modifications or commands.'
         }
@@ -2318,7 +2647,11 @@ function Invoke-AgentTool {
         elseif ($name -eq 'run_agent') {
             $arguments = Format-RunAgentArguments -Arguments $arguments
         }
+        elseif ($name -eq 'todo') {
+            $arguments = Format-TodoArguments -Arguments $arguments
+        }
         Test-AgentToolArguments -Name $name -Arguments $arguments
+        if ($name -eq 'todo') { return (Invoke-AgentTodo -Arguments $arguments) }
         if ($name -eq 'fetch_url') { return (Invoke-AgentFetchUrl -Arguments $arguments) }
         if ($name -eq 'web_search') { return (Invoke-AgentWebSearch -Arguments $arguments) }
         if ($name -eq 'run_agent') { return (Invoke-AgentSubagent -Root $Root -Arguments $arguments) }
@@ -2419,6 +2752,11 @@ function Invoke-AgentTool {
                 $fileOffset = [int]$arguments.file_offset
                 if ($fileOffset -lt 0) { throw 'file_offset must be at least 0.' }
             }
+            $startLine = 1
+            if ($null -ne $arguments.start_line) {
+                $startLine = [int]$arguments.start_line
+                if ($startLine -lt 1) { throw 'start_line must be at least 1.' }
+            }
             $allCandidateFiles = @(if ($item.PSIsContainer) {
                 foreach ($walkEntry in @(Get-WorkspaceWalkEntries -Root $Root -SearchPath $path -FilesOnly)) {
                     $child = $walkEntry.item
@@ -2431,20 +2769,34 @@ function Invoke-AgentTool {
                 if ($item.Length -gt 1MB) { throw 'File exceeds 1 MiB.' }
                 $item.FullName
             })
+            # Offsets are stable while the candidate file set is unchanged.
+            $allCandidateFiles = @($allCandidateFiles | Sort-Object -CaseSensitive)
             $totalFiles = $allCandidateFiles.Count
-            $targetFiles = @($allCandidateFiles | Select-Object -Skip $fileOffset -First 500)
-            $filesScanned = $targetFiles.Count
-            $fileLimitReached = (($fileOffset + $filesScanned) -lt $totalFiles)
+            $filesScanned = 0
+            $fileLimitReached = $false
             $matchLimitReached = $false
             $linesTruncated = $false
             $hitCount = 0
-            $hits = @(if ($targetFiles.Count -gt 0) {
-                $selParams = @{ LiteralPath = $targetFiles; Pattern = $arguments.pattern; Encoding = 'UTF8'; ErrorAction = 'Stop' }
+            $hits = @()
+            $nextFileOffset = $null
+            $nextStartLine = $null
+            for ($fileIndex = $fileOffset; $fileIndex -lt $totalFiles -and $filesScanned -lt 500; $fileIndex++) {
+                $filesScanned++
+                $firstLine = if ($fileIndex -eq $fileOffset) { $startLine } else { 1 }
+                $selParams = @{ LiteralPath = $allCandidateFiles[$fileIndex]; Pattern = $arguments.pattern; Encoding = 'UTF8'; ErrorAction = 'Stop' }
                 if ($isLiteral) { $selParams.SimpleMatch = $true }
                 if ($isCaseSensitive) { $selParams.CaseSensitive = $true }
                 if ($ctxLines -gt 0) { $selParams.Context = @($ctxLines, $ctxLines) }
-                foreach ($m in @(Select-String @selParams)) {
-                    if ($hitCount -ge $maxMatches) { $matchLimitReached = $true; break }
+                # Keep one lookahead match so continuation within a file starts
+                # at the first result not returned, without buffering all matches.
+                $pageMatches = @(Select-String @selParams | Where-Object { $_.LineNumber -ge $firstLine } | Select-Object -First ($maxMatches - $hitCount + 1))
+                foreach ($m in $pageMatches) {
+                    if ($hitCount -ge $maxMatches) {
+                        $matchLimitReached = $true
+                        $nextFileOffset = $fileIndex
+                        $nextStartLine = [int]$m.LineNumber
+                        break
+                    }
                     $hitCount++
                     $lineText = [string]$m.Line
                     if ($lineText.Length -gt 300) {
@@ -2460,9 +2812,19 @@ function Invoke-AgentTool {
                     if ($ctxLines -gt 0 -and $m.Context) {
                         $hitObj.context = @($m.Context.PreContext) + @($lineText) + @($m.Context.PostContext)
                     }
-                    $hitObj
+                    $hits += $hitObj
                 }
-            })
+                if ($matchLimitReached) { break }
+                if ($fileIndex + 1 -lt $totalFiles) {
+                    $matchLimitReached = ($hitCount -ge $maxMatches)
+                    $fileLimitReached = ($filesScanned -ge 500)
+                    if ($matchLimitReached -or $fileLimitReached) {
+                        $nextFileOffset = $fileIndex + 1
+                        $nextStartLine = 1
+                        break
+                    }
+                }
+            }
             $truncated = ($fileLimitReached -or $matchLimitReached)
             $truncReason = if ($matchLimitReached -and $fileLimitReached) {
                 'max_matches_and_max_files'
@@ -2476,10 +2838,10 @@ function Invoke-AgentTool {
             else {
                 $null
             }
-            $nextFileOffset = if ($fileLimitReached) { $fileOffset + $filesScanned } else { $null }
             $notices = @()
             if ($matchLimitReached) { $notices += "${maxMatches} matches limit reached" }
-            if ($fileLimitReached) { $notices += "Scanned ${filesScanned} of ${totalFiles} files; use file_offset=${nextFileOffset} to continue" }
+            if ($fileLimitReached) { $notices += "Scanned ${filesScanned} of ${totalFiles} files" }
+            if ($truncated) { $notices += "Continue with file_offset=${nextFileOffset} and start_line=${nextStartLine} using the same search arguments" }
             if ($linesTruncated) { $notices += 'Some lines truncated to 300 chars; use read_file for full lines' }
             $noticeStr = if ($notices.Count -gt 0) { '[' + ($notices -join '. ') + ']' } else { $null }
             $elapsedMs = [int](((Get-Date) - $toolStart).TotalMilliseconds)
@@ -2492,6 +2854,7 @@ function Invoke-AgentTool {
                 files_scanned = $filesScanned
                 total_files = $totalFiles
                 next_file_offset = $nextFileOffset
+                next_start_line = $nextStartLine
                 lines_truncated = $linesTruncated
                 notice = $noticeStr
             } | ConvertTo-Json -Depth 5 -Compress)
