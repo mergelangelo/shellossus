@@ -23,8 +23,9 @@
 
 ### 3. [`src/Tools.ps1`](../src/Tools.ps1)
 - **Search Continuation (`grep_files`):** Truncated results return `next_file_offset` (0-based) and `next_start_line` (1-based). Pass both back as `file_offset` and `start_line` with the same search arguments. The line cursor applies only to the first file on the next page. Candidate paths are sorted; pagination assumes the file set and contents remain unchanged between requests. `files_scanned` counts only files actually visited on the current page.
-- **Tool Definitions (`Get-AgentTools`):** Exposes built-in tools (`list_files`, `read_file`, `find_files`, `grep_files`, `fetch_url`, `web_search`, `todo`, `run_agent`, `write_file`, `edit_file`, `run_command`), dynamically hiding write and command tools when `$script:AgentPermission -eq 'ReadOnly'`.
+- **Tool Definitions (`Get-AgentTools`):** Exposes built-in tools (`list_files`, `read_file`, `find_files`, `grep_files`, `fetch_url`, `web_search`, `todo`, `ask_user`, `run_agent`, `write_file`, `edit_file`, `run_command`), dynamically hiding write and command tools when `$script:AgentPermission -eq 'ReadOnly'`.
 - **Task Planning & Progress (`Invoke-AgentTodo`):** Log-only task board tool (`todo`) with whole-list atomic replacement, resilient argument formatting (`Format-TodoArguments`), validation, and live TUI checklist cards (`Format-TodoCard`).
+- **Interactive Questions & Plan Reviews (`Invoke-AgentAskUser`):** Interactive decision tool (`ask_user`) with `question` and `plan-review` presentation intents, option selection via `Invoke-TuiSelector`, custom free-text feedback, explicit plan approval tracking, and Markdown plan cards (`Format-PlanReviewCard`).
 - **Strict Schema Validation (`Test-AgentToolArguments`):**
   - Uses `Get-Member -MemberType NoteProperty` (compatible with `ConstrainedLanguage` mode) to inspect parsed JSON objects.
   - Verifies required parameters, rejects unknown parameters, and enforces actual runtime types (`[string]`, `[bool]`, `[int]`/`[long]`, `[array]`) without PowerShell truthy string coercion (e.g. rejecting `"overwrite": "false"`).
