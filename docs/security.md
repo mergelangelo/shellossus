@@ -11,8 +11,8 @@ You can set the permission mode at launch (`-Permission <Mode>`) or switch it at
 | Mode | Read & Search Tools | File Write & Edit Tools | Shell Execution (`run_command`) | Typical Use Case |
 | --- | --- | --- | --- | --- |
 | `ReadOnly` | Allowed | Hidden & blocked | Hidden & blocked | Code review, SQL/log analysis, architecture Q&A |
-| `Ask` *(default)* | Allowed | Requires typing `WRITE` | Requires typing `RUN` | Safe everyday pair programming |
-| `AutoEdit` | Allowed | Auto-approved (saves backup) | Requires typing `RUN` | Fast iterative coding while keeping shell commands gated |
+| `Ask` *(default)* | Allowed | Requires confirmation (`y` / `Enter` / `WRITE`) | Requires confirmation (`y` / `Enter` / `RUN`) | Safe everyday pair programming |
+| `AutoEdit` | Allowed | Auto-approved (saves backup) | Requires confirmation (`y` / `Enter` / `RUN`) | Fast iterative coding while keeping shell commands gated |
 | `Auto` | Allowed | Auto-approved (saves backup) | Auto-approved | Trusted automation or sandboxed environments |
 
 When resuming a saved session via `/resume`, `shellossus` resets the active permission mode to `Ask` unless `-Permission` was explicitly passed at launch.
