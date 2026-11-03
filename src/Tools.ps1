@@ -1239,34 +1239,40 @@ function Invoke-AgentCommand {
         if ($timeoutSec -lt 1 -or $timeoutSec -gt 600) { throw 'timeout_sec must be between 1 and 600.' }
     }
     if ($script:OutputMode -ne 'json') {
-        Write-Host ("`n" + $script:Gm.BoldYellow + 'PROPOSED run_command (in ' + $Root + '):' + $script:Gm.Reset)
-        Write-Host ($script:Gm.Bg1 + $script:Gm.Yellow + '  ' + (Format-PreviewText $cmdText) + '  ' + $script:Gm.Reset)
+        Write-Host ("`n  " + $script:Gm.Grey0 + $script:Box.TL + $script:Box.H + ' ' + $script:Gm.BoldYellow + $script:Box.Arrow + ' run_command ' + $script:Gm.Grey1 + '(' + $Root + ')' + $script:Gm.Reset)
+        Write-Host ('  ' + $script:Gm.Grey0 + $script:Box.V + ' ' + $script:Gm.Bg1 + $script:Gm.Yellow + '  ' + (Format-PreviewText $cmdText) + '  ' + $script:Gm.Reset)
     }
     if ($script:AgentPermission -eq 'Auto') {
         if ($script:OutputMode -ne 'json') {
-            Write-Host ($script:Gm.Aqua + '  [auto-approved by Auto mode]' + $script:Gm.Reset)
+            Write-Host ('  ' + $script:Gm.Grey0 + $script:Box.V + ' ' + $script:Gm.Aqua + $script:Box.Check + ' [auto-approved by Auto mode]' + $script:Gm.Reset)
         }
     }
     else {
         if ($script:OutputMode -eq 'json') {
             return (@{ status = 'cancelled'; message = 'Interactive confirmation is disabled in JSON mode. Use -Permission Auto to allow command execution.' } | ConvertTo-Json -Compress)
         }
-        Write-Host ($script:Gm.BoldYellow + 'Confirm: ' + $script:Gm.Fg) -NoNewline
+        Write-Host ('  ' + $script:Gm.Grey0 + $script:Box.V + ' ' + $script:Gm.BoldYellow + 'Confirm (' + $script:Gm.Fg1 + 'RUN' + $script:Gm.BoldYellow + ' to execute, Enter cancels): ' + $script:Gm.Fg) -NoNewline
         $approval = Read-Host 'Type RUN to execute this command; Enter cancels'
         Write-Host $script:Gm.Reset -NoNewline
         if ($approval -cne 'RUN') {
+            Write-Host ('  ' + $script:Gm.Grey0 + $script:Box.BL + $script:Box.H + ' ' + $script:Gm.Red + $script:Box.Cross + ' cancelled' + $script:Gm.Reset)
             return (@{ status = 'cancelled'; message = 'User declined command execution. Do not retry without a new user request.' } | ConvertTo-Json -Compress)
         }
     }
     $res = Invoke-ShellCommand -Root $Root -Command $cmdText -TimeoutSec $timeoutSec
-    if ($res.output -and $script:OutputMode -ne 'json') {
-        $previewLines = @($res.output -split "`r?`n" | Select-Object -First 15)
-        foreach ($pLine in $previewLines) {
-            Write-Host ($script:Gm.Grey1 + '    ' + (Format-PreviewText $pLine) + $script:Gm.Reset)
+    if ($script:OutputMode -ne 'json') {
+        if ($res.output) {
+            $previewLines = @($res.output -split "`r?`n" | Select-Object -First 15)
+            foreach ($pLine in $previewLines) {
+                Write-Host ('  ' + $script:Gm.Grey0 + $script:Box.V + '   ' + $script:Gm.Grey1 + (Format-PreviewText $pLine) + $script:Gm.Reset)
+            }
+            if (($res.output -split "`r?`n").Count -gt 15) {
+                Write-Host ('  ' + $script:Gm.Grey0 + $script:Box.V + '   ... (output truncated in terminal preview)' + $script:Gm.Reset)
+            }
         }
-        if (($res.output -split "`r?`n").Count -gt 15) {
-            Write-Host ($script:Gm.Grey0 + '    ... (output truncated in terminal preview)' + $script:Gm.Reset)
-        }
+        $cmdIcon = if ($res.timed_out -or $res.exit_code -ne 0) { $script:Gm.Red + $script:Box.Cross + $script:Gm.Reset } else { $script:Gm.Green + $script:Box.Check + $script:Gm.Reset }
+        $cmdColor = if ($res.timed_out -or $res.exit_code -ne 0) { $script:Gm.Red } else { $script:Gm.Grey2 }
+        Write-Host ('  ' + $script:Gm.Grey0 + $script:Box.BL + $script:Box.H + ' ' + $cmdIcon + ' ' + $cmdColor + ("exit {0}" -f $res.exit_code) + $script:Gm.Grey0 + ' | ' + $script:Gm.Grey1 + ("{0}s" -f $res.wall_time_seconds) + $script:Gm.Reset)
     }
     $status = if ($res.timed_out) { 'timed_out' } else { 'executed' }
     return (@{
@@ -1447,40 +1453,25 @@ function Invoke-AgentWrite {
     if ($after.Length -gt 1MB -or ($null -ne $before -and $before.Length -gt 1MB)) { throw 'File content exceeds 1 MiB limit.' }
     if ($after -match '\x00' -or ($null -ne $before -and $before -match '\x00')) { throw 'Binary content is not supported.' }
     if ($script:OutputMode -ne 'json') {
-        Write-Host ("`n" + $script:Gm.BoldYellow + 'PROPOSED ' + $Name + ': ' + $path + $script:Gm.Reset)
-        if ($null -ne $before) {
-            $prevPrefix = Format-DiffSnippet -Text $prefixText -MaxChars 300 -KeepTail
-            $prevSuffix = Format-DiffSnippet -Text $suffixText -MaxChars 300
-            $prevOld = Format-DiffSnippet -Text $oldText -MaxChars 4000
-            $prevNew = Format-DiffSnippet -Text $newText -MaxChars 4000
-            Write-Host ($script:Gm.BoldRed + '--- BEFORE ---' + $script:Gm.Reset)
-            Write-Host ($script:Gm.Grey0 + $prevPrefix + $script:Gm.Reset) -NoNewline
-            Write-Host ($script:Gm.BgDiffRed + $script:Gm.Red + $prevOld + $script:Gm.Reset) -NoNewline
-            Write-Host ($script:Gm.Grey0 + $prevSuffix + $script:Gm.Reset)
-            Write-Host ($script:Gm.BoldGreen + '--- AFTER ---' + $script:Gm.Reset)
-            Write-Host ($script:Gm.Grey0 + $prevPrefix + $script:Gm.Reset) -NoNewline
-            Write-Host ($script:Gm.BgDiffGreen + $script:Gm.Green + $prevNew + $script:Gm.Reset) -NoNewline
-            Write-Host ($script:Gm.Grey0 + $prevSuffix + $script:Gm.Reset)
-        }
-        else {
-            Write-Host ($script:Gm.BoldGreen + '--- AFTER ---' + $script:Gm.Reset)
-            Write-Host ($script:Gm.BgDiffGreen + $script:Gm.Green + (Format-DiffSnippet -Text $after -MaxChars 4000) + $script:Gm.Reset)
-        }
-        Write-Host ($script:Gm.Grey0 + '--- END OF PREVIEW ---' + $script:Gm.Reset)
+        Write-Host ''
+        Write-UnifiedDiffCard -Path $Arguments.path -ToolName $Name -Before $before -After $after
     }
     if ($script:AgentPermission -in @('AutoEdit', 'Auto')) {
         if ($script:OutputMode -ne 'json') {
-            Write-Host ($script:Gm.Aqua + '  [auto-approved by ' + $script:AgentPermission + ' mode]' + $script:Gm.Reset)
+            Write-Host ('  ' + $script:Gm.Aqua + $script:Box.Check + ' [auto-approved by ' + $script:AgentPermission + ' mode]' + $script:Gm.Reset)
         }
     }
     else {
         if ($script:OutputMode -eq 'json') {
             return (@{ status = 'cancelled'; message = 'Interactive confirmation is disabled in JSON mode. Use -Permission AutoEdit or Auto to allow file modifications.' } | ConvertTo-Json -Compress)
         }
-        Write-Host ($script:Gm.BoldYellow + 'Confirm: ' + $script:Gm.Fg) -NoNewline
+        Write-Host ('  ' + $script:Gm.BoldYellow + $script:Box.Arrow + ' Confirm (' + $script:Gm.Fg1 + 'WRITE' + $script:Gm.BoldYellow + ' to apply, Enter cancels): ' + $script:Gm.Fg) -NoNewline
         $approval = Read-Host 'Type WRITE to approve this file change; Enter cancels'
         Write-Host $script:Gm.Reset -NoNewline
-        if ($approval -cne 'WRITE') { return (@{ status = 'cancelled'; message = 'User declined. Do not retry without a new user request.' } | ConvertTo-Json -Compress) }
+        if ($approval -cne 'WRITE') {
+            Write-Host ('  ' + $script:Gm.Red + $script:Box.Cross + ' cancelled' + $script:Gm.Reset)
+            return (@{ status = 'cancelled'; message = 'User declined. Do not retry without a new user request.' } | ConvertTo-Json -Compress)
+        }
     }
     $stageFile = New-TemporaryFile -ErrorAction Stop
     $backupPath = $null
@@ -1747,7 +1738,7 @@ function Invoke-SubagentInProcess {
         }
         Sync-AgentCapabilities -State $childState -Root $Root | Out-Null
         if ($script:OutputMode -ne 'json') {
-            Write-Host ($script:Gm.Aqua + ("  [run_agent:{0}] ({1}, context={2}) " -f $roleObj.name, $effPerm, $ContextMode) + $script:Gm.Grey1 + (Invoke-TruncateLine -Line $TaskPrompt -MaxChars 90).text + $script:Gm.Reset)
+            Write-Host ("`n  " + $script:Gm.Grey0 + $script:Box.TL + $script:Box.H + ' ' + $script:Gm.Aqua + $script:Box.Arrow + (" run_agent:{0} " -f $roleObj.name) + $script:Gm.Yellow + ("[{0}; context={1}] " -f $effPerm, $ContextMode) + $script:Gm.Grey1 + (Invoke-TruncateLine -Line $TaskPrompt -MaxChars 80).text + $script:Gm.Reset)
         }
         Invoke-AgentTurn -State $childState -Endpoint $effEndpoint -ModelId $effModel -ApiKey $effKey -Root $Root -Steps $MaxSteps
         if ($null -ne $savedState) {
@@ -1764,6 +1755,9 @@ function Invoke-SubagentInProcess {
         }
         $fileOps = Get-CompactionFileOperations -Messages $childState.messages
         $subStatus = if ($childState.step_limit_reached) { 'step_limit_reached' } elseif ($childState.loop_detected) { 'loop_detected' } else { 'completed' }
+        if ($script:OutputMode -ne 'json') {
+            Write-Host ('  ' + $script:Gm.Grey0 + $script:Box.BL + $script:Box.H + ' ' + $script:Gm.Green + $script:Box.Check + ' ' + $script:Gm.Grey2 + ("run_agent:{0} {1} ({2} steps, read:{3}, modified:{4})" -f $roleObj.name, $subStatus, $assistantSteps, @($fileOps.read_files).Count, @($fileOps.modified_files).Count) + $script:Gm.Reset)
+        }
         return @{
             role = $roleObj.name
             permission = $effPerm
@@ -2080,12 +2074,10 @@ function Invoke-AgentTool {
         if ($name -eq 'run_agent') { return (Invoke-AgentSubagent -Root $Root -Arguments $arguments) }
         if ($name -eq 'run_command') { return (Invoke-AgentCommand -Root $Root -Arguments $arguments) }
         if ($name -in @('write_file', 'edit_file')) { return (Invoke-AgentWrite -Root $Root -Name $name -Arguments $arguments) }
+        $toolStart = Get-Date
         $allowSkill = ($name -eq 'read_file')
         $path = Resolve-AgentPath -Root $Root -RelativePath $arguments.path -AllowRegisteredSkill:$allowSkill
         $item = Get-Item -LiteralPath $path -Force -ErrorAction Stop
-        if ($script:OutputMode -ne 'json') {
-            Write-Host ($script:Gm.Yellow + ('  [{0}] ' -f $name) + $script:Gm.Grey1 + $arguments.path + $script:Gm.Reset)
-        }
         if ($name -eq 'list_files') {
             if (-not $item.PSIsContainer) { throw 'Expected a directory.' }
             $maxEntries = 200
@@ -2097,9 +2089,13 @@ function Invoke-AgentTool {
                 -not (Test-IsSecretFile $_)
             } | Sort-Object { $_.Name.ToLower() } | Select-Object -First ($maxEntries + 1))
             $isTrunc = ($entries.Count -gt $maxEntries)
+            $shownEntries = @($entries | Select-Object -First $maxEntries -Property Name, PSIsContainer, Length)
+            $elapsedMs = [int](((Get-Date) - $toolStart).TotalMilliseconds)
+            $sumText = "$($shownEntries.Count) entries" + $(if ($isTrunc) { ' (truncated)' } else { '' })
+            Write-ToolCallCard -Name 'list_files' -Target $arguments.path -Status 'ok' -Summary $sumText -ElapsedMs $elapsedMs
             $notice = if ($isTrunc) { "[${maxEntries} entries limit reached]" } else { $null }
             return (@{
-                entries = @($entries | Select-Object -First $maxEntries -Property Name, PSIsContainer, Length)
+                entries = $shownEntries
                 truncated = $isTrunc
                 notice = $notice
             } | ConvertTo-Json -Depth 5 -Compress)
@@ -2139,6 +2135,9 @@ function Invoke-AgentTool {
                     }
                 }
             })
+            $elapsedMs = [int](((Get-Date) - $toolStart).TotalMilliseconds)
+            $sumText = "$($found.Count) matches" + $(if ($truncated) { ' (truncated)' } else { '' })
+            Write-ToolCallCard -Name 'find_files' -Target $arguments.path -Detail "pattern=$rawPat" -Status 'ok' -Summary $sumText -ElapsedMs $elapsedMs
             $notice = if ($truncated) { "[${maxFind} results limit reached. Refine pattern or increase limit]" } else { $null }
             return (@{ matches = @($found); files = @($found); count = $found.Count; truncated = $truncated; notice = $notice } | ConvertTo-Json -Depth 5 -Compress)
         }
@@ -2233,6 +2232,9 @@ function Invoke-AgentTool {
             if ($fileLimitReached) { $notices += "Scanned ${filesScanned} of ${totalFiles} files; use file_offset=${nextFileOffset} to continue" }
             if ($linesTruncated) { $notices += 'Some lines truncated to 300 chars; use read_file for full lines' }
             $noticeStr = if ($notices.Count -gt 0) { '[' + ($notices -join '. ') + ']' } else { $null }
+            $elapsedMs = [int](((Get-Date) - $toolStart).TotalMilliseconds)
+            $sumText = "$($hits.Count) matches in $filesScanned files" + $(if ($truncated) { ' (truncated)' } else { '' })
+            Write-ToolCallCard -Name 'grep_files' -Target $arguments.path -Detail "pattern=$($arguments.pattern)" -Status 'ok' -Summary $sumText -ElapsedMs $elapsedMs
             return (@{
                 matches = @($hits)
                 truncated = $truncated
@@ -2273,6 +2275,8 @@ function Invoke-AgentTool {
         $totalLines = $allLines.Count
         $charBudget = 20000
         if ($totalLines -eq 0 -or $startLine -gt $totalLines) {
+            $elapsedMs = [int](((Get-Date) - $toolStart).TotalMilliseconds)
+            Write-ToolCallCard -Name 'read_file' -Target $arguments.path -Detail "lines $startLine..$totalLines" -Status 'ok' -Summary "0 lines ($totalLines total)" -ElapsedMs $elapsedMs
             return (@{
                 text = ''
                 start_line = $startLine
@@ -2336,6 +2340,9 @@ function Invoke-AgentTool {
         else {
             $null
         }
+        $elapsedMs = [int](((Get-Date) - $toolStart).TotalMilliseconds)
+        $sumText = "$($pageLines.Count) lines ($totalLines total)" + $(if ($truncated) { ' [paginated]' } else { '' })
+        Write-ToolCallCard -Name 'read_file' -Target $arguments.path -Detail "lines $startLine..$endLine" -Status 'ok' -Summary $sumText -ElapsedMs $elapsedMs
         return (@{
             text = ($pageLines -join "`n")
             start_line = $startLine

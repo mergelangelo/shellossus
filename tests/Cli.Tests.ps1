@@ -540,6 +540,22 @@ try {
     Invoke-AgentTurn -State $forkParentState -Endpoint 'https://example.invalid/v1/chat/completions' -ModelId 'test-model' -ApiKey 'fake' -Root $workspacePath -Steps 6 -MaxRepeatCalls 2
     Assert-True ($script:forkedSawPriorHistory -and (-not $forkParentState.loop_detected) -and $forkParentState.messages[-1].content -eq 'Verified v2 after subagent edit.') 'run_agent context=fork or mutationEpoch advancement after subagent edit failed.'
     $script:AgentPermission = 'Ask'
+
+    # TUI REPL command alias resolution, status dashboard card, and tree card rendering.
+    Assert-True ((Resolve-ReplCommandAlias -InputText '?') -eq '/help') 'Alias ? -> /help failed.'
+    Assert-True ((Resolve-ReplCommandAlias -InputText '/p AutoEdit') -eq '/permission AutoEdit') 'Alias /p AutoEdit -> /permission AutoEdit failed.'
+    Assert-True ((Resolve-ReplCommandAlias -InputText '/m glm-5') -eq '/model glm-5') 'Alias /m -> /model failed.'
+    Assert-True ((Resolve-ReplCommandAlias -InputText '/u') -eq '/undo') 'Alias /u -> /undo failed.'
+    Assert-True ((Resolve-ReplCommandAlias -InputText '/t e0002') -eq '/tree e0002') 'Alias /t -> /tree failed.'
+
+    Ensure-SessionTree -State $forkParentState
+    $statusCard = @(Format-TuiStatusCard -State $forkParentState -Model 'test-model' -MaxSteps 50 -SessionFile 'test.jsonl' -UndoCount 1)
+    $plainStatus = ($statusCard | ForEach-Object { Strip-AnsiCodes -Text $_ }) -join "`n"
+    Assert-True ($plainStatus.Contains('test-model') -and $plainStatus.Contains('Ask') -and $plainStatus.Contains('test.jsonl')) "Format-TuiStatusCard output unexpected: $plainStatus"
+
+    $treeCard = @(Format-TuiTreeCard -State $forkParentState)
+    $plainTree = ($treeCard | ForEach-Object { Strip-AnsiCodes -Text $_ }) -join "`n"
+    Assert-True ($plainTree.Contains('e0001') -and $plainTree.Contains('(root)')) "Format-TuiTreeCard output unexpected: $plainTree"
 }
 finally {
     Remove-TestEnvironment -Env $envData
