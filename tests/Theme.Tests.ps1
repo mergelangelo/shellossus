@@ -92,9 +92,16 @@ try {
     $script:mlQueue = @('3')
     $picked = Invoke-TuiSelector -Title 'Select Permission' -Items $items
     Assert-True ($picked -eq 'AutoEdit') "Invoke-TuiSelector expected AutoEdit for input 3, got $picked"
+    $script:mlQueue = @('Custom choice')
+    $customPicked = Invoke-TuiSelector -Title 'Select Permission' -Items $items -AllowFreeText
+    Assert-True ($customPicked -eq 'Custom choice') 'Invoke-TuiSelector -AllowFreeText failed.'
     $script:mlQueue = @('')
     $cancelled = Invoke-TuiSelector -Title 'Select Permission' -Items $items
     Assert-True ($null -eq $cancelled) 'Invoke-TuiSelector should return $null on empty input.'
+
+    $planCard = @(Format-PlanReviewCard -Question 'Review migration plan' -Plan "# Plan`n1. Step A`n2. Step B")
+    $plainPlan = ($planCard | ForEach-Object { Strip-AnsiCodes -Text $_ }) -join "`n"
+    Assert-True ($plainPlan.Contains('PLAN REVIEW') -and $plainPlan.Contains('Review migration plan') -and $plainPlan.Contains('Step A')) 'Format-PlanReviewCard failed.'
 }
 finally {
     Remove-Item Function:\Read-Host -ErrorAction SilentlyContinue

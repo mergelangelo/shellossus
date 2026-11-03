@@ -186,7 +186,7 @@ try {
     # 4 Permission modes: ReadOnly, Ask, AutoEdit, Auto.
     $script:approval = ''
     $script:AgentPermission = 'ReadOnly'
-    Assert-True (@(Get-AgentTools).Count -eq 8) 'ReadOnly mode should expose 8 tools (7 read-only + run_agent).'
+    Assert-True (@(Get-AgentTools).Count -eq 9) 'ReadOnly mode should expose 9 tools (8 read-only + run_agent).'
     $call.function.name = 'write_file'
     $call.function.arguments = '{"path":"ro.txt","content":"no"}'
     $roRes = Invoke-AgentTool -Root $workspacePath -Call $call | ConvertFrom-Json
@@ -348,7 +348,7 @@ try {
     $script:EnabledTools = @()
     $script:AgentPermission = 'ReadOnly'
     $capRo = Get-AgentCapabilities
-    Assert-True ($capRo.permission -eq 'ReadOnly' -and $capRo.tool_names.Count -eq 8 -and ($capRo.tool_names -contains 'todo') -and ($capRo.tool_names -contains 'fetch_url') -and ($capRo.tool_names -contains 'web_search') -and ($capRo.tool_names -contains 'run_agent') -and (-not $capRo.can_write) -and (-not $capRo.can_exec)) 'Get-AgentCapabilities in ReadOnly mode failed.'
+    Assert-True ($capRo.permission -eq 'ReadOnly' -and $capRo.tool_names.Count -eq 9 -and ($capRo.tool_names -contains 'ask_user') -and ($capRo.tool_names -contains 'todo') -and ($capRo.tool_names -contains 'fetch_url') -and ($capRo.tool_names -contains 'web_search') -and ($capRo.tool_names -contains 'run_agent') -and (-not $capRo.can_write) -and (-not $capRo.can_exec)) 'Get-AgentCapabilities in ReadOnly mode failed.'
     $script:AgentPermission = 'AutoEdit'
     $capAe = Get-AgentCapabilities
     Assert-True ($capAe.permission -eq 'AutoEdit' -and $capAe.can_write -and (-not $capAe.write_requires_confirmation) -and $capAe.exec_requires_confirmation) 'Get-AgentCapabilities in AutoEdit mode failed.'
@@ -595,6 +595,71 @@ try {
     $badStatusCall = @{ id = 'td-bad-st'; function = @{ name = 'todo'; arguments = '{"todos":[{"content":"Valid task","status":"invalid_status"}]}' } }
     $badStatusRes = Invoke-AgentTool -Root $workspacePath -Call $badStatusCall | ConvertFrom-Json
     Assert-True ($badStatusRes.error -like '*status*') 'todo tool did not reject invalid status.'
+
+    # Ask_user tool: aliases, argument normalization, plan-review approval, questions, and custom free text.
+    Assert-True ((Resolve-ToolCanonicalName -Name 'ask') -eq 'ask_user') 'Resolve-ToolCanonicalName ask alias failed.'
+    Assert-True ((Resolve-ToolCanonicalName -Name 'ask_user_question') -eq 'ask_user') 'Resolve-ToolCanonicalName ask_user_question alias failed.'
+    Assert-True ((Resolve-ToolCanonicalName -Name 'plan_review') -eq 'ask_user') 'Resolve-ToolCanonicalName plan_review alias failed.'
+    Assert-True ((Resolve-ToolCanonicalName -Name 'question') -eq 'ask_user') 'Resolve-ToolCanonicalName question alias failed.'
+
+    $normAskQuestion = Format-AskUserArguments -Arguments ([pscustomobject]@{ question = 'Which framework?'; options = @('Pester 4', 'Pester 5') })
+    Assert-True ($normAskQuestion.question -eq 'Which framework?' -and $normAskQuestion.intent -eq 'question' -and $normAskQuestion.options.Count -eq 2 -and $normAskQuestion.options[0].label -eq 'Pester 4' -and $normAskQuestion.allow_custom) 'Format-AskUserArguments question normalization failed.'
+
+    $normPlanArgs = Format-AskUserArguments -Arguments ([pscustomobject]@{ prompt = 'Review refactor'; plan = "# Plan`n1. Do refactor" })
+    Assert-True ($normPlanArgs.question -eq 'Review refactor' -and $normPlanArgs.intent -eq 'plan-review' -and $normPlanArgs.options.Count -eq 3 -and $normPlanArgs.options[0].value -eq 'Approve') 'Format-AskUserArguments plan-review default options failed.'
+
+    # Test execution: plan approval by index '1'
+    $script:approval = '1'
+    $planCall = @{
+        id = 'ask-plan-1'
+        function = @{
+            name = 'ask_user'
+            arguments = '{"question":"Approve refactoring plan?","intent":"plan-review","plan":"# Refactor Plan\n1. Add tests\n2. Modify src"}'
+        }
+    }
+    $planRes = Invoke-AgentTool -Root $workspacePath -Call $planCall | ConvertFrom-Json
+    Assert-True ($planRes.question -eq 'Approve refactoring plan?' -and $planRes.intent -eq 'plan-review' -and $planRes.approved -and $planRes.answer -eq 'Approve' -and (-not $planRes.cancelled)) 'ask_user plan approval failed.'
+
+    # Test execution: choice by label
+    $script:approval = 'Pester 5'
+    $qCall = @{
+        id = 'ask-q-1'
+        function = @{
+            name = 'ask_user'
+            arguments = '{"question":"Select test framework","options":["Pester 4","Pester 5"]}'
+        }
+    }
+    $qRes = Invoke-AgentTool -Root $workspacePath -Call $qCall | ConvertFrom-Json
+    Assert-True ($qRes.answer -eq 'Pester 5' -and (-not $qRes.approved) -and (-not $qRes.cancelled)) 'ask_user question choice failed.'
+
+    # Test execution: custom free-text feedback
+    $script:approval = 'Please add backward compatibility'
+    $customCall = @{
+        id = 'ask-custom-1'
+        function = @{
+            name = 'ask_user'
+            arguments = '{"question":"Approve changes?","intent":"plan-review"}'
+        }
+    }
+    $customRes = Invoke-AgentTool -Root $workspacePath -Call $customCall | ConvertFrom-Json
+    Assert-True ($customRes.custom -eq 'Please add backward compatibility' -and (-not $customRes.approved) -and (-not $customRes.cancelled)) 'ask_user custom feedback failed.'
+
+    # Test execution: cancel on empty input
+    $script:approval = ''
+    $cancelCall = @{
+        id = 'ask-cancel-1'
+        function = @{
+            name = 'ask_user'
+            arguments = '{"question":"Continue?"}'
+        }
+    }
+    $cancelRes = Invoke-AgentTool -Root $workspacePath -Call $cancelCall | ConvertFrom-Json
+    Assert-True ($cancelRes.cancelled -and $null -eq $cancelRes.answer) 'ask_user cancellation failed.'
+
+    # Validation: empty question rejected
+    $badAskCall = @{ id = 'ask-bad'; function = @{ name = 'ask_user'; arguments = '{"question":""}' } }
+    $badAskRes = Invoke-AgentTool -Root $workspacePath -Call $badAskCall | ConvertFrom-Json
+    Assert-True ($badAskRes.error -like '*question*') 'ask_user tool did not reject empty question.'
 }
 finally {
     Remove-TestEnvironment -Env $envData

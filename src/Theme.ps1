@@ -327,6 +327,39 @@ function Write-TodoCard {
     }
 }
 
+function Format-PlanReviewCard {
+    param([string]$Question, [string]$Plan)
+    $w = Get-TerminalWidth
+    $hdr = ' ' + $script:Gm.BoldOrange + 'PLAN REVIEW' + $script:Gm.Reset + ' '
+    $hdrVis = (Strip-AnsiCodes -Text $hdr).Length
+    $dashes = $w - 5 - $hdrVis
+    if ($dashes -lt 2) { $dashes = 2 }
+    $out = @('  ' + $script:Gm.Grey0 + $script:Box.TL + $script:Box.H + $script:Gm.Reset + $hdr + $script:Gm.Grey0 + ($script:Box.H * $dashes) + $script:Box.TR + $script:Gm.Reset)
+    if ($Question) {
+        $qClean = Format-PreviewText $Question
+        $out += ('  ' + $script:Gm.Grey0 + $script:Box.V + ' ' + $script:Gm.BoldYellow + $qClean + $script:Gm.Reset)
+        $out += ('  ' + $script:Gm.Grey0 + $script:Box.V + (' ' * ($w - 4)) + $script:Box.V + $script:Gm.Reset)
+    }
+    if ($Plan) {
+        $planLines = @($Plan -split "`r?`n")
+        foreach ($pLine in $planLines) {
+            $cleanLine = Format-PreviewText $pLine
+            $formattedLine = Format-MarkdownInline -Text $cleanLine
+            $out += ('  ' + $script:Gm.Grey0 + $script:Box.V + ' ' + $formattedLine + $script:Gm.Reset)
+        }
+    }
+    $out += ('  ' + $script:Gm.Grey0 + $script:Box.BL + ($script:Box.H * ($w - 4)) + $script:Box.BR + $script:Gm.Reset)
+    return $out
+}
+
+function Write-PlanReviewCard {
+    param([string]$Question, [string]$Plan)
+    if ($script:OutputMode -eq 'json') { return }
+    foreach ($ln in @(Format-PlanReviewCard -Question $Question -Plan $Plan)) {
+        Write-Host $ln
+    }
+}
+
 function Format-DiffLinePreview {
     param([string]$Line, [int]$MaxChars = 180)
     $clean = Format-PreviewText $Line
@@ -491,7 +524,8 @@ function Invoke-TuiSelector {
     param(
         [string]$Title,
         [array]$Items,
-        [string]$PromptText = 'Select number (Enter cancels)'
+        [string]$PromptText = 'Select number (Enter cancels)',
+        [switch]$AllowFreeText
     )
     if (-not $Items -or $Items.Count -eq 0) { return $null }
     if ($script:OutputMode -ne 'json') {
@@ -530,6 +564,9 @@ function Invoke-TuiSelector {
         if ($val -ieq $trimmed -or ([string]$it.label -ieq $trimmed)) {
             return $val
         }
+    }
+    if ($AllowFreeText) {
+        return $trimmed
     }
     return $null
 }
