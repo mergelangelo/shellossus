@@ -356,6 +356,9 @@ function Format-CapabilitiesPromptBlock {
     if ($cap.tool_names -contains 'todo') {
         $lines += '- Multi-step task tracking: call todo tool to record, update, and track task plan progress on multi-step work.'
     }
+    if ($cap.tool_names -contains 'ask_user') {
+        $lines += '- User questions and plan reviews: call ask_user with options and intent (question or plan-review) to clarify choices or get explicit approval on plans before modifying files.'
+    }
     $lines += '</capabilities>'
     return ($lines -join "`n")
 }

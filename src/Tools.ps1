@@ -48,6 +48,14 @@ function Resolve-ToolCanonicalName {
         'manage_todo' { return 'todo' }
         'task_board' { return 'todo' }
         'tasks' { return 'todo' }
+        'ask_user' { return 'ask_user' }
+        'ask' { return 'ask_user' }
+        'ask_question' { return 'ask_user' }
+        'ask_user_question' { return 'ask_user' }
+        'plan_review' { return 'ask_user' }
+        'plan-review' { return 'ask_user' }
+        'question' { return 'ask_user' }
+        'user_question' { return 'ask_user' }
         default { return $lower }
     }
 }
@@ -772,6 +780,44 @@ function Get-AgentCapabilities {
             }
         }
     }
+    if (Test-IsToolEnabled -Name 'ask_user') {
+        $toolNames += 'ask_user'
+        $tools += @{
+            type = 'function'
+            function = @{
+                name = 'ask_user'
+                description = 'Ask the user a concise question, request an architectural decision, or present a Markdown implementation plan for explicit review and approval before making changes.'
+                parameters = @{
+                    type = 'object'
+                    properties = @{
+                        question = @{
+                            type = 'string'
+                            description = 'The question or plan summary to present to the user.'
+                        }
+                        options = @{
+                            type = 'array'
+                            description = 'Optional choices to show the user (list of strings or objects with label and description). Put recommended choice first.'
+                            items = @{ type = 'string' }
+                        }
+                        intent = @{
+                            type = 'string'
+                            description = "Presentation intent: 'question' for architectural/decision choices (default), or 'plan-review' for reviewing a Markdown plan before modifying files."
+                            enum = @('question', 'plan-review')
+                        }
+                        plan = @{
+                            type = 'string'
+                            description = "Markdown text of the plan under review (used when intent is 'plan-review')."
+                        }
+                        allow_custom = @{
+                            type = 'boolean'
+                            description = 'Whether the user can provide custom free-text feedback if none of the options fit (default true).'
+                        }
+                    }
+                    required = @('question')
+                }
+            }
+        }
+    }
     if ($perm -ne 'ReadOnly') {
         foreach ($name in @('write_file', 'edit_file')) {
             if (-not (Test-IsToolEnabled -Name $name)) { continue }
@@ -1070,6 +1116,107 @@ function Format-TodoArguments {
     return $out
 }
 
+function Format-AskUserArguments {
+    param($Arguments, $ArgsObj = $null)
+    if ($null -eq $Arguments -and $null -ne $ArgsObj) { $Arguments = $ArgsObj }
+    if ($null -eq $Arguments -or $Arguments -is [string] -or $Arguments -is [ValueType] -or $Arguments -is [array]) {
+        return $Arguments
+    }
+    $props = @(Get-ObjectPropertyNames -InputObject $Arguments)
+    $q = ''
+    foreach ($p in @('question', 'query', 'prompt', 'title', 'message')) {
+        if ($props -contains $p -and $Arguments.$p) { $q = [string]$Arguments.$p; break }
+    }
+
+    $intent = 'question'
+    if ($props -contains 'intent' -and $Arguments.intent) {
+        $intent = ([string]$Arguments.intent).Trim().ToLower()
+    }
+    elseif ($props -contains 'plan' -or $props -contains 'plan_review' -or $props -contains 'planReview') {
+        $intent = 'plan-review'
+    }
+
+    $plan = ''
+    foreach ($p in @('plan', 'plan_text', 'planText', 'markdown')) {
+        if ($props -contains $p -and $Arguments.$p) { $plan = [string]$Arguments.$p; break }
+    }
+
+    $allowCustom = $true
+    if ($props -contains 'allow_custom' -and $null -ne $Arguments.allow_custom) {
+        $allowCustom = [bool]$Arguments.allow_custom
+    }
+    elseif ($props -contains 'allowCustom' -and $null -ne $Arguments.allowCustom) {
+        $allowCustom = [bool]$Arguments.allowCustom
+    }
+
+    $rawOptions = $null
+    foreach ($p in @('options', 'choices', 'answers')) {
+        if ($props -contains $p -and $null -ne $Arguments.$p) {
+            $rawOptions = $Arguments.$p
+            break
+        }
+    }
+    if ($rawOptions -is [string]) {
+        try {
+            $parsed = $rawOptions | ConvertFrom-Json -ErrorAction Stop
+            if ($parsed -is [array]) { $rawOptions = $parsed }
+            elseif ($null -ne $parsed) { $rawOptions = @($parsed) }
+        }
+        catch {}
+    }
+    $normOptions = @()
+    if ($null -ne $rawOptions) {
+        foreach ($opt in @($rawOptions)) {
+            if ($opt -is [string]) {
+                $optStr = ([string]$opt).Trim()
+                if ($optStr) {
+                    $normOptions += @{ label = $optStr; value = $optStr; description = '' }
+                }
+            }
+            elseif ($null -ne $opt -and $opt -isnot [ValueType] -and $opt -isnot [array]) {
+                $op = @(Get-ObjectPropertyNames -InputObject $opt)
+                $lbl = ''
+                foreach ($k in @('label', 'name', 'text', 'title', 'value')) {
+                    if ($op -contains $k -and $opt.$k) { $lbl = [string]$opt.$k; break }
+                }
+                $val = if ($op -contains 'value' -and $opt.value) { [string]$opt.value } else { $lbl }
+                $desc = ''
+                foreach ($k in @('description', 'desc', 'detail')) {
+                    if ($op -contains $k -and $opt.$k) { $desc = [string]$opt.$k; break }
+                }
+                if ($lbl) {
+                    $normOptions += @{ label = $lbl; value = $val; description = $desc }
+                }
+            }
+        }
+    }
+
+    if ($normOptions.Count -eq 0) {
+        if ($intent -eq 'plan-review') {
+            $normOptions = @(
+                @{ label = 'Approve (Recommended)'; value = 'Approve'; description = 'Accept plan and begin implementation' },
+                @{ label = 'Revise'; value = 'Revise'; description = 'Request changes to the plan' },
+                @{ label = 'Decline'; value = 'Decline'; description = 'Reject plan and stop' }
+            )
+        }
+        else {
+            $normOptions = @(
+                @{ label = 'Yes'; value = 'Yes'; description = '' },
+                @{ label = 'No'; value = 'No'; description = '' }
+            )
+        }
+    }
+
+    $out = @{
+        question = $q
+        options = $normOptions
+        intent = $intent
+        allow_custom = $allowCustom
+    }
+    if ($plan) { $out['plan'] = $plan }
+    return $out
+}
+
 function Test-AgentToolArguments {
     param([string]$Name, $Arguments)
     if ($null -eq $Arguments -or $Arguments -is [string] -or $Arguments -is [ValueType] -or $Arguments -is [array]) {
@@ -1119,6 +1266,10 @@ function Test-AgentToolArguments {
         todo = @{
             required = @('todos')
             types = @{ todos = 'array' }
+        }
+        ask_user = @{
+            required = @('question')
+            types = @{ question = 'string'; options = 'array'; intent = 'string'; plan = 'string'; allow_custom = 'boolean' }
         }
     }
     $schema = $schemas[$Name]
@@ -1281,6 +1432,14 @@ function Test-AgentToolArguments {
             if ($itemProps -notcontains 'status' -or $item.status -isnot [string] -or $item.status.ToLower() -notin @('pending', 'in_progress', 'completed')) {
                 throw "Each todo item must have status 'pending', 'in_progress', or 'completed'."
             }
+        }
+    }
+    if ($Name -eq 'ask_user') {
+        if (-not $Arguments.question -or -not $Arguments.question.Trim()) {
+            throw 'question must be a nonempty string.'
+        }
+        if ($Arguments.intent -and $Arguments.intent.ToLower() -notin @('question', 'plan-review')) {
+            throw "intent must be 'question' or 'plan-review'."
         }
     }
 }
@@ -2628,12 +2787,129 @@ function Invoke-AgentTodo {
     return ($resultObj | ConvertTo-Json -Depth 5 -Compress)
 }
 
+function Invoke-AgentAskUser {
+    param($Arguments)
+    $toolStart = Get-Date
+    $q = [string]$Arguments.question
+    $opts = @($Arguments.options)
+    $intent = if ($Arguments.intent) { [string]$Arguments.intent } else { 'question' }
+    $plan = if ($Arguments.plan) { [string]$Arguments.plan } else { '' }
+    $allowCustom = if ($null -ne $Arguments.allow_custom) { [bool]$Arguments.allow_custom } else { $true }
+
+    if ($script:OutputMode -ne 'json') {
+        if ($intent -eq 'plan-review' -and $plan) {
+            Write-PlanReviewCard -Question $q -Plan $plan
+        }
+    }
+
+    $selectorItems = @()
+    foreach ($opt in $opts) {
+        $lbl = [string]$opt.label
+        $val = if ($opt.value) { [string]$opt.value } else { $lbl }
+        $desc = if ($opt.description) { [string]$opt.description } else { '' }
+        $selectorItems += @{
+            label = $lbl
+            value = $val
+            description = $desc
+            active = $false
+        }
+    }
+
+    $customChoice = $null
+    $chosenAnswer = $null
+    $isCancelled = $false
+    $isApproved = $false
+
+    if ($script:OutputMode -eq 'json') {
+        $mocked = Read-Host
+        if ($mocked -and $mocked.Trim()) {
+            $trimmedMock = $mocked.Trim()
+            if ($trimmedMock -match '^\d+$') {
+                $idx = [int]$trimmedMock - 1
+                if ($idx -ge 0 -and $idx -lt $selectorItems.Count) {
+                    $chosenAnswer = $selectorItems[$idx].value
+                }
+                else {
+                    $chosenAnswer = $trimmedMock
+                }
+            }
+            else {
+                $matchedItem = $selectorItems | Where-Object { $_.value -ieq $trimmedMock -or $_.label -ieq $trimmedMock } | Select-Object -First 1
+                if ($matchedItem) {
+                    $chosenAnswer = $matchedItem.value
+                }
+                else {
+                    $chosenAnswer = $trimmedMock
+                    $customChoice = $trimmedMock
+                }
+            }
+        }
+        else {
+            if ($selectorItems.Count -gt 0) {
+                $chosenAnswer = $selectorItems[0].value
+            }
+            else {
+                $isCancelled = $true
+            }
+        }
+    }
+    else {
+        $title = if ($intent -eq 'plan-review') { "Plan Review: $q" } else { "Question: $q" }
+        $prompt = if ($allowCustom) { 'Select number or type response (Enter cancels)' } else { 'Select number (Enter cancels)' }
+        $picked = Invoke-TuiSelector -Title $title -Items $selectorItems -PromptText $prompt -AllowFreeText:$allowCustom
+        if ($null -eq $picked -or -not [string]$picked.Trim()) {
+            $isCancelled = $true
+        }
+        else {
+            $pickedStr = [string]$picked.Trim()
+            $matchedItem = $selectorItems | Where-Object { $_.value -ieq $pickedStr -or $_.label -ieq $pickedStr } | Select-Object -First 1
+            if ($matchedItem) {
+                $chosenAnswer = $matchedItem.value
+            }
+            else {
+                $chosenAnswer = $pickedStr
+                $customChoice = $pickedStr
+            }
+        }
+    }
+
+    if (-not $isCancelled -and $intent -eq 'plan-review') {
+        if ($chosenAnswer -match '^(Approve|Yes|Ok|Accept)') {
+            $isApproved = $true
+        }
+    }
+
+    $elapsedMs = [int](((Get-Date) - $toolStart).TotalMilliseconds)
+    $summaryText = if ($isCancelled) {
+        'cancelled'
+    }
+    elseif ($intent -eq 'plan-review') {
+        if ($isApproved) { "Approved ($chosenAnswer)" } else { "Feedback ($chosenAnswer)" }
+    }
+    else {
+        "Answered: $chosenAnswer"
+    }
+
+    $statusVal = if ($isCancelled) { 'cancelled' } else { 'ok' }
+    Write-ToolCallCard -Name 'ask_user' -Target $intent -Detail $q -Status $statusVal -Summary $summaryText -ElapsedMs $elapsedMs
+
+    $resultObj = @{
+        question = $q
+        intent = $intent
+        answer = $chosenAnswer
+        custom = $customChoice
+        approved = $isApproved
+        cancelled = $isCancelled
+    }
+    return ($resultObj | ConvertTo-Json -Depth 5 -Compress)
+}
+
 function Invoke-AgentTool {
     param([string]$Root, $Call)
     try {
         $rawName = [string]$Call.function.name
         $name = Resolve-ToolCanonicalName -Name $rawName
-        if ($name -notin @('list_files', 'read_file', 'find_files', 'grep_files', 'fetch_url', 'web_search', 'write_file', 'edit_file', 'run_command', 'run_agent', 'todo')) { throw 'Unknown tool.' }
+        if ($name -notin @('list_files', 'read_file', 'find_files', 'grep_files', 'fetch_url', 'web_search', 'write_file', 'edit_file', 'run_command', 'run_agent', 'todo', 'ask_user')) { throw 'Unknown tool.' }
         if ($script:AgentPermission -eq 'ReadOnly' -and $name -in @('write_file', 'edit_file', 'run_command')) {
             throw 'Permission mode ReadOnly does not allow file modifications or commands.'
         }
@@ -2650,7 +2926,11 @@ function Invoke-AgentTool {
         elseif ($name -eq 'todo') {
             $arguments = Format-TodoArguments -Arguments $arguments
         }
+        elseif ($name -eq 'ask_user') {
+            $arguments = Format-AskUserArguments -Arguments $arguments
+        }
         Test-AgentToolArguments -Name $name -Arguments $arguments
+        if ($name -eq 'ask_user') { return (Invoke-AgentAskUser -Arguments $arguments) }
         if ($name -eq 'todo') { return (Invoke-AgentTodo -Arguments $arguments) }
         if ($name -eq 'fetch_url') { return (Invoke-AgentFetchUrl -Arguments $arguments) }
         if ($name -eq 'web_search') { return (Invoke-AgentWebSearch -Arguments $arguments) }
