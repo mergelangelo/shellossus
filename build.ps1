@@ -20,6 +20,8 @@ param(
     [string]$ConfigPath = "$(if ($env:USERPROFILE) { $env:USERPROFILE } else { $HOME })\.shellossus\.env",
     [int]$MaxSteps = 50,
     [int]$MaxRepeatCalls = 3,
+    [string]$ContextWindow = $env:SHELLOSSUS_CONTEXT_WINDOW,
+    [string]$CompactThreshold = $env:SHELLOSSUS_COMPACT_THRESHOLD,
     [string]$Permission = 'Ask',
     [string]$ReasoningEffort = '',
     [string]$Prompt = '',

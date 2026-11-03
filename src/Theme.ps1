@@ -72,19 +72,47 @@ function Format-TokenCount {
 }
 
 function Format-ContextGauge {
-    param([int]$Chars, [int]$MaxChars = 60000, [int]$Width = 10)
-    if ($MaxChars -le 0) { $MaxChars = 60000 }
+    param(
+        [int]$Chars = -1,
+        [int]$MaxChars = 0,
+        [int]$Tokens = -1,
+        [int]$MaxTokens = 0,
+        [int]$CompactTokens = 0,
+        [int]$Width = 10
+    )
     if ($Width -lt 4) { $Width = 4 }
-    $estTok = [int](($Chars + 3) / 4)
-    $maxTok = [int](($MaxChars + 3) / 4)
-    $pct = [int](($Chars * 100) / $MaxChars)
+    $estTok = if ($Tokens -ge 0) {
+        $Tokens
+    }
+    elseif ($Chars -ge 0) {
+        [int](($Chars + 3) / 4)
+    }
+    else {
+        0
+    }
+    $maxTok = if ($MaxTokens -gt 0) {
+        $MaxTokens
+    }
+    elseif ($MaxChars -gt 0) {
+        [int](($MaxChars + 3) / 4)
+    }
+    elseif ($script:ContextWindowTokens -gt 0) {
+        [int]$script:ContextWindowTokens
+    }
+    else {
+        128000
+    }
+    if ($maxTok -le 0) { $maxTok = 128000 }
+    $pct = [int](($estTok * 100) / $maxTok)
     if ($pct -lt 0) { $pct = 0 }
     $clampedPct = if ($pct -gt 100) { 100 } else { $pct }
     $filled = [int](($clampedPct * $Width + 50) / 100)
     if ($filled -gt $Width) { $filled = $Width }
     if ($filled -lt 0) { $filled = 0 }
     $empty = $Width - $filled
-    $barColor = if ($pct -ge 80) { $script:Gm.Red } elseif ($pct -ge 50) { $script:Gm.Yellow } else { $script:Gm.Green }
+    $colorRefTok = if ($CompactTokens -gt 0) { $CompactTokens } else { $maxTok }
+    $compactPct = if ($colorRefTok -gt 0) { [int](($estTok * 100) / $colorRefTok) } else { $pct }
+    $barColor = if ($compactPct -ge 85 -or $pct -ge 80) { $script:Gm.Red } elseif ($compactPct -ge 55 -or $pct -ge 50) { $script:Gm.Yellow } else { $script:Gm.Green }
     $bar = $barColor + ($script:Box.BarFull * $filled) + $script:Gm.Grey0 + ($script:Box.BarEmpty * $empty) + $script:Gm.Reset
     $tokStr = (Format-TokenCount -Tokens $estTok) + '/' + (Format-TokenCount -Tokens $maxTok)
     return ($bar + ' ' + $barColor + ("{0}%" -f $pct) + $script:Gm.Reset + ' ' + $script:Gm.Grey1 + '(' + $tokStr + ')' + $script:Gm.Reset)
@@ -158,16 +186,22 @@ function Format-TuiStatusBar {
     if ($topDashes -lt 2) { $topDashes = 2 }
     $lineTop = $script:Gm.Grey0 + $script:Box.TL + $script:Box.H + $script:Gm.Reset + $topTitle + $script:Gm.Grey0 + ($script:Box.H * $topDashes) + $script:Box.TR + $script:Gm.Reset
 
-    $chars = 0
-    if ($State -and $State.messages) {
-        foreach ($m in @($State.messages)) {
-            if ($m.content) { $chars += ([string]$m.content).Length }
+    $stBar = if (Get-Command -Name 'Get-ContextStats' -ErrorAction SilentlyContinue) {
+        Get-ContextStats -State $State
+    }
+    else {
+        $cTmp = 0
+        if ($State -and $State.messages) {
+            foreach ($m in @($State.messages)) {
+                if ($m.content) { $cTmp += ([string]$m.content).Length }
+            }
         }
+        @{ est_tokens = [int](($cTmp + 3) / 4); context_window_tokens = 128000; compact_threshold_tokens = 96000 }
     }
     $effStr = if ($script:ReasoningEffort) { ':' + $script:ReasoningEffort } elseif ($script:ShowReasoning -eq 'hide') { ':hide' } else { '' }
     $modelSeg = $script:Gm.Fg1 + $Model + $script:Gm.Grey1 + $effStr + $script:Gm.Reset
     $permSeg = Format-PermissionBadge -Permission $script:AgentPermission
-    $gaugeSeg = Format-ContextGauge -Chars $chars -MaxChars 60000 -Width 8
+    $gaugeSeg = Format-ContextGauge -Tokens $stBar.est_tokens -MaxTokens $stBar.context_window_tokens -CompactTokens $stBar.compact_threshold_tokens -Width 8
     $inTok = if ($State -and $State.usage_input_tokens) { [int]$State.usage_input_tokens } else { 0 }
     $outTok = if ($State -and $State.usage_output_tokens) { [int]$State.usage_output_tokens } else { 0 }
     $tokSeg = if (($inTok + $outTok) -gt 0) {

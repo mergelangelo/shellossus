@@ -255,6 +255,9 @@ try {
     $clCyr = ([string][char]0x0447) + ([string][char]0x0442) + ([string][char]0x043E) + '?'
     $clAsciiJson = ConvertTo-AsciiJson -Json (@{ q = $clCyr } | ConvertTo-Json -Compress)
     Assert-True (($clAsciiJson -notmatch '[^\x00-\x7F]') -and (([string]($clAsciiJson | ConvertFrom-Json).q) -eq $clCyr)) 'ConstrainedLanguage ConvertTo-AsciiJson failed.'
+    $clLim = Set-AgentContextLimits -WindowSpec '128k' -CompactSpec '80k'
+    Assert-True ($clLim.context_window_tokens -eq 128000 -and $clLim.compact_threshold_tokens -eq 80000) 'ConstrainedLanguage Set-AgentContextLimits failed.'
+    $null = Set-AgentContextLimits -WindowSpec '128k' -CompactSpec '75%'
 }
 finally {
     Remove-TestEnvironment -Env $envData

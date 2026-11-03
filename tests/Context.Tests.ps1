@@ -264,6 +264,15 @@ try {
         @{ role = 'tool'; tool_call_id = 'sub1'; content = '{"status":"completed","read_files":["sub-read.sql","sub-both.sql"],"modified_files":["sub-both.sql","sub-mod.sql"]}' }
     )
     Assert-True (($subOps.read_files -contains 'sub-read.sql') -and ($subOps.read_files -notcontains 'sub-both.sql') -and ($subOps.modified_files -contains 'sub-both.sql') -and ($subOps.modified_files -contains 'sub-mod.sql')) 'Get-CompactionFileOperations did not extract read_files and modified_files from run_agent tool result.'
+
+    # Context window (default 128k) and auto-compact threshold (default 96k = 75%), token spec parsing, and API prompt_tokens tracking.
+    Assert-True ((Resolve-TokenBudgetValue -Spec '128k') -eq 128000) 'Resolve-TokenBudgetValue 128k failed.'
+    Assert-True ((Resolve-TokenBudgetValue -Spec '75%' -BaseTokens 128000) -eq 96000) 'Resolve-TokenBudgetValue 75% of 128k failed.'
+    $defStats = Get-ContextStats -State $sampleState
+    Assert-True ($defStats.context_window_tokens -eq 128000 -and $defStats.compact_threshold_tokens -eq 96000) "Expected default 128k/96k limits, got $($defStats.context_window_tokens)/$($defStats.compact_threshold_tokens)"
+    $customLim = Set-AgentContextLimits -WindowSpec '64k' -CompactSpec '48k'
+    Assert-True ($customLim.context_window_tokens -eq 64000 -and $customLim.compact_threshold_tokens -eq 48000 -and $customLim.compact_pct -eq 75) 'Set-AgentContextLimits 64k/48k failed.'
+    $null = Set-AgentContextLimits -WindowSpec '128k' -CompactSpec '75%'
 }
 finally {
     Remove-TestEnvironment -Env $envData

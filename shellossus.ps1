@@ -5,6 +5,8 @@ param(
     [string]$ConfigPath = "$(if ($env:USERPROFILE) { $env:USERPROFILE } else { $HOME })\.shellossus\.env",
     [int]$MaxSteps = 50,
     [int]$MaxRepeatCalls = 3,
+    [string]$ContextWindow = $env:SHELLOSSUS_CONTEXT_WINDOW,
+    [string]$CompactThreshold = $env:SHELLOSSUS_COMPACT_THRESHOLD,
     [string]$Permission = 'Ask',
     [string]$ReasoningEffort = '',
     [string]$Prompt = '',
@@ -64,7 +66,7 @@ function Read-AgentConfig {
         $lineNumber++
         $trimmed = $line.Trim()
         if (-not $trimmed -or $trimmed.StartsWith('#')) { continue }
-        if ($trimmed -notmatch '^(?:(SHELLOSSUS|H_AGENT)_(BASE_URL|MODEL|API_KEY|WORKSPACE))\s*=(.*)$') {
+        if ($trimmed -notmatch '^(?:(SHELLOSSUS|H_AGENT)_(BASE_URL|MODEL|API_KEY|WORKSPACE|CONTEXT_WINDOW|COMPACT_THRESHOLD))\s*=(.*)$') {
             throw "Invalid config entry at line $lineNumber. Expected a supported SHELLOSSUS_* key=value."
         }
         $prefix = $Matches[1].ToUpper()
@@ -99,6 +101,13 @@ function Save-AgentConfig {
         # Quotes preserve paths, # and = without interpreting backslashes.
         if ($value.Contains('"')) { throw 'Config values cannot contain double quotes.' }
         $lines += $key + '="' + $value + '"'
+    }
+    foreach ($optKey in @('SHELLOSSUS_CONTEXT_WINDOW', 'SHELLOSSUS_COMPACT_THRESHOLD')) {
+        if ($Config.ContainsKey($optKey) -and $Config[$optKey]) {
+            $optVal = [string]$Config[$optKey]
+            if ($optVal -match "[`r`n]" -or $optVal.Contains('"')) { throw 'Invalid optional config value.' }
+            $lines += $optKey + '="' + $optVal + '"'
+        }
     }
     $parent = Split-Path $Path -Parent
     if ($parent -and -not (Test-Path -LiteralPath $parent)) { New-Item -ItemType Directory -Path $parent -ErrorAction Stop | Out-Null }
@@ -289,19 +298,47 @@ function Format-TokenCount {
 }
 
 function Format-ContextGauge {
-    param([int]$Chars, [int]$MaxChars = 60000, [int]$Width = 10)
-    if ($MaxChars -le 0) { $MaxChars = 60000 }
+    param(
+        [int]$Chars = -1,
+        [int]$MaxChars = 0,
+        [int]$Tokens = -1,
+        [int]$MaxTokens = 0,
+        [int]$CompactTokens = 0,
+        [int]$Width = 10
+    )
     if ($Width -lt 4) { $Width = 4 }
-    $estTok = [int](($Chars + 3) / 4)
-    $maxTok = [int](($MaxChars + 3) / 4)
-    $pct = [int](($Chars * 100) / $MaxChars)
+    $estTok = if ($Tokens -ge 0) {
+        $Tokens
+    }
+    elseif ($Chars -ge 0) {
+        [int](($Chars + 3) / 4)
+    }
+    else {
+        0
+    }
+    $maxTok = if ($MaxTokens -gt 0) {
+        $MaxTokens
+    }
+    elseif ($MaxChars -gt 0) {
+        [int](($MaxChars + 3) / 4)
+    }
+    elseif ($script:ContextWindowTokens -gt 0) {
+        [int]$script:ContextWindowTokens
+    }
+    else {
+        128000
+    }
+    if ($maxTok -le 0) { $maxTok = 128000 }
+    $pct = [int](($estTok * 100) / $maxTok)
     if ($pct -lt 0) { $pct = 0 }
     $clampedPct = if ($pct -gt 100) { 100 } else { $pct }
     $filled = [int](($clampedPct * $Width + 50) / 100)
     if ($filled -gt $Width) { $filled = $Width }
     if ($filled -lt 0) { $filled = 0 }
     $empty = $Width - $filled
-    $barColor = if ($pct -ge 80) { $script:Gm.Red } elseif ($pct -ge 50) { $script:Gm.Yellow } else { $script:Gm.Green }
+    $colorRefTok = if ($CompactTokens -gt 0) { $CompactTokens } else { $maxTok }
+    $compactPct = if ($colorRefTok -gt 0) { [int](($estTok * 100) / $colorRefTok) } else { $pct }
+    $barColor = if ($compactPct -ge 85 -or $pct -ge 80) { $script:Gm.Red } elseif ($compactPct -ge 55 -or $pct -ge 50) { $script:Gm.Yellow } else { $script:Gm.Green }
     $bar = $barColor + ($script:Box.BarFull * $filled) + $script:Gm.Grey0 + ($script:Box.BarEmpty * $empty) + $script:Gm.Reset
     $tokStr = (Format-TokenCount -Tokens $estTok) + '/' + (Format-TokenCount -Tokens $maxTok)
     return ($bar + ' ' + $barColor + ("{0}%" -f $pct) + $script:Gm.Reset + ' ' + $script:Gm.Grey1 + '(' + $tokStr + ')' + $script:Gm.Reset)
@@ -375,16 +412,22 @@ function Format-TuiStatusBar {
     if ($topDashes -lt 2) { $topDashes = 2 }
     $lineTop = $script:Gm.Grey0 + $script:Box.TL + $script:Box.H + $script:Gm.Reset + $topTitle + $script:Gm.Grey0 + ($script:Box.H * $topDashes) + $script:Box.TR + $script:Gm.Reset
 
-    $chars = 0
-    if ($State -and $State.messages) {
-        foreach ($m in @($State.messages)) {
-            if ($m.content) { $chars += ([string]$m.content).Length }
+    $stBar = if (Get-Command -Name 'Get-ContextStats' -ErrorAction SilentlyContinue) {
+        Get-ContextStats -State $State
+    }
+    else {
+        $cTmp = 0
+        if ($State -and $State.messages) {
+            foreach ($m in @($State.messages)) {
+                if ($m.content) { $cTmp += ([string]$m.content).Length }
+            }
         }
+        @{ est_tokens = [int](($cTmp + 3) / 4); context_window_tokens = 128000; compact_threshold_tokens = 96000 }
     }
     $effStr = if ($script:ReasoningEffort) { ':' + $script:ReasoningEffort } elseif ($script:ShowReasoning -eq 'hide') { ':hide' } else { '' }
     $modelSeg = $script:Gm.Fg1 + $Model + $script:Gm.Grey1 + $effStr + $script:Gm.Reset
     $permSeg = Format-PermissionBadge -Permission $script:AgentPermission
-    $gaugeSeg = Format-ContextGauge -Chars $chars -MaxChars 60000 -Width 8
+    $gaugeSeg = Format-ContextGauge -Tokens $stBar.est_tokens -MaxTokens $stBar.context_window_tokens -CompactTokens $stBar.compact_threshold_tokens -Width 8
     $inTok = if ($State -and $State.usage_input_tokens) { [int]$State.usage_input_tokens } else { 0 }
     $outTok = if ($State -and $State.usage_output_tokens) { [int]$State.usage_output_tokens } else { 0 }
     $tokSeg = if (($inTok + $outTok) -gt 0) {
@@ -2483,6 +2526,8 @@ function Invoke-AgentUndo {
         throw ('Undo failed: ' + ($undoErrors -join '; '))
     }
     $State.messages = @($UndoEntry.messages)
+    $State.last_prompt_tokens = 0
+    $State.last_prompt_chars = 0
 }
 
 function Get-ForkedSubagentMessages {
@@ -3207,6 +3252,8 @@ $script:NoSkills = $false
 $script:NoPromptTemplates = $false
 $script:SkillsByName = @{}
 $script:AgentRolesByName = @{}
+$script:ContextWindowTokens = 128000
+$script:CompactThresholdTokens = 96000
 
 function Escape-XmlText {
     param([string]$Text)
@@ -4109,6 +4156,8 @@ function Switch-SessionBranch {
     $State.messages = $rebuilt
     $State.leaf_id = $effectiveLeaf
     $State.undo_stack = @()
+    $State.last_prompt_tokens = 0
+    $State.last_prompt_chars = 0
     Sync-AgentCapabilities -State $State | Out-Null
     return $State
 }
@@ -4301,6 +4350,8 @@ function Invoke-SessionResume {
     }
     $State.undo_stack = @()
     $State.last_failed_question = ''
+    $State.last_prompt_tokens = 0
+    $State.last_prompt_chars = 0
     Sync-AgentCapabilities -State $State | Out-Null
     return $State
 }
@@ -4390,6 +4441,66 @@ function Export-AgentSessionHtml {
     return $OutputPath
 }
 
+function Resolve-TokenBudgetValue {
+    param([string]$Spec, [int]$BaseTokens = 0)
+    if (-not $Spec -or -not $Spec.Trim()) { return 0 }
+    $s = $Spec.Trim().ToLower()
+    if ($s -match '^(\d+(?:\.\d+)?)%$') {
+        if ($BaseTokens -le 0) { throw "Percentage '$Spec' requires a base context window." }
+        $pct = [double]$Matches[1]
+        if ($pct -lt 10 -or $pct -gt 100) { throw 'Auto-compact percentage must be between 10% and 100%.' }
+        return [int](($BaseTokens * $pct) / 100.0)
+    }
+    if ($s -match '^(\d+(?:\.\d+)?)k$') {
+        return [int](([double]$Matches[1]) * 1000.0)
+    }
+    if ($s -match '^(\d+(?:\.\d+)?)m$') {
+        return [int](([double]$Matches[1]) * 1000000.0)
+    }
+    if ($s -match '^\d+$') {
+        return [int]$s
+    }
+    throw "Invalid token value '$Spec'. Use a number like 128k, 96k, 64000, or a percentage like 75%."
+}
+
+function Set-AgentContextLimits {
+    param([string]$WindowSpec = '', [string]$CompactSpec = '')
+    $winTok = if ($WindowSpec -and $WindowSpec.Trim()) {
+        Resolve-TokenBudgetValue -Spec $WindowSpec
+    }
+    elseif ($script:ContextWindowTokens -gt 0) {
+        [int]$script:ContextWindowTokens
+    }
+    else {
+        128000
+    }
+    if ($winTok -lt 4000 -or $winTok -gt 2000000) {
+        throw 'Context window must be between 4k and 2000k tokens.'
+    }
+    $compTok = if ($CompactSpec -and $CompactSpec.Trim()) {
+        Resolve-TokenBudgetValue -Spec $CompactSpec -BaseTokens $winTok
+    }
+    elseif ($WindowSpec -and $WindowSpec.Trim()) {
+        [int](($winTok * 75) / 100)
+    }
+    elseif ($script:CompactThresholdTokens -gt 0 -and $script:CompactThresholdTokens -le $winTok) {
+        [int]$script:CompactThresholdTokens
+    }
+    else {
+        [int](($winTok * 75) / 100)
+    }
+    if ($compTok -lt 2000 -or $compTok -gt $winTok) {
+        throw "Auto-compact threshold ($compTok) must be between 2k and context window ($winTok)."
+    }
+    $script:ContextWindowTokens = $winTok
+    $script:CompactThresholdTokens = $compTok
+    return @{
+        context_window_tokens = $script:ContextWindowTokens
+        compact_threshold_tokens = $script:CompactThresholdTokens
+        compact_pct = [int](($script:CompactThresholdTokens * 100) / $script:ContextWindowTokens)
+    }
+}
+
 function Get-MessageEstimatedTokens {
     param($Message)
     if ($null -eq $Message) { return 0 }
@@ -4403,17 +4514,33 @@ function Get-MessageEstimatedTokens {
 function Get-ContextStats {
     param($State)
     $chars = 0
-    foreach ($m in @($State.messages)) {
-        if ($m.content) { $chars += ([string]$m.content).Length }
-        if ($m.tool_calls) { $chars += (($m.tool_calls | ConvertTo-Json -Depth 10 -Compress)).Length }
+    $msgCount = 0
+    if ($State -and $State.messages) {
+        $msgCount = $State.messages.Count
+        foreach ($m in @($State.messages)) {
+            if ($m.content) { $chars += ([string]$m.content).Length }
+            if ($m.tool_calls) { $chars += (($m.tool_calls | ConvertTo-Json -Depth 10 -Compress)).Length }
+        }
     }
-    $tokens = [int](($chars + 3) / 4)
-    $usageIn = if ($State.usage_input_tokens) { [int]$State.usage_input_tokens } else { 0 }
-    $usageOut = if ($State.usage_output_tokens) { [int]$State.usage_output_tokens } else { 0 }
+    $charTokens = [int](($chars + 3) / 4)
+    $tokens = if ($State -and $State.last_prompt_tokens -gt 0 -and $State.last_prompt_chars -gt 0 -and $chars -ge [int]$State.last_prompt_chars) {
+        [int]$State.last_prompt_tokens + [int]((($chars - [int]$State.last_prompt_chars) + 3) / 4)
+    }
+    else {
+        $charTokens
+    }
+    $winTok = if ($script:ContextWindowTokens -gt 0) { [int]$script:ContextWindowTokens } else { 128000 }
+    $compTok = if ($script:CompactThresholdTokens -gt 0 -and $script:CompactThresholdTokens -le $winTok) { [int]$script:CompactThresholdTokens } else { [int](($winTok * 75) / 100) }
+    $compPct = [int](($compTok * 100) / $winTok)
+    $usageIn = if ($State -and $State.usage_input_tokens) { [int]$State.usage_input_tokens } else { 0 }
+    $usageOut = if ($State -and $State.usage_output_tokens) { [int]$State.usage_output_tokens } else { 0 }
     return @{
-        messages = $State.messages.Count
+        messages = $msgCount
         chars = $chars
         est_tokens = $tokens
+        context_window_tokens = $winTok
+        compact_threshold_tokens = $compTok
+        compact_pct = $compPct
         usage_input_tokens = $usageIn
         usage_output_tokens = $usageOut
         usage_total_tokens = ($usageIn + $usageOut)
@@ -4656,6 +4783,8 @@ function Invoke-AgentCompact {
     $State.tree_entries += $compEntry
     $State.leaf_id = $compId
     $State.messages = @(Build-BranchContextMessages -State $State -LeafId $compId)
+    $State.last_prompt_tokens = 0
+    $State.last_prompt_chars = 0
     Sync-AgentCapabilities -State $State | Out-Null
     return $true
 }
@@ -4872,9 +5001,10 @@ function Invoke-AgentTurn {
     for ($step = 0; $step -lt $Steps; $step++) {
         if ($step -gt 0) {
             $stStep = Get-ContextStats -State $State
-            if ($stStep.chars -gt 60000) {
+            if ($stStep.est_tokens -gt $stStep.compact_threshold_tokens) {
                 if ($script:OutputMode -ne 'json') {
-                    Write-Host ($script:Gm.Yellow + '  [auto-compact] Context exceeds 60k chars, compacting older history...' + $script:Gm.Reset)
+                    $limStr = Format-TokenCount -Tokens $stStep.compact_threshold_tokens
+                    Write-Host ($script:Gm.Yellow + "  [auto-compact] Context exceeds $limStr tokens, compacting older history..." + $script:Gm.Reset)
                 }
                 try {
                     if (Invoke-AgentCompact -State $State -Endpoint $Endpoint -ModelId $ModelId -ApiKey $ApiKey) {
@@ -4939,6 +5069,12 @@ function Invoke-AgentTurn {
                     }
                     if ((-not $overflowRetried) -and ($errFormatted -match '(?i)(context_length|maximum context|too many tokens|token limit)')) {
                         $overflowRetried = $true
+                        if ($errFormatted -match '(?i)maximum context length is (\d+)') {
+                            $srvLim = [int]$Matches[1]
+                            if ($srvLim -ge 4000 -and $srvLim -lt $script:ContextWindowTokens) {
+                                $null = Set-AgentContextLimits -WindowSpec ([string]$srvLim) -CompactSpec '75%'
+                            }
+                        }
                         if ($script:OutputMode -ne 'json') {
                             Write-Host ($script:Gm.Yellow + '  [auto-recovery] Context overflow detected; compacting history and retrying...' + $script:Gm.Reset)
                         }
@@ -4978,6 +5114,16 @@ function Invoke-AgentTurn {
         }
         if ($message.tool_calls) { $assistant.tool_calls = @($message.tool_calls) }
         $State.messages += $assistant
+        if ($reply.usage -and $reply.usage.prompt_tokens) {
+            $compTok = if ($reply.usage.completion_tokens) { [int]$reply.usage.completion_tokens } else { 0 }
+            $State.last_prompt_tokens = [int]$reply.usage.prompt_tokens + $compTok
+            $curChars = 0
+            foreach ($m in @($State.messages)) {
+                if ($m.content) { $curChars += ([string]$m.content).Length }
+                if ($m.tool_calls) { $curChars += (($m.tool_calls | ConvertTo-Json -Depth 10 -Compress)).Length }
+            }
+            $State.last_prompt_chars = $curChars
+        }
         Ensure-SessionTree -State $State
         Write-AgentJsonEvent -EventType 'message_end' -Payload @{
             role = 'assistant'
@@ -5088,6 +5234,9 @@ function Resolve-ReplCommandAlias {
     if ($t -match '^/r(?:\s+(.+))?$') {
         return $(if ($Matches[1]) { '/resume ' + $Matches[1] } else { '/resume' })
     }
+    if ($t -match '^/ctx(?:\s+(.+))?$') {
+        return $(if ($Matches[1]) { '/context ' + $Matches[1] } else { '/context' })
+    }
     return $t
 }
 
@@ -5103,6 +5252,7 @@ function Format-TuiStatusCard {
     $effLabel = if ($script:ReasoningEffort) { $script:ReasoningEffort } else { 'default' }
     $capNow = Get-AgentCapabilities -Root $script:ActiveWorkspace
     $toolsStr = if ($capNow.tool_names.Count -gt 0) { $capNow.tool_names -join ', ' } else { 'none' }
+    $compLabel = (Format-TokenCount -Tokens $st.compact_threshold_tokens) + " ($($st.compact_pct)%)"
     $hdr = ' ' + $script:Gm.BoldOrange + 'Session Status' + $script:Gm.Reset + ' '
     $hdrVis = (Strip-AnsiCodes -Text $hdr).Length
     $dashes = $w - 5 - $hdrVis
@@ -5112,7 +5262,7 @@ function Format-TuiStatusCard {
         ('  ' + $script:Gm.Grey0 + $script:Box.TL + $script:Box.H + $script:Gm.Reset + $hdr + $script:Gm.Grey0 + ($script:Box.H * $dashes) + $script:Box.TR + $script:Gm.Reset),
         ($barV + $script:Gm.Grey1 + 'Model:       ' + $script:Gm.Fg1 + $Model + $script:Gm.Grey1 + " (reasoning: view=$($script:ShowReasoning), effort=$effLabel)" + $script:Gm.Reset),
         ($barV + $script:Gm.Grey1 + 'Permission:  ' + (Format-PermissionBadge -Permission $script:AgentPermission) + $script:Gm.Grey1 + " | MaxSteps: $MaxSteps | Undo stack: $UndoCount" + $script:Gm.Reset),
-        ($barV + $script:Gm.Grey1 + 'Context:     ' + (Format-ContextGauge -Chars $st.chars -MaxChars 60000 -Width 12) + $script:Gm.Grey1 + " | Messages: $($st.messages) | Chars: $($st.chars)" + $script:Gm.Reset),
+        ($barV + $script:Gm.Grey1 + 'Context:     ' + (Format-ContextGauge -Tokens $st.est_tokens -MaxTokens $st.context_window_tokens -CompactTokens $st.compact_threshold_tokens -Width 12) + $script:Gm.Grey1 + " | Auto-compact: $compLabel | Msgs: $($st.messages)" + $script:Gm.Reset),
         ($barV + $script:Gm.Grey1 + 'API Tokens:  ' + $script:Gm.Aqua + "in=$inTok out=$outTok" + $script:Gm.Grey1 + " (total=$(Format-TokenCount -Tokens ($inTok + $outTok)))" + $script:Gm.Reset),
         ($barV + $script:Gm.Grey1 + 'Session:     ' + $script:Gm.Fg + "$($State.session_id) " + $script:Gm.Grey1 + "| Name: $nmInfo | Leaf: $leafInfo" + $script:Gm.Reset),
         ($barV + $script:Gm.Grey1 + 'File:        ' + $script:Gm.Grey2 + $sessFileStr + $script:Gm.Reset),
@@ -5160,6 +5310,7 @@ function Write-TuiHelpCard {
     Write-Host ($barV + $script:Gm.BoldYellow + 'Mode & Model (call without args for interactive picker)' + $script:Gm.Reset)
     Write-Host ($barV + $script:Gm.Aqua + '  /permission (/p) [mode]      ' + $script:Gm.Fg + 'Pick or set: ReadOnly | Ask | AutoEdit | Auto' + $script:Gm.Reset)
     Write-Host ($barV + $script:Gm.Aqua + '  /model (/m) [id]             ' + $script:Gm.Fg + 'Pick or switch active model ID' + $script:Gm.Reset)
+    Write-Host ($barV + $script:Gm.Aqua + '  /context (/ctx) [win] [comp] ' + $script:Gm.Fg + 'Pick or set context window & auto-compact threshold (default 128k / 96k)' + $script:Gm.Reset)
     Write-Host ($barV + $script:Gm.Aqua + '  /reasoning [arg]             ' + $script:Gm.Fg + 'Pick view (compact|full|hide) or effort (low|medium|high|off)' + $script:Gm.Reset)
     Write-Host ($barV + $script:Gm.Aqua + '  /status (/s, /tokens)        ' + $script:Gm.Fg + 'Show TUI dashboard (context gauge, tokens, tools, session)' + $script:Gm.Reset)
     Write-Host ($barV + $script:Gm.Aqua + '  /diagnostics [on|off]        ' + $script:Gm.Fg + 'Toggle pre-request capability/tool diagnostics' + $script:Gm.Reset)
@@ -5266,6 +5417,11 @@ if (-not $LibraryOnly) {
     if ($MaxSteps -lt 1 -or $MaxSteps -gt 500) { throw 'MaxSteps must be between 1 and 500.' }
     if ($MaxRepeatCalls -lt 1 -or $MaxRepeatCalls -gt 50) { throw 'MaxRepeatCalls must be between 1 and 50.' }
     $script:MaxRepeatToolCalls = $MaxRepeatCalls
+    if (-not $ContextWindow -and $config.SHELLOSSUS_CONTEXT_WINDOW) { $ContextWindow = $config.SHELLOSSUS_CONTEXT_WINDOW }
+    if (-not $CompactThreshold -and $config.SHELLOSSUS_COMPACT_THRESHOLD) { $CompactThreshold = $config.SHELLOSSUS_COMPACT_THRESHOLD }
+    if ($ContextWindow -or $CompactThreshold) {
+        $null = Set-AgentContextLimits -WindowSpec $ContextWindow -CompactSpec $CompactThreshold
+    }
     if ($Permission -notin @('ReadOnly', 'Ask', 'AutoEdit', 'Auto')) { throw 'Permission must be one of: ReadOnly, Ask, AutoEdit, Auto.' }
     $script:AgentPermission = $Permission
     $script:Diagnostics = [bool]$Diagnostics
@@ -5690,6 +5846,53 @@ if (-not $LibraryOnly) {
                 }
                 continue
             }
+            if ($trimmedQ -match '^/context(?:\s+(.+))?$') {
+                $ctxArg = if ($Matches[1]) { $Matches[1].Trim() } else { '' }
+                if (-not $ctxArg) {
+                    $curSt = Get-ContextStats -State $state
+                    $curWinFmt = Format-TokenCount -Tokens $curSt.context_window_tokens
+                    $curCompFmt = Format-TokenCount -Tokens $curSt.compact_threshold_tokens
+                    $ctxItems = @(
+                        @{ label = '128k / 96k (75%)'; value = '128k 96k'; description = 'Default for 128k models (gpt-oss-120b, GPT-4o, DeepSeek, GLM)'; active = ($curSt.context_window_tokens -eq 128000 -and $curSt.compact_threshold_tokens -eq 96000) },
+                        @{ label = '128k / 80k (62%)'; value = '128k 80k'; description = '128k window with earlier compaction for faster prefill & deep reasoning'; active = ($curSt.context_window_tokens -eq 128000 -and $curSt.compact_threshold_tokens -eq 80000) },
+                        @{ label = '64k / 48k (75%)'; value = '64k 48k'; description = 'vLLM / corporate server with max_model_len=64k'; active = ($curSt.context_window_tokens -eq 64000 -and $curSt.compact_threshold_tokens -eq 48000) },
+                        @{ label = '32k / 24k (75%)'; value = '32k 24k'; description = 'Compact deployment with max_model_len=32k'; active = ($curSt.context_window_tokens -eq 32000 -and $curSt.compact_threshold_tokens -eq 24000) },
+                        @{ label = '200k / 150k (75%)'; value = '200k 150k'; description = 'Large context window (200k tokens)'; active = ($curSt.context_window_tokens -eq 200000 -and $curSt.compact_threshold_tokens -eq 150000) },
+                        @{ label = '[Custom limits...]'; value = '__custom__'; description = 'Enter "<window> [compact]" e.g. "128k 85k" or "128k 70%"'; active = $false }
+                    )
+                    $pickedCtx = Invoke-TuiSelector -Title "Context Window & Auto-Compact (current: $curWinFmt / compact at $curCompFmt)" -Items $ctxItems -PromptText 'Select preset or type "<window> [compact]" (Enter cancels)'
+                    if ($pickedCtx -eq '__custom__') {
+                        Write-Host ('  ' + $script:Gm.BoldYellow + 'Enter "<window> [compact]" (e.g. 128k 80k or 128k 70%): ' + $script:Gm.Fg) -NoNewline
+                        $customCtx = Read-Host
+                        Write-Host $script:Gm.Reset -NoNewline
+                        if ($customCtx -and $customCtx.Trim()) { $ctxArg = $customCtx.Trim() }
+                    }
+                    elseif ($pickedCtx) {
+                        $ctxArg = [string]$pickedCtx
+                    }
+                }
+                if ($ctxArg) {
+                    try {
+                        $tokensParts = @($ctxArg -split '\s+' | Where-Object { $_ })
+                        $limRes = if ($tokensParts.Count -ge 2 -and ($tokensParts[0] -ieq 'compact' -or $tokensParts[0] -ieq 'threshold')) {
+                            Set-AgentContextLimits -CompactSpec $tokensParts[1]
+                        }
+                        elseif ($tokensParts.Count -ge 2) {
+                            Set-AgentContextLimits -WindowSpec $tokensParts[0] -CompactSpec $tokensParts[1]
+                        }
+                        else {
+                            Set-AgentContextLimits -WindowSpec $tokensParts[0]
+                        }
+                        $wFmt = Format-TokenCount -Tokens $limRes.context_window_tokens
+                        $cFmt = Format-TokenCount -Tokens $limRes.compact_threshold_tokens
+                        Write-Host ($script:Gm.Green + "  Context window set to $wFmt tokens | Auto-compact threshold: $cFmt ($($limRes.compact_pct)%)" + $script:Gm.Reset)
+                    }
+                    catch {
+                        Write-Host ($script:Gm.Red + '  ' + $_.Exception.Message + $script:Gm.Reset)
+                    }
+                }
+                continue
+            }
             if ($trimmedQ -match '^/model(?:\s+(.+))?$') {
                 $newModel = if ($Matches[1]) { $Matches[1].Trim() } else { '' }
                 if (-not $newModel) {
@@ -5831,8 +6034,9 @@ if (-not $LibraryOnly) {
                 $beforeTurn = @($state.messages)
                 $script:CurrentTurnWrites = @()
                 $stBefore = Get-ContextStats -State $state
-                if ($stBefore.chars -gt 60000) {
-                    Write-Host ($script:Gm.Yellow + '  [auto-compact] Context exceeds 60k chars, compacting older history...' + $script:Gm.Reset)
+                if ($stBefore.est_tokens -gt $stBefore.compact_threshold_tokens) {
+                    $limStr = Format-TokenCount -Tokens $stBefore.compact_threshold_tokens
+                    Write-Host ($script:Gm.Yellow + "  [auto-compact] Context exceeds $limStr tokens, compacting older history..." + $script:Gm.Reset)
                     try { Invoke-AgentCompact -State $state -Endpoint $endpoint -ModelId $Model -ApiKey $agentKey | Out-Null } catch {}
                 }
                 Write-Host ($script:Gm.Aqua + "  [continue] Continuing agent turn (up to $contSteps steps)..." + $script:Gm.Reset)
@@ -5894,8 +6098,9 @@ if (-not $LibraryOnly) {
             $beforeTurn = @($state.messages)
             $script:CurrentTurnWrites = @()
             $stBefore = Get-ContextStats -State $state
-            if ($stBefore.chars -gt 60000) {
-                Write-Host ($script:Gm.Yellow + '  [auto-compact] Context exceeds 60k chars, compacting older history...' + $script:Gm.Reset)
+            if ($stBefore.est_tokens -gt $stBefore.compact_threshold_tokens) {
+                $limStr = Format-TokenCount -Tokens $stBefore.compact_threshold_tokens
+                Write-Host ($script:Gm.Yellow + "  [auto-compact] Context exceeds $limStr tokens, compacting older history..." + $script:Gm.Reset)
                 try { Invoke-AgentCompact -State $state -Endpoint $endpoint -ModelId $Model -ApiKey $agentKey | Out-Null } catch {}
             }
             $expandedQuestion = Expand-UserPrompt -Root $rootPath -Prompt $question
