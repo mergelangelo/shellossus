@@ -279,7 +279,7 @@ try {
         Invoke-AgentTurn -State $modeSwitchState -Endpoint 'https://example.invalid/v1/chat/completions' -ModelId 'test-model' -ApiKey 'fake' -Root $workspacePath -Steps 4
         $roPayload = $script:capturedPayloads[2]
         $roToolNames = @($roPayload.tools | ForEach-Object { $_.function.name })
-        Assert-True ($roToolNames.Count -eq 7 -and ($roToolNames -notcontains 'write_file') -and ($roToolNames -contains 'fetch_url') -and ($roToolNames -contains 'web_search') -and ($roToolNames -contains 'run_agent') -and $roPayload.messages[0].content.Contains('Permission mode: ReadOnly.')) 'ReadOnly turn payload was out of sync with active permission.'
+        Assert-True ($roToolNames.Count -eq 8 -and ($roToolNames -contains 'todo') -and ($roToolNames -notcontains 'write_file') -and ($roToolNames -contains 'fetch_url') -and ($roToolNames -contains 'web_search') -and ($roToolNames -contains 'run_agent') -and $roPayload.messages[0].content.Contains('Permission mode: ReadOnly.')) 'ReadOnly turn payload was out of sync with active permission.'
 
         # 3. Switch to Ask: write_file is restored, transition notice replaces ReadOnly notice, and real write with WRITE confirmation succeeds.
         $script:AgentPermission = 'Ask'

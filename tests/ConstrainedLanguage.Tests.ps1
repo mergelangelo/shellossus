@@ -200,12 +200,15 @@ try {
     Wait-AgentProcessWithSpinner -Process $clDoneProc -StatusLabel 'CL wait check' -TimeoutSec 5 -PollMs 10
 
     $clCap = Get-AgentCapabilities -Root $workspacePath
-    Assert-True ($clCap.permission -eq 'Ask' -and $clCap.tool_names.Count -eq 10 -and ($clCap.tool_names -contains 'fetch_url') -and ($clCap.tool_names -contains 'web_search') -and ($clCap.tool_names -contains 'run_agent') -and $clCap.environment.language_mode -eq 'ConstrainedLanguage') 'ConstrainedLanguage Get-AgentCapabilities or Get-AgentEnvironment failed.'
+    Assert-True ($clCap.permission -eq 'Ask' -and $clCap.tool_names.Count -eq 11 -and ($clCap.tool_names -contains 'todo') -and ($clCap.tool_names -contains 'fetch_url') -and ($clCap.tool_names -contains 'web_search') -and ($clCap.tool_names -contains 'run_agent') -and $clCap.environment.language_mode -eq 'ConstrainedLanguage') 'ConstrainedLanguage Get-AgentCapabilities or Get-AgentEnvironment failed.'
     $clSyncState = @{ messages = @(@{ role = 'system'; content = 'sys' }, @{ role = 'user'; content = 'q' }, @{ role = 'assistant'; content = 'a' }) }
     $clSyncRes = Sync-AgentCapabilities -State $clSyncState -RecordTransition
     Assert-True ($clSyncRes.consistent -and $clSyncState.messages[0].content.Contains('<capabilities>')) 'ConstrainedLanguage Sync-AgentCapabilities failed.'
     $clSig = Get-ToolCallSignature -Call @{ function = @{ name = 'read_file'; arguments = '{"max_lines":10,"path":"a.txt"}' } } -Epoch 1
     Assert-True ($clSig -eq '1|read_file|{max_lines:10,path:"a.txt"}') 'ConstrainedLanguage Get-ToolCallSignature failed.'
+    $clTodoCall = @{ id = 'cl-td'; function = @{ name = 'todo'; arguments = '{"todos":[{"content":"cl task","status":"completed"}]}' } }
+    $clTodoRes = Invoke-AgentTool -Root $workspacePath -Call $clTodoCall | ConvertFrom-Json
+    Assert-True ($clTodoRes.success -and $clTodoRes.total -eq 1 -and $clTodoRes.completed -eq 1) 'ConstrainedLanguage todo execution failed.'
     $clWalk = @(Get-WorkspaceWalkEntries -Root $workspacePath -SearchPath $workspacePath -FilesOnly)
     Assert-True ($clWalk.Count -ge 1) 'ConstrainedLanguage Get-WorkspaceWalkEntries failed.'
     $clNormSub = Format-RunAgentArguments -ArgsObj ('{"agent":"scout","task":"check"}' | ConvertFrom-Json)
