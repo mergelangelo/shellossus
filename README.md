@@ -98,6 +98,7 @@ shellossus -Prompt "Explain @src/tools/Files.ps1" # Single-shot non-interactive 
 ```text
 .
 ├── CONSTITUTION.md     # Project constitution: core principles, safety guarantees, and invariants
+├── SECURITY.md         # Vulnerability reporting policy and threat model
 ├── shellossus.ps1      # Standalone single-file distribution (built from src/*.ps1)
 ├── build.ps1           # Bundler and sync verifier (.\build.ps1 / .\build.ps1 -Check)
 ├── install.ps1         # PowerShell profile launcher installer
@@ -109,12 +110,13 @@ shellossus -Prompt "Explain @src/tools/Files.ps1" # Single-shot non-interactive 
 │   └── Cli.ps1         # Agent turn loop, retry/overflow recovery, interactive REPL
 ├── tests/
 │   ├── smoke.ps1       # Test runner (.\build.ps1 -Check + all *.Tests.ps1 suites)
-│   └── *.Tests.ps1     # Modular suites (Config, Theme, Tools, Context, Cli, ConstrainedLanguage)
+│   └── *.Tests.ps1     # Modular suites (Config, Theme, Tools, Context, Cli, Reliability, ConstrainedLanguage)
 ├── docs/
 │   ├── architecture.md # Internal design, module boundaries, and build pipeline
 │   ├── security.md     # Permission model, workspace isolation, and enterprise notes
-│   └── customization.md# Guide to AGENTS.md, skills, prompt templates, and sessions
-└── examples/           # Sample prompt templates and skills
+│   ├── customization.md# Guide to AGENTS.md, skills, prompt templates, and sessions
+│   └── assets/         # Screenshots, screencasts, and terminal demos
+└── examples/           # Sample agents, SOUL.md, prompt templates, and domain skills
 ```
 
 ## Development & Testing
@@ -129,6 +131,7 @@ Edit modular files under [`src/`](src/), rebuild [`shellossus.ps1`](shellossus.p
 ## Documentation
 
 - [Project Constitution](CONSTITUTION.md)
+- [Security Policy](SECURITY.md)
 - [Architecture & Build Pipeline](docs/architecture.md)
 - [Security, Permissions & Enterprise Guide](docs/security.md)
 - [Customization: AGENTS.md, Skills & Prompt Templates](docs/customization.md)
