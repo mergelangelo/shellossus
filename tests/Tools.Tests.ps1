@@ -186,7 +186,7 @@ try {
     # 4 Permission modes: ReadOnly, Ask, AutoEdit, Auto.
     $script:approval = ''
     $script:AgentPermission = 'ReadOnly'
-    Assert-True (@(Get-AgentTools).Count -eq 7) 'ReadOnly mode should expose 7 tools (6 read-only + run_agent).'
+    Assert-True (@(Get-AgentTools).Count -eq 8) 'ReadOnly mode should expose 8 tools (7 read-only + run_agent).'
     $call.function.name = 'write_file'
     $call.function.arguments = '{"path":"ro.txt","content":"no"}'
     $roRes = Invoke-AgentTool -Root $workspacePath -Call $call | ConvertFrom-Json
