@@ -202,7 +202,13 @@ Start-Sleep -Seconds 30
         Assert-True (Test-Path -LiteralPath $pidPath) "Process fixture did not start: $pidName"
         $parts = (Get-Content -LiteralPath $pidPath -Raw).Trim() -split '\|'
         $p = Get-Process -Id ([int]$parts[0]) -ErrorAction SilentlyContinue
-        $stillRunning = $p -and ($p.StartTime.Ticks -eq [long]$parts[1])
+        $stillRunning = $false
+        if ($p -and ($p.StartTime.Ticks -eq [long]$parts[1])) {
+            if (-not $p.HasExited) {
+                Wait-Process -InputObject $p -Timeout 3 -ErrorAction SilentlyContinue
+            }
+            $stillRunning = -not $p.HasExited
+        }
         Assert-True (-not $stillRunning) "Timeout left $pidName running."
     }
     Assert-True (-not $bystander.HasExited) 'Tree cleanup stopped an unrelated process.'
@@ -241,7 +247,14 @@ Start-Sleep -Seconds 30
     Assert-True $inspectionFailed "Expected process inspection failure was not reported: $inspectionError"
     $parts = (Get-Content -LiteralPath $script:inspectionPidPath -Raw).Trim() -split '\|'
     $p = Get-Process -Id ([int]$parts[0]) -ErrorAction SilentlyContinue
-    Assert-True (-not ($p -and $p.StartTime.Ticks -eq [long]$parts[1])) 'A monitoring exception leaked the command process.'
+    $stillRunning = $false
+    if ($p -and ($p.StartTime.Ticks -eq [long]$parts[1])) {
+        if (-not $p.HasExited) {
+            Wait-Process -InputObject $p -Timeout 3 -ErrorAction SilentlyContinue
+        }
+        $stillRunning = -not $p.HasExited
+    }
+    Assert-True (-not $stillRunning) 'A monitoring exception leaked the command process.'
 }
 finally {
     Remove-Item Function:\Invoke-WebRequest -ErrorAction SilentlyContinue
@@ -250,7 +263,7 @@ finally {
         foreach ($pidFile in @(Get-ChildItem -LiteralPath $processDir -Filter '*.pid' -File)) {
             $parts = (Get-Content -LiteralPath $pidFile.FullName -Raw).Trim() -split '\|'
             $p = Get-Process -Id ([int]$parts[0]) -ErrorAction SilentlyContinue
-            if ($p -and $p.StartTime.Ticks -eq [long]$parts[1]) { Stop-Process -InputObject $p -Force -ErrorAction SilentlyContinue }
+            if ($p -and -not $p.HasExited -and $p.StartTime.Ticks -eq [long]$parts[1]) { Stop-Process -InputObject $p -Force -ErrorAction SilentlyContinue }
         }
     }
     foreach ($backup in $testBackups) { if ($backup -and (Test-Path -LiteralPath $backup)) { Remove-Item -LiteralPath $backup -Force } }
