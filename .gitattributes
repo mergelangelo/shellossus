@@ -1,0 +1,9 @@
+# Normalize line endings to LF across all platforms.
+# Windows PowerShell 5.1 and build.ps1 -Check require exact LF byte matching.
+* text=auto
+
+*.ps1 text eol=lf
+*.md text eol=lf
+*.json text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
