@@ -209,9 +209,12 @@ try {
     $clTodoCall = @{ id = 'cl-td'; function = @{ name = 'todo'; arguments = '{"todos":[{"content":"cl task","status":"completed"}]}' } }
     $clTodoRes = Invoke-AgentTool -Root $workspacePath -Call $clTodoCall | ConvertFrom-Json
     Assert-True ($clTodoRes.success -and $clTodoRes.total -eq 1 -and $clTodoRes.completed -eq 1) 'ConstrainedLanguage todo execution failed.'
+    $savedAppr = $script:approval
+    $script:approval = '1'
     $clAskCall = @{ id = 'cl-ask'; function = @{ name = 'ask_user'; arguments = '{"question":"Confirm?","intent":"plan-review","plan":"# CL Plan"}' } }
     $clAskRes = Invoke-AgentTool -Root $workspacePath -Call $clAskCall | ConvertFrom-Json
     Assert-True ($clAskRes.question -eq 'Confirm?' -and $clAskRes.intent -eq 'plan-review' -and $clAskRes.approved) 'ConstrainedLanguage ask_user execution failed.'
+    $script:approval = $savedAppr
     $clWalk = @(Get-WorkspaceWalkEntries -Root $workspacePath -SearchPath $workspacePath -FilesOnly)
     Assert-True ($clWalk.Count -ge 1) 'ConstrainedLanguage Get-WorkspaceWalkEntries failed.'
     $clNormSub = Format-RunAgentArguments -ArgsObj ('{"agent":"scout","task":"check"}' | ConvertFrom-Json)
