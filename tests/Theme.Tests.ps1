@@ -106,6 +106,24 @@ try {
     $memCard = @(Format-MemoryCard -Scope 'workspace' -Action 'append' -Content '+ Invariant note')
     $plainMem = ($memCard | ForEach-Object { Strip-AnsiCodes -Text $_ }) -join "`n"
     Assert-True ($plainMem.Contains('MEMORY (WORKSPACE)') -and $plainMem.Contains('+ Invariant note')) 'Format-MemoryCard failed.'
+
+    # Read-TuiConfirmation tests via mock Read-Host
+    $script:mlQueue = @('y')
+    Assert-True ((Read-TuiConfirmation -PromptText 'prompt: ' -ActionType 'write') -eq 'y') 'Read-TuiConfirmation y failed.'
+    $script:mlQueue = @('yes')
+    Assert-True ((Read-TuiConfirmation -PromptText 'prompt: ' -ActionType 'write') -eq 'y') 'Read-TuiConfirmation yes failed.'
+    $script:mlQueue = @('WRITE')
+    Assert-True ((Read-TuiConfirmation -PromptText 'prompt: ' -ActionType 'write') -eq 'y') 'Read-TuiConfirmation WRITE failed.'
+    $script:mlQueue = @('RUN')
+    Assert-True ((Read-TuiConfirmation -PromptText 'prompt: ' -ActionType 'run') -eq 'y') 'Read-TuiConfirmation RUN failed.'
+    $script:mlQueue = @('a')
+    Assert-True ((Read-TuiConfirmation -PromptText 'prompt: ' -ActionType 'write') -eq 'a') 'Read-TuiConfirmation a failed.'
+    $script:mlQueue = @('d')
+    Assert-True ((Read-TuiConfirmation -PromptText 'prompt: ' -AllowDiff -ActionType 'write') -eq 'd') 'Read-TuiConfirmation d failed.'
+    $script:mlQueue = @('n')
+    Assert-True ((Read-TuiConfirmation -PromptText 'prompt: ' -ActionType 'write') -eq 'n') 'Read-TuiConfirmation n failed.'
+    $script:mlQueue = @('')
+    Assert-True ((Read-TuiConfirmation -PromptText 'prompt: ' -ActionType 'write') -eq 'n') 'Read-TuiConfirmation empty cancel failed.'
 }
 finally {
     Remove-Item Function:\Read-Host -ErrorAction SilentlyContinue

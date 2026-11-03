@@ -250,10 +250,13 @@ function Invoke-AgentCommand {
         if ($script:OutputMode -eq 'json') {
             return (@{ status = 'cancelled'; message = 'Interactive confirmation is disabled in JSON mode. Use -Permission Auto to allow command execution.' } | ConvertTo-Json -Compress)
         }
-        Write-Host ('  ' + $script:Gm.Grey0 + $script:Box.V + ' ' + $script:Gm.BoldYellow + 'Confirm (' + $script:Gm.Fg1 + 'RUN' + $script:Gm.BoldYellow + ' to execute, Enter cancels): ' + $script:Gm.Fg) -NoNewline
-        $approval = Read-Host 'Type RUN to execute this command; Enter cancels'
-        Write-Host $script:Gm.Reset -NoNewline
-        if ($approval -cne 'RUN') {
+        $promptStr = '  ' + $script:Gm.Grey0 + $script:Box.V + ' ' + $script:Gm.BoldYellow + 'Confirm [y]es, [n]o, [a]ll commands: ' + $script:Gm.Fg
+        $choice = Read-TuiConfirmation -PromptText $promptStr -ActionType 'run'
+        if ($choice -eq 'a') {
+            $script:AgentPermission = 'Auto'
+            Write-Host ('  ' + $script:Gm.Grey0 + $script:Box.V + ' ' + $script:Gm.Aqua + $script:Box.Check + ' [switched permission to Auto for this session]' + $script:Gm.Reset)
+        }
+        elseif ($choice -ne 'y') {
             Write-Host ('  ' + $script:Gm.Grey0 + $script:Box.BL + $script:Box.H + ' ' + $script:Gm.Red + $script:Box.Cross + ' cancelled' + $script:Gm.Reset)
             return (@{ status = 'cancelled'; message = 'User declined command execution. Do not retry without a new user request.' } | ConvertTo-Json -Compress)
         }

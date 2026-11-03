@@ -827,6 +827,79 @@ function Invoke-TuiSelector {
     return $null
 }
 
+function Read-TuiConfirmation {
+    param(
+        [string]$PromptText,
+        [switch]$AllowDiff,
+        [string]$ActionType = 'write'
+    )
+    while ($true) {
+        Write-Host $PromptText -NoNewline
+        $raw = $null
+        try {
+            if ($Host.UI.RawUI -and $ExecutionContext.SessionState.LanguageMode -ne 'ConstrainedLanguage') {
+                $key = $Host.UI.RawUI.ReadKey('NoEcho,IncludeKeyDown')
+                if ($null -ne $key) {
+                    if ($key.VirtualKeyCode -eq 27) {
+                        Write-Host ($script:Gm.Red + 'n (Esc)' + $script:Gm.Reset)
+                        return 'n'
+                    }
+                    if ($key.VirtualKeyCode -eq 13) {
+                        Write-Host ($script:Gm.BoldGreen + 'y (Enter)' + $script:Gm.Reset)
+                        return 'y'
+                    }
+                    $ch = [string]$key.Character
+                    if ($ch) {
+                        $cLower = $ch.ToLower()
+                        if ($cLower -eq 'y') {
+                            Write-Host ($script:Gm.BoldGreen + 'y' + $script:Gm.Reset)
+                            return 'y'
+                        }
+                        if ($cLower -eq 'a') {
+                            Write-Host ($script:Gm.Aqua + 'a (all)' + $script:Gm.Reset)
+                            return 'a'
+                        }
+                        if ($cLower -eq 'd' -and $AllowDiff) {
+                            Write-Host ($script:Gm.Yellow + 'd (diff)' + $script:Gm.Reset)
+                            return 'd'
+                        }
+                        if ($cLower -eq 'n' -or $cLower -eq 'q') {
+                            Write-Host ($script:Gm.Red + 'n' + $script:Gm.Reset)
+                            return 'n'
+                        }
+                        Write-Host $ch
+                        return $cLower
+                    }
+                }
+            }
+        }
+        catch {}
+
+        $raw = Read-Host
+        Write-Host $script:Gm.Reset -NoNewline
+        if ($null -eq $raw) { return 'n' }
+        $trimmed = $raw.Trim()
+        if (-not $trimmed) { return 'n' }
+        $lower = $trimmed.ToLower()
+        if ($lower -in @('y', 'yes', '1', 'w', 'write') -or ($ActionType -eq 'write' -and $trimmed -ceq 'WRITE')) {
+            return 'y'
+        }
+        if ($lower -in @('r', 'run') -or ($ActionType -eq 'run' -and $trimmed -ceq 'RUN')) {
+            return 'y'
+        }
+        if ($lower -in @('a', 'all', 'always')) {
+            return 'a'
+        }
+        if ($lower -in @('d', 'diff') -and $AllowDiff) {
+            return 'd'
+        }
+        if ($lower -in @('n', 'no', 'cancel', 'c', '0')) {
+            return 'n'
+        }
+        return $lower
+    }
+}
+
 function Get-VisibleLength {
     param([string]$Text)
     $plain = ''
@@ -2732,10 +2805,25 @@ function Invoke-AgentWrite {
         if ($script:OutputMode -eq 'json') {
             return (@{ status = 'cancelled'; message = 'Interactive confirmation is disabled in JSON mode. Use -Permission AutoEdit or Auto to allow file modifications.' } | ConvertTo-Json -Compress)
         }
-        Write-Host ('  ' + $script:Gm.BoldYellow + $script:Box.Arrow + ' Confirm (' + $script:Gm.Fg1 + 'WRITE' + $script:Gm.BoldYellow + ' to apply, Enter cancels): ' + $script:Gm.Fg) -NoNewline
-        $approval = Read-Host 'Type WRITE to approve this file change; Enter cancels'
-        Write-Host $script:Gm.Reset -NoNewline
-        if ($approval -cne 'WRITE') {
+        $confirmed = $false
+        while (-not $confirmed) {
+            $promptStr = '  ' + $script:Gm.BoldYellow + $script:Box.Arrow + ' Confirm [y]es, [n]o, [a]ll edits, [d]iff: ' + $script:Gm.Fg
+            $choice = Read-TuiConfirmation -PromptText $promptStr -AllowDiff -ActionType 'write'
+            if ($choice -eq 'd') {
+                Write-Host ''
+                Write-UnifiedDiffCard -Path $Arguments.path -ToolName $Name -Before $before -After $after -MaxLines 500
+                continue
+            }
+            if ($choice -eq 'a') {
+                $script:AgentPermission = 'AutoEdit'
+                Write-Host ('  ' + $script:Gm.Aqua + $script:Box.Check + ' [switched permission to AutoEdit for this session]' + $script:Gm.Reset)
+                $confirmed = $true
+                break
+            }
+            if ($choice -eq 'y') {
+                $confirmed = $true
+                break
+            }
             Write-Host ('  ' + $script:Gm.Red + $script:Box.Cross + ' cancelled' + $script:Gm.Reset)
             return (@{ status = 'cancelled'; message = 'User declined. Do not retry without a new user request.' } | ConvertTo-Json -Compress)
         }
@@ -3051,10 +3139,13 @@ function Invoke-AgentCommand {
         if ($script:OutputMode -eq 'json') {
             return (@{ status = 'cancelled'; message = 'Interactive confirmation is disabled in JSON mode. Use -Permission Auto to allow command execution.' } | ConvertTo-Json -Compress)
         }
-        Write-Host ('  ' + $script:Gm.Grey0 + $script:Box.V + ' ' + $script:Gm.BoldYellow + 'Confirm (' + $script:Gm.Fg1 + 'RUN' + $script:Gm.BoldYellow + ' to execute, Enter cancels): ' + $script:Gm.Fg) -NoNewline
-        $approval = Read-Host 'Type RUN to execute this command; Enter cancels'
-        Write-Host $script:Gm.Reset -NoNewline
-        if ($approval -cne 'RUN') {
+        $promptStr = '  ' + $script:Gm.Grey0 + $script:Box.V + ' ' + $script:Gm.BoldYellow + 'Confirm [y]es, [n]o, [a]ll commands: ' + $script:Gm.Fg
+        $choice = Read-TuiConfirmation -PromptText $promptStr -ActionType 'run'
+        if ($choice -eq 'a') {
+            $script:AgentPermission = 'Auto'
+            Write-Host ('  ' + $script:Gm.Grey0 + $script:Box.V + ' ' + $script:Gm.Aqua + $script:Box.Check + ' [switched permission to Auto for this session]' + $script:Gm.Reset)
+        }
+        elseif ($choice -ne 'y') {
             Write-Host ('  ' + $script:Gm.Grey0 + $script:Box.BL + $script:Box.H + ' ' + $script:Gm.Red + $script:Box.Cross + ' cancelled' + $script:Gm.Reset)
             return (@{ status = 'cancelled'; message = 'User declined command execution. Do not retry without a new user request.' } | ConvertTo-Json -Compress)
         }

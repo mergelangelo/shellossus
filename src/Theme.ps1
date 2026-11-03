@@ -600,6 +600,79 @@ function Invoke-TuiSelector {
     return $null
 }
 
+function Read-TuiConfirmation {
+    param(
+        [string]$PromptText,
+        [switch]$AllowDiff,
+        [string]$ActionType = 'write'
+    )
+    while ($true) {
+        Write-Host $PromptText -NoNewline
+        $raw = $null
+        try {
+            if ($Host.UI.RawUI -and $ExecutionContext.SessionState.LanguageMode -ne 'ConstrainedLanguage') {
+                $key = $Host.UI.RawUI.ReadKey('NoEcho,IncludeKeyDown')
+                if ($null -ne $key) {
+                    if ($key.VirtualKeyCode -eq 27) {
+                        Write-Host ($script:Gm.Red + 'n (Esc)' + $script:Gm.Reset)
+                        return 'n'
+                    }
+                    if ($key.VirtualKeyCode -eq 13) {
+                        Write-Host ($script:Gm.BoldGreen + 'y (Enter)' + $script:Gm.Reset)
+                        return 'y'
+                    }
+                    $ch = [string]$key.Character
+                    if ($ch) {
+                        $cLower = $ch.ToLower()
+                        if ($cLower -eq 'y') {
+                            Write-Host ($script:Gm.BoldGreen + 'y' + $script:Gm.Reset)
+                            return 'y'
+                        }
+                        if ($cLower -eq 'a') {
+                            Write-Host ($script:Gm.Aqua + 'a (all)' + $script:Gm.Reset)
+                            return 'a'
+                        }
+                        if ($cLower -eq 'd' -and $AllowDiff) {
+                            Write-Host ($script:Gm.Yellow + 'd (diff)' + $script:Gm.Reset)
+                            return 'd'
+                        }
+                        if ($cLower -eq 'n' -or $cLower -eq 'q') {
+                            Write-Host ($script:Gm.Red + 'n' + $script:Gm.Reset)
+                            return 'n'
+                        }
+                        Write-Host $ch
+                        return $cLower
+                    }
+                }
+            }
+        }
+        catch {}
+
+        $raw = Read-Host
+        Write-Host $script:Gm.Reset -NoNewline
+        if ($null -eq $raw) { return 'n' }
+        $trimmed = $raw.Trim()
+        if (-not $trimmed) { return 'n' }
+        $lower = $trimmed.ToLower()
+        if ($lower -in @('y', 'yes', '1', 'w', 'write') -or ($ActionType -eq 'write' -and $trimmed -ceq 'WRITE')) {
+            return 'y'
+        }
+        if ($lower -in @('r', 'run') -or ($ActionType -eq 'run' -and $trimmed -ceq 'RUN')) {
+            return 'y'
+        }
+        if ($lower -in @('a', 'all', 'always')) {
+            return 'a'
+        }
+        if ($lower -in @('d', 'diff') -and $AllowDiff) {
+            return 'd'
+        }
+        if ($lower -in @('n', 'no', 'cancel', 'c', '0')) {
+            return 'n'
+        }
+        return $lower
+    }
+}
+
 function Get-VisibleLength {
     param([string]$Text)
     $plain = ''
