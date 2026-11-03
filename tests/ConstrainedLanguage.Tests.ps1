@@ -200,7 +200,7 @@ try {
     Wait-AgentProcessWithSpinner -Process $clDoneProc -StatusLabel 'CL wait check' -TimeoutSec 5 -PollMs 10
 
     $clCap = Get-AgentCapabilities -Root $workspacePath
-    Assert-True ($clCap.permission -eq 'Ask' -and $clCap.tool_names.Count -eq 8 -and ($clCap.tool_names -contains 'run_agent') -and $clCap.environment.language_mode -eq 'ConstrainedLanguage') 'ConstrainedLanguage Get-AgentCapabilities or Get-AgentEnvironment failed.'
+    Assert-True ($clCap.permission -eq 'Ask' -and $clCap.tool_names.Count -eq 10 -and ($clCap.tool_names -contains 'fetch_url') -and ($clCap.tool_names -contains 'web_search') -and ($clCap.tool_names -contains 'run_agent') -and $clCap.environment.language_mode -eq 'ConstrainedLanguage') 'ConstrainedLanguage Get-AgentCapabilities or Get-AgentEnvironment failed.'
     $clSyncState = @{ messages = @(@{ role = 'system'; content = 'sys' }, @{ role = 'user'; content = 'q' }, @{ role = 'assistant'; content = 'a' }) }
     $clSyncRes = Sync-AgentCapabilities -State $clSyncState -RecordTransition
     Assert-True ($clSyncRes.consistent -and $clSyncState.messages[0].content.Contains('<capabilities>')) 'ConstrainedLanguage Sync-AgentCapabilities failed.'
@@ -258,6 +258,8 @@ try {
     $clLim = Set-AgentContextLimits -WindowSpec '128k' -CompactSpec '80k'
     Assert-True ($clLim.context_window_tokens -eq 128000 -and $clLim.compact_threshold_tokens -eq 80000) 'ConstrainedLanguage Set-AgentContextLimits failed.'
     $null = Set-AgentContextLimits -WindowSpec '128k' -CompactSpec '75%'
+    Assert-True ((ConvertTo-UrlEncodedString -Text $clCyr) -eq '%D1%87%D1%82%D0%BE%3F') 'ConstrainedLanguage ConvertTo-UrlEncodedString failed.'
+    Assert-True ((ConvertFrom-HtmlToText -Html '<p>Hi &amp; bye</p>').Contains('Hi & bye')) 'ConstrainedLanguage ConvertFrom-HtmlToText failed.'
 }
 finally {
     Remove-TestEnvironment -Env $envData

@@ -186,7 +186,7 @@ try {
     # 4 Permission modes: ReadOnly, Ask, AutoEdit, Auto.
     $script:approval = ''
     $script:AgentPermission = 'ReadOnly'
-    Assert-True (@(Get-AgentTools).Count -eq 5) 'ReadOnly mode should expose 5 tools (4 read-only + run_agent).'
+    Assert-True (@(Get-AgentTools).Count -eq 7) 'ReadOnly mode should expose 7 tools (6 read-only + run_agent).'
     $call.function.name = 'write_file'
     $call.function.arguments = '{"path":"ro.txt","content":"no"}'
     $roRes = Invoke-AgentTool -Root $workspacePath -Call $call | ConvertFrom-Json
@@ -341,7 +341,7 @@ try {
     $script:EnabledTools = @()
     $script:AgentPermission = 'ReadOnly'
     $capRo = Get-AgentCapabilities
-    Assert-True ($capRo.permission -eq 'ReadOnly' -and $capRo.tool_names.Count -eq 5 -and ($capRo.tool_names -contains 'run_agent') -and (-not $capRo.can_write) -and (-not $capRo.can_exec)) 'Get-AgentCapabilities in ReadOnly mode failed.'
+    Assert-True ($capRo.permission -eq 'ReadOnly' -and $capRo.tool_names.Count -eq 7 -and ($capRo.tool_names -contains 'fetch_url') -and ($capRo.tool_names -contains 'web_search') -and ($capRo.tool_names -contains 'run_agent') -and (-not $capRo.can_write) -and (-not $capRo.can_exec)) 'Get-AgentCapabilities in ReadOnly mode failed.'
     $script:AgentPermission = 'AutoEdit'
     $capAe = Get-AgentCapabilities
     Assert-True ($capAe.permission -eq 'AutoEdit' -and $capAe.can_write -and (-not $capAe.write_requires_confirmation) -and $capAe.exec_requires_confirmation) 'Get-AgentCapabilities in AutoEdit mode failed.'
@@ -529,6 +529,36 @@ try {
     finally {
         $script:AgentPermission = 'Ask'
         Remove-Item Function:\Write-Host -ErrorAction SilentlyContinue
+    }
+
+    # Web tools: fetch_url (HTML stripping, entity decoding, scheme guard) and web_search.
+    Assert-True ((ConvertTo-UrlEncodedString -Text 'a b?') -eq 'a+b%3F') 'ConvertTo-UrlEncodedString failed.'
+    $cleanHtml = ConvertFrom-HtmlToText -Html '<html><head><style>body{}</style><script>alert(1)</script></head><body><h1>Title</h1><p>Hello &amp; world</p></body></html>'
+    Assert-True ($cleanHtml.Contains('Title') -and $cleanHtml.Contains('Hello & world') -and (-not $cleanHtml.Contains('alert(1)'))) "ConvertFrom-HtmlToText unexpected: $cleanHtml"
+
+    $badSchemeRes = Invoke-AgentTool -Root $workspacePath -Call @{ id = 'w-bad'; function = @{ name = 'fetch_url'; arguments = '{"url":"file:///etc/passwd"}' } } | ConvertFrom-Json
+    Assert-True ($badSchemeRes.error -like '*http*') 'fetch_url must reject non-http/https URLs.'
+
+    function Invoke-WebRequest {
+        param($Uri, $Method, $Headers, $ContentType, $Body, $TimeoutSec, $ErrorAction, [switch]$UseBasicParsing, $OutFile)
+        if ($Uri -like '*duckduckgo*') {
+            $ddgHtml = '<div class="result"><a class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Fdocs">Example Docs</a><a class="result__snippet">Official documentation snippet.</a></div>'
+            Set-Content -LiteralPath $OutFile -Value $ddgHtml -Encoding UTF8 -NoNewline
+        }
+        else {
+            $pageHtml = '<html><body><h1>Guide</h1><p>PowerShell 5.1 guide text.</p></body></html>'
+            Set-Content -LiteralPath $OutFile -Value $pageHtml -Encoding UTF8 -NoNewline
+        }
+    }
+    try {
+        $fetchRes = Invoke-AgentTool -Root $workspacePath -Call @{ id = 'w-fetch'; function = @{ name = 'fetch_url'; arguments = '{"url":"https://example.com/docs"}' } } | ConvertFrom-Json
+        Assert-True ($fetchRes.url -eq 'https://example.com/docs' -and $fetchRes.content.Contains('PowerShell 5.1 guide text.')) 'fetch_url failed to return cleaned page content.'
+
+        $searchRes = Invoke-AgentTool -Root $workspacePath -Call @{ id = 'w-search'; function = @{ name = 'web_search'; arguments = '{"query":"powershell 5.1","limit":5}' } } | ConvertFrom-Json
+        Assert-True ($searchRes.count -eq 1 -and $searchRes.results[0].title -eq 'Example Docs' -and $searchRes.results[0].url -eq 'https://example.com/docs') 'web_search failed to parse search results.'
+    }
+    finally {
+        Remove-Item Function:\Invoke-WebRequest -ErrorAction SilentlyContinue
     }
 }
 finally {
