@@ -133,7 +133,7 @@ In interactive and text modes, output uses the 24-bit TrueColor `sainnhe/gruvbox
 ## Article VIII — Verification and Changes
 
 ### Section 1. Automated Verification (`smoke.ps1`)
-Every code change in `src/*.ps1` must be followed by running [`build.ps1`](build.ps1) to update [`shellossus.ps1`](shellossus.ps1) and running [`tests/smoke.ps1`](tests/smoke.ps1) (`Config.Tests.ps1`, `Theme.Tests.ps1`, `Tools.Tests.ps1`, `Context.Tests.ps1`, `Cli.Tests.ps1`, and `ConstrainedLanguage.Tests.ps1`).
+Every code change in `src/*.ps1` must be followed by running [`build.ps1`](build.ps1) to update [`shellossus.ps1`](shellossus.ps1) and running [`tests/smoke.ps1`](tests/smoke.ps1) (`Config.Tests.ps1`, `Theme.Tests.ps1`, `Tools.Tests.ps1`, `Context.Tests.ps1`, `Cli.Tests.ps1`, `Reliability.Tests.ps1`, and `ConstrainedLanguage.Tests.ps1`).
 
 ### Section 2. Maintaining Invariants
 Any new feature or bugfix must uphold Articles I through VII and include regression coverage in [`tests/`](tests/).
