@@ -28,6 +28,9 @@ try {
     Set-Content -LiteralPath (Join-Path $dirA '.gitignore') -Value '*.log' -Encoding UTF8
     Set-Content -LiteralPath (Join-Path $dirAB 'private.log') -Value 'secret log token' -Encoding UTF8
     Set-Content -LiteralPath (Join-Path $dirAB 'keep.txt') -Value 'public log token' -Encoding UTF8
+    $clGitDir = Join-Path $workspacePath '.git'
+    New-Item -ItemType Directory -Path $clGitDir -Force | Out-Null
+    Set-Content -LiteralPath (Join-Path $clGitDir 'HEAD') -Value "ref: refs/heads/cl-tui`n" -Encoding UTF8 -NoNewline
 
     $sessionDirTest = Join-Path $testRoot 'sessions'
     $sessionFile = Join-Path $sessionDirTest 'test-ws1.jsonl'
@@ -220,6 +223,34 @@ try {
     $clSubRes = Invoke-AgentTool -Root $workspacePath -Call $clSubCall | ConvertFrom-Json
     Assert-True ($clSubRes.status -eq 'completed' -and $clSubRes.output -eq 'CL subagent ok') 'ConstrainedLanguage run_agent execution failed.'
     Remove-Item Function:\Invoke-WebRequest -ErrorAction SilentlyContinue
+
+    # ConstrainedLanguage Inline TUI verification
+    Assert-True ((Get-GitBranchLabel -Root $workspacePath) -eq 'cl-tui') 'ConstrainedLanguage Get-GitBranchLabel failed.'
+    Assert-True ((Format-TokenCount -Tokens 15400) -eq '15.4k') 'ConstrainedLanguage Format-TokenCount failed.'
+    $clGauge = Strip-AnsiCodes -Text (Format-ContextGauge -Chars 15000 -MaxChars 60000 -Width 8)
+    Assert-True ($clGauge.Contains('25%')) 'ConstrainedLanguage Format-ContextGauge failed.'
+    $clBar = @(Format-TuiStatusBar -State $reloadedTreeState -Root $workspacePath -Model 'test-model' -UndoCount 1 -Width 85)
+    $clBarPlain = ($clBar | ForEach-Object { Strip-AnsiCodes -Text $_ }) -join "`n"
+    Assert-True ($clBarPlain.Contains('cl-tui') -and $clBarPlain.Contains('test-model') -and $clBarPlain.Contains('undo:1')) 'ConstrainedLanguage Format-TuiStatusBar failed.'
+    Write-TuiPromptFrame -State $reloadedTreeState -Root $workspacePath -Model 'test-model' -UndoCount 1
+    $clDiff = @(Format-UnifiedDiff -Path 'a.txt' -ToolName 'edit_file' -Before "x`ny" -After "x`nz")
+    $clDiffPlain = ($clDiff | ForEach-Object { Strip-AnsiCodes -Text $_ }) -join "`n"
+    Assert-True ($clDiffPlain.Contains('+1 -1') -and $clDiffPlain.Contains('- y') -and $clDiffPlain.Contains('+ z')) 'ConstrainedLanguage Format-UnifiedDiff failed.'
+    $clCard = @(Format-ToolCallCard -Name 'read_file' -Target 'a.txt' -Detail 'lines 1..2' -Status 'ok' -Summary '2 lines' -ElapsedMs 5)
+    Assert-True ($clCard.Count -eq 2) 'ConstrainedLanguage Format-ToolCallCard failed.'
+    Assert-True ((Resolve-ReplCommandAlias -InputText '/p Auto') -eq '/permission Auto') 'ConstrainedLanguage Resolve-ReplCommandAlias failed.'
+    $clStatusCard = @(Format-TuiStatusCard -State $reloadedTreeState -Model 'test-model' -MaxSteps 50 -SessionFile $sessionFile -UndoCount 1)
+    Assert-True ($clStatusCard.Count -ge 7) 'ConstrainedLanguage Format-TuiStatusCard failed.'
+    $clTreeCard = @(Format-TuiTreeCard -State $reloadedTreeState)
+    Assert-True ($clTreeCard.Count -ge 4) 'ConstrainedLanguage Format-TuiTreeCard failed.'
+    Write-TuiHelpCard
+    $script:approval = '2'
+    $clPicked = Invoke-TuiSelector -Title 'CL Picker' -Items @(
+        @{ label = 'One'; value = 'v1'; description = 'd1'; active = $false },
+        @{ label = 'Two'; value = 'v2'; description = 'd2'; active = $true }
+    )
+    Assert-True ($clPicked -eq 'v2') 'ConstrainedLanguage Invoke-TuiSelector failed.'
+    $script:approval = 'WRITE'
 }
 finally {
     Remove-TestEnvironment -Env $envData

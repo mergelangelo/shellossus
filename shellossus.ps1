@@ -246,6 +246,424 @@ $script:Gm = @{
     OscInit     = "$script:Esc]11;#282828$script:Bel$script:Esc]10;#d4be98$script:Bel"
 }
 
+$script:Box = @{
+    TL       = [string][char]0x256D
+    TR       = [string][char]0x256E
+    BL       = [string][char]0x2570
+    BR       = [string][char]0x256F
+    H        = [string][char]0x2500
+    V        = [string][char]0x2502
+    LT       = [string][char]0x251C
+    RT       = [string][char]0x2524
+    BarFull  = [string][char]0x2588
+    BarEmpty = [string][char]0x2591
+    Dot      = [string][char]0x25CF
+    Arrow    = [string][char]0x25B8
+    Check    = [string][char]0x2713
+    Cross    = [string][char]0x2717
+}
+
+function Strip-AnsiCodes {
+    param([string]$Text)
+    if (-not $Text) { return '' }
+    $s = $Text -replace '\x1b\][^\x07]*\x07', ''
+    $s = $s -replace '\x1b\[[0-9;?]*[a-zA-Z]', ''
+    return $s
+}
+
+function Get-TerminalWidth {
+    try {
+        if ($Host -and $Host.UI -and $Host.UI.RawUI -and $Host.UI.RawUI.WindowSize) {
+            $w = [int]$Host.UI.RawUI.WindowSize.Width
+            if ($w -ge 50 -and $w -le 220) { return $w }
+        }
+    }
+    catch {}
+    return 90
+}
+
+function Format-TokenCount {
+    param([int]$Tokens)
+    if ($Tokens -lt 1000) { return [string]$Tokens }
+    return (("{0:0.0}k" -f ($Tokens / 1000.0)).Replace(',', '.'))
+}
+
+function Format-ContextGauge {
+    param([int]$Chars, [int]$MaxChars = 60000, [int]$Width = 10)
+    if ($MaxChars -le 0) { $MaxChars = 60000 }
+    if ($Width -lt 4) { $Width = 4 }
+    $estTok = [int](($Chars + 3) / 4)
+    $maxTok = [int](($MaxChars + 3) / 4)
+    $pct = [int](($Chars * 100) / $MaxChars)
+    if ($pct -lt 0) { $pct = 0 }
+    $clampedPct = if ($pct -gt 100) { 100 } else { $pct }
+    $filled = [int](($clampedPct * $Width + 50) / 100)
+    if ($filled -gt $Width) { $filled = $Width }
+    if ($filled -lt 0) { $filled = 0 }
+    $empty = $Width - $filled
+    $barColor = if ($pct -ge 80) { $script:Gm.Red } elseif ($pct -ge 50) { $script:Gm.Yellow } else { $script:Gm.Green }
+    $bar = $barColor + ($script:Box.BarFull * $filled) + $script:Gm.Grey0 + ($script:Box.BarEmpty * $empty) + $script:Gm.Reset
+    $tokStr = (Format-TokenCount -Tokens $estTok) + '/' + (Format-TokenCount -Tokens $maxTok)
+    return ($bar + ' ' + $barColor + ("{0}%" -f $pct) + $script:Gm.Reset + ' ' + $script:Gm.Grey1 + '(' + $tokStr + ')' + $script:Gm.Reset)
+}
+
+function Get-GitBranchLabel {
+    param([string]$Root)
+    if (-not $Root) { return '' }
+    $curr = $Root
+    for ($depth = 0; $depth -lt 12; $depth++) {
+        if (-not $curr) { break }
+        $currItem = Get-Item -LiteralPath $curr -Force -ErrorAction SilentlyContinue
+        if (-not $currItem -or (($currItem.Attributes -band 1024) -ne 0)) { break }
+        $dotGit = Join-Path $curr '.git'
+        if (Test-Path -LiteralPath $dotGit) {
+            $gitItem = Get-Item -LiteralPath $dotGit -Force -ErrorAction SilentlyContinue
+            if ($gitItem -and (($gitItem.Attributes -band 1024) -eq 0) -and $gitItem.PSIsContainer) {
+                $headFile = Join-Path $dotGit 'HEAD'
+                if (Test-Path -LiteralPath $headFile) {
+                    $headItem = Get-Item -LiteralPath $headFile -Force -ErrorAction SilentlyContinue
+                    if ($headItem -and (-not $headItem.PSIsContainer) -and (($headItem.Attributes -band 1024) -eq 0) -and $headItem.Length -le 1024) {
+                        $rawHead = Get-Content -LiteralPath $headFile -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
+                        if ($rawHead) {
+                            $trimmed = $rawHead.Trim()
+                            if ($trimmed -match '^ref:\s*refs/heads/(.+)$') {
+                                return $Matches[1].Trim()
+                            }
+                            if ($trimmed -match '^[0-9a-fA-F]{7,40}$') {
+                                return $trimmed.Substring(0, 7)
+                            }
+                        }
+                    }
+                }
+            }
+            break
+        }
+        $parent = Split-Path $curr -Parent
+        if (-not $parent -or ($parent -ieq $curr)) { break }
+        $curr = $parent
+    }
+    return ''
+}
+
+function Format-PermissionBadge {
+    param([string]$Permission = $script:AgentPermission)
+    $p = if ($Permission) { $Permission } else { 'Ask' }
+    $color = switch ($p) {
+        'ReadOnly' { $script:Gm.Blue }
+        'Ask'      { $script:Gm.BoldYellow }
+        'AutoEdit' { $script:Gm.Aqua }
+        'Auto'     { $script:Gm.BoldRed }
+        default    { $script:Gm.Fg }
+    }
+    return ($script:Gm.Bg1 + $color + '[' + $p + ']' + $script:Gm.Reset)
+}
+
+function Format-TuiStatusBar {
+    param($State, [string]$Root, [string]$Model, [int]$UndoCount = 0, [int]$Width = 0)
+    $w = if ($Width -ge 50) { $Width } else { Get-TerminalWidth }
+    $innerW = $w - 4
+    if ($innerW -lt 46) { $innerW = 46 }
+    $wsName = if ($Root) { Split-Path $Root -Leaf } else { 'workspace' }
+    if (-not $wsName) { $wsName = $Root }
+    $branch = Get-GitBranchLabel -Root $Root
+    $branchSeg = if ($branch) { ' ' + $script:Gm.Purple + '(' + $branch + ')' + $script:Gm.Reset } else { '' }
+    $sessLabel = if ($State -and $State.session_name) { [string]$State.session_name } elseif ($State -and $State.session_id) { [string]$State.session_id } else { '' }
+    $sessSeg = if ($sessLabel) { ' ' + $script:Gm.Grey0 + $script:Box.H + ' ' + $script:Gm.Grey1 + $sessLabel + $script:Gm.Reset } else { '' }
+    $topTitle = ' ' + $script:Gm.BoldGreen + $script:Box.Dot + ' ' + $wsName + $script:Gm.Reset + $branchSeg + $sessSeg + ' '
+    $topVisLen = (Strip-AnsiCodes -Text $topTitle).Length
+    $topDashes = $w - 3 - $topVisLen
+    if ($topDashes -lt 2) { $topDashes = 2 }
+    $lineTop = $script:Gm.Grey0 + $script:Box.TL + $script:Box.H + $script:Gm.Reset + $topTitle + $script:Gm.Grey0 + ($script:Box.H * $topDashes) + $script:Box.TR + $script:Gm.Reset
+
+    $chars = 0
+    if ($State -and $State.messages) {
+        foreach ($m in @($State.messages)) {
+            if ($m.content) { $chars += ([string]$m.content).Length }
+        }
+    }
+    $effStr = if ($script:ReasoningEffort) { ':' + $script:ReasoningEffort } elseif ($script:ShowReasoning -eq 'hide') { ':hide' } else { '' }
+    $modelSeg = $script:Gm.Fg1 + $Model + $script:Gm.Grey1 + $effStr + $script:Gm.Reset
+    $permSeg = Format-PermissionBadge -Permission $script:AgentPermission
+    $gaugeSeg = Format-ContextGauge -Chars $chars -MaxChars 60000 -Width 8
+    $inTok = if ($State -and $State.usage_input_tokens) { [int]$State.usage_input_tokens } else { 0 }
+    $outTok = if ($State -and $State.usage_output_tokens) { [int]$State.usage_output_tokens } else { 0 }
+    $tokSeg = if (($inTok + $outTok) -gt 0) {
+        ' ' + $script:Gm.Grey0 + $script:Box.V + ' ' + $script:Gm.Grey1 + 'in:' + (Format-TokenCount -Tokens $inTok) + ' out:' + (Format-TokenCount -Tokens $outTok) + $script:Gm.Reset
+    }
+    else { '' }
+    $undoSeg = if ($UndoCount -gt 0) {
+        ' ' + $script:Gm.Grey0 + $script:Box.V + ' ' + $script:Gm.Yellow + "undo:$UndoCount" + $script:Gm.Reset
+    }
+    else { '' }
+    $sep = ' ' + $script:Gm.Grey0 + $script:Box.V + $script:Gm.Reset + ' '
+    $midContent = $modelSeg + $sep + $permSeg + $sep + $gaugeSeg + $tokSeg + $undoSeg
+    $midVisLen = (Strip-AnsiCodes -Text $midContent).Length
+    $padRight = $innerW - $midVisLen
+    $padStr = if ($padRight -gt 0) { ' ' * $padRight } else { '' }
+    $lineMid = $script:Gm.Grey0 + $script:Box.V + $script:Gm.Reset + ' ' + $midContent + $padStr + ' ' + $script:Gm.Grey0 + $script:Box.V + $script:Gm.Reset
+    $lineBot = $script:Gm.Grey0 + $script:Box.BL + ($script:Box.H * ($w - 2)) + $script:Box.BR + $script:Gm.Reset
+    return @($lineTop, $lineMid, $lineBot)
+}
+
+function Write-TuiPromptFrame {
+    param($State, [string]$Root, [string]$Model, [int]$UndoCount = 0)
+    if ($script:OutputMode -eq 'json') { return }
+    $wsName = if ($Root) { Split-Path $Root -Leaf } else { 'workspace' }
+    if (-not $wsName) { $wsName = $Root }
+    $titleSeq = "$script:Esc]0;shellossus - $wsName [$Model | $($script:AgentPermission)]$script:Bel"
+    Write-Host ("`n" + $titleSeq) -NoNewline
+    foreach ($ln in @(Format-TuiStatusBar -State $State -Root $Root -Model $Model -UndoCount $UndoCount)) {
+        Write-Host $ln
+    }
+}
+
+function Format-ToolCallCard {
+    param(
+        [string]$Name,
+        [string]$Target = '',
+        [string]$Detail = '',
+        [string]$Status = 'ok',
+        [string]$Summary = '',
+        [int]$ElapsedMs = -1
+    )
+    $targetPart = if ($Target) { ' ' + $script:Gm.Fg1 + $Target + $script:Gm.Reset } else { '' }
+    $detailPart = if ($Detail) { ' ' + $script:Gm.Grey1 + '(' + $Detail + ')' + $script:Gm.Reset } else { '' }
+    $top = '  ' + $script:Gm.Grey0 + $script:Box.TL + $script:Box.H + ' ' + $script:Gm.Yellow + $script:Box.Arrow + ' ' + $Name + $script:Gm.Reset + $targetPart + $detailPart
+    $icon = if ($Status -in @('error', 'cancelled', 'timed_out')) {
+        $script:Gm.Red + $script:Box.Cross + $script:Gm.Reset
+    }
+    else {
+        $script:Gm.Green + $script:Box.Check + $script:Gm.Reset
+    }
+    $sumColor = if ($Status -in @('error', 'cancelled', 'timed_out')) { $script:Gm.Red } else { $script:Gm.Grey2 }
+    $sumPart = if ($Summary) { ' ' + $sumColor + $Summary + $script:Gm.Reset } else { ' ' + $sumColor + $Status + $script:Gm.Reset }
+    $timePart = if ($ElapsedMs -ge 0) { $script:Gm.Grey0 + ' | ' + $script:Gm.Grey1 + ("{0}ms" -f $ElapsedMs) + $script:Gm.Reset } else { '' }
+    $bot = '  ' + $script:Gm.Grey0 + $script:Box.BL + $script:Box.H + ' ' + $icon + $sumPart + $timePart
+    return @($top, $bot)
+}
+
+function Write-ToolCallCard {
+    param(
+        [string]$Name,
+        [string]$Target = '',
+        [string]$Detail = '',
+        [string]$Status = 'ok',
+        [string]$Summary = '',
+        [int]$ElapsedMs = -1
+    )
+    if ($script:OutputMode -eq 'json') { return }
+    foreach ($ln in @(Format-ToolCallCard -Name $Name -Target $Target -Detail $Detail -Status $Status -Summary $Summary -ElapsedMs $ElapsedMs)) {
+        Write-Host $ln
+    }
+}
+
+function Format-DiffLinePreview {
+    param([string]$Line, [int]$MaxChars = 180)
+    $clean = Format-PreviewText $Line
+    if ($clean.Length -le $MaxChars) { return $clean }
+    return ($clean.Substring(0, $MaxChars) + ' ...')
+}
+
+function Format-UnifiedDiff {
+    param(
+        [string]$Path,
+        [string]$ToolName = 'edit_file',
+        $Before = $null,
+        [string]$After = '',
+        [int]$ContextLines = 3,
+        [int]$MaxLines = 80
+    )
+    $w = Get-TerminalWidth
+    $afterNorm = if ($After) { $After.Replace("`r`n", "`n") } else { '' }
+    $newLines = @(if ($afterNorm.Length -gt 0) { $afterNorm -split "`n" } else { @() })
+    if ($null -eq $Before) {
+        $addedCount = $newLines.Count
+        $hdr = ' ' + $script:Gm.BoldGreen + 'DIFF ' + $ToolName + ': ' + $script:Gm.Fg1 + $Path + ' ' + $script:Gm.Green + ("(+{0} new)" -f $addedCount) + $script:Gm.Reset + ' '
+        $hdrVis = (Strip-AnsiCodes -Text $hdr).Length
+        $dashes = $w - 5 - $hdrVis
+        if ($dashes -lt 2) { $dashes = 2 }
+        $out = @('  ' + $script:Gm.Grey0 + $script:Box.TL + $script:Box.H + $script:Gm.Reset + $hdr + $script:Gm.Grey0 + ($script:Box.H * $dashes) + $script:Box.TR + $script:Gm.Reset)
+        $showCount = if ($newLines.Count -gt $MaxLines) { $MaxLines } else { $newLines.Count }
+        for ($i = 0; $i -lt $showCount; $i++) {
+            $lnNum = ('{0,4}' -f ($i + 1))
+            $txt = Format-DiffLinePreview -Line $newLines[$i]
+            $out += ('  ' + $script:Gm.Grey0 + $script:Box.V + ' ' + $script:Gm.Grey1 + $lnNum + ' ' + $script:Gm.BgDiffGreen + $script:Gm.Green + '+ ' + $txt + $script:Gm.Reset)
+        }
+        if ($newLines.Count -gt $MaxLines) {
+            $out += ('  ' + $script:Gm.Grey0 + $script:Box.V + '      ... (' + ($newLines.Count - $MaxLines) + ' more lines)' + $script:Gm.Reset)
+        }
+        $out += ('  ' + $script:Gm.Grey0 + $script:Box.BL + ($script:Box.H * ($w - 4)) + $script:Box.BR + $script:Gm.Reset)
+        return $out
+    }
+    $beforeNorm = $Before.Replace("`r`n", "`n")
+    $oldLines = @(if ($beforeNorm.Length -gt 0) { $beforeNorm -split "`n" } else { @() })
+    $pref = 0
+    $minLen = if ($oldLines.Count -lt $newLines.Count) { $oldLines.Count } else { $newLines.Count }
+    while ($pref -lt $minLen -and ($oldLines[$pref] -ceq $newLines[$pref])) {
+        $pref++
+    }
+    $oldEnd = $oldLines.Count - 1
+    $newEnd = $newLines.Count - 1
+    while ($oldEnd -ge $pref -and $newEnd -ge $pref -and ($oldLines[$oldEnd] -ceq $newLines[$newEnd])) {
+        $oldEnd--
+        $newEnd--
+    }
+    $removedCount = if ($oldEnd -ge $pref) { $oldEnd - $pref + 1 } else { 0 }
+    $addedCount = if ($newEnd -ge $pref) { $newEnd - $pref + 1 } else { 0 }
+    $hdr = ' ' + $script:Gm.BoldYellow + 'DIFF ' + $ToolName + ': ' + $script:Gm.Fg1 + $Path + ' ' + $script:Gm.Green + ("+{0}" -f $addedCount) + ' ' + $script:Gm.Red + ("-{0}" -f $removedCount) + $script:Gm.Reset + ' '
+    $hdrVis = (Strip-AnsiCodes -Text $hdr).Length
+    $dashes = $w - 5 - $hdrVis
+    if ($dashes -lt 2) { $dashes = 2 }
+    $out = @('  ' + $script:Gm.Grey0 + $script:Box.TL + $script:Box.H + $script:Gm.Reset + $hdr + $script:Gm.Grey0 + ($script:Box.H * $dashes) + $script:Box.TR + $script:Gm.Reset)
+    $ctxStart = $pref - $ContextLines
+    if ($ctxStart -lt 0) { $ctxStart = 0 }
+    if ($ctxStart -gt 0) {
+        $out += ('  ' + $script:Gm.Grey0 + $script:Box.V + ' ' + $script:Gm.Aqua + ("@@ line {0} @@" -f ($pref + 1)) + $script:Gm.Reset)
+    }
+    for ($i = $ctxStart; $i -lt $pref; $i++) {
+        $lnNum = ('{0,4}' -f ($i + 1))
+        $txt = Format-DiffLinePreview -Line $oldLines[$i]
+        $out += ('  ' + $script:Gm.Grey0 + $script:Box.V + ' ' + $script:Gm.Grey0 + $lnNum + '   ' + $txt + $script:Gm.Reset)
+    }
+    $emitted = 0
+    for ($i = $pref; $i -le $oldEnd; $i++) {
+        if ($emitted -ge $MaxLines) { break }
+        $lnNum = ('{0,4}' -f ($i + 1))
+        $txt = Format-DiffLinePreview -Line $oldLines[$i]
+        $out += ('  ' + $script:Gm.Grey0 + $script:Box.V + ' ' + $script:Gm.Red + $lnNum + ' ' + $script:Gm.BgDiffRed + $script:Gm.Red + '- ' + $txt + $script:Gm.Reset)
+        $emitted++
+    }
+    for ($i = $pref; $i -le $newEnd; $i++) {
+        if ($emitted -ge $MaxLines) { break }
+        $lnNum = ('{0,4}' -f ($i + 1))
+        $txt = Format-DiffLinePreview -Line $newLines[$i]
+        $out += ('  ' + $script:Gm.Grey0 + $script:Box.V + ' ' + $script:Gm.Green + $lnNum + ' ' + $script:Gm.BgDiffGreen + $script:Gm.Green + '+ ' + $txt + $script:Gm.Reset)
+        $emitted++
+    }
+    if (($removedCount + $addedCount) -gt $MaxLines) {
+        $more = ($removedCount + $addedCount) - $MaxLines
+        $out += ('  ' + $script:Gm.Grey0 + $script:Box.V + "      ... ($more more changed lines)" + $script:Gm.Reset)
+    }
+    $ctxAfterEnd = $oldEnd + $ContextLines
+    if ($ctxAfterEnd -ge $oldLines.Count) { $ctxAfterEnd = $oldLines.Count - 1 }
+    for ($i = $oldEnd + 1; $i -le $ctxAfterEnd; $i++) {
+        $newLnIdx = $newEnd + 1 + ($i - ($oldEnd + 1))
+        $lnNum = ('{0,4}' -f ($newLnIdx + 1))
+        $txt = Format-DiffLinePreview -Line $oldLines[$i]
+        $out += ('  ' + $script:Gm.Grey0 + $script:Box.V + ' ' + $script:Gm.Grey0 + $lnNum + '   ' + $txt + $script:Gm.Reset)
+    }
+    $out += ('  ' + $script:Gm.Grey0 + $script:Box.BL + ($script:Box.H * ($w - 4)) + $script:Box.BR + $script:Gm.Reset)
+    return $out
+}
+
+function Write-UnifiedDiffCard {
+    param([string]$Path, [string]$ToolName = 'edit_file', $Before = $null, [string]$After = '')
+    if ($script:OutputMode -eq 'json') { return }
+    foreach ($ln in @(Format-UnifiedDiff -Path $Path -ToolName $ToolName -Before $Before -After $After)) {
+        Write-Host $ln
+    }
+}
+
+function Read-TuiMultilineInput {
+    $first = Read-Host
+    if ($null -eq $first) { return '' }
+    if ($first.StartsWith('"""') -or $first.StartsWith('<<<')) {
+        $fence = if ($first.StartsWith('"""')) { '"""' } else { '>>>' }
+        $altFence = $first.Substring(0, 3)
+        $rest = $first.Substring(3)
+        if ($rest.Length -ge 3 -and ($rest.EndsWith($fence) -or $rest.EndsWith($altFence))) {
+            return $rest.Substring(0, $rest.Length - 3)
+        }
+        $lines = @()
+        if ($rest) { $lines += $rest }
+        while ($true) {
+            if ($script:OutputMode -ne 'json') {
+                Write-Host ($script:Gm.Grey0 + '  ' + $script:Box.V + ' ... ' + $script:Gm.Fg) -NoNewline
+            }
+            $next = Read-Host
+            if ($script:OutputMode -ne 'json') {
+                Write-Host $script:Gm.Reset -NoNewline
+            }
+            if ($null -eq $next) { break }
+            if ($next.EndsWith($fence) -or $next.EndsWith($altFence)) {
+                $beforeClose = $next.Substring(0, $next.Length - 3)
+                if ($beforeClose -or $lines.Count -gt 0) { $lines += $beforeClose }
+                break
+            }
+            $lines += $next
+        }
+        return ($lines -join "`n")
+    }
+    if ($first.EndsWith('\') -and (-not ($first -match '^[a-zA-Z]:\\$'))) {
+        $lines = @($first.Substring(0, $first.Length - 1))
+        while ($true) {
+            if ($script:OutputMode -ne 'json') {
+                Write-Host ($script:Gm.Grey0 + '  ' + $script:Box.V + ' ... ' + $script:Gm.Fg) -NoNewline
+            }
+            $next = Read-Host
+            if ($script:OutputMode -ne 'json') {
+                Write-Host $script:Gm.Reset -NoNewline
+            }
+            if ($null -eq $next) { break }
+            if ($next.EndsWith('\')) {
+                $lines += $next.Substring(0, $next.Length - 1)
+                continue
+            }
+            $lines += $next
+            break
+        }
+        return ($lines -join "`n")
+    }
+    return $first
+}
+
+function Invoke-TuiSelector {
+    param(
+        [string]$Title,
+        [array]$Items,
+        [string]$PromptText = 'Select number (Enter cancels)'
+    )
+    if (-not $Items -or $Items.Count -eq 0) { return $null }
+    if ($script:OutputMode -ne 'json') {
+        $w = Get-TerminalWidth
+        $hdr = ' ' + $script:Gm.BoldOrange + $Title + $script:Gm.Reset + ' '
+        $hdrVis = (Strip-AnsiCodes -Text $hdr).Length
+        $dashes = $w - 5 - $hdrVis
+        if ($dashes -lt 2) { $dashes = 2 }
+        Write-Host ('  ' + $script:Gm.Grey0 + $script:Box.TL + $script:Box.H + $script:Gm.Reset + $hdr + $script:Gm.Grey0 + ($script:Box.H * $dashes) + $script:Box.TR + $script:Gm.Reset)
+        for ($i = 0; $i -lt $Items.Count; $i++) {
+            $it = $Items[$i]
+            $marker = if ($it.active) { $script:Gm.BoldGreen + $script:Box.Dot + $script:Gm.Reset } else { ' ' }
+            $numStr = $script:Gm.Yellow + ("[{0}]" -f ($i + 1)) + $script:Gm.Reset
+            $lblStr = $script:Gm.Aqua + [string]$it.label + $script:Gm.Reset
+            $descStr = if ($it.description) { $script:Gm.Grey1 + ' - ' + [string]$it.description + $script:Gm.Reset } else { '' }
+            Write-Host ('  ' + $script:Gm.Grey0 + $script:Box.V + $script:Gm.Reset + " $marker $numStr $lblStr$descStr")
+        }
+        Write-Host ('  ' + $script:Gm.Grey0 + $script:Box.BL + ($script:Box.H * ($w - 4)) + $script:Box.BR + $script:Gm.Reset)
+        Write-Host ('  ' + $script:Gm.BoldYellow + $PromptText + ': ' + $script:Gm.Fg) -NoNewline
+    }
+    $rawChoice = Read-Host
+    if ($script:OutputMode -ne 'json') {
+        Write-Host $script:Gm.Reset -NoNewline
+    }
+    if (-not $rawChoice -or -not $rawChoice.Trim()) { return $null }
+    $trimmed = $rawChoice.Trim()
+    if ($trimmed -match '^\d+$') {
+        $idx = [int]$trimmed - 1
+        if ($idx -ge 0 -and $idx -lt $Items.Count) {
+            $picked = $Items[$idx]
+            return $(if ($null -ne $picked.value) { $picked.value } else { $picked.label })
+        }
+    }
+    foreach ($it in $Items) {
+        $val = if ($null -ne $it.value) { [string]$it.value } else { [string]$it.label }
+        if ($val -ieq $trimmed -or ([string]$it.label -ieq $trimmed)) {
+            return $val
+        }
+    }
+    return $null
+}
+
 function Get-VisibleLength {
     param([string]$Text)
     $plain = ''
@@ -336,9 +754,9 @@ function Format-MarkdownTable {
 function Write-AgentReply {
     param([string]$Content)
     if ($script:OutputMode -eq 'json') { return }
-    Write-Host ("`n" + $script:Gm.BoldGreen + 'Shellossus: ' + $script:Gm.Reset) -NoNewline
+    $barV = $script:Gm.Grey0 + '  ' + $script:Box.V + ' ' + $script:Gm.Reset
+    Write-Host ("`n  " + $script:Gm.Grey0 + $script:Box.TL + $script:Box.H + ' ' + $script:Gm.BoldGreen + $script:Box.Dot + ' Shellossus' + $script:Gm.Reset)
     $inCode = $false
-    $first = $true
     $tableBuf = @()
     $lines = @($Content -split "`r?`n")
     for ($idx = 0; $idx -lt $lines.Count; $idx++) {
@@ -350,23 +768,24 @@ function Write-AgentReply {
         }
         if ($tableBuf.Count -gt 0) {
             foreach ($tLine in @(Format-MarkdownTable -Lines $tableBuf -Indent '')) {
-                $tIndent = if ($first) { '' } else { '   ' }
-                $first = $false
-                Write-Host ($tIndent + $tLine)
+                Write-Host ($barV + $tLine)
             }
             $tableBuf = @()
         }
-        $indent = if ($first) { '' } else { '   ' }
-        $first = $false
         $trimmedStart = $line.TrimStart()
         if ($trimmedStart.StartsWith('```')) {
-            $lang = $trimmedStart.Substring(3).Trim()
-            $label = if ($lang) { "[$lang]" } else { '---' }
-            Write-Host ($indent + $script:Gm.Grey1 + $label + $script:Gm.Reset)
+            if (-not $inCode) {
+                $lang = $trimmedStart.Substring(3).Trim()
+                $label = if ($lang) { " $lang " } else { ' code ' }
+                Write-Host ($barV + $script:Gm.Grey0 + $script:Box.TL + $script:Box.H + $script:Gm.Aqua + $label + $script:Gm.Grey0 + ($script:Box.H * 24) + $script:Gm.Reset)
+            }
+            else {
+                Write-Host ($barV + $script:Gm.Grey0 + $script:Box.BL + ($script:Box.H * 30) + $script:Gm.Reset)
+            }
             $inCode = -not $inCode
         }
         elseif ($inCode) {
-            Write-Host ($indent + $script:Gm.Bg1 + $script:Gm.Yellow + '  ' + $line + '  ' + $script:Gm.Reset)
+            Write-Host ($barV + $script:Gm.Grey0 + $script:Box.V + $script:Gm.Bg1 + $script:Gm.Yellow + '  ' + $line + '  ' + $script:Gm.Reset)
         }
         elseif ($line -match '^\s*(#{1,6})\s+(.*)$') {
             $level = $Matches[1].Length
@@ -376,28 +795,27 @@ function Write-AgentReply {
                 3 { $script:Gm.BoldYellow }
                 default { $script:Gm.BoldGreen }
             }
-            Write-Host ($indent + (Format-MarkdownInline -Text $Matches[2] -BaseColor $hColor))
+            Write-Host ($barV + (Format-MarkdownInline -Text $Matches[2] -BaseColor $hColor))
         }
         elseif ($line -match '^\s*([-*_]){3,}\s*$') {
-            Write-Host ($indent + $script:Gm.Grey0 + ('-' * 40) + $script:Gm.Reset)
+            Write-Host ($barV + $script:Gm.Grey0 + ($script:Box.H * 40) + $script:Gm.Reset)
         }
         elseif ($line -match '^(\s*)>\s?(.*)$') {
-            Write-Host ($indent + $Matches[1] + $script:Gm.Grey0 + '| ' + (Format-MarkdownInline -Text $Matches[2] -BaseColor $script:Gm.Grey2))
+            Write-Host ($barV + $Matches[1] + $script:Gm.Grey0 + $script:Box.V + ' ' + (Format-MarkdownInline -Text $Matches[2] -BaseColor $script:Gm.Grey2))
         }
         elseif ($line -match '^(\s*)([-*+]|\d+\.)\s+(.*)$') {
-            Write-Host ($indent + $Matches[1] + $script:Gm.Green + $Matches[2] + ' ' + $script:Gm.Reset + (Format-MarkdownInline -Text $Matches[3] -BaseColor $script:Gm.Fg))
+            Write-Host ($barV + $Matches[1] + $script:Gm.Green + $Matches[2] + ' ' + $script:Gm.Reset + (Format-MarkdownInline -Text $Matches[3] -BaseColor $script:Gm.Fg))
         }
         else {
-            Write-Host ($indent + (Format-MarkdownInline -Text $line -BaseColor $script:Gm.Fg))
+            Write-Host ($barV + (Format-MarkdownInline -Text $line -BaseColor $script:Gm.Fg))
         }
     }
     if ($tableBuf.Count -gt 0) {
         foreach ($tLine in @(Format-MarkdownTable -Lines $tableBuf -Indent '')) {
-            $tIndent = if ($first) { '' } else { '   ' }
-            $first = $false
-            Write-Host ($tIndent + $tLine)
+            Write-Host ($barV + $tLine)
         }
     }
+    Write-Host ('  ' + $script:Gm.Grey0 + $script:Box.BL + ($script:Box.H * 16) + $script:Gm.Reset)
 }
 
 function Write-AgentReasoning {
@@ -405,16 +823,18 @@ function Write-AgentReasoning {
     if (-not $Text -or $script:ShowReasoning -eq 'hide' -or $script:OutputMode -eq 'json') { return }
     $lines = @($Text.Trim() -split "`r?`n")
     if ($script:ShowReasoning -eq 'full' -or $lines.Count -le 3) {
-        Write-Host ("`n" + $script:Gm.Grey0 + '  [reasoning]' + $script:Gm.Reset)
+        Write-Host ("`n  " + $script:Gm.Grey0 + $script:Box.TL + $script:Box.H + ' [reasoning]' + $script:Gm.Reset)
         foreach ($l in $lines) {
-            Write-Host ($script:Gm.Grey1 + '  | ' + (Format-PreviewText $l) + $script:Gm.Reset)
+            Write-Host ('  ' + $script:Gm.Grey0 + $script:Box.V + ' ' + $script:Gm.Grey1 + (Format-PreviewText $l) + $script:Gm.Reset)
         }
+        Write-Host ('  ' + $script:Gm.Grey0 + $script:Box.BL + ($script:Box.H * 12) + $script:Gm.Reset)
     }
     else {
-        Write-Host ("`n" + $script:Gm.Grey0 + "  [reasoning: last 3 of $($lines.Count) lines | /reasoning full to expand]" + $script:Gm.Reset)
+        Write-Host ("`n  " + $script:Gm.Grey0 + $script:Box.TL + $script:Box.H + " [reasoning: last 3 of $($lines.Count) lines | /reasoning full to expand]" + $script:Gm.Reset)
         foreach ($l in @($lines | Select-Object -Last 3)) {
-            Write-Host ($script:Gm.Grey1 + '  | ' + (Format-PreviewText $l) + $script:Gm.Reset)
+            Write-Host ('  ' + $script:Gm.Grey0 + $script:Box.V + ' ' + $script:Gm.Grey1 + (Format-PreviewText $l) + $script:Gm.Reset)
         }
+        Write-Host ('  ' + $script:Gm.Grey0 + $script:Box.BL + ($script:Box.H * 12) + $script:Gm.Reset)
     }
 }
 
@@ -1660,34 +2080,40 @@ function Invoke-AgentCommand {
         if ($timeoutSec -lt 1 -or $timeoutSec -gt 600) { throw 'timeout_sec must be between 1 and 600.' }
     }
     if ($script:OutputMode -ne 'json') {
-        Write-Host ("`n" + $script:Gm.BoldYellow + 'PROPOSED run_command (in ' + $Root + '):' + $script:Gm.Reset)
-        Write-Host ($script:Gm.Bg1 + $script:Gm.Yellow + '  ' + (Format-PreviewText $cmdText) + '  ' + $script:Gm.Reset)
+        Write-Host ("`n  " + $script:Gm.Grey0 + $script:Box.TL + $script:Box.H + ' ' + $script:Gm.BoldYellow + $script:Box.Arrow + ' run_command ' + $script:Gm.Grey1 + '(' + $Root + ')' + $script:Gm.Reset)
+        Write-Host ('  ' + $script:Gm.Grey0 + $script:Box.V + ' ' + $script:Gm.Bg1 + $script:Gm.Yellow + '  ' + (Format-PreviewText $cmdText) + '  ' + $script:Gm.Reset)
     }
     if ($script:AgentPermission -eq 'Auto') {
         if ($script:OutputMode -ne 'json') {
-            Write-Host ($script:Gm.Aqua + '  [auto-approved by Auto mode]' + $script:Gm.Reset)
+            Write-Host ('  ' + $script:Gm.Grey0 + $script:Box.V + ' ' + $script:Gm.Aqua + $script:Box.Check + ' [auto-approved by Auto mode]' + $script:Gm.Reset)
         }
     }
     else {
         if ($script:OutputMode -eq 'json') {
             return (@{ status = 'cancelled'; message = 'Interactive confirmation is disabled in JSON mode. Use -Permission Auto to allow command execution.' } | ConvertTo-Json -Compress)
         }
-        Write-Host ($script:Gm.BoldYellow + 'Confirm: ' + $script:Gm.Fg) -NoNewline
+        Write-Host ('  ' + $script:Gm.Grey0 + $script:Box.V + ' ' + $script:Gm.BoldYellow + 'Confirm (' + $script:Gm.Fg1 + 'RUN' + $script:Gm.BoldYellow + ' to execute, Enter cancels): ' + $script:Gm.Fg) -NoNewline
         $approval = Read-Host 'Type RUN to execute this command; Enter cancels'
         Write-Host $script:Gm.Reset -NoNewline
         if ($approval -cne 'RUN') {
+            Write-Host ('  ' + $script:Gm.Grey0 + $script:Box.BL + $script:Box.H + ' ' + $script:Gm.Red + $script:Box.Cross + ' cancelled' + $script:Gm.Reset)
             return (@{ status = 'cancelled'; message = 'User declined command execution. Do not retry without a new user request.' } | ConvertTo-Json -Compress)
         }
     }
     $res = Invoke-ShellCommand -Root $Root -Command $cmdText -TimeoutSec $timeoutSec
-    if ($res.output -and $script:OutputMode -ne 'json') {
-        $previewLines = @($res.output -split "`r?`n" | Select-Object -First 15)
-        foreach ($pLine in $previewLines) {
-            Write-Host ($script:Gm.Grey1 + '    ' + (Format-PreviewText $pLine) + $script:Gm.Reset)
+    if ($script:OutputMode -ne 'json') {
+        if ($res.output) {
+            $previewLines = @($res.output -split "`r?`n" | Select-Object -First 15)
+            foreach ($pLine in $previewLines) {
+                Write-Host ('  ' + $script:Gm.Grey0 + $script:Box.V + '   ' + $script:Gm.Grey1 + (Format-PreviewText $pLine) + $script:Gm.Reset)
+            }
+            if (($res.output -split "`r?`n").Count -gt 15) {
+                Write-Host ('  ' + $script:Gm.Grey0 + $script:Box.V + '   ... (output truncated in terminal preview)' + $script:Gm.Reset)
+            }
         }
-        if (($res.output -split "`r?`n").Count -gt 15) {
-            Write-Host ($script:Gm.Grey0 + '    ... (output truncated in terminal preview)' + $script:Gm.Reset)
-        }
+        $cmdIcon = if ($res.timed_out -or $res.exit_code -ne 0) { $script:Gm.Red + $script:Box.Cross + $script:Gm.Reset } else { $script:Gm.Green + $script:Box.Check + $script:Gm.Reset }
+        $cmdColor = if ($res.timed_out -or $res.exit_code -ne 0) { $script:Gm.Red } else { $script:Gm.Grey2 }
+        Write-Host ('  ' + $script:Gm.Grey0 + $script:Box.BL + $script:Box.H + ' ' + $cmdIcon + ' ' + $cmdColor + ("exit {0}" -f $res.exit_code) + $script:Gm.Grey0 + ' | ' + $script:Gm.Grey1 + ("{0}s" -f $res.wall_time_seconds) + $script:Gm.Reset)
     }
     $status = if ($res.timed_out) { 'timed_out' } else { 'executed' }
     return (@{
@@ -1868,40 +2294,25 @@ function Invoke-AgentWrite {
     if ($after.Length -gt 1MB -or ($null -ne $before -and $before.Length -gt 1MB)) { throw 'File content exceeds 1 MiB limit.' }
     if ($after -match '\x00' -or ($null -ne $before -and $before -match '\x00')) { throw 'Binary content is not supported.' }
     if ($script:OutputMode -ne 'json') {
-        Write-Host ("`n" + $script:Gm.BoldYellow + 'PROPOSED ' + $Name + ': ' + $path + $script:Gm.Reset)
-        if ($null -ne $before) {
-            $prevPrefix = Format-DiffSnippet -Text $prefixText -MaxChars 300 -KeepTail
-            $prevSuffix = Format-DiffSnippet -Text $suffixText -MaxChars 300
-            $prevOld = Format-DiffSnippet -Text $oldText -MaxChars 4000
-            $prevNew = Format-DiffSnippet -Text $newText -MaxChars 4000
-            Write-Host ($script:Gm.BoldRed + '--- BEFORE ---' + $script:Gm.Reset)
-            Write-Host ($script:Gm.Grey0 + $prevPrefix + $script:Gm.Reset) -NoNewline
-            Write-Host ($script:Gm.BgDiffRed + $script:Gm.Red + $prevOld + $script:Gm.Reset) -NoNewline
-            Write-Host ($script:Gm.Grey0 + $prevSuffix + $script:Gm.Reset)
-            Write-Host ($script:Gm.BoldGreen + '--- AFTER ---' + $script:Gm.Reset)
-            Write-Host ($script:Gm.Grey0 + $prevPrefix + $script:Gm.Reset) -NoNewline
-            Write-Host ($script:Gm.BgDiffGreen + $script:Gm.Green + $prevNew + $script:Gm.Reset) -NoNewline
-            Write-Host ($script:Gm.Grey0 + $prevSuffix + $script:Gm.Reset)
-        }
-        else {
-            Write-Host ($script:Gm.BoldGreen + '--- AFTER ---' + $script:Gm.Reset)
-            Write-Host ($script:Gm.BgDiffGreen + $script:Gm.Green + (Format-DiffSnippet -Text $after -MaxChars 4000) + $script:Gm.Reset)
-        }
-        Write-Host ($script:Gm.Grey0 + '--- END OF PREVIEW ---' + $script:Gm.Reset)
+        Write-Host ''
+        Write-UnifiedDiffCard -Path $Arguments.path -ToolName $Name -Before $before -After $after
     }
     if ($script:AgentPermission -in @('AutoEdit', 'Auto')) {
         if ($script:OutputMode -ne 'json') {
-            Write-Host ($script:Gm.Aqua + '  [auto-approved by ' + $script:AgentPermission + ' mode]' + $script:Gm.Reset)
+            Write-Host ('  ' + $script:Gm.Aqua + $script:Box.Check + ' [auto-approved by ' + $script:AgentPermission + ' mode]' + $script:Gm.Reset)
         }
     }
     else {
         if ($script:OutputMode -eq 'json') {
             return (@{ status = 'cancelled'; message = 'Interactive confirmation is disabled in JSON mode. Use -Permission AutoEdit or Auto to allow file modifications.' } | ConvertTo-Json -Compress)
         }
-        Write-Host ($script:Gm.BoldYellow + 'Confirm: ' + $script:Gm.Fg) -NoNewline
+        Write-Host ('  ' + $script:Gm.BoldYellow + $script:Box.Arrow + ' Confirm (' + $script:Gm.Fg1 + 'WRITE' + $script:Gm.BoldYellow + ' to apply, Enter cancels): ' + $script:Gm.Fg) -NoNewline
         $approval = Read-Host 'Type WRITE to approve this file change; Enter cancels'
         Write-Host $script:Gm.Reset -NoNewline
-        if ($approval -cne 'WRITE') { return (@{ status = 'cancelled'; message = 'User declined. Do not retry without a new user request.' } | ConvertTo-Json -Compress) }
+        if ($approval -cne 'WRITE') {
+            Write-Host ('  ' + $script:Gm.Red + $script:Box.Cross + ' cancelled' + $script:Gm.Reset)
+            return (@{ status = 'cancelled'; message = 'User declined. Do not retry without a new user request.' } | ConvertTo-Json -Compress)
+        }
     }
     $stageFile = New-TemporaryFile -ErrorAction Stop
     $backupPath = $null
@@ -2168,7 +2579,7 @@ function Invoke-SubagentInProcess {
         }
         Sync-AgentCapabilities -State $childState -Root $Root | Out-Null
         if ($script:OutputMode -ne 'json') {
-            Write-Host ($script:Gm.Aqua + ("  [run_agent:{0}] ({1}, context={2}) " -f $roleObj.name, $effPerm, $ContextMode) + $script:Gm.Grey1 + (Invoke-TruncateLine -Line $TaskPrompt -MaxChars 90).text + $script:Gm.Reset)
+            Write-Host ("`n  " + $script:Gm.Grey0 + $script:Box.TL + $script:Box.H + ' ' + $script:Gm.Aqua + $script:Box.Arrow + (" run_agent:{0} " -f $roleObj.name) + $script:Gm.Yellow + ("[{0}; context={1}] " -f $effPerm, $ContextMode) + $script:Gm.Grey1 + (Invoke-TruncateLine -Line $TaskPrompt -MaxChars 80).text + $script:Gm.Reset)
         }
         Invoke-AgentTurn -State $childState -Endpoint $effEndpoint -ModelId $effModel -ApiKey $effKey -Root $Root -Steps $MaxSteps
         if ($null -ne $savedState) {
@@ -2185,6 +2596,9 @@ function Invoke-SubagentInProcess {
         }
         $fileOps = Get-CompactionFileOperations -Messages $childState.messages
         $subStatus = if ($childState.step_limit_reached) { 'step_limit_reached' } elseif ($childState.loop_detected) { 'loop_detected' } else { 'completed' }
+        if ($script:OutputMode -ne 'json') {
+            Write-Host ('  ' + $script:Gm.Grey0 + $script:Box.BL + $script:Box.H + ' ' + $script:Gm.Green + $script:Box.Check + ' ' + $script:Gm.Grey2 + ("run_agent:{0} {1} ({2} steps, read:{3}, modified:{4})" -f $roleObj.name, $subStatus, $assistantSteps, @($fileOps.read_files).Count, @($fileOps.modified_files).Count) + $script:Gm.Reset)
+        }
         return @{
             role = $roleObj.name
             permission = $effPerm
@@ -2501,12 +2915,10 @@ function Invoke-AgentTool {
         if ($name -eq 'run_agent') { return (Invoke-AgentSubagent -Root $Root -Arguments $arguments) }
         if ($name -eq 'run_command') { return (Invoke-AgentCommand -Root $Root -Arguments $arguments) }
         if ($name -in @('write_file', 'edit_file')) { return (Invoke-AgentWrite -Root $Root -Name $name -Arguments $arguments) }
+        $toolStart = Get-Date
         $allowSkill = ($name -eq 'read_file')
         $path = Resolve-AgentPath -Root $Root -RelativePath $arguments.path -AllowRegisteredSkill:$allowSkill
         $item = Get-Item -LiteralPath $path -Force -ErrorAction Stop
-        if ($script:OutputMode -ne 'json') {
-            Write-Host ($script:Gm.Yellow + ('  [{0}] ' -f $name) + $script:Gm.Grey1 + $arguments.path + $script:Gm.Reset)
-        }
         if ($name -eq 'list_files') {
             if (-not $item.PSIsContainer) { throw 'Expected a directory.' }
             $maxEntries = 200
@@ -2518,9 +2930,13 @@ function Invoke-AgentTool {
                 -not (Test-IsSecretFile $_)
             } | Sort-Object { $_.Name.ToLower() } | Select-Object -First ($maxEntries + 1))
             $isTrunc = ($entries.Count -gt $maxEntries)
+            $shownEntries = @($entries | Select-Object -First $maxEntries -Property Name, PSIsContainer, Length)
+            $elapsedMs = [int](((Get-Date) - $toolStart).TotalMilliseconds)
+            $sumText = "$($shownEntries.Count) entries" + $(if ($isTrunc) { ' (truncated)' } else { '' })
+            Write-ToolCallCard -Name 'list_files' -Target $arguments.path -Status 'ok' -Summary $sumText -ElapsedMs $elapsedMs
             $notice = if ($isTrunc) { "[${maxEntries} entries limit reached]" } else { $null }
             return (@{
-                entries = @($entries | Select-Object -First $maxEntries -Property Name, PSIsContainer, Length)
+                entries = $shownEntries
                 truncated = $isTrunc
                 notice = $notice
             } | ConvertTo-Json -Depth 5 -Compress)
@@ -2560,6 +2976,9 @@ function Invoke-AgentTool {
                     }
                 }
             })
+            $elapsedMs = [int](((Get-Date) - $toolStart).TotalMilliseconds)
+            $sumText = "$($found.Count) matches" + $(if ($truncated) { ' (truncated)' } else { '' })
+            Write-ToolCallCard -Name 'find_files' -Target $arguments.path -Detail "pattern=$rawPat" -Status 'ok' -Summary $sumText -ElapsedMs $elapsedMs
             $notice = if ($truncated) { "[${maxFind} results limit reached. Refine pattern or increase limit]" } else { $null }
             return (@{ matches = @($found); files = @($found); count = $found.Count; truncated = $truncated; notice = $notice } | ConvertTo-Json -Depth 5 -Compress)
         }
@@ -2654,6 +3073,9 @@ function Invoke-AgentTool {
             if ($fileLimitReached) { $notices += "Scanned ${filesScanned} of ${totalFiles} files; use file_offset=${nextFileOffset} to continue" }
             if ($linesTruncated) { $notices += 'Some lines truncated to 300 chars; use read_file for full lines' }
             $noticeStr = if ($notices.Count -gt 0) { '[' + ($notices -join '. ') + ']' } else { $null }
+            $elapsedMs = [int](((Get-Date) - $toolStart).TotalMilliseconds)
+            $sumText = "$($hits.Count) matches in $filesScanned files" + $(if ($truncated) { ' (truncated)' } else { '' })
+            Write-ToolCallCard -Name 'grep_files' -Target $arguments.path -Detail "pattern=$($arguments.pattern)" -Status 'ok' -Summary $sumText -ElapsedMs $elapsedMs
             return (@{
                 matches = @($hits)
                 truncated = $truncated
@@ -2694,6 +3116,8 @@ function Invoke-AgentTool {
         $totalLines = $allLines.Count
         $charBudget = 20000
         if ($totalLines -eq 0 -or $startLine -gt $totalLines) {
+            $elapsedMs = [int](((Get-Date) - $toolStart).TotalMilliseconds)
+            Write-ToolCallCard -Name 'read_file' -Target $arguments.path -Detail "lines $startLine..$totalLines" -Status 'ok' -Summary "0 lines ($totalLines total)" -ElapsedMs $elapsedMs
             return (@{
                 text = ''
                 start_line = $startLine
@@ -2757,6 +3181,9 @@ function Invoke-AgentTool {
         else {
             $null
         }
+        $elapsedMs = [int](((Get-Date) - $toolStart).TotalMilliseconds)
+        $sumText = "$($pageLines.Count) lines ($totalLines total)" + $(if ($truncated) { ' [paginated]' } else { '' })
+        Write-ToolCallCard -Name 'read_file' -Target $arguments.path -Detail "lines $startLine..$endLine" -Status 'ok' -Summary $sumText -ElapsedMs $elapsedMs
         return (@{
             text = ($pageLines -join "`n")
             start_line = $startLine
@@ -4624,6 +5051,128 @@ function Invoke-AgentTurn {
     Write-AgentJsonEvent -EventType 'turn_end' -Payload @{ step = $Steps; status = 'step_limit_reached' }
 }
 
+function Resolve-ReplCommandAlias {
+    param([string]$InputText)
+    if (-not $InputText) { return '' }
+    $t = $InputText.Trim()
+    if ($t -eq '?' -or $t -eq '/?' -or $t -eq '/h') { return '/help' }
+    if ($t -eq '/q') { return '/exit' }
+    if ($t -eq '/u') { return '/undo' }
+    if ($t -eq '/s') { return '/status' }
+    if ($t -match '^/(?:p|perm)(?:\s+(.+))?$') {
+        return $(if ($Matches[1]) { '/permission ' + $Matches[1] } else { '/permission' })
+    }
+    if ($t -match '^/m(?:\s+(.+))?$') {
+        return $(if ($Matches[1]) { '/model ' + $Matches[1] } else { '/model' })
+    }
+    if ($t -match '^/c(?:\s+(.+))?$') {
+        return $(if ($Matches[1]) { '/compact ' + $Matches[1] } else { '/compact' })
+    }
+    if ($t -match '^/t(?:\s+(.+))?$') {
+        return $(if ($Matches[1]) { '/tree ' + $Matches[1] } else { '/tree' })
+    }
+    if ($t -match '^/r(?:\s+(.+))?$') {
+        return $(if ($Matches[1]) { '/resume ' + $Matches[1] } else { '/resume' })
+    }
+    return $t
+}
+
+function Format-TuiStatusCard {
+    param($State, [string]$Model, [int]$MaxSteps = 50, [string]$SessionFile = '', [int]$UndoCount = 0)
+    $w = Get-TerminalWidth
+    $st = Get-ContextStats -State $State
+    $inTok = if ($State -and $State.usage_input_tokens) { [int]$State.usage_input_tokens } else { 0 }
+    $outTok = if ($State -and $State.usage_output_tokens) { [int]$State.usage_output_tokens } else { 0 }
+    $nmInfo = if ($State -and $State.session_name) { [string]$State.session_name } else { '(unnamed)' }
+    $leafInfo = if ($State -and $State.leaf_id) { [string]$State.leaf_id } else { '(root)' }
+    $sessFileStr = if ($SessionFile) { $SessionFile } else { '(ephemeral -NoSession)' }
+    $effLabel = if ($script:ReasoningEffort) { $script:ReasoningEffort } else { 'default' }
+    $capNow = Get-AgentCapabilities -Root $script:ActiveWorkspace
+    $toolsStr = if ($capNow.tool_names.Count -gt 0) { $capNow.tool_names -join ', ' } else { 'none' }
+    $hdr = ' ' + $script:Gm.BoldOrange + 'Session Status' + $script:Gm.Reset + ' '
+    $hdrVis = (Strip-AnsiCodes -Text $hdr).Length
+    $dashes = $w - 5 - $hdrVis
+    if ($dashes -lt 2) { $dashes = 2 }
+    $barV = '  ' + $script:Gm.Grey0 + $script:Box.V + ' ' + $script:Gm.Reset
+    $lines = @(
+        ('  ' + $script:Gm.Grey0 + $script:Box.TL + $script:Box.H + $script:Gm.Reset + $hdr + $script:Gm.Grey0 + ($script:Box.H * $dashes) + $script:Box.TR + $script:Gm.Reset),
+        ($barV + $script:Gm.Grey1 + 'Model:       ' + $script:Gm.Fg1 + $Model + $script:Gm.Grey1 + " (reasoning: view=$($script:ShowReasoning), effort=$effLabel)" + $script:Gm.Reset),
+        ($barV + $script:Gm.Grey1 + 'Permission:  ' + (Format-PermissionBadge -Permission $script:AgentPermission) + $script:Gm.Grey1 + " | MaxSteps: $MaxSteps | Undo stack: $UndoCount" + $script:Gm.Reset),
+        ($barV + $script:Gm.Grey1 + 'Context:     ' + (Format-ContextGauge -Chars $st.chars -MaxChars 60000 -Width 12) + $script:Gm.Grey1 + " | Messages: $($st.messages) | Chars: $($st.chars)" + $script:Gm.Reset),
+        ($barV + $script:Gm.Grey1 + 'API Tokens:  ' + $script:Gm.Aqua + "in=$inTok out=$outTok" + $script:Gm.Grey1 + " (total=$(Format-TokenCount -Tokens ($inTok + $outTok)))" + $script:Gm.Reset),
+        ($barV + $script:Gm.Grey1 + 'Session:     ' + $script:Gm.Fg + "$($State.session_id) " + $script:Gm.Grey1 + "| Name: $nmInfo | Leaf: $leafInfo" + $script:Gm.Reset),
+        ($barV + $script:Gm.Grey1 + 'File:        ' + $script:Gm.Grey2 + $sessFileStr + $script:Gm.Reset),
+        ($barV + $script:Gm.Grey1 + 'Tools:       ' + $script:Gm.Aqua + $toolsStr + $script:Gm.Reset),
+        ('  ' + $script:Gm.Grey0 + $script:Box.BL + ($script:Box.H * ($w - 4)) + $script:Box.BR + $script:Gm.Reset)
+    )
+    return $lines
+}
+
+function Format-TuiTreeCard {
+    param($State)
+    $w = Get-TerminalWidth
+    $treeNodes = @(Get-SessionTree -State $State)
+    $hdr = ' ' + $script:Gm.BoldOrange + 'Conversation Tree' + $script:Gm.Reset + ' '
+    $hdrVis = (Strip-AnsiCodes -Text $hdr).Length
+    $dashes = $w - 5 - $hdrVis
+    if ($dashes -lt 2) { $dashes = 2 }
+    $barV = '  ' + $script:Gm.Grey0 + $script:Box.V + ' ' + $script:Gm.Reset
+    $out = @('  ' + $script:Gm.Grey0 + $script:Box.TL + $script:Box.H + $script:Gm.Reset + $hdr + $script:Gm.Grey0 + ($script:Box.H * $dashes) + $script:Box.TR + $script:Gm.Reset)
+    if ($treeNodes.Count -eq 0) {
+        $out += ($barV + $script:Gm.Grey1 + 'Session tree is empty.' + $script:Gm.Reset)
+    }
+    else {
+        foreach ($node in $treeNodes) {
+            $marker = if ($node.is_leaf) { $script:Box.Dot } elseif ($node.active) { $script:Box.Arrow } else { '-' }
+            $parentInfo = if ($node.parent_id) { " <- $($node.parent_id)" } else { ' (root)' }
+            $color = if ($node.is_leaf) { $script:Gm.BoldGreen } elseif ($node.active) { $script:Gm.Aqua } else { $script:Gm.Grey1 }
+            $out += ($barV + $color + ("{0} [{1}] ({2}{3}) " -f $marker, $node.id, $node.role, $parentInfo) + $script:Gm.Fg + $node.preview + $script:Gm.Reset)
+        }
+        $out += ($barV + $script:Gm.Grey1 + '(Use /tree <entry-id> to switch branch, or /fork <entry-id> to fork)' + $script:Gm.Reset)
+    }
+    $out += ('  ' + $script:Gm.Grey0 + $script:Box.BL + ($script:Box.H * ($w - 4)) + $script:Box.BR + $script:Gm.Reset)
+    return $out
+}
+
+function Write-TuiHelpCard {
+    if ($script:OutputMode -eq 'json') { return }
+    $w = Get-TerminalWidth
+    $hdr = ' ' + $script:Gm.BoldOrange + 'Shellossus TUI Commands & Shortcuts' + $script:Gm.Reset + ' '
+    $hdrVis = (Strip-AnsiCodes -Text $hdr).Length
+    $dashes = $w - 5 - $hdrVis
+    if ($dashes -lt 2) { $dashes = 2 }
+    $barV = '  ' + $script:Gm.Grey0 + $script:Box.V + ' ' + $script:Gm.Reset
+    Write-Host ('  ' + $script:Gm.Grey0 + $script:Box.TL + $script:Box.H + $script:Gm.Reset + $hdr + $script:Gm.Grey0 + ($script:Box.H * $dashes) + $script:Box.TR + $script:Gm.Reset)
+    Write-Host ($barV + $script:Gm.BoldYellow + 'Mode & Model (call without args for interactive picker)' + $script:Gm.Reset)
+    Write-Host ($barV + $script:Gm.Aqua + '  /permission (/p) [mode]      ' + $script:Gm.Fg + 'Pick or set: ReadOnly | Ask | AutoEdit | Auto' + $script:Gm.Reset)
+    Write-Host ($barV + $script:Gm.Aqua + '  /model (/m) [id]             ' + $script:Gm.Fg + 'Pick or switch active model ID' + $script:Gm.Reset)
+    Write-Host ($barV + $script:Gm.Aqua + '  /reasoning [arg]             ' + $script:Gm.Fg + 'Pick view (compact|full|hide) or effort (low|medium|high|off)' + $script:Gm.Reset)
+    Write-Host ($barV + $script:Gm.Aqua + '  /status (/s, /tokens)        ' + $script:Gm.Fg + 'Show TUI dashboard (context gauge, tokens, tools, session)' + $script:Gm.Reset)
+    Write-Host ($barV + $script:Gm.Aqua + '  /diagnostics [on|off]        ' + $script:Gm.Fg + 'Toggle pre-request capability/tool diagnostics' + $script:Gm.Reset)
+    Write-Host ($barV + $script:Gm.BoldYellow + 'History, Undo & Compaction' + $script:Gm.Reset)
+    Write-Host ($barV + $script:Gm.Aqua + '  /undo (/u)                   ' + $script:Gm.Fg + 'Revert last turn AND restore modified/created files on disk' + $script:Gm.Reset)
+    Write-Host ($barV + $script:Gm.Aqua + '  /retry                       ' + $script:Gm.Fg + 'Retry the last failed user request' + $script:Gm.Reset)
+    Write-Host ($barV + $script:Gm.Aqua + '  /continue [steps]            ' + $script:Gm.Fg + 'Continue after hitting step limit (or continue last response)' + $script:Gm.Reset)
+    Write-Host ($barV + $script:Gm.Aqua + '  /compact (/c) [focus]        ' + $script:Gm.Fg + 'Summarize older turns into a structured context handoff' + $script:Gm.Reset)
+    Write-Host ($barV + $script:Gm.Aqua + '  /copy                        ' + $script:Gm.Fg + 'Copy the last assistant response to clipboard' + $script:Gm.Reset)
+    Write-Host ($barV + $script:Gm.BoldYellow + 'Sessions & Branch Tree' + $script:Gm.Reset)
+    Write-Host ($barV + $script:Gm.Aqua + '  /sessions                    ' + $script:Gm.Fg + 'Browse and interactively resume saved workspace sessions' + $script:Gm.Reset)
+    Write-Host ($barV + $script:Gm.Aqua + '  /resume (/r) [num|name]      ' + $script:Gm.Fg + 'Resume a saved session (interactive picker when no arg)' + $script:Gm.Reset)
+    Write-Host ($barV + $script:Gm.Aqua + '  /tree (/t) [entry-id]        ' + $script:Gm.Fg + 'View conversation tree or switch active branch' + $script:Gm.Reset)
+    Write-Host ($barV + $script:Gm.Aqua + '  /fork [entry-id] (/clone)    ' + $script:Gm.Fg + 'Fork current branch into a new session file' + $script:Gm.Reset)
+    Write-Host ($barV + $script:Gm.Aqua + '  /name [name] | /save [name]  ' + $script:Gm.Fg + 'Name or save current session' + $script:Gm.Reset)
+    Write-Host ($barV + $script:Gm.Aqua + '  /export [path] | /import <p> ' + $script:Gm.Fg + 'Export HTML/JSONL or import a JSONL session' + $script:Gm.Reset)
+    Write-Host ($barV + $script:Gm.Aqua + '  /new (/clear) | /exit (/q)   ' + $script:Gm.Fg + 'Start a fresh session or exit shellossus' + $script:Gm.Reset)
+    Write-Host ($barV + $script:Gm.BoldYellow + 'Delegation, Skills & Input Syntax' + $script:Gm.Reset)
+    Write-Host ($barV + $script:Gm.Aqua + '  /agents | /agent:<role> <q>  ' + $script:Gm.Fg + 'List or run subagent roles (recon, audit, craft, custom)' + $script:Gm.Reset)
+    Write-Host ($barV + $script:Gm.Aqua + '  /skills | /skill:<name> [a]  ' + $script:Gm.Fg + 'List or invoke a SKILL.md skill directly' + $script:Gm.Reset)
+    Write-Host ($barV + $script:Gm.Aqua + '  /<template> [args] | /reload ' + $script:Gm.Fg + 'Run .shellossus/prompts/<name>.md or reload context files' + $script:Gm.Reset)
+    Write-Host ($barV + $script:Gm.Aqua + '  @path/to/file                ' + $script:Gm.Fg + 'Inline-attach a workspace file into your prompt' + $script:Gm.Reset)
+    Write-Host ($barV + $script:Gm.Aqua + '  !cmd / !!cmd                 ' + $script:Gm.Fg + 'Run shell command (! adds to context, !! local only)' + $script:Gm.Reset)
+    Write-Host ($barV + $script:Gm.Aqua + '  """ ... """ or trailing \    ' + $script:Gm.Fg + 'Multi-line prompt input block' + $script:Gm.Reset)
+    Write-Host ('  ' + $script:Gm.Grey0 + $script:Box.BL + ($script:Box.H * ($w - 4)) + $script:Box.BR + $script:Gm.Reset)
+}
+
 function Invoke-AgentContinue {
     param($State, [string]$Endpoint, [string]$ModelId, [string]$ApiKey, [string]$Root, [int]$Steps = 50)
     if (-not $State -or -not $State.messages -or $State.messages.Count -eq 0) { return $false }
@@ -4794,17 +5343,30 @@ if (-not $LibraryOnly) {
             Save-AgentSession -SessionFile $sessionFile -State $state -Workspace $rootPath -Model $Model
             return
         }
-        Write-Host ($script:Gm.OscInit + $script:Gm.BoldGreen + "shellossus | model: $Model | permission: $($script:AgentPermission) | workspace: $rootPath" + $script:Gm.Reset)
-        if (Get-AgentsContext -Root $rootPath -ConfigDir $configDir) { Write-Host ($script:Gm.Aqua + 'Loaded AGENTS.md/CLAUDE.md instructions.' + $script:Gm.Reset) }
-        if (Get-SkillsCatalog -Root $rootPath -ConfigDir $configDir) { Write-Host ($script:Gm.Aqua + 'Loaded skills catalog.' + $script:Gm.Reset) }
-        Write-Host ($script:Gm.Grey1 + 'Commands: /help /status /session /permission /reasoning /agents /continue /undo /retry /compact /tree /fork /export /copy /reload /model /sessions /resume /save /new /exit' + $script:Gm.Reset)
+        $wInit = Get-TerminalWidth
+        $hdrInit = ' ' + $script:Gm.BoldGreen + $script:Box.Dot + ' shellossus ' + $script:Gm.Grey1 + 'inline TUI' + $script:Gm.Reset + ' '
+        $hdrInitVis = (Strip-AnsiCodes -Text $hdrInit).Length
+        $initDashes = $wInit - 3 - $hdrInitVis
+        if ($initDashes -lt 2) { $initDashes = 2 }
+        Write-Host ($script:Gm.OscInit + $script:Gm.Grey0 + $script:Box.TL + $script:Box.H + $script:Gm.Reset + $hdrInit + $script:Gm.Grey0 + ($script:Box.H * $initDashes) + $script:Box.TR + $script:Gm.Reset)
+        $ctxLoaded = @()
+        if (Get-AgentsContext -Root $rootPath -ConfigDir $configDir) { $ctxLoaded += 'AGENTS.md/CLAUDE.md' }
+        if (Get-SkillsCatalog -Root $rootPath -ConfigDir $configDir) { $ctxLoaded += "skills ($($script:SkillsByName.Count))" }
+        $null = Get-AgentRolesCatalog -Root $rootPath -ConfigDir $configDir
+        if ($script:AgentRolesByName -and $script:AgentRolesByName.Count -gt 0) { $ctxLoaded += "agents ($($script:AgentRolesByName.Count))" }
+        if ($ctxLoaded.Count -gt 0) {
+            Write-Host ($script:Gm.Grey0 + $script:Box.V + ' ' + $script:Gm.Aqua + 'Loaded: ' + $script:Gm.Fg + ($ctxLoaded -join ' | ') + $script:Gm.Reset)
+        }
+        Write-Host ($script:Gm.Grey0 + $script:Box.V + ' ' + $script:Gm.Grey1 + 'Shortcuts: ' + $script:Gm.Aqua + '? (/help)' + $script:Gm.Grey1 + ' | ' + $script:Gm.Aqua + '/p' + $script:Gm.Grey1 + ' mode | ' + $script:Gm.Aqua + '/m' + $script:Gm.Grey1 + ' model | ' + $script:Gm.Aqua + '/s' + $script:Gm.Grey1 + ' status | ' + $script:Gm.Aqua + '/t' + $script:Gm.Grey1 + ' tree | ' + $script:Gm.Aqua + '/u' + $script:Gm.Grey1 + ' undo | ' + $script:Gm.Aqua + '"""' + $script:Gm.Grey1 + ' multiline' + $script:Gm.Reset)
+        Write-Host ($script:Gm.Grey0 + $script:Box.BL + ($script:Box.H * ($wInit - 2)) + $script:Box.BR + $script:Gm.Reset)
         while ($true) {
-            Write-Host ("`n" + $script:Gm.Grey0 + ('-' * 40) + $script:Gm.Reset)
-            Write-Host ($script:Gm.BoldBlue + 'You: ' + $script:Gm.Fg) -NoNewline
-            $question = Read-Host
+            Write-TuiPromptFrame -State $state -Root $rootPath -Model $Model -UndoCount $undoStack.Count
+            Write-Host ('  ' + $script:Gm.BoldBlue + $script:Box.Arrow + ' You: ' + $script:Gm.Fg) -NoNewline
+            $question = Read-TuiMultilineInput
             Write-Host $script:Gm.Reset -NoNewline
             if (-not $question) { continue }
-            $trimmedQ = $question.Trim()
+            $rawTrimmed = $question.Trim()
+            $trimmedQ = Resolve-ReplCommandAlias -InputText $rawTrimmed
             if ($trimmedQ -eq '/exit' -or $trimmedQ -eq '/quit') { break }
             if ($trimmedQ -eq '/clear' -or $trimmedQ -eq '/new') {
                 $newId = 'sess-' + (Get-Date -Format 'yyyyMMdd-HHmmss') + '-' + (Get-Random -Minimum 100000 -Maximum 999999)
@@ -4823,63 +5385,66 @@ if (-not $LibraryOnly) {
                 $sessionFile = if ($NoSession) { '' } else { Join-Path $sessionDir ($newId + '.jsonl') }
                 $script:ActiveSessionId = $newId
                 $script:ActiveSessionFile = $sessionFile
-                Write-Host ($script:Gm.Grey1 + 'Started a new conversation session.' + $script:Gm.Reset)
+                Write-Host ($script:Gm.Grey1 + '  Started a new conversation session.' + $script:Gm.Reset)
                 continue
             }
             if ($trimmedQ -eq '/help') {
-                Write-Host ($script:Gm.Aqua + '  /status (/session, /tokens)  ' + $script:Gm.Fg + 'Show context size, token usage, model, permission, and session info' + $script:Gm.Reset)
-                Write-Host ($script:Gm.Aqua + '  /permission <mode>           ' + $script:Gm.Fg + 'Set mode: ReadOnly | Ask | AutoEdit (no-ask writes) | Auto' + $script:Gm.Reset)
-                Write-Host ($script:Gm.Aqua + '  /diagnostics [on|off]        ' + $script:Gm.Fg + 'Show or toggle pre-request capability/tool diagnostics' + $script:Gm.Reset)
-                Write-Host ($script:Gm.Aqua + '  /reasoning (/thinking) <arg> ' + $script:Gm.Fg + 'View: compact | full | hide; Effort: low | medium | high | off' + $script:Gm.Reset)
-                Write-Host ($script:Gm.Aqua + '  /agents                      ' + $script:Gm.Fg + 'List built-in and custom subagent roles (recon, audit, craft, ...)' + $script:Gm.Reset)
-                Write-Host ($script:Gm.Aqua + '  /continue [steps]            ' + $script:Gm.Fg + 'Continue after hitting step limit (or continue last response)' + $script:Gm.Reset)
-                Write-Host ($script:Gm.Aqua + '  /undo                        ' + $script:Gm.Fg + 'Revert last turn AND restore modified/created files on disk' + $script:Gm.Reset)
-                Write-Host ($script:Gm.Aqua + '  /retry                       ' + $script:Gm.Fg + 'Retry the last failed user request' + $script:Gm.Reset)
-                Write-Host ($script:Gm.Aqua + '  /compact [focus]             ' + $script:Gm.Fg + 'Summarize older turns into a structured context handoff' + $script:Gm.Reset)
-                Write-Host ($script:Gm.Aqua + '  /name [name]                 ' + $script:Gm.Fg + 'Set or display the human-friendly session name' + $script:Gm.Reset)
-                Write-Host ($script:Gm.Aqua + '  /tree [entry-id]             ' + $script:Gm.Fg + 'Show conversation tree or switch active branch to <entry-id>' + $script:Gm.Reset)
-                Write-Host ($script:Gm.Aqua + '  /fork [entry-id] (/clone)    ' + $script:Gm.Fg + 'Fork current branch (or from <entry-id>) into a new session file' + $script:Gm.Reset)
-                Write-Host ($script:Gm.Aqua + '  /export [path.html|.jsonl]   ' + $script:Gm.Fg + 'Export session to standalone HTML (or JSONL)' + $script:Gm.Reset)
-                Write-Host ($script:Gm.Aqua + '  /import <path.jsonl>         ' + $script:Gm.Fg + 'Import and resume a JSONL session file' + $script:Gm.Reset)
-                Write-Host ($script:Gm.Aqua + '  /copy                        ' + $script:Gm.Fg + 'Copy the last assistant response to clipboard' + $script:Gm.Reset)
-                Write-Host ($script:Gm.Aqua + '  /reload                      ' + $script:Gm.Fg + 'Reload AGENTS.md, CLAUDE.md, SYSTEM.md, skills, agents, and templates' + $script:Gm.Reset)
-                Write-Host ($script:Gm.Aqua + '  /hotkeys                     ' + $script:Gm.Fg + 'Display input shortcuts and syntax reference' + $script:Gm.Reset)
-                Write-Host ($script:Gm.Aqua + '  /model <id>                  ' + $script:Gm.Fg + 'Switch active model ID for this session' + $script:Gm.Reset)
-                Write-Host ($script:Gm.Aqua + '  /sessions                    ' + $script:Gm.Fg + 'List saved sessions in ~/.shellossus/sessions' + $script:Gm.Reset)
-                Write-Host ($script:Gm.Aqua + '  /resume <num|name>           ' + $script:Gm.Fg + 'Resume a saved session by number or filename' + $script:Gm.Reset)
-                Write-Host ($script:Gm.Aqua + '  /save [name]                 ' + $script:Gm.Fg + 'Save conversation to current or named session file' + $script:Gm.Reset)
-                Write-Host ($script:Gm.Aqua + '  /new (/clear)                ' + $script:Gm.Fg + 'Start a fresh session while keeping old session files' + $script:Gm.Reset)
-                Write-Host ($script:Gm.Aqua + '  /exit (/quit)                ' + $script:Gm.Fg + 'Exit shellossus' + $script:Gm.Reset)
-                Write-Host ($script:Gm.Aqua + '  /agent:<role> <task>         ' + $script:Gm.Fg + 'Delegate a task to a subagent role (recon, audit, craft, ...)' + $script:Gm.Reset)
-                Write-Host ($script:Gm.Aqua + '  /skill:<name> [args]         ' + $script:Gm.Fg + 'Invoke a skill directly with arguments' + $script:Gm.Reset)
-                Write-Host ($script:Gm.Aqua + '  /<template> [args]           ' + $script:Gm.Fg + 'Run a custom Markdown prompt from .shellossus/prompts/<name>.md' + $script:Gm.Reset)
-                Write-Host ($script:Gm.Aqua + '  @path/to/file                ' + $script:Gm.Fg + 'Inline-attach a workspace file into your prompt' + $script:Gm.Reset)
-                Write-Host ($script:Gm.Aqua + '  !command / !!command         ' + $script:Gm.Fg + 'Run shell command (! adds to context, !! local only)' + $script:Gm.Reset)
+                Write-TuiHelpCard
                 continue
             }
             if ($trimmedQ -eq '/agents') {
                 $null = Get-AgentRolesCatalog -Root $rootPath -ConfigDir $configDir
+                $w = Get-TerminalWidth
+                $hdr = ' ' + $script:Gm.BoldOrange + 'Subagent Roles' + $script:Gm.Reset + ' '
+                $dashes = $w - 5 - (Strip-AnsiCodes -Text $hdr).Length
+                if ($dashes -lt 2) { $dashes = 2 }
+                Write-Host ('  ' + $script:Gm.Grey0 + $script:Box.TL + $script:Box.H + $script:Gm.Reset + $hdr + $script:Gm.Grey0 + ($script:Box.H * $dashes) + $script:Box.TR + $script:Gm.Reset)
                 foreach ($rKey in @($script:AgentRolesByName.Keys | Sort-Object)) {
                     $rObj = $script:AgentRolesByName[$rKey]
                     $srcTag = if ($rObj.builtin) { 'built-in' } else { $rObj.rel_path }
-                    Write-Host ($script:Gm.Aqua + ("  {0,-12} " -f $rObj.name) + $script:Gm.Yellow + ("[{0}; {1}] " -f $rObj.permission, $srcTag) + $script:Gm.Fg + $rObj.description + $script:Gm.Reset)
+                    Write-Host ('  ' + $script:Gm.Grey0 + $script:Box.V + ' ' + $script:Gm.Aqua + ("{0,-12} " -f $rObj.name) + $script:Gm.Yellow + ("[{0}; {1}] " -f $rObj.permission, $srcTag) + $script:Gm.Fg + $rObj.description + $script:Gm.Reset)
                 }
-                Write-Host ($script:Gm.Grey1 + '  (Invoke via /agent:<role> <task> or let the model call run_agent)' + $script:Gm.Reset)
+                Write-Host ('  ' + $script:Gm.Grey0 + $script:Box.V + ' ' + $script:Gm.Grey1 + '(Invoke via /agent:<role> <task> or let the model call run_agent)' + $script:Gm.Reset)
+                Write-Host ('  ' + $script:Gm.Grey0 + $script:Box.BL + ($script:Box.H * ($w - 4)) + $script:Box.BR + $script:Gm.Reset)
+                continue
+            }
+            if ($trimmedQ -eq '/skills') {
+                $null = Get-SkillsCatalog -Root $rootPath -ConfigDir $configDir
+                $w = Get-TerminalWidth
+                $hdr = ' ' + $script:Gm.BoldOrange + 'Available Skills' + $script:Gm.Reset + ' '
+                $dashes = $w - 5 - (Strip-AnsiCodes -Text $hdr).Length
+                if ($dashes -lt 2) { $dashes = 2 }
+                Write-Host ('  ' + $script:Gm.Grey0 + $script:Box.TL + $script:Box.H + $script:Gm.Reset + $hdr + $script:Gm.Grey0 + ($script:Box.H * $dashes) + $script:Box.TR + $script:Gm.Reset)
+                if (-not $script:SkillsByName -or $script:SkillsByName.Count -eq 0) {
+                    Write-Host ('  ' + $script:Gm.Grey0 + $script:Box.V + ' ' + $script:Gm.Grey1 + 'No skills found in .shellossus/skills or ~/.shellossus/skills.' + $script:Gm.Reset)
+                }
+                else {
+                    foreach ($sKey in @($script:SkillsByName.Keys | Sort-Object)) {
+                        $sObj = $script:SkillsByName[$sKey]
+                        Write-Host ('  ' + $script:Gm.Grey0 + $script:Box.V + ' ' + $script:Gm.Aqua + ("{0,-18} " -f $sObj.name) + $script:Gm.Fg + $sObj.description + $script:Gm.Reset)
+                    }
+                    Write-Host ('  ' + $script:Gm.Grey0 + $script:Box.V + ' ' + $script:Gm.Grey1 + '(Invoke via /skill:<name> [args])' + $script:Gm.Reset)
+                }
+                Write-Host ('  ' + $script:Gm.Grey0 + $script:Box.BL + ($script:Box.H * ($w - 4)) + $script:Box.BR + $script:Gm.Reset)
                 continue
             }
             if ($trimmedQ -eq '/hotkeys') {
-                Write-Host ($script:Gm.Aqua + '  @path/to/file     ' + $script:Gm.Fg + 'Attach file contents inline into prompt' + $script:Gm.Reset)
-                Write-Host ($script:Gm.Aqua + '  !cmd              ' + $script:Gm.Fg + 'Execute shell command and append output to conversation context' + $script:Gm.Reset)
-                Write-Host ($script:Gm.Aqua + '  !!cmd             ' + $script:Gm.Fg + 'Execute shell command locally without adding to context' + $script:Gm.Reset)
-                Write-Host ($script:Gm.Aqua + '  /agent:<role>     ' + $script:Gm.Fg + 'Delegate task to subagent role (recon, audit, craft, custom)' + $script:Gm.Reset)
-                Write-Host ($script:Gm.Aqua + '  /skill:<name>     ' + $script:Gm.Fg + 'Expand a skill SKILL.md into the prompt' + $script:Gm.Reset)
-                Write-Host ($script:Gm.Aqua + '  /<template>       ' + $script:Gm.Fg + 'Expand a prompt template with $1, $2, $@, ${1:-default}' + $script:Gm.Reset)
-                Write-Host ($script:Gm.Aqua + '  Ctrl+C            ' + $script:Gm.Fg + 'Interrupt running command or exit interactive prompt' + $script:Gm.Reset)
+                Write-TuiHelpCard
                 continue
             }
             if ($trimmedQ -match '^/permission(?:\s+(.+))?$') {
-                if ($Matches[1]) {
-                    $reqPerm = $Matches[1].Trim()
+                $reqPerm = if ($Matches[1]) { $Matches[1].Trim() } else { '' }
+                if (-not $reqPerm) {
+                    $permItems = @(
+                        @{ label = 'ReadOnly'; value = 'ReadOnly'; description = 'Read/search only; no file writes or shell commands'; active = ($script:AgentPermission -eq 'ReadOnly') },
+                        @{ label = 'Ask'; value = 'Ask'; description = 'Preview and confirm both file writes (WRITE) and commands (RUN)'; active = ($script:AgentPermission -eq 'Ask') },
+                        @{ label = 'AutoEdit'; value = 'AutoEdit'; description = 'Auto-approve file edits; still confirm shell commands (RUN)'; active = ($script:AgentPermission -eq 'AutoEdit') },
+                        @{ label = 'Auto'; value = 'Auto'; description = 'Auto-approve all workspace file writes and shell commands'; active = ($script:AgentPermission -eq 'Auto') }
+                    )
+                    $pickedPerm = Invoke-TuiSelector -Title "Permission Mode (current: $($script:AgentPermission))" -Items $permItems
+                    if ($pickedPerm) { $reqPerm = [string]$pickedPerm }
+                }
+                if ($reqPerm) {
                     $matchedPerm = @('ReadOnly', 'Ask', 'AutoEdit', 'Auto') | Where-Object { $_ -ieq $reqPerm } | Select-Object -First 1
                     if ($matchedPerm) {
                         $script:AgentPermission = $matchedPerm
@@ -4890,9 +5455,6 @@ if (-not $LibraryOnly) {
                     else {
                         Write-Host ($script:Gm.Red + '  Invalid permission mode. Choose: ReadOnly, Ask, AutoEdit, Auto' + $script:Gm.Reset)
                     }
-                }
-                else {
-                    Write-Host ($script:Gm.Aqua + "  Current permission mode: $($script:AgentPermission) (use /permission ReadOnly|Ask|AutoEdit|Auto)" + $script:Gm.Reset)
                 }
                 continue
             }
@@ -4919,8 +5481,22 @@ if (-not $LibraryOnly) {
                 continue
             }
             if ($trimmedQ -match '^/(?:reasoning|thinking)(?:\s+(.+))?$') {
-                if ($Matches[1]) {
-                    $argR = $Matches[1].Trim().ToLower()
+                $argR = if ($Matches[1]) { $Matches[1].Trim().ToLower() } else { '' }
+                if (-not $argR) {
+                    $effLabel = if ($script:ReasoningEffort) { $script:ReasoningEffort } else { 'default' }
+                    $rItems = @(
+                        @{ label = 'compact'; value = 'compact'; description = 'Show last 3 lines of reasoning block'; active = ($script:ShowReasoning -eq 'compact') },
+                        @{ label = 'full'; value = 'full'; description = 'Show full reasoning block'; active = ($script:ShowReasoning -eq 'full') },
+                        @{ label = 'hide'; value = 'hide'; description = 'Hide reasoning display'; active = ($script:ShowReasoning -eq 'hide') },
+                        @{ label = 'low'; value = 'low'; description = 'Set API reasoning_effort = low'; active = ($script:ReasoningEffort -eq 'low') },
+                        @{ label = 'medium'; value = 'medium'; description = 'Set API reasoning_effort = medium'; active = ($script:ReasoningEffort -eq 'medium') },
+                        @{ label = 'high'; value = 'high'; description = 'Set API reasoning_effort = high'; active = ($script:ReasoningEffort -eq 'high') },
+                        @{ label = 'default'; value = 'default'; description = 'Reset API reasoning_effort to provider default'; active = (-not $script:ReasoningEffort) }
+                    )
+                    $pickedR = Invoke-TuiSelector -Title "Reasoning (view: $($script:ShowReasoning) | effort: $effLabel)" -Items $rItems
+                    if ($pickedR) { $argR = ([string]$pickedR).ToLower() }
+                }
+                if ($argR) {
                     if ($argR -in @('compact', 'full', 'hide')) {
                         $script:ShowReasoning = $argR
                         Write-Host ($script:Gm.Green + "  Reasoning display set to: $($script:ShowReasoning)" + $script:Gm.Reset)
@@ -4936,10 +5512,6 @@ if (-not $LibraryOnly) {
                     else {
                         Write-Host ($script:Gm.Red + '  Usage: /reasoning [compact|full|hide|low|medium|high|default]' + $script:Gm.Reset)
                     }
-                }
-                else {
-                    $effLabel = if ($script:ReasoningEffort) { $script:ReasoningEffort } else { 'default' }
-                    Write-Host ($script:Gm.Aqua + "  Reasoning view: $($script:ShowReasoning) | effort: $effLabel" + $script:Gm.Reset)
                 }
                 continue
             }
@@ -4969,18 +5541,8 @@ if (-not $LibraryOnly) {
                     }
                 }
                 else {
-                    $treeNodes = @(Get-SessionTree -State $state)
-                    if ($treeNodes.Count -eq 0) {
-                        Write-Host ($script:Gm.Grey1 + '  Session tree is empty.' + $script:Gm.Reset)
-                    }
-                    else {
-                        foreach ($node in $treeNodes) {
-                            $marker = if ($node.is_leaf) { '*' } elseif ($node.active) { '+' } else { '-' }
-                            $parentInfo = if ($node.parent_id) { " <- $($node.parent_id)" } else { ' (root)' }
-                            $color = if ($node.is_leaf) { $script:Gm.BoldGreen } elseif ($node.active) { $script:Gm.Aqua } else { $script:Gm.Grey1 }
-                            Write-Host ($color + ("  {0} [{1}] ({2}{3}) " -f $marker, $node.id, $node.role, $parentInfo) + $script:Gm.Fg + $node.preview + $script:Gm.Reset)
-                        }
-                        Write-Host ($script:Gm.Grey1 + '  (Use /tree <entry-id> to switch branch, or /fork <entry-id> to fork)' + $script:Gm.Reset)
+                    foreach ($tLn in @(Format-TuiTreeCard -State $state)) {
+                        Write-Host $tLn
                     }
                 }
                 continue
@@ -5109,24 +5671,44 @@ if (-not $LibraryOnly) {
                 continue
             }
             if ($trimmedQ -eq '/status' -or $trimmedQ -eq '/tokens' -or $trimmedQ -eq '/session') {
-                $st = Get-ContextStats -State $state
-                $inTok = if ($state.usage_input_tokens) { [int]$state.usage_input_tokens } else { 0 }
-                $outTok = if ($state.usage_output_tokens) { [int]$state.usage_output_tokens } else { 0 }
-                $nmInfo = if ($state.session_name) { " | Name: $($state.session_name)" } else { '' }
-                $leafInfo = if ($state.leaf_id) { " | Leaf: $($state.leaf_id)" } else { '' }
-                Write-Host ($script:Gm.Aqua + "  Model: $($Model) | Permission: $($script:AgentPermission) | MaxSteps: $($MaxSteps) | Messages: $($st.messages) | Chars: $($st.chars) (~$($st.est_tokens) tokens)" + $script:Gm.Reset)
-                Write-Host ($script:Gm.Grey1 + "  Session ID: $($state.session_id)$nmInfo$leafInfo | API Usage: in=$inTok out=$outTok" + $script:Gm.Reset)
-                Write-Host ($script:Gm.Grey1 + "  Session File: $(if ($sessionFile) { $sessionFile } else { '(ephemeral -NoSession)' })" + $script:Gm.Reset)
+                foreach ($sLn in @(Format-TuiStatusCard -State $state -Model $Model -MaxSteps $MaxSteps -SessionFile $sessionFile -UndoCount $undoStack.Count)) {
+                    Write-Host $sLn
+                }
                 continue
             }
             if ($trimmedQ -match '^/model(?:\s+(.+))?$') {
-                if ($Matches[1]) {
-                    $Model = $Matches[1].Trim()
-                    $state.model = $Model
-                    Write-Host ($script:Gm.Green + "  Model switched to: $Model" + $script:Gm.Reset)
+                $newModel = if ($Matches[1]) { $Matches[1].Trim() } else { '' }
+                if (-not $newModel) {
+                    $knownModels = @($Model)
+                    if (Test-Path -LiteralPath $sessionDir) {
+                        foreach ($sf in @(Get-ChildItem -LiteralPath $sessionDir -Filter '*.jsonl' -File -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 15)) {
+                            $mMeta = Get-AgentSessionMeta -SessionFile $sf.FullName
+                            if ($mMeta -and $mMeta.model -and ($knownModels -notcontains [string]$mMeta.model)) {
+                                $knownModels += [string]$mMeta.model
+                            }
+                        }
+                    }
+                    $mItems = @()
+                    foreach ($km in $knownModels) {
+                        $mItems += @{ label = $km; value = $km; description = $(if ($km -eq $Model) { 'active model' } else { 'recent session model' }); active = ($km -eq $Model) }
+                    }
+                    $mItems += @{ label = '[Custom model ID...]'; value = '__custom__'; description = 'Type any OpenAI-compatible model ID'; active = $false }
+                    $pickedM = Invoke-TuiSelector -Title "Select Model (current: $Model)" -Items $mItems -PromptText 'Select number or type model ID (Enter cancels)'
+                    if ($pickedM -eq '__custom__') {
+                        Write-Host ('  ' + $script:Gm.BoldYellow + 'Enter model ID: ' + $script:Gm.Fg) -NoNewline
+                        $customM = Read-Host
+                        Write-Host $script:Gm.Reset -NoNewline
+                        if ($customM -and $customM.Trim()) { $newModel = $customM.Trim() }
+                    }
+                    elseif ($pickedM) {
+                        $newModel = [string]$pickedM
+                    }
                 }
-                else {
-                    Write-Host ($script:Gm.Aqua + "  Current model: $Model (use /model <id> to change)" + $script:Gm.Reset)
+                if ($newModel) {
+                    $Model = $newModel
+                    $state.model = $Model
+                    $script:ActiveModelId = $Model
+                    Write-Host ($script:Gm.Green + "  Model switched to: $Model" + $script:Gm.Reset)
                 }
                 continue
             }
@@ -5147,9 +5729,11 @@ if (-not $LibraryOnly) {
                 }
                 continue
             }
-            if ($trimmedQ -eq '/sessions') {
+            if ($trimmedQ -eq '/sessions' -or $trimmedQ -match '^/resume(?:\s+(.+))?$') {
+                $isResumeCmd = ($trimmedQ -match '^/resume')
+                $arg = if ($isResumeCmd -and $Matches[1]) { $Matches[1].Trim() } else { '' }
                 if (-not (Test-Path -LiteralPath $sessionDir)) {
-                    Write-Host ($script:Gm.Grey1 + '  No saved sessions yet.' + $script:Gm.Reset)
+                    Write-Host ($script:Gm.Grey1 + '  No saved sessions found.' + $script:Gm.Reset)
                     continue
                 }
                 $wsNorm = $rootPath.TrimEnd('\').TrimEnd('/')
@@ -5161,26 +5745,25 @@ if (-not $LibraryOnly) {
                     Write-Host ($script:Gm.Grey1 + '  No saved sessions for this workspace.' + $script:Gm.Reset)
                     continue
                 }
-                for ($i = 0; $i -lt $list.Count; $i++) {
-                    $meta = Get-AgentSessionMeta -SessionFile $list[$i].FullName
-                    $mdlInfo = if ($meta -and $meta.model) { " [model: $($meta.model)]" } else { '' }
-                    Write-Host ($script:Gm.Yellow + ("  [{0}] " -f ($i + 1)) + $script:Gm.Fg + $list[$i].Name + $script:Gm.Grey1 + (" ({0}){1}" -f $list[$i].LastWriteTime.ToString('yyyy-MM-dd HH:mm'), $mdlInfo) + $script:Gm.Reset)
-                }
-                continue
-            }
-            if ($trimmedQ -match '^/resume(?:\s+(.+))?$') {
-                $arg = if ($Matches[1]) { $Matches[1].Trim() } else { '1' }
-                if (-not (Test-Path -LiteralPath $sessionDir)) {
-                    Write-Host ($script:Gm.Grey1 + '  No saved sessions found.' + $script:Gm.Reset)
-                    continue
-                }
-                $wsNorm = $rootPath.TrimEnd('\').TrimEnd('/')
-                $list = @(Get-ChildItem -LiteralPath $sessionDir -Filter '*.jsonl' -File | Sort-Object LastWriteTime -Descending | Where-Object {
-                    $m = Get-AgentSessionMeta -SessionFile $_.FullName
-                    (-not $m) -or (-not $m.workspace) -or ($m.workspace.TrimEnd('\').TrimEnd('/') -ieq $wsNorm)
-                })
                 $chosen = $null
-                if ($arg -match '^\d+$') {
+                if (-not $arg) {
+                    $sItems = @()
+                    for ($i = 0; $i -lt $list.Count; $i++) {
+                        $meta = Get-AgentSessionMeta -SessionFile $list[$i].FullName
+                        $mdlInfo = if ($meta -and $meta.model) { "model: $($meta.model)" } else { '' }
+                        $nmTag = if ($meta -and $meta.session_name) { "[$($meta.session_name)] " } else { '' }
+                        $desc = ("{0}{1} ({2})" -f $nmTag, $list[$i].LastWriteTime.ToString('yyyy-MM-dd HH:mm'), $mdlInfo)
+                        $sItems += @{
+                            label = $list[$i].Name
+                            value = $list[$i].FullName
+                            description = $desc
+                            active = ($sessionFile -and ($list[$i].FullName -ieq $sessionFile))
+                        }
+                    }
+                    $pickedSess = Invoke-TuiSelector -Title 'Saved Workspace Sessions' -Items $sItems -PromptText 'Select session number to resume (Enter cancels)'
+                    if ($pickedSess) { $chosen = [string]$pickedSess }
+                }
+                elseif ($arg -match '^\d+$') {
                     $idx = [int]$arg - 1
                     if ($idx -ge 0 -and $idx -lt $list.Count) { $chosen = $list[$idx].FullName }
                 }
@@ -5207,7 +5790,7 @@ if (-not $LibraryOnly) {
                         Write-Host ($script:Gm.Red + '  ' + $_.Exception.Message + $script:Gm.Reset)
                     }
                 }
-                else {
+                elseif ($arg) {
                     Write-Host ($script:Gm.Red + "  Session not found: $arg" + $script:Gm.Reset)
                 }
                 continue

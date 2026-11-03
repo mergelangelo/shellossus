@@ -388,6 +388,128 @@ function Invoke-AgentTurn {
     Write-AgentJsonEvent -EventType 'turn_end' -Payload @{ step = $Steps; status = 'step_limit_reached' }
 }
 
+function Resolve-ReplCommandAlias {
+    param([string]$InputText)
+    if (-not $InputText) { return '' }
+    $t = $InputText.Trim()
+    if ($t -eq '?' -or $t -eq '/?' -or $t -eq '/h') { return '/help' }
+    if ($t -eq '/q') { return '/exit' }
+    if ($t -eq '/u') { return '/undo' }
+    if ($t -eq '/s') { return '/status' }
+    if ($t -match '^/(?:p|perm)(?:\s+(.+))?$') {
+        return $(if ($Matches[1]) { '/permission ' + $Matches[1] } else { '/permission' })
+    }
+    if ($t -match '^/m(?:\s+(.+))?$') {
+        return $(if ($Matches[1]) { '/model ' + $Matches[1] } else { '/model' })
+    }
+    if ($t -match '^/c(?:\s+(.+))?$') {
+        return $(if ($Matches[1]) { '/compact ' + $Matches[1] } else { '/compact' })
+    }
+    if ($t -match '^/t(?:\s+(.+))?$') {
+        return $(if ($Matches[1]) { '/tree ' + $Matches[1] } else { '/tree' })
+    }
+    if ($t -match '^/r(?:\s+(.+))?$') {
+        return $(if ($Matches[1]) { '/resume ' + $Matches[1] } else { '/resume' })
+    }
+    return $t
+}
+
+function Format-TuiStatusCard {
+    param($State, [string]$Model, [int]$MaxSteps = 50, [string]$SessionFile = '', [int]$UndoCount = 0)
+    $w = Get-TerminalWidth
+    $st = Get-ContextStats -State $State
+    $inTok = if ($State -and $State.usage_input_tokens) { [int]$State.usage_input_tokens } else { 0 }
+    $outTok = if ($State -and $State.usage_output_tokens) { [int]$State.usage_output_tokens } else { 0 }
+    $nmInfo = if ($State -and $State.session_name) { [string]$State.session_name } else { '(unnamed)' }
+    $leafInfo = if ($State -and $State.leaf_id) { [string]$State.leaf_id } else { '(root)' }
+    $sessFileStr = if ($SessionFile) { $SessionFile } else { '(ephemeral -NoSession)' }
+    $effLabel = if ($script:ReasoningEffort) { $script:ReasoningEffort } else { 'default' }
+    $capNow = Get-AgentCapabilities -Root $script:ActiveWorkspace
+    $toolsStr = if ($capNow.tool_names.Count -gt 0) { $capNow.tool_names -join ', ' } else { 'none' }
+    $hdr = ' ' + $script:Gm.BoldOrange + 'Session Status' + $script:Gm.Reset + ' '
+    $hdrVis = (Strip-AnsiCodes -Text $hdr).Length
+    $dashes = $w - 5 - $hdrVis
+    if ($dashes -lt 2) { $dashes = 2 }
+    $barV = '  ' + $script:Gm.Grey0 + $script:Box.V + ' ' + $script:Gm.Reset
+    $lines = @(
+        ('  ' + $script:Gm.Grey0 + $script:Box.TL + $script:Box.H + $script:Gm.Reset + $hdr + $script:Gm.Grey0 + ($script:Box.H * $dashes) + $script:Box.TR + $script:Gm.Reset),
+        ($barV + $script:Gm.Grey1 + 'Model:       ' + $script:Gm.Fg1 + $Model + $script:Gm.Grey1 + " (reasoning: view=$($script:ShowReasoning), effort=$effLabel)" + $script:Gm.Reset),
+        ($barV + $script:Gm.Grey1 + 'Permission:  ' + (Format-PermissionBadge -Permission $script:AgentPermission) + $script:Gm.Grey1 + " | MaxSteps: $MaxSteps | Undo stack: $UndoCount" + $script:Gm.Reset),
+        ($barV + $script:Gm.Grey1 + 'Context:     ' + (Format-ContextGauge -Chars $st.chars -MaxChars 60000 -Width 12) + $script:Gm.Grey1 + " | Messages: $($st.messages) | Chars: $($st.chars)" + $script:Gm.Reset),
+        ($barV + $script:Gm.Grey1 + 'API Tokens:  ' + $script:Gm.Aqua + "in=$inTok out=$outTok" + $script:Gm.Grey1 + " (total=$(Format-TokenCount -Tokens ($inTok + $outTok)))" + $script:Gm.Reset),
+        ($barV + $script:Gm.Grey1 + 'Session:     ' + $script:Gm.Fg + "$($State.session_id) " + $script:Gm.Grey1 + "| Name: $nmInfo | Leaf: $leafInfo" + $script:Gm.Reset),
+        ($barV + $script:Gm.Grey1 + 'File:        ' + $script:Gm.Grey2 + $sessFileStr + $script:Gm.Reset),
+        ($barV + $script:Gm.Grey1 + 'Tools:       ' + $script:Gm.Aqua + $toolsStr + $script:Gm.Reset),
+        ('  ' + $script:Gm.Grey0 + $script:Box.BL + ($script:Box.H * ($w - 4)) + $script:Box.BR + $script:Gm.Reset)
+    )
+    return $lines
+}
+
+function Format-TuiTreeCard {
+    param($State)
+    $w = Get-TerminalWidth
+    $treeNodes = @(Get-SessionTree -State $State)
+    $hdr = ' ' + $script:Gm.BoldOrange + 'Conversation Tree' + $script:Gm.Reset + ' '
+    $hdrVis = (Strip-AnsiCodes -Text $hdr).Length
+    $dashes = $w - 5 - $hdrVis
+    if ($dashes -lt 2) { $dashes = 2 }
+    $barV = '  ' + $script:Gm.Grey0 + $script:Box.V + ' ' + $script:Gm.Reset
+    $out = @('  ' + $script:Gm.Grey0 + $script:Box.TL + $script:Box.H + $script:Gm.Reset + $hdr + $script:Gm.Grey0 + ($script:Box.H * $dashes) + $script:Box.TR + $script:Gm.Reset)
+    if ($treeNodes.Count -eq 0) {
+        $out += ($barV + $script:Gm.Grey1 + 'Session tree is empty.' + $script:Gm.Reset)
+    }
+    else {
+        foreach ($node in $treeNodes) {
+            $marker = if ($node.is_leaf) { $script:Box.Dot } elseif ($node.active) { $script:Box.Arrow } else { '-' }
+            $parentInfo = if ($node.parent_id) { " <- $($node.parent_id)" } else { ' (root)' }
+            $color = if ($node.is_leaf) { $script:Gm.BoldGreen } elseif ($node.active) { $script:Gm.Aqua } else { $script:Gm.Grey1 }
+            $out += ($barV + $color + ("{0} [{1}] ({2}{3}) " -f $marker, $node.id, $node.role, $parentInfo) + $script:Gm.Fg + $node.preview + $script:Gm.Reset)
+        }
+        $out += ($barV + $script:Gm.Grey1 + '(Use /tree <entry-id> to switch branch, or /fork <entry-id> to fork)' + $script:Gm.Reset)
+    }
+    $out += ('  ' + $script:Gm.Grey0 + $script:Box.BL + ($script:Box.H * ($w - 4)) + $script:Box.BR + $script:Gm.Reset)
+    return $out
+}
+
+function Write-TuiHelpCard {
+    if ($script:OutputMode -eq 'json') { return }
+    $w = Get-TerminalWidth
+    $hdr = ' ' + $script:Gm.BoldOrange + 'Shellossus TUI Commands & Shortcuts' + $script:Gm.Reset + ' '
+    $hdrVis = (Strip-AnsiCodes -Text $hdr).Length
+    $dashes = $w - 5 - $hdrVis
+    if ($dashes -lt 2) { $dashes = 2 }
+    $barV = '  ' + $script:Gm.Grey0 + $script:Box.V + ' ' + $script:Gm.Reset
+    Write-Host ('  ' + $script:Gm.Grey0 + $script:Box.TL + $script:Box.H + $script:Gm.Reset + $hdr + $script:Gm.Grey0 + ($script:Box.H * $dashes) + $script:Box.TR + $script:Gm.Reset)
+    Write-Host ($barV + $script:Gm.BoldYellow + 'Mode & Model (call without args for interactive picker)' + $script:Gm.Reset)
+    Write-Host ($barV + $script:Gm.Aqua + '  /permission (/p) [mode]      ' + $script:Gm.Fg + 'Pick or set: ReadOnly | Ask | AutoEdit | Auto' + $script:Gm.Reset)
+    Write-Host ($barV + $script:Gm.Aqua + '  /model (/m) [id]             ' + $script:Gm.Fg + 'Pick or switch active model ID' + $script:Gm.Reset)
+    Write-Host ($barV + $script:Gm.Aqua + '  /reasoning [arg]             ' + $script:Gm.Fg + 'Pick view (compact|full|hide) or effort (low|medium|high|off)' + $script:Gm.Reset)
+    Write-Host ($barV + $script:Gm.Aqua + '  /status (/s, /tokens)        ' + $script:Gm.Fg + 'Show TUI dashboard (context gauge, tokens, tools, session)' + $script:Gm.Reset)
+    Write-Host ($barV + $script:Gm.Aqua + '  /diagnostics [on|off]        ' + $script:Gm.Fg + 'Toggle pre-request capability/tool diagnostics' + $script:Gm.Reset)
+    Write-Host ($barV + $script:Gm.BoldYellow + 'History, Undo & Compaction' + $script:Gm.Reset)
+    Write-Host ($barV + $script:Gm.Aqua + '  /undo (/u)                   ' + $script:Gm.Fg + 'Revert last turn AND restore modified/created files on disk' + $script:Gm.Reset)
+    Write-Host ($barV + $script:Gm.Aqua + '  /retry                       ' + $script:Gm.Fg + 'Retry the last failed user request' + $script:Gm.Reset)
+    Write-Host ($barV + $script:Gm.Aqua + '  /continue [steps]            ' + $script:Gm.Fg + 'Continue after hitting step limit (or continue last response)' + $script:Gm.Reset)
+    Write-Host ($barV + $script:Gm.Aqua + '  /compact (/c) [focus]        ' + $script:Gm.Fg + 'Summarize older turns into a structured context handoff' + $script:Gm.Reset)
+    Write-Host ($barV + $script:Gm.Aqua + '  /copy                        ' + $script:Gm.Fg + 'Copy the last assistant response to clipboard' + $script:Gm.Reset)
+    Write-Host ($barV + $script:Gm.BoldYellow + 'Sessions & Branch Tree' + $script:Gm.Reset)
+    Write-Host ($barV + $script:Gm.Aqua + '  /sessions                    ' + $script:Gm.Fg + 'Browse and interactively resume saved workspace sessions' + $script:Gm.Reset)
+    Write-Host ($barV + $script:Gm.Aqua + '  /resume (/r) [num|name]      ' + $script:Gm.Fg + 'Resume a saved session (interactive picker when no arg)' + $script:Gm.Reset)
+    Write-Host ($barV + $script:Gm.Aqua + '  /tree (/t) [entry-id]        ' + $script:Gm.Fg + 'View conversation tree or switch active branch' + $script:Gm.Reset)
+    Write-Host ($barV + $script:Gm.Aqua + '  /fork [entry-id] (/clone)    ' + $script:Gm.Fg + 'Fork current branch into a new session file' + $script:Gm.Reset)
+    Write-Host ($barV + $script:Gm.Aqua + '  /name [name] | /save [name]  ' + $script:Gm.Fg + 'Name or save current session' + $script:Gm.Reset)
+    Write-Host ($barV + $script:Gm.Aqua + '  /export [path] | /import <p> ' + $script:Gm.Fg + 'Export HTML/JSONL or import a JSONL session' + $script:Gm.Reset)
+    Write-Host ($barV + $script:Gm.Aqua + '  /new (/clear) | /exit (/q)   ' + $script:Gm.Fg + 'Start a fresh session or exit shellossus' + $script:Gm.Reset)
+    Write-Host ($barV + $script:Gm.BoldYellow + 'Delegation, Skills & Input Syntax' + $script:Gm.Reset)
+    Write-Host ($barV + $script:Gm.Aqua + '  /agents | /agent:<role> <q>  ' + $script:Gm.Fg + 'List or run subagent roles (recon, audit, craft, custom)' + $script:Gm.Reset)
+    Write-Host ($barV + $script:Gm.Aqua + '  /skills | /skill:<name> [a]  ' + $script:Gm.Fg + 'List or invoke a SKILL.md skill directly' + $script:Gm.Reset)
+    Write-Host ($barV + $script:Gm.Aqua + '  /<template> [args] | /reload ' + $script:Gm.Fg + 'Run .shellossus/prompts/<name>.md or reload context files' + $script:Gm.Reset)
+    Write-Host ($barV + $script:Gm.Aqua + '  @path/to/file                ' + $script:Gm.Fg + 'Inline-attach a workspace file into your prompt' + $script:Gm.Reset)
+    Write-Host ($barV + $script:Gm.Aqua + '  !cmd / !!cmd                 ' + $script:Gm.Fg + 'Run shell command (! adds to context, !! local only)' + $script:Gm.Reset)
+    Write-Host ($barV + $script:Gm.Aqua + '  """ ... """ or trailing \    ' + $script:Gm.Fg + 'Multi-line prompt input block' + $script:Gm.Reset)
+    Write-Host ('  ' + $script:Gm.Grey0 + $script:Box.BL + ($script:Box.H * ($w - 4)) + $script:Box.BR + $script:Gm.Reset)
+}
+
 function Invoke-AgentContinue {
     param($State, [string]$Endpoint, [string]$ModelId, [string]$ApiKey, [string]$Root, [int]$Steps = 50)
     if (-not $State -or -not $State.messages -or $State.messages.Count -eq 0) { return $false }
@@ -558,17 +680,30 @@ if (-not $LibraryOnly) {
             Save-AgentSession -SessionFile $sessionFile -State $state -Workspace $rootPath -Model $Model
             return
         }
-        Write-Host ($script:Gm.OscInit + $script:Gm.BoldGreen + "shellossus | model: $Model | permission: $($script:AgentPermission) | workspace: $rootPath" + $script:Gm.Reset)
-        if (Get-AgentsContext -Root $rootPath -ConfigDir $configDir) { Write-Host ($script:Gm.Aqua + 'Loaded AGENTS.md/CLAUDE.md instructions.' + $script:Gm.Reset) }
-        if (Get-SkillsCatalog -Root $rootPath -ConfigDir $configDir) { Write-Host ($script:Gm.Aqua + 'Loaded skills catalog.' + $script:Gm.Reset) }
-        Write-Host ($script:Gm.Grey1 + 'Commands: /help /status /session /permission /reasoning /agents /continue /undo /retry /compact /tree /fork /export /copy /reload /model /sessions /resume /save /new /exit' + $script:Gm.Reset)
+        $wInit = Get-TerminalWidth
+        $hdrInit = ' ' + $script:Gm.BoldGreen + $script:Box.Dot + ' shellossus ' + $script:Gm.Grey1 + 'inline TUI' + $script:Gm.Reset + ' '
+        $hdrInitVis = (Strip-AnsiCodes -Text $hdrInit).Length
+        $initDashes = $wInit - 3 - $hdrInitVis
+        if ($initDashes -lt 2) { $initDashes = 2 }
+        Write-Host ($script:Gm.OscInit + $script:Gm.Grey0 + $script:Box.TL + $script:Box.H + $script:Gm.Reset + $hdrInit + $script:Gm.Grey0 + ($script:Box.H * $initDashes) + $script:Box.TR + $script:Gm.Reset)
+        $ctxLoaded = @()
+        if (Get-AgentsContext -Root $rootPath -ConfigDir $configDir) { $ctxLoaded += 'AGENTS.md/CLAUDE.md' }
+        if (Get-SkillsCatalog -Root $rootPath -ConfigDir $configDir) { $ctxLoaded += "skills ($($script:SkillsByName.Count))" }
+        $null = Get-AgentRolesCatalog -Root $rootPath -ConfigDir $configDir
+        if ($script:AgentRolesByName -and $script:AgentRolesByName.Count -gt 0) { $ctxLoaded += "agents ($($script:AgentRolesByName.Count))" }
+        if ($ctxLoaded.Count -gt 0) {
+            Write-Host ($script:Gm.Grey0 + $script:Box.V + ' ' + $script:Gm.Aqua + 'Loaded: ' + $script:Gm.Fg + ($ctxLoaded -join ' | ') + $script:Gm.Reset)
+        }
+        Write-Host ($script:Gm.Grey0 + $script:Box.V + ' ' + $script:Gm.Grey1 + 'Shortcuts: ' + $script:Gm.Aqua + '? (/help)' + $script:Gm.Grey1 + ' | ' + $script:Gm.Aqua + '/p' + $script:Gm.Grey1 + ' mode | ' + $script:Gm.Aqua + '/m' + $script:Gm.Grey1 + ' model | ' + $script:Gm.Aqua + '/s' + $script:Gm.Grey1 + ' status | ' + $script:Gm.Aqua + '/t' + $script:Gm.Grey1 + ' tree | ' + $script:Gm.Aqua + '/u' + $script:Gm.Grey1 + ' undo | ' + $script:Gm.Aqua + '"""' + $script:Gm.Grey1 + ' multiline' + $script:Gm.Reset)
+        Write-Host ($script:Gm.Grey0 + $script:Box.BL + ($script:Box.H * ($wInit - 2)) + $script:Box.BR + $script:Gm.Reset)
         while ($true) {
-            Write-Host ("`n" + $script:Gm.Grey0 + ('-' * 40) + $script:Gm.Reset)
-            Write-Host ($script:Gm.BoldBlue + 'You: ' + $script:Gm.Fg) -NoNewline
-            $question = Read-Host
+            Write-TuiPromptFrame -State $state -Root $rootPath -Model $Model -UndoCount $undoStack.Count
+            Write-Host ('  ' + $script:Gm.BoldBlue + $script:Box.Arrow + ' You: ' + $script:Gm.Fg) -NoNewline
+            $question = Read-TuiMultilineInput
             Write-Host $script:Gm.Reset -NoNewline
             if (-not $question) { continue }
-            $trimmedQ = $question.Trim()
+            $rawTrimmed = $question.Trim()
+            $trimmedQ = Resolve-ReplCommandAlias -InputText $rawTrimmed
             if ($trimmedQ -eq '/exit' -or $trimmedQ -eq '/quit') { break }
             if ($trimmedQ -eq '/clear' -or $trimmedQ -eq '/new') {
                 $newId = 'sess-' + (Get-Date -Format 'yyyyMMdd-HHmmss') + '-' + (Get-Random -Minimum 100000 -Maximum 999999)
@@ -587,63 +722,66 @@ if (-not $LibraryOnly) {
                 $sessionFile = if ($NoSession) { '' } else { Join-Path $sessionDir ($newId + '.jsonl') }
                 $script:ActiveSessionId = $newId
                 $script:ActiveSessionFile = $sessionFile
-                Write-Host ($script:Gm.Grey1 + 'Started a new conversation session.' + $script:Gm.Reset)
+                Write-Host ($script:Gm.Grey1 + '  Started a new conversation session.' + $script:Gm.Reset)
                 continue
             }
             if ($trimmedQ -eq '/help') {
-                Write-Host ($script:Gm.Aqua + '  /status (/session, /tokens)  ' + $script:Gm.Fg + 'Show context size, token usage, model, permission, and session info' + $script:Gm.Reset)
-                Write-Host ($script:Gm.Aqua + '  /permission <mode>           ' + $script:Gm.Fg + 'Set mode: ReadOnly | Ask | AutoEdit (no-ask writes) | Auto' + $script:Gm.Reset)
-                Write-Host ($script:Gm.Aqua + '  /diagnostics [on|off]        ' + $script:Gm.Fg + 'Show or toggle pre-request capability/tool diagnostics' + $script:Gm.Reset)
-                Write-Host ($script:Gm.Aqua + '  /reasoning (/thinking) <arg> ' + $script:Gm.Fg + 'View: compact | full | hide; Effort: low | medium | high | off' + $script:Gm.Reset)
-                Write-Host ($script:Gm.Aqua + '  /agents                      ' + $script:Gm.Fg + 'List built-in and custom subagent roles (recon, audit, craft, ...)' + $script:Gm.Reset)
-                Write-Host ($script:Gm.Aqua + '  /continue [steps]            ' + $script:Gm.Fg + 'Continue after hitting step limit (or continue last response)' + $script:Gm.Reset)
-                Write-Host ($script:Gm.Aqua + '  /undo                        ' + $script:Gm.Fg + 'Revert last turn AND restore modified/created files on disk' + $script:Gm.Reset)
-                Write-Host ($script:Gm.Aqua + '  /retry                       ' + $script:Gm.Fg + 'Retry the last failed user request' + $script:Gm.Reset)
-                Write-Host ($script:Gm.Aqua + '  /compact [focus]             ' + $script:Gm.Fg + 'Summarize older turns into a structured context handoff' + $script:Gm.Reset)
-                Write-Host ($script:Gm.Aqua + '  /name [name]                 ' + $script:Gm.Fg + 'Set or display the human-friendly session name' + $script:Gm.Reset)
-                Write-Host ($script:Gm.Aqua + '  /tree [entry-id]             ' + $script:Gm.Fg + 'Show conversation tree or switch active branch to <entry-id>' + $script:Gm.Reset)
-                Write-Host ($script:Gm.Aqua + '  /fork [entry-id] (/clone)    ' + $script:Gm.Fg + 'Fork current branch (or from <entry-id>) into a new session file' + $script:Gm.Reset)
-                Write-Host ($script:Gm.Aqua + '  /export [path.html|.jsonl]   ' + $script:Gm.Fg + 'Export session to standalone HTML (or JSONL)' + $script:Gm.Reset)
-                Write-Host ($script:Gm.Aqua + '  /import <path.jsonl>         ' + $script:Gm.Fg + 'Import and resume a JSONL session file' + $script:Gm.Reset)
-                Write-Host ($script:Gm.Aqua + '  /copy                        ' + $script:Gm.Fg + 'Copy the last assistant response to clipboard' + $script:Gm.Reset)
-                Write-Host ($script:Gm.Aqua + '  /reload                      ' + $script:Gm.Fg + 'Reload AGENTS.md, CLAUDE.md, SYSTEM.md, skills, agents, and templates' + $script:Gm.Reset)
-                Write-Host ($script:Gm.Aqua + '  /hotkeys                     ' + $script:Gm.Fg + 'Display input shortcuts and syntax reference' + $script:Gm.Reset)
-                Write-Host ($script:Gm.Aqua + '  /model <id>                  ' + $script:Gm.Fg + 'Switch active model ID for this session' + $script:Gm.Reset)
-                Write-Host ($script:Gm.Aqua + '  /sessions                    ' + $script:Gm.Fg + 'List saved sessions in ~/.shellossus/sessions' + $script:Gm.Reset)
-                Write-Host ($script:Gm.Aqua + '  /resume <num|name>           ' + $script:Gm.Fg + 'Resume a saved session by number or filename' + $script:Gm.Reset)
-                Write-Host ($script:Gm.Aqua + '  /save [name]                 ' + $script:Gm.Fg + 'Save conversation to current or named session file' + $script:Gm.Reset)
-                Write-Host ($script:Gm.Aqua + '  /new (/clear)                ' + $script:Gm.Fg + 'Start a fresh session while keeping old session files' + $script:Gm.Reset)
-                Write-Host ($script:Gm.Aqua + '  /exit (/quit)                ' + $script:Gm.Fg + 'Exit shellossus' + $script:Gm.Reset)
-                Write-Host ($script:Gm.Aqua + '  /agent:<role> <task>         ' + $script:Gm.Fg + 'Delegate a task to a subagent role (recon, audit, craft, ...)' + $script:Gm.Reset)
-                Write-Host ($script:Gm.Aqua + '  /skill:<name> [args]         ' + $script:Gm.Fg + 'Invoke a skill directly with arguments' + $script:Gm.Reset)
-                Write-Host ($script:Gm.Aqua + '  /<template> [args]           ' + $script:Gm.Fg + 'Run a custom Markdown prompt from .shellossus/prompts/<name>.md' + $script:Gm.Reset)
-                Write-Host ($script:Gm.Aqua + '  @path/to/file                ' + $script:Gm.Fg + 'Inline-attach a workspace file into your prompt' + $script:Gm.Reset)
-                Write-Host ($script:Gm.Aqua + '  !command / !!command         ' + $script:Gm.Fg + 'Run shell command (! adds to context, !! local only)' + $script:Gm.Reset)
+                Write-TuiHelpCard
                 continue
             }
             if ($trimmedQ -eq '/agents') {
                 $null = Get-AgentRolesCatalog -Root $rootPath -ConfigDir $configDir
+                $w = Get-TerminalWidth
+                $hdr = ' ' + $script:Gm.BoldOrange + 'Subagent Roles' + $script:Gm.Reset + ' '
+                $dashes = $w - 5 - (Strip-AnsiCodes -Text $hdr).Length
+                if ($dashes -lt 2) { $dashes = 2 }
+                Write-Host ('  ' + $script:Gm.Grey0 + $script:Box.TL + $script:Box.H + $script:Gm.Reset + $hdr + $script:Gm.Grey0 + ($script:Box.H * $dashes) + $script:Box.TR + $script:Gm.Reset)
                 foreach ($rKey in @($script:AgentRolesByName.Keys | Sort-Object)) {
                     $rObj = $script:AgentRolesByName[$rKey]
                     $srcTag = if ($rObj.builtin) { 'built-in' } else { $rObj.rel_path }
-                    Write-Host ($script:Gm.Aqua + ("  {0,-12} " -f $rObj.name) + $script:Gm.Yellow + ("[{0}; {1}] " -f $rObj.permission, $srcTag) + $script:Gm.Fg + $rObj.description + $script:Gm.Reset)
+                    Write-Host ('  ' + $script:Gm.Grey0 + $script:Box.V + ' ' + $script:Gm.Aqua + ("{0,-12} " -f $rObj.name) + $script:Gm.Yellow + ("[{0}; {1}] " -f $rObj.permission, $srcTag) + $script:Gm.Fg + $rObj.description + $script:Gm.Reset)
                 }
-                Write-Host ($script:Gm.Grey1 + '  (Invoke via /agent:<role> <task> or let the model call run_agent)' + $script:Gm.Reset)
+                Write-Host ('  ' + $script:Gm.Grey0 + $script:Box.V + ' ' + $script:Gm.Grey1 + '(Invoke via /agent:<role> <task> or let the model call run_agent)' + $script:Gm.Reset)
+                Write-Host ('  ' + $script:Gm.Grey0 + $script:Box.BL + ($script:Box.H * ($w - 4)) + $script:Box.BR + $script:Gm.Reset)
+                continue
+            }
+            if ($trimmedQ -eq '/skills') {
+                $null = Get-SkillsCatalog -Root $rootPath -ConfigDir $configDir
+                $w = Get-TerminalWidth
+                $hdr = ' ' + $script:Gm.BoldOrange + 'Available Skills' + $script:Gm.Reset + ' '
+                $dashes = $w - 5 - (Strip-AnsiCodes -Text $hdr).Length
+                if ($dashes -lt 2) { $dashes = 2 }
+                Write-Host ('  ' + $script:Gm.Grey0 + $script:Box.TL + $script:Box.H + $script:Gm.Reset + $hdr + $script:Gm.Grey0 + ($script:Box.H * $dashes) + $script:Box.TR + $script:Gm.Reset)
+                if (-not $script:SkillsByName -or $script:SkillsByName.Count -eq 0) {
+                    Write-Host ('  ' + $script:Gm.Grey0 + $script:Box.V + ' ' + $script:Gm.Grey1 + 'No skills found in .shellossus/skills or ~/.shellossus/skills.' + $script:Gm.Reset)
+                }
+                else {
+                    foreach ($sKey in @($script:SkillsByName.Keys | Sort-Object)) {
+                        $sObj = $script:SkillsByName[$sKey]
+                        Write-Host ('  ' + $script:Gm.Grey0 + $script:Box.V + ' ' + $script:Gm.Aqua + ("{0,-18} " -f $sObj.name) + $script:Gm.Fg + $sObj.description + $script:Gm.Reset)
+                    }
+                    Write-Host ('  ' + $script:Gm.Grey0 + $script:Box.V + ' ' + $script:Gm.Grey1 + '(Invoke via /skill:<name> [args])' + $script:Gm.Reset)
+                }
+                Write-Host ('  ' + $script:Gm.Grey0 + $script:Box.BL + ($script:Box.H * ($w - 4)) + $script:Box.BR + $script:Gm.Reset)
                 continue
             }
             if ($trimmedQ -eq '/hotkeys') {
-                Write-Host ($script:Gm.Aqua + '  @path/to/file     ' + $script:Gm.Fg + 'Attach file contents inline into prompt' + $script:Gm.Reset)
-                Write-Host ($script:Gm.Aqua + '  !cmd              ' + $script:Gm.Fg + 'Execute shell command and append output to conversation context' + $script:Gm.Reset)
-                Write-Host ($script:Gm.Aqua + '  !!cmd             ' + $script:Gm.Fg + 'Execute shell command locally without adding to context' + $script:Gm.Reset)
-                Write-Host ($script:Gm.Aqua + '  /agent:<role>     ' + $script:Gm.Fg + 'Delegate task to subagent role (recon, audit, craft, custom)' + $script:Gm.Reset)
-                Write-Host ($script:Gm.Aqua + '  /skill:<name>     ' + $script:Gm.Fg + 'Expand a skill SKILL.md into the prompt' + $script:Gm.Reset)
-                Write-Host ($script:Gm.Aqua + '  /<template>       ' + $script:Gm.Fg + 'Expand a prompt template with $1, $2, $@, ${1:-default}' + $script:Gm.Reset)
-                Write-Host ($script:Gm.Aqua + '  Ctrl+C            ' + $script:Gm.Fg + 'Interrupt running command or exit interactive prompt' + $script:Gm.Reset)
+                Write-TuiHelpCard
                 continue
             }
             if ($trimmedQ -match '^/permission(?:\s+(.+))?$') {
-                if ($Matches[1]) {
-                    $reqPerm = $Matches[1].Trim()
+                $reqPerm = if ($Matches[1]) { $Matches[1].Trim() } else { '' }
+                if (-not $reqPerm) {
+                    $permItems = @(
+                        @{ label = 'ReadOnly'; value = 'ReadOnly'; description = 'Read/search only; no file writes or shell commands'; active = ($script:AgentPermission -eq 'ReadOnly') },
+                        @{ label = 'Ask'; value = 'Ask'; description = 'Preview and confirm both file writes (WRITE) and commands (RUN)'; active = ($script:AgentPermission -eq 'Ask') },
+                        @{ label = 'AutoEdit'; value = 'AutoEdit'; description = 'Auto-approve file edits; still confirm shell commands (RUN)'; active = ($script:AgentPermission -eq 'AutoEdit') },
+                        @{ label = 'Auto'; value = 'Auto'; description = 'Auto-approve all workspace file writes and shell commands'; active = ($script:AgentPermission -eq 'Auto') }
+                    )
+                    $pickedPerm = Invoke-TuiSelector -Title "Permission Mode (current: $($script:AgentPermission))" -Items $permItems
+                    if ($pickedPerm) { $reqPerm = [string]$pickedPerm }
+                }
+                if ($reqPerm) {
                     $matchedPerm = @('ReadOnly', 'Ask', 'AutoEdit', 'Auto') | Where-Object { $_ -ieq $reqPerm } | Select-Object -First 1
                     if ($matchedPerm) {
                         $script:AgentPermission = $matchedPerm
@@ -654,9 +792,6 @@ if (-not $LibraryOnly) {
                     else {
                         Write-Host ($script:Gm.Red + '  Invalid permission mode. Choose: ReadOnly, Ask, AutoEdit, Auto' + $script:Gm.Reset)
                     }
-                }
-                else {
-                    Write-Host ($script:Gm.Aqua + "  Current permission mode: $($script:AgentPermission) (use /permission ReadOnly|Ask|AutoEdit|Auto)" + $script:Gm.Reset)
                 }
                 continue
             }
@@ -683,8 +818,22 @@ if (-not $LibraryOnly) {
                 continue
             }
             if ($trimmedQ -match '^/(?:reasoning|thinking)(?:\s+(.+))?$') {
-                if ($Matches[1]) {
-                    $argR = $Matches[1].Trim().ToLower()
+                $argR = if ($Matches[1]) { $Matches[1].Trim().ToLower() } else { '' }
+                if (-not $argR) {
+                    $effLabel = if ($script:ReasoningEffort) { $script:ReasoningEffort } else { 'default' }
+                    $rItems = @(
+                        @{ label = 'compact'; value = 'compact'; description = 'Show last 3 lines of reasoning block'; active = ($script:ShowReasoning -eq 'compact') },
+                        @{ label = 'full'; value = 'full'; description = 'Show full reasoning block'; active = ($script:ShowReasoning -eq 'full') },
+                        @{ label = 'hide'; value = 'hide'; description = 'Hide reasoning display'; active = ($script:ShowReasoning -eq 'hide') },
+                        @{ label = 'low'; value = 'low'; description = 'Set API reasoning_effort = low'; active = ($script:ReasoningEffort -eq 'low') },
+                        @{ label = 'medium'; value = 'medium'; description = 'Set API reasoning_effort = medium'; active = ($script:ReasoningEffort -eq 'medium') },
+                        @{ label = 'high'; value = 'high'; description = 'Set API reasoning_effort = high'; active = ($script:ReasoningEffort -eq 'high') },
+                        @{ label = 'default'; value = 'default'; description = 'Reset API reasoning_effort to provider default'; active = (-not $script:ReasoningEffort) }
+                    )
+                    $pickedR = Invoke-TuiSelector -Title "Reasoning (view: $($script:ShowReasoning) | effort: $effLabel)" -Items $rItems
+                    if ($pickedR) { $argR = ([string]$pickedR).ToLower() }
+                }
+                if ($argR) {
                     if ($argR -in @('compact', 'full', 'hide')) {
                         $script:ShowReasoning = $argR
                         Write-Host ($script:Gm.Green + "  Reasoning display set to: $($script:ShowReasoning)" + $script:Gm.Reset)
@@ -700,10 +849,6 @@ if (-not $LibraryOnly) {
                     else {
                         Write-Host ($script:Gm.Red + '  Usage: /reasoning [compact|full|hide|low|medium|high|default]' + $script:Gm.Reset)
                     }
-                }
-                else {
-                    $effLabel = if ($script:ReasoningEffort) { $script:ReasoningEffort } else { 'default' }
-                    Write-Host ($script:Gm.Aqua + "  Reasoning view: $($script:ShowReasoning) | effort: $effLabel" + $script:Gm.Reset)
                 }
                 continue
             }
@@ -733,18 +878,8 @@ if (-not $LibraryOnly) {
                     }
                 }
                 else {
-                    $treeNodes = @(Get-SessionTree -State $state)
-                    if ($treeNodes.Count -eq 0) {
-                        Write-Host ($script:Gm.Grey1 + '  Session tree is empty.' + $script:Gm.Reset)
-                    }
-                    else {
-                        foreach ($node in $treeNodes) {
-                            $marker = if ($node.is_leaf) { '*' } elseif ($node.active) { '+' } else { '-' }
-                            $parentInfo = if ($node.parent_id) { " <- $($node.parent_id)" } else { ' (root)' }
-                            $color = if ($node.is_leaf) { $script:Gm.BoldGreen } elseif ($node.active) { $script:Gm.Aqua } else { $script:Gm.Grey1 }
-                            Write-Host ($color + ("  {0} [{1}] ({2}{3}) " -f $marker, $node.id, $node.role, $parentInfo) + $script:Gm.Fg + $node.preview + $script:Gm.Reset)
-                        }
-                        Write-Host ($script:Gm.Grey1 + '  (Use /tree <entry-id> to switch branch, or /fork <entry-id> to fork)' + $script:Gm.Reset)
+                    foreach ($tLn in @(Format-TuiTreeCard -State $state)) {
+                        Write-Host $tLn
                     }
                 }
                 continue
@@ -873,24 +1008,44 @@ if (-not $LibraryOnly) {
                 continue
             }
             if ($trimmedQ -eq '/status' -or $trimmedQ -eq '/tokens' -or $trimmedQ -eq '/session') {
-                $st = Get-ContextStats -State $state
-                $inTok = if ($state.usage_input_tokens) { [int]$state.usage_input_tokens } else { 0 }
-                $outTok = if ($state.usage_output_tokens) { [int]$state.usage_output_tokens } else { 0 }
-                $nmInfo = if ($state.session_name) { " | Name: $($state.session_name)" } else { '' }
-                $leafInfo = if ($state.leaf_id) { " | Leaf: $($state.leaf_id)" } else { '' }
-                Write-Host ($script:Gm.Aqua + "  Model: $($Model) | Permission: $($script:AgentPermission) | MaxSteps: $($MaxSteps) | Messages: $($st.messages) | Chars: $($st.chars) (~$($st.est_tokens) tokens)" + $script:Gm.Reset)
-                Write-Host ($script:Gm.Grey1 + "  Session ID: $($state.session_id)$nmInfo$leafInfo | API Usage: in=$inTok out=$outTok" + $script:Gm.Reset)
-                Write-Host ($script:Gm.Grey1 + "  Session File: $(if ($sessionFile) { $sessionFile } else { '(ephemeral -NoSession)' })" + $script:Gm.Reset)
+                foreach ($sLn in @(Format-TuiStatusCard -State $state -Model $Model -MaxSteps $MaxSteps -SessionFile $sessionFile -UndoCount $undoStack.Count)) {
+                    Write-Host $sLn
+                }
                 continue
             }
             if ($trimmedQ -match '^/model(?:\s+(.+))?$') {
-                if ($Matches[1]) {
-                    $Model = $Matches[1].Trim()
-                    $state.model = $Model
-                    Write-Host ($script:Gm.Green + "  Model switched to: $Model" + $script:Gm.Reset)
+                $newModel = if ($Matches[1]) { $Matches[1].Trim() } else { '' }
+                if (-not $newModel) {
+                    $knownModels = @($Model)
+                    if (Test-Path -LiteralPath $sessionDir) {
+                        foreach ($sf in @(Get-ChildItem -LiteralPath $sessionDir -Filter '*.jsonl' -File -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 15)) {
+                            $mMeta = Get-AgentSessionMeta -SessionFile $sf.FullName
+                            if ($mMeta -and $mMeta.model -and ($knownModels -notcontains [string]$mMeta.model)) {
+                                $knownModels += [string]$mMeta.model
+                            }
+                        }
+                    }
+                    $mItems = @()
+                    foreach ($km in $knownModels) {
+                        $mItems += @{ label = $km; value = $km; description = $(if ($km -eq $Model) { 'active model' } else { 'recent session model' }); active = ($km -eq $Model) }
+                    }
+                    $mItems += @{ label = '[Custom model ID...]'; value = '__custom__'; description = 'Type any OpenAI-compatible model ID'; active = $false }
+                    $pickedM = Invoke-TuiSelector -Title "Select Model (current: $Model)" -Items $mItems -PromptText 'Select number or type model ID (Enter cancels)'
+                    if ($pickedM -eq '__custom__') {
+                        Write-Host ('  ' + $script:Gm.BoldYellow + 'Enter model ID: ' + $script:Gm.Fg) -NoNewline
+                        $customM = Read-Host
+                        Write-Host $script:Gm.Reset -NoNewline
+                        if ($customM -and $customM.Trim()) { $newModel = $customM.Trim() }
+                    }
+                    elseif ($pickedM) {
+                        $newModel = [string]$pickedM
+                    }
                 }
-                else {
-                    Write-Host ($script:Gm.Aqua + "  Current model: $Model (use /model <id> to change)" + $script:Gm.Reset)
+                if ($newModel) {
+                    $Model = $newModel
+                    $state.model = $Model
+                    $script:ActiveModelId = $Model
+                    Write-Host ($script:Gm.Green + "  Model switched to: $Model" + $script:Gm.Reset)
                 }
                 continue
             }
@@ -911,9 +1066,11 @@ if (-not $LibraryOnly) {
                 }
                 continue
             }
-            if ($trimmedQ -eq '/sessions') {
+            if ($trimmedQ -eq '/sessions' -or $trimmedQ -match '^/resume(?:\s+(.+))?$') {
+                $isResumeCmd = ($trimmedQ -match '^/resume')
+                $arg = if ($isResumeCmd -and $Matches[1]) { $Matches[1].Trim() } else { '' }
                 if (-not (Test-Path -LiteralPath $sessionDir)) {
-                    Write-Host ($script:Gm.Grey1 + '  No saved sessions yet.' + $script:Gm.Reset)
+                    Write-Host ($script:Gm.Grey1 + '  No saved sessions found.' + $script:Gm.Reset)
                     continue
                 }
                 $wsNorm = $rootPath.TrimEnd('\').TrimEnd('/')
@@ -925,26 +1082,25 @@ if (-not $LibraryOnly) {
                     Write-Host ($script:Gm.Grey1 + '  No saved sessions for this workspace.' + $script:Gm.Reset)
                     continue
                 }
-                for ($i = 0; $i -lt $list.Count; $i++) {
-                    $meta = Get-AgentSessionMeta -SessionFile $list[$i].FullName
-                    $mdlInfo = if ($meta -and $meta.model) { " [model: $($meta.model)]" } else { '' }
-                    Write-Host ($script:Gm.Yellow + ("  [{0}] " -f ($i + 1)) + $script:Gm.Fg + $list[$i].Name + $script:Gm.Grey1 + (" ({0}){1}" -f $list[$i].LastWriteTime.ToString('yyyy-MM-dd HH:mm'), $mdlInfo) + $script:Gm.Reset)
-                }
-                continue
-            }
-            if ($trimmedQ -match '^/resume(?:\s+(.+))?$') {
-                $arg = if ($Matches[1]) { $Matches[1].Trim() } else { '1' }
-                if (-not (Test-Path -LiteralPath $sessionDir)) {
-                    Write-Host ($script:Gm.Grey1 + '  No saved sessions found.' + $script:Gm.Reset)
-                    continue
-                }
-                $wsNorm = $rootPath.TrimEnd('\').TrimEnd('/')
-                $list = @(Get-ChildItem -LiteralPath $sessionDir -Filter '*.jsonl' -File | Sort-Object LastWriteTime -Descending | Where-Object {
-                    $m = Get-AgentSessionMeta -SessionFile $_.FullName
-                    (-not $m) -or (-not $m.workspace) -or ($m.workspace.TrimEnd('\').TrimEnd('/') -ieq $wsNorm)
-                })
                 $chosen = $null
-                if ($arg -match '^\d+$') {
+                if (-not $arg) {
+                    $sItems = @()
+                    for ($i = 0; $i -lt $list.Count; $i++) {
+                        $meta = Get-AgentSessionMeta -SessionFile $list[$i].FullName
+                        $mdlInfo = if ($meta -and $meta.model) { "model: $($meta.model)" } else { '' }
+                        $nmTag = if ($meta -and $meta.session_name) { "[$($meta.session_name)] " } else { '' }
+                        $desc = ("{0}{1} ({2})" -f $nmTag, $list[$i].LastWriteTime.ToString('yyyy-MM-dd HH:mm'), $mdlInfo)
+                        $sItems += @{
+                            label = $list[$i].Name
+                            value = $list[$i].FullName
+                            description = $desc
+                            active = ($sessionFile -and ($list[$i].FullName -ieq $sessionFile))
+                        }
+                    }
+                    $pickedSess = Invoke-TuiSelector -Title 'Saved Workspace Sessions' -Items $sItems -PromptText 'Select session number to resume (Enter cancels)'
+                    if ($pickedSess) { $chosen = [string]$pickedSess }
+                }
+                elseif ($arg -match '^\d+$') {
                     $idx = [int]$arg - 1
                     if ($idx -ge 0 -and $idx -lt $list.Count) { $chosen = $list[$idx].FullName }
                 }
@@ -971,7 +1127,7 @@ if (-not $LibraryOnly) {
                         Write-Host ($script:Gm.Red + '  ' + $_.Exception.Message + $script:Gm.Reset)
                     }
                 }
-                else {
+                elseif ($arg) {
                     Write-Host ($script:Gm.Red + "  Session not found: $arg" + $script:Gm.Reset)
                 }
                 continue

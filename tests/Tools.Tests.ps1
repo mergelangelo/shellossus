@@ -508,6 +508,28 @@ try {
         Remove-Item Function:\Invoke-WebRequest -ErrorAction SilentlyContinue
         $script:AgentPermission = 'Ask'
     }
+
+    # TUI tool card and unified diff rendering in text mode.
+    $script:tuiCaptured = @()
+    function Write-Host {
+        param([Parameter(Position = 0, ValueFromRemainingArguments = $true)]$Object, [switch]$NoNewline, $ForegroundColor, $BackgroundColor)
+        $text = ($Object | ForEach-Object { [string]$_ }) -join ' '
+        $script:tuiCaptured += (Strip-AnsiCodes -Text $text)
+    }
+    try {
+        $script:OutputMode = 'text'
+        $script:AgentPermission = 'AutoEdit'
+        Set-Content -LiteralPath (Join-Path $workspacePath 'tui-diff.txt') -Value "alpha`nbeta`ngamma" -Encoding UTF8 -NoNewline
+        $null = Invoke-AgentTool -Root $workspacePath -Call @{ id = 'tui-r'; function = @{ name = 'read_file'; arguments = '{"path":"tui-diff.txt"}' } }
+        $null = Invoke-AgentTool -Root $workspacePath -Call @{ id = 'tui-e'; function = @{ name = 'edit_file'; arguments = '{"path":"tui-diff.txt","old_text":"beta","new_text":"BETA_NEW"}' } }
+        $joinedTui = $script:tuiCaptured -join "`n"
+        Assert-True ($joinedTui.Contains('read_file') -and $joinedTui.Contains('3 lines')) "Expected TUI tool card for read_file, got: $joinedTui"
+        Assert-True ($joinedTui.Contains('DIFF edit_file: tui-diff.txt +1 -1') -and $joinedTui.Contains('- beta') -and $joinedTui.Contains('+ BETA_NEW')) "Expected unified diff card for edit_file, got: $joinedTui"
+    }
+    finally {
+        $script:AgentPermission = 'Ask'
+        Remove-Item Function:\Write-Host -ErrorAction SilentlyContinue
+    }
 }
 finally {
     Remove-TestEnvironment -Env $envData
