@@ -556,6 +556,15 @@ try {
     $treeCard = @(Format-TuiTreeCard -State $forkParentState)
     $plainTree = ($treeCard | ForEach-Object { Strip-AnsiCodes -Text $_ }) -join "`n"
     Assert-True ($plainTree.Contains('e0001') -and $plainTree.Contains('(root)')) "Format-TuiTreeCard output unexpected: $plainTree"
+
+    # Non-ASCII JSON payload escaping (prevents Windows PowerShell 5.1 UTF-8 BOM / codepage 400 Bad Request).
+    $cyrText = ([string][char]0x0447) + ([string][char]0x0442) + ([string][char]0x043E) + '?'
+    $rawPayload = (@{ model = 'test-model'; messages = @(@{ role = 'user'; content = $cyrText }) } | ConvertTo-Json -Depth 10 -Compress)
+    $asciiPayload = ConvertTo-AsciiJson -Json $rawPayload
+    Assert-True ($asciiPayload -notmatch '[^\x00-\x7F]') "ConvertTo-AsciiJson left non-ASCII chars: $asciiPayload"
+    Assert-True ($asciiPayload.Contains('\u0447\u0442\u043e?')) "ConvertTo-AsciiJson did not escape Cyrillic as expected: $asciiPayload"
+    $parsedPayload = $asciiPayload | ConvertFrom-Json -ErrorAction Stop
+    Assert-True ([string]$parsedPayload.messages[0].content -eq $cyrText) 'ConvertTo-AsciiJson round-trip failed.'
 }
 finally {
     Remove-TestEnvironment -Env $envData
