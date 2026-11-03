@@ -448,6 +448,9 @@ function Resolve-ReplCommandAlias {
     if ($t -match '^/td(?:\s+(.+))?$') {
         return $(if ($Matches[1]) { '/todo ' + $Matches[1] } else { '/todo' })
     }
+    if ($t -match '^/mem(?:\s+(.+))?$') {
+        return $(if ($Matches[1]) { '/memory ' + $Matches[1] } else { '/memory' })
+    }
     return $t
 }
 
@@ -533,6 +536,7 @@ function Write-TuiHelpCard {
     Write-Host ($barV + $script:Gm.Aqua + '  /diagnostics [on|off]        ' + $script:Gm.Fg + 'Toggle pre-request capability/tool diagnostics' + $script:Gm.Reset)
     Write-Host ($barV + $script:Gm.BoldYellow + 'History, Undo & Compaction' + $script:Gm.Reset)
     Write-Host ($barV + $script:Gm.Aqua + '  /todo (/td) [clear]          ' + $script:Gm.Fg + 'View or clear active task plan checklist' + $script:Gm.Reset)
+    Write-Host ($barV + $script:Gm.Aqua + '  /memory (/mem) [clear|add ..]' + $script:Gm.Fg + 'View, clear, or add persistent project memory' + $script:Gm.Reset)
     Write-Host ($barV + $script:Gm.Aqua + '  /undo (/u)                   ' + $script:Gm.Fg + 'Revert last turn AND restore modified/created files on disk' + $script:Gm.Reset)
     Write-Host ($barV + $script:Gm.Aqua + '  /retry                       ' + $script:Gm.Fg + 'Retry the last failed user request' + $script:Gm.Reset)
     Write-Host ($barV + $script:Gm.Aqua + '  /continue [steps]            ' + $script:Gm.Fg + 'Continue after hitting step limit (or continue last response)' + $script:Gm.Reset)
@@ -738,6 +742,8 @@ if (-not $LibraryOnly) {
         if ($initDashes -lt 2) { $initDashes = 2 }
         Write-Host ($script:Gm.OscInit + $script:Gm.Grey0 + $script:Box.TL + $script:Box.H + $script:Gm.Reset + $hdrInit + $script:Gm.Grey0 + ($script:Box.H * $initDashes) + $script:Box.TR + $script:Gm.Reset)
         $ctxLoaded = @()
+        if (Get-SoulContext -Root $rootPath -ConfigDir $configDir) { $ctxLoaded += 'SOUL.md' }
+        if (Get-MemoryContext -Root $rootPath -ConfigDir $configDir) { $ctxLoaded += 'MEMORY.md' }
         if (Get-AgentsContext -Root $rootPath -ConfigDir $configDir) { $ctxLoaded += 'AGENTS.md/CLAUDE.md' }
         if (Get-SkillsCatalog -Root $rootPath -ConfigDir $configDir) { $ctxLoaded += "skills ($($script:SkillsByName.Count))" }
         $null = Get-AgentRolesCatalog -Root $rootPath -ConfigDir $configDir
@@ -793,6 +799,24 @@ if (-not $LibraryOnly) {
                     else {
                         Write-Host ($script:Gm.Grey1 + '  No active tasks in todo list.' + $script:Gm.Reset)
                     }
+                }
+                continue
+            }
+            if ($trimmedQ -match '^/(?:memory|mem)(?:\s+(.+))?$') {
+                $memSub = if ($Matches[1]) { $Matches[1].Trim() } else { '' }
+                if ($memSub -eq 'clear') {
+                    $callArg = @{ action = 'clear'; scope = 'workspace' }
+                    $null = Invoke-AgentMemory -Root $rootPath -Arguments $callArg
+                    Write-Host ($script:Gm.Grey1 + '  Cleared workspace memory.' + $script:Gm.Reset)
+                }
+                elseif ($memSub -match '^add\s+(.+)$') {
+                    $callArg = @{ action = 'append'; scope = 'workspace'; content = $Matches[1].Trim() }
+                    $null = Invoke-AgentMemory -Root $rootPath -Arguments $callArg
+                    Write-Host ($script:Gm.Green + '  Added memory entry.' + $script:Gm.Reset)
+                }
+                else {
+                    $callArg = @{ action = 'view'; scope = 'workspace' }
+                    $null = Invoke-AgentMemory -Root $rootPath -Arguments $callArg
                 }
                 continue
             }
@@ -1047,7 +1071,7 @@ if (-not $LibraryOnly) {
                     $state.messages[0].content = $fullSystemPrompt
                 }
                 Sync-AgentCapabilities -State $state | Out-Null
-                Write-Host ($script:Gm.Green + '  Reloaded AGENTS.md/CLAUDE.md, SYSTEM.md, skills catalog, and prompt templates.' + $script:Gm.Reset)
+                Write-Host ($script:Gm.Green + '  Reloaded context files (AGENTS.md, SOUL.md, MEMORY.md, SYSTEM.md), skills, and templates.' + $script:Gm.Reset)
                 continue
             }
             if ($trimmedQ -match '^/save(?:\s+(.+))?$') {

@@ -586,6 +586,35 @@ function Write-PlanReviewCard {
     }
 }
 
+function Format-MemoryCard {
+    param([string]$Scope, [string]$Action, [string]$Content)
+    $w = Get-TerminalWidth
+    $scopeLabel = if ($Scope) { [string]$Scope.ToUpper() } else { 'WORKSPACE' }
+    $hdr = ' ' + $script:Gm.BoldPurple + 'MEMORY (' + $scopeLabel + ')' + $script:Gm.Reset + ' '
+    $hdrVis = (Strip-AnsiCodes -Text $hdr).Length
+    $dashes = $w - 5 - $hdrVis
+    if ($dashes -lt 2) { $dashes = 2 }
+    $out = @('  ' + $script:Gm.Grey0 + $script:Box.TL + $script:Box.H + $script:Gm.Reset + $hdr + $script:Gm.Grey0 + ($script:Box.H * $dashes) + $script:Box.TR + $script:Gm.Reset)
+    if ($Content) {
+        $lines = @($Content -split "`r?`n")
+        foreach ($ln in $lines) {
+            $cleanLine = Format-PreviewText $ln
+            $formattedLine = Format-MarkdownInline -Text $cleanLine
+            $out += ('  ' + $script:Gm.Grey0 + $script:Box.V + ' ' + $formattedLine + $script:Gm.Reset)
+        }
+    }
+    $out += ('  ' + $script:Gm.Grey0 + $script:Box.BL + ($script:Box.H * ($w - 4)) + $script:Box.BR + $script:Gm.Reset)
+    return $out
+}
+
+function Write-MemoryCard {
+    param([string]$Scope, [string]$Action, [string]$Content)
+    if ($script:OutputMode -eq 'json') { return }
+    foreach ($ln in @(Format-MemoryCard -Scope $Scope -Action $Action -Content $Content)) {
+        Write-Host $ln
+    }
+}
+
 function Format-DiffLinePreview {
     param([string]$Line, [int]$MaxChars = 180)
     $clean = Format-PreviewText $Line
@@ -1030,6 +1059,11 @@ function Resolve-ToolCanonicalName {
         'plan-review' { return 'ask_user' }
         'question' { return 'ask_user' }
         'user_question' { return 'ask_user' }
+        'memory' { return 'memory' }
+        'remember' { return 'memory' }
+        'manage_memory' { return 'memory' }
+        'recall' { return 'memory' }
+        'note' { return 'memory' }
         default { return $lower }
     }
 }
@@ -1792,6 +1826,35 @@ function Get-AgentCapabilities {
             }
         }
     }
+    if (Test-IsToolEnabled -Name 'memory') {
+        $toolNames += 'memory'
+        $tools += @{
+            type = 'function'
+            function = @{
+                name = 'memory'
+                description = 'Record, view, or manage persistent long-term memories, user preferences, and project invariants that survive across CLI sessions in MEMORY.md.'
+                parameters = @{
+                    type = 'object'
+                    properties = @{
+                        action = @{
+                            type = 'string'
+                            description = "Action to perform: 'append' to add a new memory note (default), 'view' to read memory, 'set' to replace memory content, or 'clear' to reset."
+                            enum = @('append', 'view', 'set', 'clear')
+                        }
+                        content = @{
+                            type = 'string'
+                            description = "The fact, preference, or architectural invariant to record (required for 'append' and 'set')."
+                        }
+                        scope = @{
+                            type = 'string'
+                            description = "Storage scope: 'workspace' (default, stored in .shellossus/MEMORY.md) or 'global' (stored in global config MEMORY.md)."
+                            enum = @('workspace', 'global')
+                        }
+                    }
+                }
+            }
+        }
+    }
     if ($perm -ne 'ReadOnly') {
         foreach ($name in @('write_file', 'edit_file')) {
             if (-not (Test-IsToolEnabled -Name $name)) { continue }
@@ -2191,6 +2254,45 @@ function Format-AskUserArguments {
     return $out
 }
 
+function Format-MemoryArguments {
+    param($Arguments, $ArgsObj = $null)
+    if ($null -eq $Arguments -and $null -ne $ArgsObj) { $Arguments = $ArgsObj }
+    if ($null -eq $Arguments -or $Arguments -is [string] -or $Arguments -is [ValueType] -or $Arguments -is [array]) {
+        return $Arguments
+    }
+    $props = @(Get-ObjectPropertyNames -InputObject $Arguments)
+    $action = 'append'
+    if ($props -contains 'action' -and $Arguments.action) {
+        $action = ([string]$Arguments.action).Trim().ToLower()
+    }
+    elseif ($props -contains 'view' -and [bool]$Arguments.view) {
+        $action = 'view'
+    }
+    elseif ($props -contains 'clear' -and [bool]$Arguments.clear) {
+        $action = 'clear'
+    }
+
+    $scope = 'workspace'
+    if ($props -contains 'scope' -and $Arguments.scope) {
+        $scope = ([string]$Arguments.scope).Trim().ToLower()
+    }
+
+    $content = ''
+    foreach ($p in @('content', 'note', 'text', 'memory', 'value')) {
+        if ($props -contains $p -and $Arguments.$p) {
+            $content = [string]$Arguments.$p
+            break
+        }
+    }
+
+    $out = @{
+        action = $action
+        scope = $scope
+    }
+    if ($content) { $out['content'] = $content }
+    return $out
+}
+
 function Test-AgentToolArguments {
     param([string]$Name, $Arguments)
     if ($null -eq $Arguments -or $Arguments -is [string] -or $Arguments -is [ValueType] -or $Arguments -is [array]) {
@@ -2244,6 +2346,10 @@ function Test-AgentToolArguments {
         ask_user = @{
             required = @('question')
             types = @{ question = 'string'; options = 'array'; intent = 'string'; plan = 'string'; allow_custom = 'boolean' }
+        }
+        memory = @{
+            required = @()
+            types = @{ action = 'string'; content = 'string'; scope = 'string' }
         }
     }
     $schema = $schemas[$Name]
@@ -2414,6 +2520,19 @@ function Test-AgentToolArguments {
         }
         if ($Arguments.intent -and $Arguments.intent.ToLower() -notin @('question', 'plan-review')) {
             throw "intent must be 'question' or 'plan-review'."
+        }
+    }
+    if ($Name -eq 'memory') {
+        $act = if ($Arguments.action) { ([string]$Arguments.action).Trim().ToLower() } else { 'append' }
+        if ($act -notin @('append', 'view', 'set', 'clear')) {
+            throw "action must be 'append', 'view', 'set', or 'clear'."
+        }
+        $scope = if ($Arguments.scope) { ([string]$Arguments.scope).Trim().ToLower() } else { 'workspace' }
+        if ($scope -notin @('workspace', 'global')) {
+            throw "scope must be 'workspace' or 'global'."
+        }
+        if (($act -eq 'append' -or $act -eq 'set') -and (-not $Arguments.content -or -not [string]$Arguments.content.Trim())) {
+            throw "content must be a nonempty string for action '$act'."
         }
     }
 }
@@ -3878,12 +3997,116 @@ function Invoke-AgentAskUser {
     return ($resultObj | ConvertTo-Json -Depth 5 -Compress)
 }
 
+function Invoke-AgentMemory {
+    param([string]$Root, $Arguments)
+    $toolStart = Get-Date
+    $action = if ($Arguments.action) { ([string]$Arguments.action).Trim().ToLower() } else { 'append' }
+    $scope = if ($Arguments.scope) { ([string]$Arguments.scope).Trim().ToLower() } else { 'workspace' }
+    $content = if ($Arguments.content) { [string]$Arguments.content } else { '' }
+
+    if ($script:AgentPermission -eq 'ReadOnly' -and $action -in @('append', 'set', 'clear')) {
+        throw 'Permission mode ReadOnly does not allow memory modifications.'
+    }
+
+    $configDir = if ($script:AgentConfigPath) { Split-Path $script:AgentConfigPath -Parent } else { Join-Path (if ($env:USERPROFILE) { $env:USERPROFILE } else { $HOME }) '.shellossus' }
+
+    $targetPath = $null
+    $displayRel = $null
+    if ($scope -eq 'global') {
+        if (-not (Test-Path -LiteralPath $configDir)) {
+            New-Item -ItemType Directory -Path $configDir -Force -ErrorAction Stop | Out-Null
+        }
+        $targetPath = Join-Path $configDir 'MEMORY.md'
+        $displayRel = '~/.shellossus/MEMORY.md'
+    }
+    else {
+        $dotDir = Join-Path $Root '.shellossus'
+        $wsDotMem = Join-Path $dotDir 'MEMORY.md'
+        $wsRootMem = Join-Path $Root 'MEMORY.md'
+        if (Test-Path -LiteralPath $wsRootMem) {
+            $targetPath = $wsRootMem
+            $displayRel = 'MEMORY.md'
+        }
+        else {
+            if (-not (Test-Path -LiteralPath $dotDir)) {
+                New-Item -ItemType Directory -Path $dotDir -Force -ErrorAction Stop | Out-Null
+            }
+            $targetPath = $wsDotMem
+            $displayRel = '.shellossus/MEMORY.md'
+        }
+    }
+
+    if (Test-Path -LiteralPath $targetPath) {
+        $candItem = Get-Item -LiteralPath $targetPath -Force -ErrorAction Stop
+        if (($candItem.Attributes -band 1024) -ne 0) { throw 'Reparse points are not allowed.' }
+    }
+
+    $existing = ''
+    if (Test-Path -LiteralPath $targetPath) {
+        $existing = Get-Content -LiteralPath $targetPath -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
+        if ($null -eq $existing) { $existing = '' }
+    }
+
+    $summaryText = ''
+    $cardContent = ''
+
+    if ($action -eq 'view') {
+        $summaryText = if ($existing.Trim()) { "$($existing.Length) chars read" } else { 'empty' }
+        $cardContent = if ($existing.Trim()) { $existing.Trim() } else { '(no memories recorded yet)' }
+    }
+    elseif ($action -eq 'append') {
+        $newBullet = $content.Trim()
+        if (-not $newBullet.StartsWith('-') -and -not $newBullet.StartsWith('*') -and -not $newBullet.StartsWith('#')) {
+            $newBullet = "- $newBullet"
+        }
+        $trimmedExisting = $existing.TrimEnd()
+        $updatedText = if ($trimmedExisting) {
+            $trimmedExisting + "`n" + $newBullet + "`n"
+        }
+        else {
+            "# Project Memory`n`n" + $newBullet + "`n"
+        }
+        Set-Content -LiteralPath $targetPath -Value $updatedText -Encoding UTF8 -ErrorAction Stop
+        $existing = $updatedText
+        $summaryText = "appended to $displayRel"
+        $cardContent = "+ $newBullet"
+    }
+    elseif ($action -eq 'set') {
+        $updatedText = $content.Trim() + "`n"
+        Set-Content -LiteralPath $targetPath -Value $updatedText -Encoding UTF8 -ErrorAction Stop
+        $existing = $updatedText
+        $summaryText = "updated $displayRel ($($updatedText.Length) chars)"
+        $cardContent = $updatedText.Trim()
+    }
+    elseif ($action -eq 'clear') {
+        if (Test-Path -LiteralPath $targetPath) {
+            Remove-Item -LiteralPath $targetPath -Force -ErrorAction SilentlyContinue
+        }
+        $existing = ''
+        $summaryText = "cleared $displayRel"
+        $cardContent = '(memory cleared)'
+    }
+
+    $elapsedMs = [int](((Get-Date) - $toolStart).TotalMilliseconds)
+    Write-ToolCallCard -Name 'memory' -Target $displayRel -Detail $action -Status 'ok' -Summary $summaryText -ElapsedMs $elapsedMs
+    Write-MemoryCard -Scope $scope -Action $action -Content $cardContent
+
+    $resObj = @{
+        success = $true
+        action = $action
+        scope = $scope
+        path = $displayRel
+        memory = $existing
+    }
+    return ($resObj | ConvertTo-Json -Depth 5 -Compress)
+}
+
 function Invoke-AgentTool {
     param([string]$Root, $Call)
     try {
         $rawName = [string]$Call.function.name
         $name = Resolve-ToolCanonicalName -Name $rawName
-        if ($name -notin @('list_files', 'read_file', 'find_files', 'grep_files', 'fetch_url', 'web_search', 'write_file', 'edit_file', 'run_command', 'run_agent', 'todo', 'ask_user')) { throw 'Unknown tool.' }
+        if ($name -notin @('list_files', 'read_file', 'find_files', 'grep_files', 'fetch_url', 'web_search', 'write_file', 'edit_file', 'run_command', 'run_agent', 'todo', 'ask_user', 'memory')) { throw 'Unknown tool.' }
         if ($script:AgentPermission -eq 'ReadOnly' -and $name -in @('write_file', 'edit_file', 'run_command')) {
             throw 'Permission mode ReadOnly does not allow file modifications or commands.'
         }
@@ -3903,7 +4126,11 @@ function Invoke-AgentTool {
         elseif ($name -eq 'ask_user') {
             $arguments = Format-AskUserArguments -Arguments $arguments
         }
+        elseif ($name -eq 'memory') {
+            $arguments = Format-MemoryArguments -Arguments $arguments
+        }
         Test-AgentToolArguments -Name $name -Arguments $arguments
+        if ($name -eq 'memory') { return (Invoke-AgentMemory -Root $Root -Arguments $arguments) }
         if ($name -eq 'ask_user') { return (Invoke-AgentAskUser -Arguments $arguments) }
         if ($name -eq 'todo') { return (Invoke-AgentTodo -Arguments $arguments) }
         if ($name -eq 'fetch_url') { return (Invoke-AgentFetchUrl -Arguments $arguments) }
@@ -4240,6 +4467,72 @@ function Escape-XmlText {
     param([string]$Text)
     if (-not $Text) { return '' }
     return $Text.Replace('&', '&amp;').Replace('<', '&lt;').Replace('>', '&gt;').Replace('"', '&quot;').Replace("'", '&apos;')
+}
+
+function Get-SoulContext {
+    param([string]$Root, [string]$ConfigDir)
+    if ($script:NoContextFiles) { return '' }
+    $parts = @()
+    $seenFiles = @{}
+    $candidates = @()
+    if ($ConfigDir) {
+        foreach ($name in @('SOUL.md', 'ETHOS.md', 'SHELLOSSUS.md')) {
+            $candidates += (Join-Path $ConfigDir $name)
+        }
+    }
+    if ($Root) {
+        foreach ($name in @('SOUL.md', 'ETHOS.md', 'SHELLOSSUS.md')) {
+            $candidates += (Join-Path (Join-Path $Root '.shellossus') $name)
+            $candidates += (Join-Path $Root $name)
+        }
+    }
+    foreach ($cand in $candidates) {
+        if ($cand -and (Test-Path -LiteralPath $cand)) {
+            $item = Get-Item -LiteralPath $cand -Force -ErrorAction SilentlyContinue
+            if ($item -and (-not $item.PSIsContainer) -and (($item.Attributes -band 1024) -eq 0) -and $item.Length -le 256KB) {
+                $fullKey = $item.FullName.ToLower()
+                if ($seenFiles.ContainsKey($fullKey)) { continue }
+                $seenFiles[$fullKey] = $true
+                $text = Get-Content -LiteralPath $item.FullName -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
+                if ($text -and $text.Trim()) {
+                    if ($text.Length -gt 8000) { $text = $text.Substring(0, 8000) + "`n...(truncated)" }
+                    $parts += ("<soul source=`"$($item.FullName)`">`n" + $text.Trim() + "`n</soul>")
+                }
+            }
+        }
+    }
+    return ($parts -join "`n`n")
+}
+
+function Get-MemoryContext {
+    param([string]$Root, [string]$ConfigDir)
+    if ($script:NoContextFiles) { return '' }
+    $parts = @()
+    $seenFiles = @{}
+    $candidates = @()
+    if ($ConfigDir) {
+        $candidates += (Join-Path $ConfigDir 'MEMORY.md')
+    }
+    if ($Root) {
+        $candidates += (Join-Path (Join-Path $Root '.shellossus') 'MEMORY.md')
+        $candidates += (Join-Path $Root 'MEMORY.md')
+    }
+    foreach ($cand in $candidates) {
+        if ($cand -and (Test-Path -LiteralPath $cand)) {
+            $item = Get-Item -LiteralPath $cand -Force -ErrorAction SilentlyContinue
+            if ($item -and (-not $item.PSIsContainer) -and (($item.Attributes -band 1024) -eq 0) -and $item.Length -le 256KB) {
+                $fullKey = $item.FullName.ToLower()
+                if ($seenFiles.ContainsKey($fullKey)) { continue }
+                $seenFiles[$fullKey] = $true
+                $text = Get-Content -LiteralPath $item.FullName -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
+                if ($text -and $text.Trim()) {
+                    if ($text.Length -gt 8000) { $text = $text.Substring(0, 8000) + "`n...(truncated)" }
+                    $parts += ("<memory source=`"$($item.FullName)`">`n" + $text.Trim() + "`n</memory>")
+                }
+            }
+        }
+    }
+    return ($parts -join "`n`n")
 }
 
 function Get-AgentsContext {
@@ -4587,6 +4880,9 @@ function Format-CapabilitiesPromptBlock {
     if ($cap.tool_names -contains 'ask_user') {
         $lines += '- User questions and plan reviews: call ask_user with options and intent (question or plan-review) to clarify choices or get explicit approval on plans before modifying files.'
     }
+    if ($cap.tool_names -contains 'memory') {
+        $lines += '- Persistent project memory: call memory tool to record, view, or update long-term knowledge, user preferences, and architectural invariants across sessions.'
+    }
     $lines += '</capabilities>'
     return ($lines -join "`n")
 }
@@ -4709,6 +5005,10 @@ function Build-SystemPrompt {
             if ($appText -and $appText.Trim()) { $basePrompt += "`n`n" + $appText.Trim() }
         }
     }
+    $soulText = Get-SoulContext -Root $Root -ConfigDir $ConfigDir
+    if ($soulText) { $basePrompt += "`n`n" + $soulText }
+    $memText = Get-MemoryContext -Root $Root -ConfigDir $ConfigDir
+    if ($memText) { $basePrompt += "`n`n" + $memText }
     $agentsExtra = Get-AgentsContext -Root $Root -ConfigDir $ConfigDir
     if ($agentsExtra) { $basePrompt += "`n`n" + $agentsExtra }
     $skillsText = Get-SkillsCatalog -Root $Root -ConfigDir $ConfigDir
@@ -6240,6 +6540,9 @@ function Resolve-ReplCommandAlias {
     if ($t -match '^/td(?:\s+(.+))?$') {
         return $(if ($Matches[1]) { '/todo ' + $Matches[1] } else { '/todo' })
     }
+    if ($t -match '^/mem(?:\s+(.+))?$') {
+        return $(if ($Matches[1]) { '/memory ' + $Matches[1] } else { '/memory' })
+    }
     return $t
 }
 
@@ -6325,6 +6628,7 @@ function Write-TuiHelpCard {
     Write-Host ($barV + $script:Gm.Aqua + '  /diagnostics [on|off]        ' + $script:Gm.Fg + 'Toggle pre-request capability/tool diagnostics' + $script:Gm.Reset)
     Write-Host ($barV + $script:Gm.BoldYellow + 'History, Undo & Compaction' + $script:Gm.Reset)
     Write-Host ($barV + $script:Gm.Aqua + '  /todo (/td) [clear]          ' + $script:Gm.Fg + 'View or clear active task plan checklist' + $script:Gm.Reset)
+    Write-Host ($barV + $script:Gm.Aqua + '  /memory (/mem) [clear|add ..]' + $script:Gm.Fg + 'View, clear, or add persistent project memory' + $script:Gm.Reset)
     Write-Host ($barV + $script:Gm.Aqua + '  /undo (/u)                   ' + $script:Gm.Fg + 'Revert last turn AND restore modified/created files on disk' + $script:Gm.Reset)
     Write-Host ($barV + $script:Gm.Aqua + '  /retry                       ' + $script:Gm.Fg + 'Retry the last failed user request' + $script:Gm.Reset)
     Write-Host ($barV + $script:Gm.Aqua + '  /continue [steps]            ' + $script:Gm.Fg + 'Continue after hitting step limit (or continue last response)' + $script:Gm.Reset)
@@ -6530,6 +6834,8 @@ if (-not $LibraryOnly) {
         if ($initDashes -lt 2) { $initDashes = 2 }
         Write-Host ($script:Gm.OscInit + $script:Gm.Grey0 + $script:Box.TL + $script:Box.H + $script:Gm.Reset + $hdrInit + $script:Gm.Grey0 + ($script:Box.H * $initDashes) + $script:Box.TR + $script:Gm.Reset)
         $ctxLoaded = @()
+        if (Get-SoulContext -Root $rootPath -ConfigDir $configDir) { $ctxLoaded += 'SOUL.md' }
+        if (Get-MemoryContext -Root $rootPath -ConfigDir $configDir) { $ctxLoaded += 'MEMORY.md' }
         if (Get-AgentsContext -Root $rootPath -ConfigDir $configDir) { $ctxLoaded += 'AGENTS.md/CLAUDE.md' }
         if (Get-SkillsCatalog -Root $rootPath -ConfigDir $configDir) { $ctxLoaded += "skills ($($script:SkillsByName.Count))" }
         $null = Get-AgentRolesCatalog -Root $rootPath -ConfigDir $configDir
@@ -6585,6 +6891,24 @@ if (-not $LibraryOnly) {
                     else {
                         Write-Host ($script:Gm.Grey1 + '  No active tasks in todo list.' + $script:Gm.Reset)
                     }
+                }
+                continue
+            }
+            if ($trimmedQ -match '^/(?:memory|mem)(?:\s+(.+))?$') {
+                $memSub = if ($Matches[1]) { $Matches[1].Trim() } else { '' }
+                if ($memSub -eq 'clear') {
+                    $callArg = @{ action = 'clear'; scope = 'workspace' }
+                    $null = Invoke-AgentMemory -Root $rootPath -Arguments $callArg
+                    Write-Host ($script:Gm.Grey1 + '  Cleared workspace memory.' + $script:Gm.Reset)
+                }
+                elseif ($memSub -match '^add\s+(.+)$') {
+                    $callArg = @{ action = 'append'; scope = 'workspace'; content = $Matches[1].Trim() }
+                    $null = Invoke-AgentMemory -Root $rootPath -Arguments $callArg
+                    Write-Host ($script:Gm.Green + '  Added memory entry.' + $script:Gm.Reset)
+                }
+                else {
+                    $callArg = @{ action = 'view'; scope = 'workspace' }
+                    $null = Invoke-AgentMemory -Root $rootPath -Arguments $callArg
                 }
                 continue
             }
@@ -6839,7 +7163,7 @@ if (-not $LibraryOnly) {
                     $state.messages[0].content = $fullSystemPrompt
                 }
                 Sync-AgentCapabilities -State $state | Out-Null
-                Write-Host ($script:Gm.Green + '  Reloaded AGENTS.md/CLAUDE.md, SYSTEM.md, skills catalog, and prompt templates.' + $script:Gm.Reset)
+                Write-Host ($script:Gm.Green + '  Reloaded context files (AGENTS.md, SOUL.md, MEMORY.md, SYSTEM.md), skills, and templates.' + $script:Gm.Reset)
                 continue
             }
             if ($trimmedQ -match '^/save(?:\s+(.+))?$') {

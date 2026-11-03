@@ -14,6 +14,72 @@ function Escape-XmlText {
     return $Text.Replace('&', '&amp;').Replace('<', '&lt;').Replace('>', '&gt;').Replace('"', '&quot;').Replace("'", '&apos;')
 }
 
+function Get-SoulContext {
+    param([string]$Root, [string]$ConfigDir)
+    if ($script:NoContextFiles) { return '' }
+    $parts = @()
+    $seenFiles = @{}
+    $candidates = @()
+    if ($ConfigDir) {
+        foreach ($name in @('SOUL.md', 'ETHOS.md', 'SHELLOSSUS.md')) {
+            $candidates += (Join-Path $ConfigDir $name)
+        }
+    }
+    if ($Root) {
+        foreach ($name in @('SOUL.md', 'ETHOS.md', 'SHELLOSSUS.md')) {
+            $candidates += (Join-Path (Join-Path $Root '.shellossus') $name)
+            $candidates += (Join-Path $Root $name)
+        }
+    }
+    foreach ($cand in $candidates) {
+        if ($cand -and (Test-Path -LiteralPath $cand)) {
+            $item = Get-Item -LiteralPath $cand -Force -ErrorAction SilentlyContinue
+            if ($item -and (-not $item.PSIsContainer) -and (($item.Attributes -band 1024) -eq 0) -and $item.Length -le 256KB) {
+                $fullKey = $item.FullName.ToLower()
+                if ($seenFiles.ContainsKey($fullKey)) { continue }
+                $seenFiles[$fullKey] = $true
+                $text = Get-Content -LiteralPath $item.FullName -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
+                if ($text -and $text.Trim()) {
+                    if ($text.Length -gt 8000) { $text = $text.Substring(0, 8000) + "`n...(truncated)" }
+                    $parts += ("<soul source=`"$($item.FullName)`">`n" + $text.Trim() + "`n</soul>")
+                }
+            }
+        }
+    }
+    return ($parts -join "`n`n")
+}
+
+function Get-MemoryContext {
+    param([string]$Root, [string]$ConfigDir)
+    if ($script:NoContextFiles) { return '' }
+    $parts = @()
+    $seenFiles = @{}
+    $candidates = @()
+    if ($ConfigDir) {
+        $candidates += (Join-Path $ConfigDir 'MEMORY.md')
+    }
+    if ($Root) {
+        $candidates += (Join-Path (Join-Path $Root '.shellossus') 'MEMORY.md')
+        $candidates += (Join-Path $Root 'MEMORY.md')
+    }
+    foreach ($cand in $candidates) {
+        if ($cand -and (Test-Path -LiteralPath $cand)) {
+            $item = Get-Item -LiteralPath $cand -Force -ErrorAction SilentlyContinue
+            if ($item -and (-not $item.PSIsContainer) -and (($item.Attributes -band 1024) -eq 0) -and $item.Length -le 256KB) {
+                $fullKey = $item.FullName.ToLower()
+                if ($seenFiles.ContainsKey($fullKey)) { continue }
+                $seenFiles[$fullKey] = $true
+                $text = Get-Content -LiteralPath $item.FullName -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
+                if ($text -and $text.Trim()) {
+                    if ($text.Length -gt 8000) { $text = $text.Substring(0, 8000) + "`n...(truncated)" }
+                    $parts += ("<memory source=`"$($item.FullName)`">`n" + $text.Trim() + "`n</memory>")
+                }
+            }
+        }
+    }
+    return ($parts -join "`n`n")
+}
+
 function Get-AgentsContext {
     param([string]$Root, [string]$ConfigDir)
     if ($script:NoContextFiles) { return '' }
@@ -359,6 +425,9 @@ function Format-CapabilitiesPromptBlock {
     if ($cap.tool_names -contains 'ask_user') {
         $lines += '- User questions and plan reviews: call ask_user with options and intent (question or plan-review) to clarify choices or get explicit approval on plans before modifying files.'
     }
+    if ($cap.tool_names -contains 'memory') {
+        $lines += '- Persistent project memory: call memory tool to record, view, or update long-term knowledge, user preferences, and architectural invariants across sessions.'
+    }
     $lines += '</capabilities>'
     return ($lines -join "`n")
 }
@@ -481,6 +550,10 @@ function Build-SystemPrompt {
             if ($appText -and $appText.Trim()) { $basePrompt += "`n`n" + $appText.Trim() }
         }
     }
+    $soulText = Get-SoulContext -Root $Root -ConfigDir $ConfigDir
+    if ($soulText) { $basePrompt += "`n`n" + $soulText }
+    $memText = Get-MemoryContext -Root $Root -ConfigDir $ConfigDir
+    if ($memText) { $basePrompt += "`n`n" + $memText }
     $agentsExtra = Get-AgentsContext -Root $Root -ConfigDir $ConfigDir
     if ($agentsExtra) { $basePrompt += "`n`n" + $agentsExtra }
     $skillsText = Get-SkillsCatalog -Root $Root -ConfigDir $ConfigDir

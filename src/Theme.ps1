@@ -360,6 +360,35 @@ function Write-PlanReviewCard {
     }
 }
 
+function Format-MemoryCard {
+    param([string]$Scope, [string]$Action, [string]$Content)
+    $w = Get-TerminalWidth
+    $scopeLabel = if ($Scope) { [string]$Scope.ToUpper() } else { 'WORKSPACE' }
+    $hdr = ' ' + $script:Gm.BoldPurple + 'MEMORY (' + $scopeLabel + ')' + $script:Gm.Reset + ' '
+    $hdrVis = (Strip-AnsiCodes -Text $hdr).Length
+    $dashes = $w - 5 - $hdrVis
+    if ($dashes -lt 2) { $dashes = 2 }
+    $out = @('  ' + $script:Gm.Grey0 + $script:Box.TL + $script:Box.H + $script:Gm.Reset + $hdr + $script:Gm.Grey0 + ($script:Box.H * $dashes) + $script:Box.TR + $script:Gm.Reset)
+    if ($Content) {
+        $lines = @($Content -split "`r?`n")
+        foreach ($ln in $lines) {
+            $cleanLine = Format-PreviewText $ln
+            $formattedLine = Format-MarkdownInline -Text $cleanLine
+            $out += ('  ' + $script:Gm.Grey0 + $script:Box.V + ' ' + $formattedLine + $script:Gm.Reset)
+        }
+    }
+    $out += ('  ' + $script:Gm.Grey0 + $script:Box.BL + ($script:Box.H * ($w - 4)) + $script:Box.BR + $script:Gm.Reset)
+    return $out
+}
+
+function Write-MemoryCard {
+    param([string]$Scope, [string]$Action, [string]$Content)
+    if ($script:OutputMode -eq 'json') { return }
+    foreach ($ln in @(Format-MemoryCard -Scope $Scope -Action $Action -Content $Content)) {
+        Write-Host $ln
+    }
+}
+
 function Format-DiffLinePreview {
     param([string]$Line, [int]$MaxChars = 180)
     $clean = Format-PreviewText $Line

@@ -186,7 +186,7 @@ try {
     # 4 Permission modes: ReadOnly, Ask, AutoEdit, Auto.
     $script:approval = ''
     $script:AgentPermission = 'ReadOnly'
-    Assert-True (@(Get-AgentTools).Count -eq 9) 'ReadOnly mode should expose 9 tools (8 read-only + run_agent).'
+    Assert-True (@(Get-AgentTools).Count -eq 10) 'ReadOnly mode should expose 10 tools.'
     $call.function.name = 'write_file'
     $call.function.arguments = '{"path":"ro.txt","content":"no"}'
     $roRes = Invoke-AgentTool -Root $workspacePath -Call $call | ConvertFrom-Json
@@ -348,7 +348,7 @@ try {
     $script:EnabledTools = @()
     $script:AgentPermission = 'ReadOnly'
     $capRo = Get-AgentCapabilities
-    Assert-True ($capRo.permission -eq 'ReadOnly' -and $capRo.tool_names.Count -eq 9 -and ($capRo.tool_names -contains 'ask_user') -and ($capRo.tool_names -contains 'todo') -and ($capRo.tool_names -contains 'fetch_url') -and ($capRo.tool_names -contains 'web_search') -and ($capRo.tool_names -contains 'run_agent') -and (-not $capRo.can_write) -and (-not $capRo.can_exec)) 'Get-AgentCapabilities in ReadOnly mode failed.'
+    Assert-True ($capRo.permission -eq 'ReadOnly' -and $capRo.tool_names.Count -eq 10 -and ($capRo.tool_names -contains 'memory') -and ($capRo.tool_names -contains 'ask_user') -and ($capRo.tool_names -contains 'todo') -and ($capRo.tool_names -contains 'fetch_url') -and ($capRo.tool_names -contains 'web_search') -and ($capRo.tool_names -contains 'run_agent') -and (-not $capRo.can_write) -and (-not $capRo.can_exec)) 'Get-AgentCapabilities in ReadOnly mode failed.'
     $script:AgentPermission = 'AutoEdit'
     $capAe = Get-AgentCapabilities
     Assert-True ($capAe.permission -eq 'AutoEdit' -and $capAe.can_write -and (-not $capAe.write_requires_confirmation) -and $capAe.exec_requires_confirmation) 'Get-AgentCapabilities in AutoEdit mode failed.'
@@ -660,6 +660,54 @@ try {
     $badAskCall = @{ id = 'ask-bad'; function = @{ name = 'ask_user'; arguments = '{"question":""}' } }
     $badAskRes = Invoke-AgentTool -Root $workspacePath -Call $badAskCall | ConvertFrom-Json
     Assert-True ($badAskRes.error -like '*question*') 'ask_user tool did not reject empty question.'
+
+    # memory tool tests
+    Assert-True ((Resolve-ToolCanonicalName 'memory') -eq 'memory') 'Canonical memory name resolution failed.'
+    Assert-True ((Resolve-ToolCanonicalName 'remember') -eq 'memory') 'Canonical remember alias resolution failed.'
+    Assert-True ((Resolve-ToolCanonicalName 'manage_memory') -eq 'memory') 'Canonical manage_memory alias resolution failed.'
+    Assert-True ((Resolve-ToolCanonicalName 'recall') -eq 'memory') 'Canonical recall alias resolution failed.'
+
+    $memNorm = Format-MemoryArguments -ArgsObj ([pscustomobject]@{ note = 'Use UTF-8'; action = 'APPEND'; scope = 'WORKSPACE' })
+    Assert-True ($memNorm.action -eq 'append' -and $memNorm.scope -eq 'workspace' -and $memNorm.content -eq 'Use UTF-8') 'Format-MemoryArguments normalization failed.'
+
+    # append memory
+    $memAppendCall = @{
+        id = 'mem-1'
+        function = @{
+            name = 'memory'
+            arguments = '{"action":"append","content":"Keep all scripts ASCII"}'
+        }
+    }
+    $memAppendRes = Invoke-AgentTool -Root $workspacePath -Call $memAppendCall | ConvertFrom-Json
+    Assert-True ($memAppendRes.success -and $memAppendRes.action -eq 'append' -and ($memAppendRes.memory -like '*Keep all scripts ASCII*')) 'memory append failed.'
+
+    # view memory
+    $memViewCall = @{
+        id = 'mem-2'
+        function = @{
+            name = 'memory'
+            arguments = '{"action":"view"}'
+        }
+    }
+    $memViewRes = Invoke-AgentTool -Root $workspacePath -Call $memViewCall | ConvertFrom-Json
+    Assert-True ($memViewRes.success -and $memViewRes.action -eq 'view' -and ($memViewRes.memory -like '*Keep all scripts ASCII*')) 'memory view failed.'
+
+    # clear memory
+    $memClearCall = @{
+        id = 'mem-3'
+        function = @{
+            name = 'memory'
+            arguments = '{"action":"clear"}'
+        }
+    }
+    $memClearRes = Invoke-AgentTool -Root $workspacePath -Call $memClearCall | ConvertFrom-Json
+    Assert-True ($memClearRes.success -and $memClearRes.action -eq 'clear' -and -not $memClearRes.memory) 'memory clear failed.'
+
+    # ReadOnly blocks memory append
+    $script:AgentPermission = 'ReadOnly'
+    $roMemRes = Invoke-AgentTool -Root $workspacePath -Call $memAppendCall | ConvertFrom-Json
+    Assert-True ($roMemRes.error -like '*ReadOnly*') 'ReadOnly mode did not block memory modification.'
+    $script:AgentPermission = 'Ask'
 }
 finally {
     Remove-TestEnvironment -Env $envData

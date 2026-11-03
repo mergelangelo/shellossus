@@ -102,6 +102,10 @@ try {
     $planCard = @(Format-PlanReviewCard -Question 'Review migration plan' -Plan "# Plan`n1. Step A`n2. Step B")
     $plainPlan = ($planCard | ForEach-Object { Strip-AnsiCodes -Text $_ }) -join "`n"
     Assert-True ($plainPlan.Contains('PLAN REVIEW') -and $plainPlan.Contains('Review migration plan') -and $plainPlan.Contains('Step A')) 'Format-PlanReviewCard failed.'
+
+    $memCard = @(Format-MemoryCard -Scope 'workspace' -Action 'append' -Content '+ Invariant note')
+    $plainMem = ($memCard | ForEach-Object { Strip-AnsiCodes -Text $_ }) -join "`n"
+    Assert-True ($plainMem.Contains('MEMORY (WORKSPACE)') -and $plainMem.Contains('+ Invariant note')) 'Format-MemoryCard failed.'
 }
 finally {
     Remove-Item Function:\Read-Host -ErrorAction SilentlyContinue
