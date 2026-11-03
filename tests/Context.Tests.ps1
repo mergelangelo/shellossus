@@ -231,7 +231,7 @@ try {
     # Dynamic <capabilities> block in Build-SystemPrompt and Sync-AgentCapabilities across mode switches without notice bloat.
     $script:AgentPermission = 'ReadOnly'
     $roSys = Build-SystemPrompt -Root $workspacePath -ConfigDir ''
-    Assert-True ($roSys.Contains('Permission mode: ReadOnly.') -and $roSys.Contains('Available tools: list_files, read_file, find_files, grep_files, fetch_url, web_search, run_agent.') -and $roSys.Contains('File modification and shell execution are unavailable.')) 'Build-SystemPrompt in ReadOnly mode did not render expected dynamic <capabilities> block.'
+    Assert-True ($roSys.Contains('Permission mode: ReadOnly.') -and $roSys.Contains('Available tools: list_files, read_file, find_files, grep_files, fetch_url, web_search, todo, run_agent.') -and $roSys.Contains('File modification and shell execution are unavailable.')) 'Build-SystemPrompt in ReadOnly mode did not render expected dynamic <capabilities> block.'
     Assert-True ($roSys.Contains('Environment: OS=') -and $roSys.Contains('Command shell (run_command):') -and $roSys.Contains('Get-Command') -and $roSys.Contains($workspacePath)) 'Build-SystemPrompt missing environment, run_command shell, workspace, or Get-Command guidance.'
     Assert-True (-not $roSys.Contains('Available tools: list_files, read_file, find_files, grep_files, write_file')) 'ReadOnly system prompt listed write_file as available.'
 
