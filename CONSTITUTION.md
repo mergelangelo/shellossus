@@ -57,7 +57,7 @@ Before accessing any path, `shellossus` must verify the target and every ancesto
 
 ### Section 1. Permission Modes
 Tool availability and confirmation prompts are governed by four permission modes:
-1. **`ReadOnly`**: Exposes only read-only tools (`list_files`, `read_file`, `find_files`, `grep_files`, and `run_agent` clamped to `ReadOnly`) and blocks all file writes and shell commands.
+1. **`ReadOnly`**: Exposes only read-only tools (`list_files`, `read_file`, `find_files`, `grep_files`, `fetch_url`, `web_search`, and `run_agent` clamped to `ReadOnly`) and blocks all file writes and shell commands.
 2. **`Ask`**: Previews changes or commands and requires explicit user confirmation (`WRITE` for file changes, `RUN` for shell commands).
 3. **`AutoEdit`**: Automatically approves file creations and edits while still requiring `RUN` confirmation for `run_command`.
 4. **`Auto`**: Automatically approves both file modifications and shell commands within workspace boundaries.
