@@ -1642,6 +1642,8 @@ function Invoke-AgentUndo {
         throw ('Undo failed: ' + ($undoErrors -join '; '))
     }
     $State.messages = @($UndoEntry.messages)
+    $State.last_prompt_tokens = 0
+    $State.last_prompt_chars = 0
 }
 
 function Get-ForkedSubagentMessages {

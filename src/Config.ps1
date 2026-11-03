@@ -30,7 +30,7 @@ function Read-AgentConfig {
         $lineNumber++
         $trimmed = $line.Trim()
         if (-not $trimmed -or $trimmed.StartsWith('#')) { continue }
-        if ($trimmed -notmatch '^(?:(SHELLOSSUS|H_AGENT)_(BASE_URL|MODEL|API_KEY|WORKSPACE))\s*=(.*)$') {
+        if ($trimmed -notmatch '^(?:(SHELLOSSUS|H_AGENT)_(BASE_URL|MODEL|API_KEY|WORKSPACE|CONTEXT_WINDOW|COMPACT_THRESHOLD))\s*=(.*)$') {
             throw "Invalid config entry at line $lineNumber. Expected a supported SHELLOSSUS_* key=value."
         }
         $prefix = $Matches[1].ToUpper()
@@ -65,6 +65,13 @@ function Save-AgentConfig {
         # Quotes preserve paths, # and = without interpreting backslashes.
         if ($value.Contains('"')) { throw 'Config values cannot contain double quotes.' }
         $lines += $key + '="' + $value + '"'
+    }
+    foreach ($optKey in @('SHELLOSSUS_CONTEXT_WINDOW', 'SHELLOSSUS_COMPACT_THRESHOLD')) {
+        if ($Config.ContainsKey($optKey) -and $Config[$optKey]) {
+            $optVal = [string]$Config[$optKey]
+            if ($optVal -match "[`r`n]" -or $optVal.Contains('"')) { throw 'Invalid optional config value.' }
+            $lines += $optKey + '="' + $optVal + '"'
+        }
     }
     $parent = Split-Path $Path -Parent
     if ($parent -and -not (Test-Path -LiteralPath $parent)) { New-Item -ItemType Directory -Path $parent -ErrorAction Stop | Out-Null }

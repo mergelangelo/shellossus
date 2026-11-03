@@ -155,7 +155,8 @@ try {
     $userMsgsAfter = @($contState.messages | Where-Object { $_.role -eq 'user' })
     Assert-True ($contRes2 -and $userMsgsAfter.Count -eq 2 -and $userMsgsAfter[-1].content -eq 'Continue.') 'Invoke-AgentContinue after assistant stop should append Continue. user prompt.'
 
-    # Mid-turn proactive auto-compaction when context exceeds 60k chars across steps.
+    # Mid-turn proactive auto-compaction when context exceeds compact threshold across steps.
+    $null = Set-AgentContextLimits -WindowSpec '20k' -CompactSpec '15k'
     $bigFiller = 'X' * 32000
     $midCompactState = @{
         messages = @(
@@ -185,6 +186,7 @@ try {
         Set-Content -LiteralPath $OutFile -Value $resp -Encoding UTF8 -NoNewline
     }
     Invoke-AgentTurn -State $midCompactState -Endpoint 'https://example.invalid/v1/chat/completions' -ModelId 'test-model' -ApiKey 'fake' -Root $workspacePath -Steps 3
+    $null = Set-AgentContextLimits -WindowSpec '128k' -CompactSpec '75%'
     Assert-True ($midCompactState.messages[1].content.StartsWith('[Compacted Conversation Summary]') -and $midCompactState.messages[-1].content -eq 'Done after mid-turn compact.') 'Mid-turn proactive auto-compaction did not trigger inside Invoke-AgentTurn.'
 
     # Live waiting spinner/timer (Wait-AgentProcessWithSpinner) in text mode vs silent in JSON mode.
@@ -547,11 +549,12 @@ try {
     Assert-True ((Resolve-ReplCommandAlias -InputText '/m glm-5') -eq '/model glm-5') 'Alias /m -> /model failed.'
     Assert-True ((Resolve-ReplCommandAlias -InputText '/u') -eq '/undo') 'Alias /u -> /undo failed.'
     Assert-True ((Resolve-ReplCommandAlias -InputText '/t e0002') -eq '/tree e0002') 'Alias /t -> /tree failed.'
+    Assert-True ((Resolve-ReplCommandAlias -InputText '/ctx 128k 80k') -eq '/context 128k 80k') 'Alias /ctx -> /context failed.'
 
     Ensure-SessionTree -State $forkParentState
     $statusCard = @(Format-TuiStatusCard -State $forkParentState -Model 'test-model' -MaxSteps 50 -SessionFile 'test.jsonl' -UndoCount 1)
     $plainStatus = ($statusCard | ForEach-Object { Strip-AnsiCodes -Text $_ }) -join "`n"
-    Assert-True ($plainStatus.Contains('test-model') -and $plainStatus.Contains('Ask') -and $plainStatus.Contains('test.jsonl')) "Format-TuiStatusCard output unexpected: $plainStatus"
+    Assert-True ($plainStatus.Contains('test-model') -and $plainStatus.Contains('Ask') -and $plainStatus.Contains('128.0k') -and $plainStatus.Contains('96.0k') -and $plainStatus.Contains('test.jsonl')) "Format-TuiStatusCard output unexpected: $plainStatus"
 
     $treeCard = @(Format-TuiTreeCard -State $forkParentState)
     $plainTree = ($treeCard | ForEach-Object { Strip-AnsiCodes -Text $_ }) -join "`n"

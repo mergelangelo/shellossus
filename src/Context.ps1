@@ -5,6 +5,8 @@ $script:NoSkills = $false
 $script:NoPromptTemplates = $false
 $script:SkillsByName = @{}
 $script:AgentRolesByName = @{}
+$script:ContextWindowTokens = 128000
+$script:CompactThresholdTokens = 96000
 
 function Escape-XmlText {
     param([string]$Text)
@@ -907,6 +909,8 @@ function Switch-SessionBranch {
     $State.messages = $rebuilt
     $State.leaf_id = $effectiveLeaf
     $State.undo_stack = @()
+    $State.last_prompt_tokens = 0
+    $State.last_prompt_chars = 0
     Sync-AgentCapabilities -State $State | Out-Null
     return $State
 }
@@ -1099,6 +1103,8 @@ function Invoke-SessionResume {
     }
     $State.undo_stack = @()
     $State.last_failed_question = ''
+    $State.last_prompt_tokens = 0
+    $State.last_prompt_chars = 0
     Sync-AgentCapabilities -State $State | Out-Null
     return $State
 }
@@ -1188,6 +1194,66 @@ function Export-AgentSessionHtml {
     return $OutputPath
 }
 
+function Resolve-TokenBudgetValue {
+    param([string]$Spec, [int]$BaseTokens = 0)
+    if (-not $Spec -or -not $Spec.Trim()) { return 0 }
+    $s = $Spec.Trim().ToLower()
+    if ($s -match '^(\d+(?:\.\d+)?)%$') {
+        if ($BaseTokens -le 0) { throw "Percentage '$Spec' requires a base context window." }
+        $pct = [double]$Matches[1]
+        if ($pct -lt 10 -or $pct -gt 100) { throw 'Auto-compact percentage must be between 10% and 100%.' }
+        return [int](($BaseTokens * $pct) / 100.0)
+    }
+    if ($s -match '^(\d+(?:\.\d+)?)k$') {
+        return [int](([double]$Matches[1]) * 1000.0)
+    }
+    if ($s -match '^(\d+(?:\.\d+)?)m$') {
+        return [int](([double]$Matches[1]) * 1000000.0)
+    }
+    if ($s -match '^\d+$') {
+        return [int]$s
+    }
+    throw "Invalid token value '$Spec'. Use a number like 128k, 96k, 64000, or a percentage like 75%."
+}
+
+function Set-AgentContextLimits {
+    param([string]$WindowSpec = '', [string]$CompactSpec = '')
+    $winTok = if ($WindowSpec -and $WindowSpec.Trim()) {
+        Resolve-TokenBudgetValue -Spec $WindowSpec
+    }
+    elseif ($script:ContextWindowTokens -gt 0) {
+        [int]$script:ContextWindowTokens
+    }
+    else {
+        128000
+    }
+    if ($winTok -lt 4000 -or $winTok -gt 2000000) {
+        throw 'Context window must be between 4k and 2000k tokens.'
+    }
+    $compTok = if ($CompactSpec -and $CompactSpec.Trim()) {
+        Resolve-TokenBudgetValue -Spec $CompactSpec -BaseTokens $winTok
+    }
+    elseif ($WindowSpec -and $WindowSpec.Trim()) {
+        [int](($winTok * 75) / 100)
+    }
+    elseif ($script:CompactThresholdTokens -gt 0 -and $script:CompactThresholdTokens -le $winTok) {
+        [int]$script:CompactThresholdTokens
+    }
+    else {
+        [int](($winTok * 75) / 100)
+    }
+    if ($compTok -lt 2000 -or $compTok -gt $winTok) {
+        throw "Auto-compact threshold ($compTok) must be between 2k and context window ($winTok)."
+    }
+    $script:ContextWindowTokens = $winTok
+    $script:CompactThresholdTokens = $compTok
+    return @{
+        context_window_tokens = $script:ContextWindowTokens
+        compact_threshold_tokens = $script:CompactThresholdTokens
+        compact_pct = [int](($script:CompactThresholdTokens * 100) / $script:ContextWindowTokens)
+    }
+}
+
 function Get-MessageEstimatedTokens {
     param($Message)
     if ($null -eq $Message) { return 0 }
@@ -1201,17 +1267,33 @@ function Get-MessageEstimatedTokens {
 function Get-ContextStats {
     param($State)
     $chars = 0
-    foreach ($m in @($State.messages)) {
-        if ($m.content) { $chars += ([string]$m.content).Length }
-        if ($m.tool_calls) { $chars += (($m.tool_calls | ConvertTo-Json -Depth 10 -Compress)).Length }
+    $msgCount = 0
+    if ($State -and $State.messages) {
+        $msgCount = $State.messages.Count
+        foreach ($m in @($State.messages)) {
+            if ($m.content) { $chars += ([string]$m.content).Length }
+            if ($m.tool_calls) { $chars += (($m.tool_calls | ConvertTo-Json -Depth 10 -Compress)).Length }
+        }
     }
-    $tokens = [int](($chars + 3) / 4)
-    $usageIn = if ($State.usage_input_tokens) { [int]$State.usage_input_tokens } else { 0 }
-    $usageOut = if ($State.usage_output_tokens) { [int]$State.usage_output_tokens } else { 0 }
+    $charTokens = [int](($chars + 3) / 4)
+    $tokens = if ($State -and $State.last_prompt_tokens -gt 0 -and $State.last_prompt_chars -gt 0 -and $chars -ge [int]$State.last_prompt_chars) {
+        [int]$State.last_prompt_tokens + [int]((($chars - [int]$State.last_prompt_chars) + 3) / 4)
+    }
+    else {
+        $charTokens
+    }
+    $winTok = if ($script:ContextWindowTokens -gt 0) { [int]$script:ContextWindowTokens } else { 128000 }
+    $compTok = if ($script:CompactThresholdTokens -gt 0 -and $script:CompactThresholdTokens -le $winTok) { [int]$script:CompactThresholdTokens } else { [int](($winTok * 75) / 100) }
+    $compPct = [int](($compTok * 100) / $winTok)
+    $usageIn = if ($State -and $State.usage_input_tokens) { [int]$State.usage_input_tokens } else { 0 }
+    $usageOut = if ($State -and $State.usage_output_tokens) { [int]$State.usage_output_tokens } else { 0 }
     return @{
-        messages = $State.messages.Count
+        messages = $msgCount
         chars = $chars
         est_tokens = $tokens
+        context_window_tokens = $winTok
+        compact_threshold_tokens = $compTok
+        compact_pct = $compPct
         usage_input_tokens = $usageIn
         usage_output_tokens = $usageOut
         usage_total_tokens = ($usageIn + $usageOut)
@@ -1454,6 +1536,8 @@ function Invoke-AgentCompact {
     $State.tree_entries += $compEntry
     $State.leaf_id = $compId
     $State.messages = @(Build-BranchContextMessages -State $State -LeafId $compId)
+    $State.last_prompt_tokens = 0
+    $State.last_prompt_chars = 0
     Sync-AgentCapabilities -State $State | Out-Null
     return $true
 }
