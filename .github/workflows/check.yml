@@ -7,4 +7,19 @@ jobs:
       - uses: actions/checkout@v4
       - name: Test Windows PowerShell 5.1
         shell: powershell
-        run: .\tests\smoke.ps1
+        run: |
+          $logFile = "$env:TEMP\smoke_transcript.log"
+          try {
+            Start-Transcript -Path $logFile -Force
+            .\tests\smoke.ps1
+            Stop-Transcript
+          } catch {
+            try { Stop-Transcript } catch {}
+            $tail = if (Test-Path -LiteralPath $logFile) { (Get-Content -LiteralPath $logFile -Tail 40) -join "`n" } else { "No log file found." }
+            $encMsg = "$($_.Exception.Message)`n$($_.ScriptStackTrace)`n--- Last 40 lines of output ---`n$tail" -replace '%', '%25' -replace "`r", '%0D' -replace "`n", '%0A'
+            Write-Host "::error title=Smoke Check Failed::$encMsg"
+            if ($env:GITHUB_STEP_SUMMARY) {
+              "# Smoke Test Failure`n`n``````text`n$tail`n``````" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8
+            }
+            exit 1
+          }
