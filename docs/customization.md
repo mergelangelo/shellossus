@@ -67,7 +67,7 @@ $ARGUMENTS
 Usage:
 
 ```text
-You: /review @src/Tools.ps1
+You: /review @src/tools/Files.ps1
 ```
 
 ---

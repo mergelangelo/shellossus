@@ -7,8 +7,20 @@ $ErrorActionPreference = 'Stop'
 $modules = @(
     'Config.ps1',
     'Theme.ps1',
-    'Tools.ps1',
-    'Context.ps1',
+    'tools/Common.ps1',
+    'tools/Files.ps1',
+    'tools/Shell.ps1',
+    'tools/Undo.ps1',
+    'tools/Web.ps1',
+    'tools/Todo.ps1',
+    'tools/AskUser.ps1',
+    'tools/Memory.ps1',
+    'tools/Agents.ps1',
+    'tools/Dispatch.ps1',
+    'context/Prompt.ps1',
+    'context/Templates.ps1',
+    'context/Session.ps1',
+    'context/Compaction.ps1',
     'Cli.ps1'
 )
 
@@ -51,13 +63,18 @@ param(
 
 $parts = @($header.Replace("`r`n", "`n").TrimEnd())
 foreach ($mod in $modules) {
-    $modPath = Join-Path (Join-Path $PSScriptRoot 'src') $mod
+    $normRel = $mod.Replace('\', '/')
+    $subParts = $normRel -split '/'
+    $modPath = Join-Path $PSScriptRoot 'src'
+    foreach ($sp in $subParts) {
+        $modPath = Join-Path $modPath $sp
+    }
     if (-not (Test-Path -LiteralPath $modPath)) {
         throw "Missing source module: $modPath"
     }
     $raw = Get-Content -LiteralPath $modPath -Raw -Encoding UTF8 -ErrorAction Stop
     $normalized = $raw.Replace("`r`n", "`n").Trim()
-    $parts += "# --- src/$mod ---`n" + $normalized
+    $parts += "# --- src/$normRel ---`n" + $normalized
 }
 
 $assembled = ($parts -join "`n`n") + "`n"

@@ -54,7 +54,7 @@ Common launch flags:
 ```powershell
 shellossus -Continue                        # Resume latest session for current workspace
 shellossus -Permission AutoEdit             # Edit files without prompting; ask before shell commands
-shellossus -Prompt "Explain @src/Tools.ps1" # Single-shot non-interactive mode
+shellossus -Prompt "Explain @src/tools/Files.ps1" # Single-shot non-interactive mode
 ```
 
 ## Interactive Commands
@@ -104,8 +104,8 @@ shellossus -Prompt "Explain @src/Tools.ps1" # Single-shot non-interactive mode
 ├── src/
 │   ├── Config.ps1      # .env parser, workspace path boundary & reparse-point checks
 │   ├── Theme.ps1       # Gruvbox Material RGB palette, Markdown & table renderer
-│   ├── Tools.ps1       # Tool schemas, argument validator, file I/O, undo, shell runner
-│   ├── Context.ps1     # System prompt builder, skills, templates, sessions, compaction
+│   ├── tools/          # Modular tools (Files, Shell, Undo, Web, Todo, AskUser, Memory, Agents)
+│   ├── context/        # Prompt builder, skills, templates, sessions, compaction
 │   └── Cli.ps1         # Agent turn loop, retry/overflow recovery, interactive REPL
 ├── tests/
 │   ├── smoke.ps1       # Test runner (.\build.ps1 -Check + all *.Tests.ps1 suites)
