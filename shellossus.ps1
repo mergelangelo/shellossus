@@ -25,6 +25,7 @@ param(
     [switch]$NoContextFiles,
     [switch]$HideReasoning,
     [switch]$Diagnostics,
+    [switch]$Doctor,
     [switch]$Continue,
     [switch]$Setup,
     [switch]$LibraryOnly
@@ -6125,6 +6126,186 @@ function Invoke-AgentCompact {
     return $true
 }
 
+# --- src/Doctor.ps1 ---
+# Startup diagnostics. No model generation, settings changes, or policy changes.
+
+function Test-DoctorSessionDirectory {
+    param([string]$Path)
+    $probe = $null
+    try {
+        if (-not $Path) { throw 'Missing session directory.' }
+        if (-not (Test-Path -LiteralPath $Path)) {
+            New-Item -ItemType Directory -Path $Path -Force -ErrorAction Stop | Out-Null
+        }
+        $dir = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+        if ($dir.PSProvider.Name -ne 'FileSystem' -or -not $dir.PSIsContainer) { throw 'Expected a filesystem directory.' }
+        # Reserve a private probe directory without overwriting any existing file.
+        $probePath = Join-Path $dir.FullName ('.doctor-' + $PID + '-' + (Get-Random -Minimum 100000 -Maximum 999999))
+        $probe = New-Item -ItemType Directory -Path $probePath -ErrorAction Stop
+        $source = Join-Path $probe.FullName 'write.tmp'
+        $target = Join-Path $probe.FullName 'session.tmp'
+        Set-Content -LiteralPath $source -Value 'shellossus-doctor' -Encoding Ascii -NoNewline -ErrorAction Stop
+        Move-Item -LiteralPath $source -Destination $target -ErrorAction Stop
+        if ((Get-Content -LiteralPath $target -Raw -ErrorAction Stop) -cne 'shellossus-doctor') { throw 'Read-back failed.' }
+        Remove-Item -LiteralPath $target -ErrorAction Stop
+        Remove-Item -LiteralPath $probe.FullName -Force -ErrorAction Stop
+        $probe = $null
+        return @{ status = 'pass'; message = "Session directory supports create, write, rename, read, and delete: $($dir.FullName)" }
+    }
+    catch {
+        # Do not echo exception messages: paths and provider errors can contain secrets.
+        return @{ status = 'fail'; message = 'Session storage is unavailable. Check the directory path, free space, and create/write/rename/delete permissions; choose -SessionDir or use -NoSession.' }
+    }
+    finally {
+        if ($probe) { Remove-Item -LiteralPath $probe.FullName -Recurse -Force -ErrorAction SilentlyContinue }
+    }
+}
+
+function Invoke-DoctorModelsRequest {
+    param([string]$Uri, [string]$ApiKey)
+    $responseFile = $null
+    try {
+        $responseFile = New-TemporaryFile -ErrorAction Stop
+        # Do not follow redirects with the user's credentials. Use the same UTF-8
+        # file-backed response handling as the chat transport on PowerShell 5.1.
+        # Avoid -PassThru: older PowerShell versions leave -OutFile empty with it.
+        # A successful response has no pipeline value; HTTP failures enter catch.
+        $null = Invoke-WebRequest -Uri $Uri -Method Get -Headers @{ Authorization = ('Bearer ' + $ApiKey) } -UseBasicParsing -OutFile $responseFile.FullName -MaximumRedirection 0 -TimeoutSec 10 -ErrorAction Stop
+        if ((Get-Item -LiteralPath $responseFile.FullName).Length -gt 1MB) {
+            return @{ code = 200; valid_catalog = $false; ids = @() }
+        }
+        try {
+            $catalog = Get-Content -LiteralPath $responseFile.FullName -Raw -Encoding UTF8 -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+            $valid = ($null -ne $catalog.data -and $catalog.data -is [array])
+            $ids = @()
+            foreach ($entry in @($catalog.data)) {
+                if ($entry.id -isnot [string] -or -not $entry.id.Trim()) { $valid = $false; break }
+                $ids += $entry.id
+            }
+            return @{ code = 200; valid_catalog = $valid; ids = $ids }
+        }
+        catch { return @{ code = 200; valid_catalog = $false; ids = @() } }
+    }
+    catch {
+        $code = 0
+        if ($_.Exception.Response -and $_.Exception.Response.StatusCode) { $code = [int]$_.Exception.Response.StatusCode }
+        return @{ code = $code; valid_catalog = $false; ids = @() }
+    }
+    finally {
+        if ($responseFile) { Remove-Item -LiteralPath $responseFile.FullName -Force -ErrorAction SilentlyContinue }
+    }
+}
+
+function Get-AgentDoctorReport {
+    param(
+        [string]$BaseUrl,
+        [string]$ModelId,
+        [string]$ApiKey,
+        [string]$Workspace = '.',
+        [string]$SessionDir,
+        [switch]$NoSession,
+        [string]$ConfigState = 'loaded'
+    )
+    $checks = @()
+    $version = $PSVersionTable.PSVersion
+    $supported = ($version.Major -ge 7 -or ($version.Major -eq 5 -and $version.Minor -ge 1))
+    $checks += @{ name = 'powershell'; status = $(if ($supported) { 'pass' } else { 'fail' }); message = "PowerShell $version ($($PSVersionTable.PSEdition)). Requires Windows PowerShell 5.1 or PowerShell 7+." }
+    $language = [string]$ExecutionContext.SessionState.LanguageMode
+    $checks += @{ name = 'language_mode'; status = $(if ($language -in @('FullLanguage', 'ConstrainedLanguage')) { 'pass' } else { 'fail' }); message = "Language mode: $language. FullLanguage and ConstrainedLanguage are supported; no security policy was changed." }
+    if ($ConfigState -eq 'invalid') {
+        $checks += @{ name = 'configuration'; status = 'fail'; message = 'Configuration could not be read or parsed. Check -ConfigPath, file permissions, and supported SHELLOSSUS_* key=value entries.' }
+    }
+    elseif ($ConfigState -eq 'missing') {
+        $checks += @{ name = 'configuration'; status = 'info'; message = 'No saved configuration found. Using launch arguments and environment variables; run shellossus -Setup to save settings.' }
+    }
+    else { $checks += @{ name = 'configuration'; status = 'pass'; message = 'Configuration parsed; effective launch settings are checked below.' } }
+    try {
+        $root = Get-Item -LiteralPath $Workspace -Force -ErrorAction Stop
+        if (-not $root.PSIsContainer) { throw 'Expected a directory.' }
+        $resolved = Resolve-AgentPath -Root $root.FullName -RelativePath '.'
+        $checks += @{ name = 'workspace'; status = 'pass'; message = "Workspace is accessible: $resolved" }
+    }
+    catch { $checks += @{ name = 'workspace'; status = 'fail'; message = 'Workspace is missing, inaccessible, or traverses a reparse point. Choose an existing filesystem directory with -Workspace.' } }
+    $storage = if ($NoSession) {
+        @{ status = 'info'; message = 'Session persistence is disabled (-NoSession); no storage probe was performed.' }
+    }
+    else { Test-DoctorSessionDirectory -Path $SessionDir }
+    $storage.name = 'sessions'
+    $checks += $storage
+    $hasKey = [bool]($ApiKey -and $ApiKey.Trim())
+    $checks += @{ name = 'api_key'; status = $(if ($hasKey) { 'pass' } else { 'fail' }); message = $(if ($hasKey) { 'API key is configured (value hidden).' } else { 'API key is missing. Run shellossus -Setup or set SHELLOSSUS_API_KEY.' }) }
+    $hasModel = [bool]($ModelId -and $ModelId.Trim())
+    $modelCheck = @{ name = 'model'; status = $(if ($hasModel) { 'pass' } else { 'fail' }); message = $(if ($hasModel) { "Configured model: $ModelId. Availability has not been verified." } else { 'Model ID is missing. Run shellossus -Setup or pass -Model with the provider model ID.' }) }
+    $checks += $modelCheck
+    $validUrl = $false
+    try {
+        $uri = [uri]$BaseUrl
+        $validUrl = ($BaseUrl -match '^https://[^\s]+$' -and $uri.IsAbsoluteUri -and $uri.Host -and -not $uri.UserInfo -and -not $uri.Query -and -not $uri.Fragment -and $uri.AbsolutePath -notmatch '/(?:chat/completions|models)/?$')
+    }
+    catch { }
+    if (-not $validUrl) {
+        $checks += @{ name = 'endpoint'; status = 'fail'; message = 'Set an HTTPS API base URL (usually ending in /v1), without credentials, query, fragment, or /chat/completions. Configure -BaseUrl or run shellossus -Setup.' }
+    }
+    elseif (-not $hasKey) {
+        $checks += @{ name = 'endpoint'; status = 'info'; message = "Network check skipped until an API key is configured. Base URL: $BaseUrl" }
+    }
+    else {
+        $probe = Invoke-DoctorModelsRequest -Uri ($BaseUrl.TrimEnd('/') + '/models') -ApiKey $ApiKey
+        $status = 'fail'
+        $message = 'Endpoint check failed. Check DNS, proxy/VPN, TLS trust, firewall rules, and the API base URL. The request has a 10-second timeout (DNS resolution may take longer).'
+        if ($probe.code -eq 200) {
+            $status = 'pass'
+            $message = 'GET /models succeeded. This checks connectivity; chat generation and tool calling were not tested.'
+            if (-not $probe.valid_catalog) {
+                $status = 'warn'
+                $message = 'Endpoint responded, but /models did not return a usable model list. Verify the API base URL and provider documentation; model availability is unverified.'
+            }
+            elseif ($hasModel) {
+                if (@($probe.ids) -ccontains $ModelId) {
+                    $modelCheck.message = "Configured model is listed by the endpoint: $ModelId. Chat/tool support is not verified."
+                }
+                else {
+                    $modelCheck.status = 'warn'
+                    $modelCheck.message = "Configured model is not in /models: $ModelId. Check spelling and access with the provider; some gateways omit valid deployment aliases."
+                }
+            }
+        }
+        elseif ($probe.code -in @(401, 403)) { $message = "Endpoint returned HTTP $($probe.code). Check the API key, account access, and gateway authentication requirements." }
+        elseif ($probe.code -eq 407) { $message = 'Proxy authentication required (HTTP 407). Check your approved proxy configuration.' }
+        elseif ($probe.code -in @(404, 405, 501)) {
+            $status = 'warn'
+            $message = "Endpoint returned HTTP $($probe.code) for /models. Check the base URL; this optional route may be unsupported. Chat and model availability remain unverified."
+        }
+        elseif ($probe.code -eq 429) { $status = 'warn'; $message = 'Endpoint rate-limited the check (HTTP 429). Check quota and retry later; model availability is unverified.' }
+        elseif ($probe.code -ge 300 -and $probe.code -lt 400) { $message = 'Endpoint redirects the request. Use the final approved HTTPS API base URL; credentials were not forwarded.' }
+        elseif ($probe.code -ge 500) { $message = "Endpoint returned HTTP $($probe.code). The service or gateway is unavailable; retry later or contact its administrator." }
+        elseif ($probe.code -gt 0) { $message = "Endpoint returned HTTP $($probe.code). Check the base URL and provider authentication requirements." }
+        $checks += @{ name = 'endpoint'; status = $status; message = ($message + " Base URL: $BaseUrl") }
+    }
+    # Never include server bodies, headers, or raw exceptions in a shareable report.
+    foreach ($check in $checks) {
+        if ($ApiKey) { $check.message = $check.message.Replace($ApiKey, '[redacted]') }
+        $check.message = (Format-PreviewText -Text $check.message) -replace '[\r\n\t]', ' '
+    }
+    $failed = @($checks | Where-Object { $_.status -eq 'fail' }).Count
+    $warnings = @($checks | Where-Object { $_.status -eq 'warn' }).Count
+    return @{ checks = $checks; failures = $failed; warnings = $warnings; exit_code = $(if ($failed) { 1 } else { 0 }) }
+}
+
+function Write-AgentDoctorReport {
+    param($Report, [string]$Mode = 'text')
+    if ($Mode -eq 'json') {
+        $event = @{ type = 'doctor'; checks = @($Report.checks); failures = $Report.failures; warnings = $Report.warnings; exit_code = $Report.exit_code }
+        Write-Output (ConvertTo-AsciiJson -Json ($event | ConvertTo-Json -Depth 6 -Compress))
+        return
+    }
+    Write-Host 'Shellossus doctor'
+    foreach ($check in $Report.checks) {
+        Write-Host ('[{0}] {1}: {2}' -f $check.status.ToUpper(), $check.name, $check.message)
+    }
+    Write-Host ("Checks complete: $($Report.failures) failure(s), $($Report.warnings) warning(s). No chat request was sent.")
+}
+
 # --- src/Cli.ps1 ---
 # Agent turn loop (HTTP retries, finish_reason check, overflow auto-compaction, tool dispatch, JSON event stream) and interactive CLI REPL.
 
@@ -6662,10 +6843,11 @@ function Write-TuiHelpCard {
     Write-Host ($barV + $script:Gm.Aqua + '  /reasoning [arg]             ' + $script:Gm.Fg + 'Pick view (compact|full|hide) or effort (low|medium|high|off)' + $script:Gm.Reset)
     Write-Host ($barV + $script:Gm.Aqua + '  /status (/s, /tokens)        ' + $script:Gm.Fg + 'Show TUI dashboard (context gauge, tokens, tools, session)' + $script:Gm.Reset)
     Write-Host ($barV + $script:Gm.Aqua + '  /diagnostics [on|off]        ' + $script:Gm.Fg + 'Toggle pre-request capability/tool diagnostics' + $script:Gm.Reset)
+    Write-Host ($barV + $script:Gm.Aqua + '  /doctor                     ' + $script:Gm.Fg + 'Check runtime, configuration, endpoint, model, and session storage' + $script:Gm.Reset)
     Write-Host ($barV + $script:Gm.BoldYellow + 'History, Undo & Compaction' + $script:Gm.Reset)
     Write-Host ($barV + $script:Gm.Aqua + '  /todo (/td) [clear]          ' + $script:Gm.Fg + 'View or clear active task plan checklist' + $script:Gm.Reset)
     Write-Host ($barV + $script:Gm.Aqua + '  /memory (/mem) [clear|add ..]' + $script:Gm.Fg + 'View, clear, or add persistent project memory' + $script:Gm.Reset)
-    Write-Host ($barV + $script:Gm.Aqua + '  /undo (/u)                   ' + $script:Gm.Fg + 'Revert last turn AND restore modified/created files on disk' + $script:Gm.Reset)
+    Write-Host ($barV + $script:Gm.Aqua + '  /undo (/u)                   ' + $script:Gm.Fg + 'Revert last tracked turn and its write_file/edit_file changes' + $script:Gm.Reset)
     Write-Host ($barV + $script:Gm.Aqua + '  /retry                       ' + $script:Gm.Fg + 'Retry the last failed user request' + $script:Gm.Reset)
     Write-Host ($barV + $script:Gm.Aqua + '  /continue [steps]            ' + $script:Gm.Fg + 'Continue after hitting step limit (or continue last response)' + $script:Gm.Reset)
     Write-Host ($barV + $script:Gm.Aqua + '  /compact (/c) [focus]        ' + $script:Gm.Fg + 'Summarize older turns into a structured context handoff' + $script:Gm.Reset)
@@ -6703,11 +6885,21 @@ function Invoke-AgentContinue {
 }
 
 if (-not $LibraryOnly) {
-    $script:AgentConfigPath = Format-ConfigPath -Path $ConfigPath
-    $resolvedCfg = Resolve-AgentConfigPath -Path $ConfigPath
-    $script:LegacyAgentConfigPath = if ($resolvedCfg -and ($resolvedCfg -ne $ConfigPath)) { Format-ConfigPath -Path $resolvedCfg } else { '' }
-    $config = Read-AgentConfig -Path $ConfigPath
-    if ($Setup) {
+    $config = @{}
+    $script:AgentConfigPath = $ConfigPath
+    $doctorConfigState = 'loaded'
+    try {
+        $script:AgentConfigPath = Format-ConfigPath -Path $ConfigPath
+        $resolvedCfg = Resolve-AgentConfigPath -Path $ConfigPath
+        $script:LegacyAgentConfigPath = if ($resolvedCfg -and ($resolvedCfg -ne $ConfigPath)) { Format-ConfigPath -Path $resolvedCfg } else { '' }
+        if (-not (Test-Path -LiteralPath $resolvedCfg)) { $doctorConfigState = 'missing' }
+        $config = Read-AgentConfig -Path $ConfigPath
+    }
+    catch {
+        if (-not $Doctor) { throw }
+        $doctorConfigState = 'invalid'
+    }
+    if ($Setup -and -not $Doctor) {
         Write-Host ($script:Gm.OscInit + $script:Gm.Fg + "Save settings to: $ConfigPath" + $script:Gm.Reset)
         Write-Host ($script:Gm.Yellow + 'API key is stored as plain text in your user profile, outside the project.' + $script:Gm.Reset)
         $defaultUrl = $BaseUrl
@@ -6734,7 +6926,7 @@ if (-not $LibraryOnly) {
             SHELLOSSUS_WORKSPACE = $inputWorkspace
         }
         Remove-Variable inputKey -ErrorAction SilentlyContinue
-        Write-Host ($script:Gm.BoldGreen + 'Settings saved. Start shellossus from your working folder.' + $script:Gm.Reset)
+        Write-Host ($script:Gm.BoldGreen + 'Settings saved. Run shellossus -Doctor to check them, then start shellossus from your working folder.' + $script:Gm.Reset)
         return
     }
     if (-not $BaseUrl) { $BaseUrl = $env:H_AGENT_BASE_URL }
@@ -6746,12 +6938,31 @@ if (-not $LibraryOnly) {
         elseif ($env:H_AGENT_WORKSPACE) { $Workspace = $env:H_AGENT_WORKSPACE }
         elseif ($config.SHELLOSSUS_WORKSPACE) { $Workspace = $config.SHELLOSSUS_WORKSPACE }
     }
+    try {
+        $configDir = if ($script:AgentConfigPath) { Split-Path $script:AgentConfigPath -Parent } else { '' }
+        if (-not $configDir) { $configDir = '.' }
+        $sessionDir = if ($SessionDir) { $SessionDir } else { Join-Path $configDir 'sessions' }
+    }
+    catch {
+        if (-not $Doctor) { throw }
+        $doctorConfigState = 'invalid'
+        $sessionDir = $SessionDir
+    }
+    if ($Doctor) {
+        $doctorKey = $env:SHELLOSSUS_API_KEY
+        if (-not $doctorKey) { $doctorKey = $env:H_AGENT_API_KEY }
+        if (-not $doctorKey) { $doctorKey = $config.SHELLOSSUS_API_KEY }
+        try {
+            $report = Get-AgentDoctorReport -BaseUrl $BaseUrl -ModelId $Model -ApiKey $doctorKey -Workspace $Workspace -SessionDir $sessionDir -NoSession:$NoSession -ConfigState $doctorConfigState
+            Write-AgentDoctorReport -Report $report -Mode $Mode
+        }
+        finally { Remove-Variable doctorKey -ErrorAction SilentlyContinue; $config.Clear() }
+        exit $report.exit_code
+    }
     $rootItem = Get-Item -LiteralPath $Workspace -Force -ErrorAction Stop
     if (-not $rootItem.PSIsContainer) { throw 'Workspace must be a directory.' }
     $rootPath = Resolve-AgentPath -Root $rootItem.FullName -RelativePath '.'
     $script:ActiveWorkspace = $rootPath
-    $configDir = Split-Path $script:AgentConfigPath -Parent
-    $sessionDir = if ($SessionDir) { $SessionDir } else { Join-Path $configDir 'sessions' }
     if ($Export -and ($Export -match '\.jsonl$') -and (Test-Path -LiteralPath $Export)) {
         $expState = @{ session_id = ''; workspace = $rootPath; model = $Model; messages = @() }
         Invoke-SessionResume -SessionFile $Export -State $expState | Out-Null
@@ -6950,6 +7161,12 @@ if (-not $LibraryOnly) {
             }
             if ($trimmedQ -eq '/help') {
                 Write-TuiHelpCard
+                continue
+            }
+            if ($trimmedQ -eq '/doctor') {
+                $doctorSessionDir = if ($sessionFile) { Split-Path $sessionFile -Parent } else { $sessionDir }
+                $report = Get-AgentDoctorReport -BaseUrl $BaseUrl -ModelId $Model -ApiKey $agentKey -Workspace $rootPath -SessionDir $doctorSessionDir -NoSession:(-not $sessionFile) -ConfigState $doctorConfigState
+                Write-AgentDoctorReport -Report $report -Mode $script:OutputMode
                 continue
             }
             if ($trimmedQ -eq '/agents') {

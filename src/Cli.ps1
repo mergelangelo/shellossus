@@ -534,10 +534,11 @@ function Write-TuiHelpCard {
     Write-Host ($barV + $script:Gm.Aqua + '  /reasoning [arg]             ' + $script:Gm.Fg + 'Pick view (compact|full|hide) or effort (low|medium|high|off)' + $script:Gm.Reset)
     Write-Host ($barV + $script:Gm.Aqua + '  /status (/s, /tokens)        ' + $script:Gm.Fg + 'Show TUI dashboard (context gauge, tokens, tools, session)' + $script:Gm.Reset)
     Write-Host ($barV + $script:Gm.Aqua + '  /diagnostics [on|off]        ' + $script:Gm.Fg + 'Toggle pre-request capability/tool diagnostics' + $script:Gm.Reset)
+    Write-Host ($barV + $script:Gm.Aqua + '  /doctor                     ' + $script:Gm.Fg + 'Check runtime, configuration, endpoint, model, and session storage' + $script:Gm.Reset)
     Write-Host ($barV + $script:Gm.BoldYellow + 'History, Undo & Compaction' + $script:Gm.Reset)
     Write-Host ($barV + $script:Gm.Aqua + '  /todo (/td) [clear]          ' + $script:Gm.Fg + 'View or clear active task plan checklist' + $script:Gm.Reset)
     Write-Host ($barV + $script:Gm.Aqua + '  /memory (/mem) [clear|add ..]' + $script:Gm.Fg + 'View, clear, or add persistent project memory' + $script:Gm.Reset)
-    Write-Host ($barV + $script:Gm.Aqua + '  /undo (/u)                   ' + $script:Gm.Fg + 'Revert last turn AND restore modified/created files on disk' + $script:Gm.Reset)
+    Write-Host ($barV + $script:Gm.Aqua + '  /undo (/u)                   ' + $script:Gm.Fg + 'Revert last tracked turn and its write_file/edit_file changes' + $script:Gm.Reset)
     Write-Host ($barV + $script:Gm.Aqua + '  /retry                       ' + $script:Gm.Fg + 'Retry the last failed user request' + $script:Gm.Reset)
     Write-Host ($barV + $script:Gm.Aqua + '  /continue [steps]            ' + $script:Gm.Fg + 'Continue after hitting step limit (or continue last response)' + $script:Gm.Reset)
     Write-Host ($barV + $script:Gm.Aqua + '  /compact (/c) [focus]        ' + $script:Gm.Fg + 'Summarize older turns into a structured context handoff' + $script:Gm.Reset)
@@ -575,11 +576,21 @@ function Invoke-AgentContinue {
 }
 
 if (-not $LibraryOnly) {
-    $script:AgentConfigPath = Format-ConfigPath -Path $ConfigPath
-    $resolvedCfg = Resolve-AgentConfigPath -Path $ConfigPath
-    $script:LegacyAgentConfigPath = if ($resolvedCfg -and ($resolvedCfg -ne $ConfigPath)) { Format-ConfigPath -Path $resolvedCfg } else { '' }
-    $config = Read-AgentConfig -Path $ConfigPath
-    if ($Setup) {
+    $config = @{}
+    $script:AgentConfigPath = $ConfigPath
+    $doctorConfigState = 'loaded'
+    try {
+        $script:AgentConfigPath = Format-ConfigPath -Path $ConfigPath
+        $resolvedCfg = Resolve-AgentConfigPath -Path $ConfigPath
+        $script:LegacyAgentConfigPath = if ($resolvedCfg -and ($resolvedCfg -ne $ConfigPath)) { Format-ConfigPath -Path $resolvedCfg } else { '' }
+        if (-not (Test-Path -LiteralPath $resolvedCfg)) { $doctorConfigState = 'missing' }
+        $config = Read-AgentConfig -Path $ConfigPath
+    }
+    catch {
+        if (-not $Doctor) { throw }
+        $doctorConfigState = 'invalid'
+    }
+    if ($Setup -and -not $Doctor) {
         Write-Host ($script:Gm.OscInit + $script:Gm.Fg + "Save settings to: $ConfigPath" + $script:Gm.Reset)
         Write-Host ($script:Gm.Yellow + 'API key is stored as plain text in your user profile, outside the project.' + $script:Gm.Reset)
         $defaultUrl = $BaseUrl
@@ -606,7 +617,7 @@ if (-not $LibraryOnly) {
             SHELLOSSUS_WORKSPACE = $inputWorkspace
         }
         Remove-Variable inputKey -ErrorAction SilentlyContinue
-        Write-Host ($script:Gm.BoldGreen + 'Settings saved. Start shellossus from your working folder.' + $script:Gm.Reset)
+        Write-Host ($script:Gm.BoldGreen + 'Settings saved. Run shellossus -Doctor to check them, then start shellossus from your working folder.' + $script:Gm.Reset)
         return
     }
     if (-not $BaseUrl) { $BaseUrl = $env:H_AGENT_BASE_URL }
@@ -618,12 +629,31 @@ if (-not $LibraryOnly) {
         elseif ($env:H_AGENT_WORKSPACE) { $Workspace = $env:H_AGENT_WORKSPACE }
         elseif ($config.SHELLOSSUS_WORKSPACE) { $Workspace = $config.SHELLOSSUS_WORKSPACE }
     }
+    try {
+        $configDir = if ($script:AgentConfigPath) { Split-Path $script:AgentConfigPath -Parent } else { '' }
+        if (-not $configDir) { $configDir = '.' }
+        $sessionDir = if ($SessionDir) { $SessionDir } else { Join-Path $configDir 'sessions' }
+    }
+    catch {
+        if (-not $Doctor) { throw }
+        $doctorConfigState = 'invalid'
+        $sessionDir = $SessionDir
+    }
+    if ($Doctor) {
+        $doctorKey = $env:SHELLOSSUS_API_KEY
+        if (-not $doctorKey) { $doctorKey = $env:H_AGENT_API_KEY }
+        if (-not $doctorKey) { $doctorKey = $config.SHELLOSSUS_API_KEY }
+        try {
+            $report = Get-AgentDoctorReport -BaseUrl $BaseUrl -ModelId $Model -ApiKey $doctorKey -Workspace $Workspace -SessionDir $sessionDir -NoSession:$NoSession -ConfigState $doctorConfigState
+            Write-AgentDoctorReport -Report $report -Mode $Mode
+        }
+        finally { Remove-Variable doctorKey -ErrorAction SilentlyContinue; $config.Clear() }
+        exit $report.exit_code
+    }
     $rootItem = Get-Item -LiteralPath $Workspace -Force -ErrorAction Stop
     if (-not $rootItem.PSIsContainer) { throw 'Workspace must be a directory.' }
     $rootPath = Resolve-AgentPath -Root $rootItem.FullName -RelativePath '.'
     $script:ActiveWorkspace = $rootPath
-    $configDir = Split-Path $script:AgentConfigPath -Parent
-    $sessionDir = if ($SessionDir) { $SessionDir } else { Join-Path $configDir 'sessions' }
     if ($Export -and ($Export -match '\.jsonl$') -and (Test-Path -LiteralPath $Export)) {
         $expState = @{ session_id = ''; workspace = $rootPath; model = $Model; messages = @() }
         Invoke-SessionResume -SessionFile $Export -State $expState | Out-Null
@@ -822,6 +852,12 @@ if (-not $LibraryOnly) {
             }
             if ($trimmedQ -eq '/help') {
                 Write-TuiHelpCard
+                continue
+            }
+            if ($trimmedQ -eq '/doctor') {
+                $doctorSessionDir = if ($sessionFile) { Split-Path $sessionFile -Parent } else { $sessionDir }
+                $report = Get-AgentDoctorReport -BaseUrl $BaseUrl -ModelId $Model -ApiKey $agentKey -Workspace $rootPath -SessionDir $doctorSessionDir -NoSession:(-not $sessionFile) -ConfigState $doctorConfigState
+                Write-AgentDoctorReport -Report $report -Mode $script:OutputMode
                 continue
             }
             if ($trimmedQ -eq '/agents') {

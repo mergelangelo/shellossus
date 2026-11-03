@@ -38,10 +38,10 @@ All `.ps1` files (`src/*.ps1`, `shellossus.ps1`, `build.ps1`, `install.ps1`, `te
 ## Article III — Workspace Isolation and Credential Protection
 
 ### Section 1. Workspace Boundary Enforcement
-All file operations are strictly confined to the active workspace root. No tool may read, list, search, create, or modify files outside the workspace root, with the sole exception of read-only access to registered global `SKILL.md` files via `read_file`.
+Workspace file tools (`list_files`, `read_file`, `find_files`, `grep_files`, `write_file`, `edit_file`) and `@file` attachments must enforce the active workspace root, with a read-only exception for registered global `SKILL.md` files via `read_file`. This is an application-level file-tool boundary, not an OS sandbox. Shell commands retain the user's OS permissions; configuration/context loading, sessions, imports/exports, temporary files, and the explicit global `memory` scope have separate paths that must be documented accurately.
 
 ### Section 2. Reparse Point and Symlink Rejection
-Before accessing any path, `shellossus` must verify the target and every ancestor directory up to the workspace root. Any path that traverses a symbolic link, NTFS junction, or reparse point (`Attributes -band 1024`) must be rejected.
+Before a workspace file tool accesses a path, `shellossus` must verify the target and ancestor directories. Any path that traverses a symbolic link, NTFS junction, or reparse point (`Attributes -band 1024`) must be rejected. Other subsystems must not be described as providing this guarantee unless they implement it; the current `memory` tool checks only its final file.
 
 ### Section 3. Secret and Configuration Protection
 1. `.env`, `.env.*` (except `.env.example`), and the active user configuration file (`$ConfigPath`) must never be read by `read_file`, listed by `list_files`, returned by `find_files` or `grep_files`, attached via `@file`, or modified by `write_file` or `edit_file`.
@@ -57,10 +57,12 @@ Before accessing any path, `shellossus` must verify the target and every ancesto
 
 ### Section 1. Permission Modes
 Tool availability and confirmation prompts are governed by four permission modes:
-1. **`ReadOnly`**: Exposes only read-only tools (`list_files`, `read_file`, `find_files`, `grep_files`, `fetch_url`, `web_search`, and `run_agent` clamped to `ReadOnly`) and blocks all file writes and shell commands.
+1. **`ReadOnly`**: Allows inspection tools and `run_agent` clamped to `ReadOnly`; blocks the model's `write_file`, `edit_file`, `run_command`, and modifying `memory` actions. Auxiliary `todo`, `ask_user`, and memory viewing remain available, subject to tool filters. Session persistence and user-entered `!` / `!!` commands are separate from model tool permissions.
 2. **`Ask`**: Previews changes or commands and requires explicit user confirmation (`WRITE` for file changes, `RUN` for shell commands).
 3. **`AutoEdit`**: Automatically approves file creations and edits while still requiring `RUN` confirmation for `run_command`.
-4. **`Auto`**: Automatically approves both file modifications and shell commands within workspace boundaries.
+4. **`Auto`**: Automatically approves file-tool modifications and shell commands. Only the file tools enforce workspace boundaries; commands retain OS permissions.
+
+These confirmation rules apply to `write_file`, `edit_file`, and `run_command`. The separate `memory` implementation currently writes without `WRITE` confirmation in non-`ReadOnly` modes; documentation must state that exception rather than imply universal prompting.
 
 ### Section 2. Strict Argument Validation
 Tool arguments must be validated against the tool's schema before execution. Unknown parameters, missing required parameters, and mismatched types (such as a string `"false"` passed for a boolean parameter) must be rejected immediately.
@@ -70,10 +72,11 @@ Tool arguments must be validated against the tool's schema before execution. Unk
 2. Existing file line endings (`CRLF` or `LF`) must be preserved. `edit_file` must support exact matches, CRLF-normalized matches, line-by-line fuzzy matches (ignoring trailing whitespace, BOM, and smart quotes/dashes), and non-overlapping batch `edits[]` applied bottom-to-top.
 
 ### Section 4. Safe Multi-Step `/undo`
-1. Every turn records all created and modified files on the undo stack.
+1. Every turn records files created or modified by `write_file` and `edit_file`, including in-process subagent edits, on the undo stack. Shell effects, `memory`, task-board state, settings, exports, and network effects are outside this stack.
 2. Before `/undo` (or automatic rollback on turn failure) modifies any file on disk, a preflight check must validate the entire chain of operations for that turn in reverse order.
 3. Multiple edits to the same file within a single turn (such as `write_file` followed by `edit_file`, or multiple sequential `edit_file` calls) must be verified as a continuous chain and restored to the state prior to the turn.
 4. If a file was manually modified by the user after the agent's write, `/undo` must refuse to overwrite the manual changes and must keep all backup files intact so the user can resolve the conflict and retry `/undo`.
+5. Undo history is process-local and is not recovered from saved sessions. Preflight checks precede restoration, but a restore-time I/O failure can leave a partial rollback; no filesystem-wide atomic transaction is promised.
 
 ### Section 5. Isolated Shell Execution and Output Logs
 `run_command` must redirect stdout and stderr directly to temporary disk files to avoid memory exhaustion, enforce a strict execution timeout (`Wait-Process` followed by process termination), and save the full untruncated output under `.shellossus/output/` whenever terminal output is truncated.
@@ -81,7 +84,7 @@ Tool arguments must be validated against the tool's schema before execution. Unk
 ### Section 6. Subagent Delegation (`run_agent`)
 1. `run_agent` supports single delegation (`prompt`), parallel read-only fan-out (`parallel[]`, 1..8 tasks), and sequential pipelines (`pipeline[]`, 1..8 steps with `{previous}` / `$PREVIOUS` substitution), with `context` set to `'clean'` (default) or `'fork'` (cloning parent conversation history up to the last valid boundary).
 2. Subagents cannot recursively invoke `run_agent` (`$script:SubagentDepth` is capped at 1) and can never escalate permissions above the parent session (`ReadOnly` sessions and `recon`/`audit`/`parallel[]` subagents are strictly clamped to `ReadOnly`).
-3. File writes performed by in-process subagents are recorded into the parent turn's `$script:CurrentTurnWrites` so a single `/undo` atomically reverts both parent and subagent modifications.
+3. `write_file` / `edit_file` changes performed by in-process subagents are recorded into the parent turn's `$script:CurrentTurnWrites` so a single `/undo` covers both parent and subagent file-tool changes, subject to the preflight and I/O limits above.
 
 ---
 
@@ -112,6 +115,8 @@ Both the main agent loop (`Invoke-AgentTurn`) and context compaction (`Invoke-Ag
 ### Section 1. Clean JSONL Mode (`-Mode json`)
 In `-Mode json`, `stdout` must contain only valid JSONL event objects (`turn_start`, `message_end`, `tool_execution_start`, `tool_execution_end`, `turn_end`). All plain-text `Write-Host` UI messages, diff previews, and interactive `Read-Host` prompts must be suppressed; unapproved write or command calls in `json` mode must return `status = 'cancelled'` immediately without waiting for user input.
 
+Standalone `-Doctor -Mode json` emits one `doctor` diagnostic object and exits without entering the chat loop. Reports must not expose API keys, server response bodies, or raw exceptions.
+
 ### Section 2. Terminal Rendering (`-Mode text`)
 In interactive and text modes, output uses the 24-bit TrueColor `sainnhe/gruvbox-material` (dark medium) palette, and Markdown tables are aligned by visible character width (`Get-VisibleLength`) after stripping inline formatting and ANSI sequences.
 
@@ -133,7 +138,7 @@ In interactive and text modes, output uses the 24-bit TrueColor `sainnhe/gruvbox
 ## Article VIII — Verification and Changes
 
 ### Section 1. Automated Verification (`smoke.ps1`)
-Every code change in `src/*.ps1` must be followed by running [`build.ps1`](build.ps1) to update [`shellossus.ps1`](shellossus.ps1) and running [`tests/smoke.ps1`](tests/smoke.ps1) (`Config.Tests.ps1`, `Theme.Tests.ps1`, `Tools.Tests.ps1`, `Context.Tests.ps1`, `Cli.Tests.ps1`, `Reliability.Tests.ps1`, and `ConstrainedLanguage.Tests.ps1`).
+Every code change in `src/*.ps1` must be followed by running [`build.ps1`](build.ps1) to update [`shellossus.ps1`](shellossus.ps1) and running [`tests/smoke.ps1`](tests/smoke.ps1) (`Config.Tests.ps1`, `Theme.Tests.ps1`, `Tools.Tests.ps1`, `Context.Tests.ps1`, `Cli.Tests.ps1`, `Doctor.Tests.ps1`, `Reliability.Tests.ps1`, and `ConstrainedLanguage.Tests.ps1`). Doctor tests also run in a fresh constrained-language process. The full reliability suite's separate constrained run is currently excluded from smoke after a Windows PowerShell 5.1 failure; reported verification must distinguish actual coverage from compatibility targets.
 
 ### Section 2. Maintaining Invariants
 Any new feature or bugfix must uphold Articles I through VII and include regression coverage in [`tests/`](tests/).
