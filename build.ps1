@@ -21,6 +21,7 @@ $modules = @(
     'context/Templates.ps1',
     'context/Session.ps1',
     'context/Compaction.ps1',
+    'Doctor.ps1',
     'Cli.ps1'
 )
 
@@ -52,6 +53,7 @@ param(
     [switch]$NoContextFiles,
     [switch]$HideReasoning,
     [switch]$Diagnostics,
+    [switch]$Doctor,
     [switch]$Continue,
     [switch]$Setup,
     [switch]$LibraryOnly

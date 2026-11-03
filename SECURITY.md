@@ -29,22 +29,24 @@ Please include:
 
 ### 1. Permission Modes & Confirmation Prompts
 By default, `shellossus` operates in **`Ask`** mode:
-- **File Writes & Edits:** Must be explicitly approved by typing `WRITE`.
+- **`write_file` / `edit_file`:** Must be explicitly approved by typing `WRITE` in `Ask` mode. The separate `memory` tool currently writes without this prompt in non-`ReadOnly` modes.
 - **Command Execution:** Must be explicitly approved by typing `RUN`.
 - **`ReadOnly` Mode:** Strips file write tools and shell execution tools entirely from the model's capabilities and rejects unauthorized invocations.
+- User-entered `!cmd` / `!!cmd` shortcuts execute directly even in `ReadOnly`; this mode restricts model tools, not the user's explicit commands or session persistence.
 
 ### 2. Workspace Boundary & Junction Rejection
-- All file operations are resolved strictly against the workspace root.
-- Ancestor directory paths are traversed and checked for symbolic links, NTFS junctions, and reparse points (`Attributes -band 1024`). Traversal outside the project boundary is strictly rejected.
+- Workspace file tools and `@file` attachments enforce the workspace boundary and reject ancestor reparse points. `read_file` also permits registered global `SKILL.md` files.
+- Shell commands retain the user's OS permissions and are not confined to the workspace. Global `memory`, configuration/context loading, sessions, imports/exports, and temporary files have separate paths. `memory` does not provide the file tools' ancestor-path checks. See the [complete scope](docs/security.md#workspace-isolation--path-safety).
 
 ### 3. Credential & Environment Protection
 - `.env`, `.env.*` (excluding `.env.example`), and user profile configuration files are strictly forbidden from agent tools (`read_file`, `find_files`, `grep_files`, `@file`, `write_file`).
-- Before executing commands via `run_command`, `SHELLOSSUS_API_KEY` and `OPENAI_API_KEY` are stripped from the child process environment to prevent key leakage.
+- Before executing commands, `SHELLOSSUS_API_KEY`, `H_AGENT_API_KEY`, and `OPENAI_API_KEY` are stripped from the child environment. This does not prevent commands from reading credentials on disk or in other environment variables allowed by the OS.
 
 ### 4. Transactional Edits & Conflict-Aware `/undo`
-- File modifications are staged to temporary files and verified prior to replacing target files on disk.
+- `write_file` / `edit_file` modifications are staged to temporary files and verified prior to replacing target files on disk.
 - Pre-edit backups are verified before touching disk.
 - If a file is modified externally or manually after an agent edit, `/undo` detects the conflict and preserves both disk content and the backup file.
+- Shell effects, memory notes, task-board state, settings, exports, and network effects are outside undo coverage. Saved sessions do not restore undo history; an I/O error during restoration can leave a partial rollback.
 
 ### 5. Process Lifecycle & Execution Timeout
 - Shell commands run under configurable execution timeouts (default 60 seconds).

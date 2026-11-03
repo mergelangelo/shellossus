@@ -17,14 +17,18 @@ You can set the permission mode at launch (`-Permission <Mode>`) or switch it at
 
 When resuming a saved session via `/resume`, `shellossus` resets the active permission mode to `Ask` unless `-Permission` was explicitly passed at launch.
 
+The table describes the model's `write_file`, `edit_file`, and `run_command` tools. It does not make the entire process read-only. `todo`, `ask_user`, and `memory` remain available (subject to tool filters); memory modifications are rejected in `ReadOnly`, but in other modes `memory` currently writes without a `WRITE` prompt or verified backup. Sessions can still be saved in `ReadOnly`. User-entered `!cmd` / `!!cmd` shortcuts execute directly, without `RUN` confirmation or a `ReadOnly` check. `ask_user` plan approval does not change these permission rules.
+
 ---
 
 ## Workspace Isolation & Path Safety
 
 1. **Workspace Boundary Enforcement:**
-   - Every tool path is resolved through `Resolve-AgentPath`.
-   - Paths resolving outside the workspace directory are rejected (`Path is outside the workspace.`).
-   - The only exception is read-only access (`read_file`) to `SKILL.md` files explicitly registered during startup by `Get-SkillsCatalog` from `%USERPROFILE%\.shellossus\skills`.
+   - `list_files`, `read_file`, `find_files`, `grep_files`, `write_file`, `edit_file`, and `@file` attachments use workspace path validation. Paths resolving outside the workspace directory are rejected (`Path is outside the workspace.`).
+   - The read-only exception for these file tools is `read_file` access to global `SKILL.md` files explicitly registered by `Get-SkillsCatalog` from the global configuration directory (normally `%USERPROFILE%\.shellossus\skills`).
+   - Shell commands start with the workspace as their working directory, but retain the user's OS permissions. They can change directory, read/write other paths (including configuration files), invoke programs, and use the network. Permission prompts approve execution; they do not sandbox it.
+   - `memory` is a separate fixed-path tool: workspace scope uses an existing root `MEMORY.md`, otherwise `.shellossus/MEMORY.md`; global scope uses `MEMORY.md` beside the active configuration file. It does not use `Resolve-AgentPath`. It checks the final file for reparse points but does not enforce the file tools' ancestor checks.
+   - Configuration and global context/skills/agent profiles are intentionally loaded from outside the workspace. Sessions normally live beside the configuration in `sessions/` (`-SessionDir` overrides this); imports/exports and explicit session paths are not constrained by the file-tool boundary. Staging files, backups, and HTTP response files use OS temporary storage. Doctor can create the configured session directory and temporarily probe it.
 2. **Reparse Point Rejection:**
    - `Resolve-AgentPath`, `find_files`, `grep_files`, and `Get-SkillsCatalog` inspect file and ancestor directory attributes and reject any NTFS junction, symlink, or reparse point (`Attributes -band 1024`).
    - *Note:* Application-level path validation is not an OS kernel sandbox and does not protect against concurrent TOCTOU race conditions by external processes.
@@ -38,16 +42,22 @@ When resuming a saved session via `/resume`, `shellossus` resets the active perm
 
 - **Staged Writes:** `Invoke-AgentWrite` writes new content to a temporary file first, verifies the written content, verifies that the target file did not change during user confirmation, creates and verifies a backup copy, and then replaces the target file via `Move-Item -Force`.
 - **Conflict-Aware `/undo`:**
-  - Every write records both `before_content` and `after_content`.
+  - `write_file` and `edit_file` record created/modified paths and their content. Modified files also have verified pre-edit backups. In-process subagent file edits join the parent's recorded turn.
   - Before changing any file, undo verifies every pending backup against its recorded `before_content`, including intermediate backups from repeated edits to the same file. Missing, unreadable, or corrupted backups stop the entire preflight; files, backups, and conversation state are preserved for a retry.
   - When `/undo` is invoked, `Invoke-AgentUndo` checks whether the file on disk was modified manually after the agent's write. If manual edits are detected, `/undo` refuses to overwrite the file and preserves the backup path.
-  - Backup files are only deleted after restoration succeeds and the restored content is verified against the backup.
+  - Backup files are only deleted after restoration succeeds and the restored content is verified against the recorded original content.
+
+### What `/undo` Does Not Cover
+
+`/undo` restores the tracked turn's conversation messages and recorded file changes. It does not reverse effects of `run_command`, `!cmd`, `!!cmd`, `memory` (either scope), task-board state, configuration/setup, session exports, network requests, or changes by external processes. The same limit applies to automatic rollback after a failed turn. For example, `write_file` creating `a.txt` is tracked, while a shell command creating `b.txt` or `memory` appending a note is not.
+
+Undo history is kept in memory and is reset when a session is resumed or its active branch changes; loading JSONL history does not reconstruct file backups. Preflight failure prevents that undo operation from changing files, but I/O failure during restoration can leave some files restored and others pending. Backups are temporary local files, not a durable transaction journal. Keep version control or other backups for long-lived recovery.
 
 ---
 
-## Process Isolation & Command Timeouts
+## Process Execution & Command Timeouts
 
-- **API Key Scrubbing:** `Invoke-ShellCommand` clears `SHELLOSSUS_API_KEY` and `OPENAI_API_KEY` before spawning a child PowerShell process and restores them afterward.
+- **API Key Scrubbing:** `Invoke-ShellCommand` clears `SHELLOSSUS_API_KEY`, legacy `H_AGENT_API_KEY`, and `OPENAI_API_KEY` before spawning a child PowerShell process and restores them afterward. Other environment variables remain available, and commands can still read files allowed by the OS, including a saved `.env` key.
 - **Disk-Backed Output Streaming:** Standard output and standard error are redirected directly to temporary files on disk (`Start-Process -RedirectStandardOutput -RedirectStandardError`). Only the first 300 lines (up to 20,000 characters) are read into memory for the model response; if truncated, the full log is preserved under `.shellossus/output/cmd-*.log`.
 - **Timeout & Termination:** Commands default to a 60-second timeout (`timeout_sec`, configurable from 1 to 600 seconds). While waiting, `shellossus` tracks child and descendant processes. On timeout or interrupted execution it stops the command and tracked descendants using built-in cmdlets. Windows PowerShell 5.1 uses `Get-CimInstance Win32_Process` for parent relationships; PowerShell on Linux/macOS uses `Get-Process`. Start times are checked before termination to avoid stopping an unrelated process that reused a PID. Timeout results include `termination_errors` if cleanup could not be completed.
 - **Process Tracking Limits:** Tracking is based on periodic snapshots, not an OS process sandbox. A detached descendant whose parent exits between snapshots can escape discovery; command execution retains the user's OS permissions. Normal successful commands may intentionally leave background processes running.
@@ -61,5 +71,6 @@ In-process and separate-process subagents receive the intersection of the parent
 ## Enterprise / Citrix / VDI Notes
 
 - `shellossus` does **not** modify `ExecutionPolicy`, language mode, or system security settings.
-- All code is tested in Windows PowerShell 5.1 under `ConstrainedLanguage` mode.
+- Windows PowerShell 5.1 and `ConstrainedLanguage` are supported targets. CI runs the smoke suite on Windows PowerShell 5.1, including dedicated constrained-language checks; this is not coverage of every code path or a guarantee under every WDAC/AppLocker policy. The full reliability suite's separate constrained run is currently excluded after a Windows failure (see [verification coverage](architecture.md#build--verification-pipeline)).
+- Use `shellossus -Doctor` before starting a chat, or `/doctor` in a session, for runtime, settings, storage, and endpoint checks. The authenticated `/models` probe does not generate a completion or verify model tool support. Reports hide the key but include local paths, validated API base URLs, and model IDs; review those before sharing.
 - The user API key is stored in plain text in `%USERPROFILE%\.shellossus\.env` (outside the project directory). Do not commit `.env` files or share terminal recordings taken during `shellossus -Setup`.
