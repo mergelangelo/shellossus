@@ -3545,6 +3545,26 @@ function Invoke-AgentAskUser {
         }
     }
 
+    $hasCustomOpt = $false
+    foreach ($it in $selectorItems) {
+        $lblLow = [string]$it.label.ToLower()
+        $valLow = [string]$it.value.ToLower()
+        if ($lblLow -match '^(other|custom|manual)' -or $valLow -match '^(other|custom|manual)') {
+            $hasCustomOpt = $true
+            break
+        }
+    }
+    if ($allowCustom -and -not $hasCustomOpt -and $selectorItems.Count -gt 0) {
+        $customLabel = if ($intent -eq 'plan-review') { 'Other (type feedback)' } else { 'Other (type custom response)' }
+        $customDesc = if ($intent -eq 'plan-review') { 'Provide custom feedback or instructions' } else { 'Type your own custom answer' }
+        $selectorItems += @{
+            label = $customLabel
+            value = '__custom__'
+            description = $customDesc
+            active = $false
+        }
+    }
+
     $customChoice = $null
     $chosenAnswer = $null
     $isCancelled = $false
@@ -3562,6 +3582,9 @@ function Invoke-AgentAskUser {
                 else {
                     $chosenAnswer = $trimmedMock
                 }
+            }
+            elseif ($trimmedMock -ieq 'other' -or $trimmedMock -ieq 'custom' -or $trimmedMock -ieq 'o') {
+                $chosenAnswer = '__custom__'
             }
             else {
                 $matchedItem = $selectorItems | Where-Object { $_.value -ieq $trimmedMock -or $_.label -ieq $trimmedMock } | Select-Object -First 1
@@ -3592,13 +3615,46 @@ function Invoke-AgentAskUser {
         }
         else {
             $pickedStr = [string]$picked.Trim()
-            $matchedItem = $selectorItems | Where-Object { $_.value -ieq $pickedStr -or $_.label -ieq $pickedStr } | Select-Object -First 1
-            if ($matchedItem) {
-                $chosenAnswer = $matchedItem.value
+            if ($pickedStr -ieq 'other' -or $pickedStr -ieq 'custom' -or $pickedStr -ieq 'o') {
+                $chosenAnswer = '__custom__'
             }
             else {
-                $chosenAnswer = $pickedStr
-                $customChoice = $pickedStr
+                $matchedItem = $selectorItems | Where-Object { $_.value -ieq $pickedStr -or $_.label -ieq $pickedStr } | Select-Object -First 1
+                if ($matchedItem) {
+                    $chosenAnswer = $matchedItem.value
+                }
+                else {
+                    $chosenAnswer = $pickedStr
+                    $customChoice = $pickedStr
+                }
+            }
+        }
+    }
+
+    if (-not $isCancelled -and $chosenAnswer -eq '__custom__') {
+        if ($script:OutputMode -eq 'json') {
+            $custRaw = Read-Host
+            if ($null -ne $custRaw -and $custRaw.Trim()) {
+                $chosenAnswer = $custRaw.Trim()
+                $customChoice = $chosenAnswer
+            }
+            else {
+                $chosenAnswer = 'custom'
+                $customChoice = 'custom'
+            }
+        }
+        else {
+            $promptLabel = if ($intent -eq 'plan-review') { 'Enter custom feedback: ' } else { 'Enter custom response: ' }
+            Write-Host ('  ' + $script:Gm.BoldYellow + $promptLabel + $script:Gm.Fg) -NoNewline
+            $custRaw = Read-Host
+            Write-Host $script:Gm.Reset -NoNewline
+            if ($null -ne $custRaw -and $custRaw.Trim()) {
+                $chosenAnswer = $custRaw.Trim()
+                $customChoice = $chosenAnswer
+            }
+            else {
+                $isCancelled = $true
+                $chosenAnswer = $null
             }
         }
     }

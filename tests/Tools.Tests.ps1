@@ -77,6 +77,12 @@ try {
     function Read-Host {
         param($Prompt)
         $script:prompts++
+        if ($script:approval -is [array]) {
+            $next = $script:approval[0]
+            if ($script:approval.Count -le 1) { $script:approval = '' }
+            else { $script:approval = @($script:approval[1..($script:approval.Count - 1)]) }
+            return $next
+        }
         return $script:approval
     }
     $call.function.name = 'write_file'
@@ -631,6 +637,18 @@ try {
     }
     $qRes = Invoke-AgentTool -Root $workspacePath -Call $qCall | ConvertFrom-Json
     Assert-True ($qRes.answer -eq 'Pester 5' -and (-not $qRes.approved) -and (-not $qRes.cancelled)) 'ask_user question choice failed.'
+
+    # Test execution: select 'Other' option by number (3) and provide custom response
+    $script:approval = @('3', 'Mocha')
+    $qOtherCall = @{
+        id = 'ask-q-other'
+        function = @{
+            name = 'ask_user'
+            arguments = '{"question":"Select test framework","options":["Pester 4","Pester 5"]}'
+        }
+    }
+    $qOtherRes = Invoke-AgentTool -Root $workspacePath -Call $qOtherCall | ConvertFrom-Json
+    Assert-True ($qOtherRes.answer -eq 'Mocha' -and $qOtherRes.custom -eq 'Mocha' -and (-not $qOtherRes.approved) -and (-not $qOtherRes.cancelled)) 'ask_user Other choice failed.'
 
     # Test execution: custom free-text feedback
     $script:approval = 'Please add backward compatibility'
