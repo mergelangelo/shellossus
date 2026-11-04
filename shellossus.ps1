@@ -1042,10 +1042,11 @@ function Get-TuiMascotLines {
     param([string]$Mode = 'compact')
     $topChar = [string][char]0x2580
     $botChar = [string][char]0x2584
-    $cBodyFg = "$script:Esc[38;2;40;40;40m"
-    $cEyeFg  = "$script:Esc[38;2;216;166;87m"
-    $cBodyBg = "$script:Esc[48;2;40;40;40m"
-    $cEyeBg  = "$script:Esc[48;2;216;166;87m"
+    $fullChar = [string][char]0x2588
+    $cBodyFg = "$script:Esc[38;2;168;153;132m"
+    $cEyeFg  = "$script:Esc[1;38;2;250;189;47m"
+    $cBodyBg = "$script:Esc[48;2;168;153;132m"
+    $cEyeBg  = "$script:Esc[48;2;250;189;47m"
     $rst     = $script:Gm.Reset
 
     $sprite = @(
@@ -1068,9 +1069,15 @@ function Get-TuiMascotLines {
             $sb = ''
             for ($x = 0; $x -lt $row.Length; $x++) {
                 $ch = $row[$x]
-                if ($ch -eq '#') { $sb += ($cBodyBg + '  ') }
-                elseif ($ch -eq 'E') { $sb += ($cEyeBg + '  ') }
-                else { $sb += ($rst + '  ') }
+                if ($ch -eq '#') {
+                    $sb += ($cBodyFg + $cBodyBg + $fullChar + $fullChar)
+                }
+                elseif ($ch -eq 'E') {
+                    $sb += ($cEyeFg + $cEyeBg + $fullChar + $fullChar)
+                }
+                else {
+                    $sb += ($rst + '  ')
+                }
             }
             $lines += ($sb + $rst)
         }
@@ -1121,7 +1128,7 @@ function Write-TuiMascotCard {
     foreach ($line in $lines) {
         Write-Host ($barV + '  ' + $line)
     }
-    Write-Host ($barV + '  ' + $script:Gm.BoldYellow + 'The Armored Colossus' + $script:Gm.Reset + ' ' + $script:Gm.Grey1 + '- Zero dependencies, 100% ConstrainedLanguage.' + $script:Gm.Reset)
+    Write-Host ($barV + '  ' + $script:Gm.BoldYellow + 'The Armored Colossus' + $script:Gm.Reset)
     Write-Host ('  ' + $script:Gm.Grey0 + $script:Box.BL + ($script:Box.H * ($w - 4)) + $script:Box.BR + $script:Gm.Reset)
 }
 
@@ -7293,8 +7300,7 @@ if (-not $LibraryOnly) {
         $loadedStr = if ($ctxLoaded.Count -gt 0) { $script:Gm.Aqua + 'Loaded: ' + $script:Gm.Fg + ($ctxLoaded -join ' | ') + $script:Gm.Reset } else { $script:Gm.Grey1 + 'Workspace ready' + $script:Gm.Reset }
         $modelStr = $script:Gm.Aqua + 'Model: ' + $script:Gm.Fg + $Model + $script:Gm.Grey1 + ' | ' + $script:Gm.Aqua + 'Mode: ' + $script:Gm.Fg + $script:AgentPermission + $script:Gm.Reset
         $shortcutsStr = $script:Gm.Grey1 + 'Shortcuts: ' + $script:Gm.Aqua + '? (/help)' + $script:Gm.Grey1 + ' | ' + $script:Gm.Aqua + '/p' + $script:Gm.Grey1 + ' mode | ' + $script:Gm.Aqua + '/m' + $script:Gm.Grey1 + ' model | ' + $script:Gm.Aqua + '/s' + $script:Gm.Grey1 + ' status | ' + $script:Gm.Aqua + '/u' + $script:Gm.Grey1 + ' undo' + $script:Gm.Reset
-        $footerStr = $script:Gm.Grey1 + 'Zero dependencies - 100% ConstrainedLanguage' + $script:Gm.Reset
-        $textLines = @($loadedStr, $modelStr, $shortcutsStr, $footerStr, '')
+        $textLines = @($loadedStr, $modelStr, $shortcutsStr, '', '')
 
         $mascotLines = @(Get-TuiMascotLines -Mode 'compact')
         if ($wInit -ge 76) {
