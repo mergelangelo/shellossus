@@ -534,7 +534,8 @@ function Write-TuiHelpCard {
     Write-Host ($barV + $script:Gm.Aqua + '  /reasoning [arg]             ' + $script:Gm.Fg + 'Pick view (compact|full|hide) or effort (low|medium|high|off)' + $script:Gm.Reset)
     Write-Host ($barV + $script:Gm.Aqua + '  /status (/s, /tokens)        ' + $script:Gm.Fg + 'Show TUI dashboard (context gauge, tokens, tools, session)' + $script:Gm.Reset)
     Write-Host ($barV + $script:Gm.Aqua + '  /diagnostics [on|off]        ' + $script:Gm.Fg + 'Toggle pre-request capability/tool diagnostics' + $script:Gm.Reset)
-    Write-Host ($barV + $script:Gm.Aqua + '  /doctor                     ' + $script:Gm.Fg + 'Check runtime, configuration, endpoint, model, and session storage' + $script:Gm.Reset)
+    Write-Host ($barV + $script:Gm.Aqua + '  /doctor                      ' + $script:Gm.Fg + 'Check runtime, configuration, endpoint, model, and session storage' + $script:Gm.Reset)
+    Write-Host ($barV + $script:Gm.Aqua + '  /mascot                      ' + $script:Gm.Fg + 'Display the Shellossus pixel mascot' + $script:Gm.Reset)
     Write-Host ($barV + $script:Gm.BoldYellow + 'History, Undo & Compaction' + $script:Gm.Reset)
     Write-Host ($barV + $script:Gm.Aqua + '  /todo (/td) [clear]          ' + $script:Gm.Fg + 'View or clear active task plan checklist' + $script:Gm.Reset)
     Write-Host ($barV + $script:Gm.Aqua + '  /memory (/mem) [clear|add ..]' + $script:Gm.Fg + 'View, clear, or add persistent project memory' + $script:Gm.Reset)
@@ -618,6 +619,10 @@ if (-not $LibraryOnly) {
         }
         Remove-Variable inputKey -ErrorAction SilentlyContinue
         Write-Host ($script:Gm.BoldGreen + 'Settings saved. Run shellossus -Doctor to check them, then start shellossus from your working folder.' + $script:Gm.Reset)
+        return
+    }
+    if ($Mascot) {
+        Write-TuiMascotCard -Mode 'full'
         return
     }
     if (-not $BaseUrl) { $BaseUrl = $env:H_AGENT_BASE_URL }
@@ -778,10 +783,30 @@ if (-not $LibraryOnly) {
         if (Get-SkillsCatalog -Root $rootPath -ConfigDir $configDir) { $ctxLoaded += "skills ($($script:SkillsByName.Count))" }
         $null = Get-AgentRolesCatalog -Root $rootPath -ConfigDir $configDir
         if ($script:AgentRolesByName -and $script:AgentRolesByName.Count -gt 0) { $ctxLoaded += "agents ($($script:AgentRolesByName.Count))" }
-        if ($ctxLoaded.Count -gt 0) {
-            Write-Host ($script:Gm.Grey0 + $script:Box.V + ' ' + $script:Gm.Aqua + 'Loaded: ' + $script:Gm.Fg + ($ctxLoaded -join ' | ') + $script:Gm.Reset)
+        $loadedStr = if ($ctxLoaded.Count -gt 0) { $script:Gm.Aqua + 'Loaded: ' + $script:Gm.Fg + ($ctxLoaded -join ' | ') + $script:Gm.Reset } else { $script:Gm.Grey1 + 'Workspace ready' + $script:Gm.Reset }
+        $modelStr = $script:Gm.Aqua + 'Model: ' + $script:Gm.Fg + $Model + $script:Gm.Grey1 + ' | ' + $script:Gm.Aqua + 'Mode: ' + $script:Gm.Fg + $script:AgentPermission + $script:Gm.Reset
+        $shortcutsStr = $script:Gm.Grey1 + 'Shortcuts: ' + $script:Gm.Aqua + '? (/help)' + $script:Gm.Grey1 + ' | ' + $script:Gm.Aqua + '/p' + $script:Gm.Grey1 + ' mode | ' + $script:Gm.Aqua + '/m' + $script:Gm.Grey1 + ' model | ' + $script:Gm.Aqua + '/s' + $script:Gm.Grey1 + ' status | ' + $script:Gm.Aqua + '/u' + $script:Gm.Grey1 + ' undo' + $script:Gm.Reset
+        $footerStr = $script:Gm.Grey1 + 'Zero dependencies - 100% ConstrainedLanguage' + $script:Gm.Reset
+        $textLines = @($loadedStr, $modelStr, $shortcutsStr, $footerStr, '')
+
+        $mascot = @(Get-TuiMascotLines -Mode 'compact')
+        if ($wInit -ge 76) {
+            for ($mIdx = 0; $mIdx -lt 5; $mIdx++) {
+                $mLine = $mascot[$mIdx]
+                $tLine = $textLines[$mIdx]
+                $contentVis = 14 + 3 + (Strip-AnsiCodes -Text $tLine).Length
+                $padLen = $wInit - 6 - $contentVis
+                if ($padLen -lt 0) { $padLen = 0 }
+                $pad = ' ' * $padLen
+                Write-Host ($script:Gm.Grey0 + $script:Box.V + ' ' + $script:Gm.Reset + '  ' + $mLine + '   ' + $tLine + $pad)
+            }
         }
-        Write-Host ($script:Gm.Grey0 + $script:Box.V + ' ' + $script:Gm.Grey1 + 'Shortcuts: ' + $script:Gm.Aqua + '? (/help)' + $script:Gm.Grey1 + ' | ' + $script:Gm.Aqua + '/p' + $script:Gm.Grey1 + ' mode | ' + $script:Gm.Aqua + '/m' + $script:Gm.Grey1 + ' model | ' + $script:Gm.Aqua + '/s' + $script:Gm.Grey1 + ' status | ' + $script:Gm.Aqua + '/t' + $script:Gm.Grey1 + ' tree | ' + $script:Gm.Aqua + '/u' + $script:Gm.Grey1 + ' undo | ' + $script:Gm.Aqua + '"""' + $script:Gm.Grey1 + ' multiline' + $script:Gm.Reset)
+        else {
+            if ($ctxLoaded.Count -gt 0) {
+                Write-Host ($script:Gm.Grey0 + $script:Box.V + ' ' + $loadedStr)
+            }
+            Write-Host ($script:Gm.Grey0 + $script:Box.V + ' ' + $shortcutsStr)
+        }
         Write-Host ($script:Gm.Grey0 + $script:Box.BL + ($script:Box.H * ($wInit - 2)) + $script:Box.BR + $script:Gm.Reset)
         while ($true) {
             Write-TuiPromptFrame -State $state -Root $rootPath -Model $Model -UndoCount $undoStack.Count
@@ -858,6 +883,10 @@ if (-not $LibraryOnly) {
                 $doctorSessionDir = if ($sessionFile) { Split-Path $sessionFile -Parent } else { $sessionDir }
                 $report = Get-AgentDoctorReport -BaseUrl $BaseUrl -ModelId $Model -ApiKey $agentKey -Workspace $rootPath -SessionDir $doctorSessionDir -NoSession:(-not $sessionFile) -ConfigState $doctorConfigState
                 Write-AgentDoctorReport -Report $report -Mode $script:OutputMode
+                continue
+            }
+            if ($trimmedQ -eq '/mascot') {
+                Write-TuiMascotCard -Mode 'full'
                 continue
             }
             if ($trimmedQ -eq '/agents') {

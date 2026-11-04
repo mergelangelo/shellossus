@@ -809,3 +809,90 @@ function Write-AgentReasoning {
         Write-Host ('  ' + $script:Gm.Grey0 + $script:Box.BL + ($script:Box.H * 12) + $script:Gm.Reset)
     }
 }
+
+function Get-TuiMascotLines {
+    param([string]$Mode = 'compact')
+    $topChar = [string][char]0x2580
+    $botChar = [string][char]0x2584
+    $cBodyFg = "$script:Esc[38;2;40;40;40m"
+    $cEyeFg  = "$script:Esc[38;2;216;166;87m"
+    $cBodyBg = "$script:Esc[48;2;40;40;40m"
+    $cEyeBg  = "$script:Esc[48;2;216;166;87m"
+    $rst     = $script:Gm.Reset
+
+    $sprite = @(
+        '    ###       ',
+        '  #######     ',
+        ' #########    ',
+        ' ##E#E####    ',
+        '###########   ',
+        ' ############ ',
+        '  ##########  ',
+        '##  ## #   ###',
+        '    ##     #  ',
+        '              '
+    )
+
+    if ($Mode -eq 'full') {
+        $lines = @()
+        for ($y = 0; $y -lt 9; $y++) {
+            $row = $sprite[$y]
+            $sb = ''
+            for ($x = 0; $x -lt $row.Length; $x++) {
+                $ch = $row[$x]
+                if ($ch -eq '#') { $sb += ($cBodyBg + '  ') }
+                elseif ($ch -eq 'E') { $sb += ($cEyeBg + '  ') }
+                else { $sb += ($rst + '  ') }
+            }
+            $lines += ($sb + $rst)
+        }
+        return $lines
+    }
+
+    $lines = @()
+    for ($y = 0; $y -lt 10; $y += 2) {
+        $rTop = $sprite[$y]
+        $rBot = $sprite[$y + 1]
+        $sb = ''
+        for ($x = 0; $x -lt 14; $x++) {
+            $t = $rTop[$x]
+            $b = $rBot[$x]
+            if ($t -eq ' ' -and $b -eq ' ') {
+                $sb += ($rst + ' ')
+            }
+            elseif ($t -ne ' ' -and $b -eq ' ') {
+                $fg = if ($t -eq 'E') { $cEyeFg } else { $cBodyFg }
+                $sb += ($rst + $fg + $topChar)
+            }
+            elseif ($t -eq ' ' -and $b -ne ' ') {
+                $fg = if ($b -eq 'E') { $cEyeFg } else { $cBodyFg }
+                $sb += ($rst + $fg + $botChar)
+            }
+            else {
+                $fg = if ($t -eq 'E') { $cEyeFg } else { $cBodyFg }
+                $bg = if ($b -eq 'E') { $cEyeBg } else { $cBodyBg }
+                $sb += ($bg + $fg + $topChar)
+            }
+        }
+        $lines += ($sb + $rst)
+    }
+    return $lines
+}
+
+function Write-TuiMascotCard {
+    param([string]$Mode = 'full')
+    if ($script:OutputMode -eq 'json') { return }
+    $w = Get-TerminalWidth
+    $hdr = ' ' + $script:Gm.BoldGreen + $script:Box.Dot + ' Shellossus Mascot ' + $script:Gm.Reset + ' '
+    $hdrVis = (Strip-AnsiCodes -Text $hdr).Length
+    $dashes = $w - 5 - $hdrVis
+    if ($dashes -lt 2) { $dashes = 2 }
+    $barV = '  ' + $script:Gm.Grey0 + $script:Box.V + ' ' + $script:Gm.Reset
+    Write-Host ('  ' + $script:Gm.Grey0 + $script:Box.TL + $script:Box.H + $script:Gm.Reset + $hdr + $script:Gm.Grey0 + ($script:Box.H * $dashes) + $script:Box.TR + $script:Gm.Reset)
+    $lines = @(Get-TuiMascotLines -Mode $Mode)
+    foreach ($line in $lines) {
+        Write-Host ($barV + '  ' + $line)
+    }
+    Write-Host ($barV + '  ' + $script:Gm.BoldYellow + 'The Armored Colossus' + $script:Gm.Reset + ' ' + $script:Gm.Grey1 + '- Zero dependencies, 100% ConstrainedLanguage.' + $script:Gm.Reset)
+    Write-Host ('  ' + $script:Gm.Grey0 + $script:Box.BL + ($script:Box.H * ($w - 4)) + $script:Box.BR + $script:Gm.Reset)
+}

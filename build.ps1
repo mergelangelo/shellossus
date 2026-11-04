@@ -54,6 +54,7 @@ param(
     [switch]$HideReasoning,
     [switch]$Diagnostics,
     [switch]$Doctor,
+    [switch]$Mascot,
     [switch]$Continue,
     [switch]$Setup,
     [switch]$LibraryOnly
