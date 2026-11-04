@@ -7296,10 +7296,10 @@ if (-not $LibraryOnly) {
         $footerStr = $script:Gm.Grey1 + 'Zero dependencies - 100% ConstrainedLanguage' + $script:Gm.Reset
         $textLines = @($loadedStr, $modelStr, $shortcutsStr, $footerStr, '')
 
-        $mascot = @(Get-TuiMascotLines -Mode 'compact')
+        $mascotLines = @(Get-TuiMascotLines -Mode 'compact')
         if ($wInit -ge 76) {
             for ($mIdx = 0; $mIdx -lt 5; $mIdx++) {
-                $mLine = $mascot[$mIdx]
+                $mLine = $mascotLines[$mIdx]
                 $tLine = $textLines[$mIdx]
                 $contentVis = 14 + 3 + (Strip-AnsiCodes -Text $tLine).Length
                 $padLen = $wInit - 6 - $contentVis
