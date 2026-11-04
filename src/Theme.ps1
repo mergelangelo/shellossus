@@ -814,10 +814,11 @@ function Get-TuiMascotLines {
     param([string]$Mode = 'compact')
     $topChar = [string][char]0x2580
     $botChar = [string][char]0x2584
-    $cBodyFg = "$script:Esc[38;2;40;40;40m"
-    $cEyeFg  = "$script:Esc[38;2;216;166;87m"
-    $cBodyBg = "$script:Esc[48;2;40;40;40m"
-    $cEyeBg  = "$script:Esc[48;2;216;166;87m"
+    $fullChar = [string][char]0x2588
+    $cBodyFg = "$script:Esc[38;2;168;153;132m"
+    $cEyeFg  = "$script:Esc[1;38;2;250;189;47m"
+    $cBodyBg = "$script:Esc[48;2;168;153;132m"
+    $cEyeBg  = "$script:Esc[48;2;250;189;47m"
     $rst     = $script:Gm.Reset
 
     $sprite = @(
@@ -840,9 +841,15 @@ function Get-TuiMascotLines {
             $sb = ''
             for ($x = 0; $x -lt $row.Length; $x++) {
                 $ch = $row[$x]
-                if ($ch -eq '#') { $sb += ($cBodyBg + '  ') }
-                elseif ($ch -eq 'E') { $sb += ($cEyeBg + '  ') }
-                else { $sb += ($rst + '  ') }
+                if ($ch -eq '#') {
+                    $sb += ($cBodyFg + $cBodyBg + $fullChar + $fullChar)
+                }
+                elseif ($ch -eq 'E') {
+                    $sb += ($cEyeFg + $cEyeBg + $fullChar + $fullChar)
+                }
+                else {
+                    $sb += ($rst + '  ')
+                }
             }
             $lines += ($sb + $rst)
         }
@@ -893,6 +900,6 @@ function Write-TuiMascotCard {
     foreach ($line in $lines) {
         Write-Host ($barV + '  ' + $line)
     }
-    Write-Host ($barV + '  ' + $script:Gm.BoldYellow + 'The Armored Colossus' + $script:Gm.Reset + ' ' + $script:Gm.Grey1 + '- Zero dependencies, 100% ConstrainedLanguage.' + $script:Gm.Reset)
+    Write-Host ($barV + '  ' + $script:Gm.BoldYellow + 'The Armored Colossus' + $script:Gm.Reset)
     Write-Host ('  ' + $script:Gm.Grey0 + $script:Box.BL + ($script:Box.H * ($w - 4)) + $script:Box.BR + $script:Gm.Reset)
 }
