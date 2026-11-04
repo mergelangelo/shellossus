@@ -114,8 +114,12 @@ try {
     Assert-True ((Read-TuiConfirmation -PromptText 'prompt: ' -ActionType 'write') -eq 'y') 'Read-TuiConfirmation yes failed.'
     $script:mlQueue = @('WRITE')
     Assert-True ((Read-TuiConfirmation -PromptText 'prompt: ' -ActionType 'write') -eq 'y') 'Read-TuiConfirmation WRITE failed.'
+    $script:mlQueue = @('WRITE')
+    Assert-True ((Read-TuiConfirmation -PromptText 'prompt: ' -ActionType 'run') -ne 'y') 'Read-TuiConfirmation WRITE must not approve run.'
     $script:mlQueue = @('RUN')
     Assert-True ((Read-TuiConfirmation -PromptText 'prompt: ' -ActionType 'run') -eq 'y') 'Read-TuiConfirmation RUN failed.'
+    $script:mlQueue = @('RUN')
+    Assert-True ((Read-TuiConfirmation -PromptText 'prompt: ' -ActionType 'write') -ne 'y') 'Read-TuiConfirmation RUN must not approve write.'
     $script:mlQueue = @('a')
     Assert-True ((Read-TuiConfirmation -PromptText 'prompt: ' -ActionType 'write') -eq 'a') 'Read-TuiConfirmation a failed.'
     $script:mlQueue = @('d')

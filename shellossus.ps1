@@ -865,8 +865,8 @@ function Read-TuiConfirmation {
                         $ch = [string]$key.Character
                         if ($ch) {
                             $cLower = $ch.ToLower()
-                            if ($cLower -eq 'y') {
-                                Write-Host ($script:Gm.BoldGreen + 'y' + $script:Gm.Reset)
+                            if ($cLower -eq 'y' -or ($ActionType -eq 'write' -and $cLower -eq 'w') -or ($ActionType -eq 'run' -and $cLower -eq 'r')) {
+                                Write-Host ($script:Gm.BoldGreen + $cLower + $script:Gm.Reset)
                                 return 'y'
                             }
                             if ($cLower -eq 'a') {
@@ -896,10 +896,13 @@ function Read-TuiConfirmation {
         $trimmed = $raw.Trim()
         if (-not $trimmed) { return 'n' }
         $lower = $trimmed.ToLower()
-        if ($lower -in @('y', 'yes', '1', 'w', 'write') -or ($ActionType -eq 'write' -and $trimmed -ceq 'WRITE')) {
+        if ($lower -in @('y', 'yes', '1')) {
             return 'y'
         }
-        if ($lower -in @('r', 'run') -or ($ActionType -eq 'run' -and $trimmed -ceq 'RUN')) {
+        if ($ActionType -eq 'write' -and ($lower -in @('w', 'write') -or $trimmed -ceq 'WRITE')) {
+            return 'y'
+        }
+        if ($ActionType -eq 'run' -and ($lower -in @('r', 'run') -or $trimmed -ceq 'RUN')) {
             return 'y'
         }
         if ($lower -in @('a', 'all', 'always')) {
