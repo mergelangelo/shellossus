@@ -128,6 +128,18 @@ try {
     Assert-True ((Read-TuiConfirmation -PromptText 'prompt: ' -ActionType 'write') -eq 'n') 'Read-TuiConfirmation n failed.'
     $script:mlQueue = @('')
     Assert-True ((Read-TuiConfirmation -PromptText 'prompt: ' -ActionType 'write') -eq 'n') 'Read-TuiConfirmation empty cancel failed.'
+
+    # Mascot tests: compact (5 lines) and full (9 lines)
+    $compactMascot = @(Get-TuiMascotLines -Mode 'compact')
+    Assert-True ($compactMascot.Count -eq 5) 'Compact mascot must have 5 lines.'
+    Assert-True ((Strip-AnsiCodes -Text $compactMascot[0]).Length -eq 14) 'Compact mascot line width must be 14 chars.'
+
+    $fullMascot = @(Get-TuiMascotLines -Mode 'full')
+    Assert-True ($fullMascot.Count -eq 9) 'Full mascot must have 9 lines.'
+    Assert-True ((Strip-AnsiCodes -Text $fullMascot[0]).Length -eq 28) 'Full mascot line width must be 28 chars.'
+
+    Write-TuiMascotCard -Mode 'compact'
+    Write-TuiMascotCard -Mode 'full'
 }
 finally {
     Remove-Item Function:\Read-Host -ErrorAction SilentlyContinue
