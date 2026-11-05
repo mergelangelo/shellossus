@@ -48,7 +48,15 @@ if (-not $LibraryOnly) {
         $inputKey = Read-Host 'API key'
         if (-not $inputKey) { $inputKey = $config.SHELLOSSUS_API_KEY }
         if (-not $inputKey) { throw 'API key is required.' }
-        $inputWorkspace = Read-Host 'Default workspace (Enter = current folder at each launch)'
+        $defaultWorkspace = ''
+        if ($PSBoundParameters.Keys -contains 'Workspace') { $defaultWorkspace = $Workspace }
+        elseif ($env:SHELLOSSUS_WORKSPACE) { $defaultWorkspace = $env:SHELLOSSUS_WORKSPACE }
+        elseif ($env:H_AGENT_WORKSPACE) { $defaultWorkspace = $env:H_AGENT_WORKSPACE }
+        elseif ($config.SHELLOSSUS_WORKSPACE) { $defaultWorkspace = $config.SHELLOSSUS_WORKSPACE }
+        $wsPrompt = if ($defaultWorkspace) { "Default workspace [$defaultWorkspace] (Enter keeps saved, '-' clears)" } else { 'Default workspace (Enter = current folder at each launch)' }
+        $inputWorkspace = Read-Host $wsPrompt
+        if (-not $inputWorkspace) { $inputWorkspace = $defaultWorkspace }
+        elseif ($inputWorkspace.Trim() -eq '-') { $inputWorkspace = '' }
         $newCfg = @{
             SHELLOSSUS_BASE_URL = $inputUrl
             SHELLOSSUS_MODEL = $inputModel
@@ -58,7 +66,9 @@ if (-not $LibraryOnly) {
         foreach ($optK in @('SHELLOSSUS_CONTEXT_WINDOW', 'SHELLOSSUS_COMPACT_THRESHOLD', 'SHELLOSSUS_THEME')) {
             if ($config.ContainsKey($optK) -and $config[$optK]) { $newCfg[$optK] = $config[$optK] }
         }
-        if ($Theme -and $script:ActiveTheme) { $newCfg['SHELLOSSUS_THEME'] = $script:ActiveTheme }
+        if (($PSBoundParameters.Keys -contains 'ContextWindow') -and $ContextWindow) { $newCfg['SHELLOSSUS_CONTEXT_WINDOW'] = $ContextWindow }
+        if (($PSBoundParameters.Keys -contains 'CompactThreshold') -and $CompactThreshold) { $newCfg['SHELLOSSUS_COMPACT_THRESHOLD'] = $CompactThreshold }
+        if (($PSBoundParameters.Keys -contains 'Theme') -and $Theme -and $script:ActiveTheme) { $newCfg['SHELLOSSUS_THEME'] = $script:ActiveTheme }
         Save-AgentConfig -Path $ConfigPath -Config $newCfg
         Remove-Variable inputKey -ErrorAction SilentlyContinue
         Write-Host ($script:Gm.BoldGreen + 'Settings saved. Run shellossus -Doctor to check them, then start shellossus from your working folder.' + $script:Gm.Reset)
@@ -268,11 +278,13 @@ if (-not $LibraryOnly) {
                 if ($memSub -eq 'clear') {
                     $callArg = @{ action = 'clear'; scope = 'workspace' }
                     $null = Invoke-AgentMemory -Root $rootPath -Arguments $callArg
+                    Sync-AgentMemoryContext -State $state -Root $rootPath -ConfigDir $configDir | Out-Null
                     Write-Host ($script:Gm.Grey1 + '  Cleared workspace memory.' + $script:Gm.Reset)
                 }
                 elseif ($memSub -match '^add\s+(.+)$') {
                     $callArg = @{ action = 'append'; scope = 'workspace'; content = $Matches[1].Trim() }
                     $null = Invoke-AgentMemory -Root $rootPath -Arguments $callArg
+                    Sync-AgentMemoryContext -State $state -Root $rootPath -ConfigDir $configDir | Out-Null
                     Write-Host ($script:Gm.Green + '  Added memory entry.' + $script:Gm.Reset)
                 }
                 else {

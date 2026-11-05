@@ -608,6 +608,66 @@ try {
     Assert-True ($asciiPayload.Contains('\u0447\u0442\u043e?')) "ConvertTo-AsciiJson did not escape Cyrillic as expected: $asciiPayload"
     $parsedPayload = $asciiPayload | ConvertFrom-Json -ErrorAction Stop
     Assert-True ([string]$parsedPayload.messages[0].content -eq $cyrText) 'ConvertTo-AsciiJson round-trip failed.'
+
+    # Regression: -Setup preserves saved SHELLOSSUS_WORKSPACE, SHELLOSSUS_CONTEXT_WINDOW, SHELLOSSUS_COMPACT_THRESHOLD, and SHELLOSSUS_THEME when Enter is pressed.
+    $setupCfgFile = Join-Path $testRoot 'setup-preserve.env'
+    Save-AgentConfig -Path $setupCfgFile -Config @{
+        SHELLOSSUS_BASE_URL = 'https://saved.invalid/v1'
+        SHELLOSSUS_MODEL = 'saved-model'
+        SHELLOSSUS_API_KEY = 'saved-key'
+        SHELLOSSUS_WORKSPACE = 'C:\SavedWorkspace'
+        SHELLOSSUS_CONTEXT_WINDOW = '64k'
+        SHELLOSSUS_COMPACT_THRESHOLD = '48k'
+        SHELLOSSUS_THEME = 'dracula'
+    }
+    $global:setupReadQueue = @('', 'updated-model', '', '')
+    function global:Read-Host {
+        param($Prompt)
+        if (-not $global:setupReadQueue -or $global:setupReadQueue.Count -eq 0) { return '' }
+        $next = $global:setupReadQueue[0]
+        if ($global:setupReadQueue.Count -eq 1) { $global:setupReadQueue = @() }
+        else { $global:setupReadQueue = @($global:setupReadQueue[1..($global:setupReadQueue.Count - 1)]) }
+        return $next
+    }
+    try {
+        & "$PSScriptRoot\..\shellossus.ps1" -Setup -ConfigPath $setupCfgFile
+        $afterSetupCfg = Read-AgentConfig -Path $setupCfgFile
+        Assert-True ($afterSetupCfg.SHELLOSSUS_BASE_URL -eq 'https://saved.invalid/v1' -and $afterSetupCfg.SHELLOSSUS_MODEL -eq 'updated-model' -and $afterSetupCfg.SHELLOSSUS_API_KEY -eq 'saved-key' -and $afterSetupCfg.SHELLOSSUS_WORKSPACE -eq 'C:\SavedWorkspace' -and $afterSetupCfg.SHELLOSSUS_CONTEXT_WINDOW -eq '64k' -and $afterSetupCfg.SHELLOSSUS_COMPACT_THRESHOLD -eq '48k' -and $afterSetupCfg.SHELLOSSUS_THEME -eq 'dracula') '-Setup failed to preserve existing workspace or optional settings on Enter.'
+    }
+    finally {
+        Remove-Item Function:\global:Read-Host -ErrorAction SilentlyContinue
+        Remove-Variable -Name setupReadQueue -Scope Global -ErrorAction SilentlyContinue
+        $null = Set-AgentTheme -Name 'gruvbox-material'
+    }
+
+    # Regression: memory tool mutations advance $mutationEpoch and update $State.messages[0].content during Invoke-AgentTurn.
+    $script:memTurnStep = 0
+    function Invoke-WebRequest {
+        param($Uri, $Method, $Headers, $ContentType, $Body, $TimeoutSec, $ErrorAction, [switch]$UseBasicParsing, $OutFile)
+        $script:memTurnStep++
+        if ($script:memTurnStep -eq 1) {
+            $r = @{ choices = @(@{ finish_reason = 'tool_calls'; message = @{ content = ''; tool_calls = @(@{ id = 'mv-1'; type = 'function'; function = @{ name = 'memory'; arguments = '{"action":"view"}' } }) } }) } | ConvertTo-Json -Depth 10 -Compress
+        }
+        elseif ($script:memTurnStep -eq 2) {
+            $r = @{ choices = @(@{ finish_reason = 'tool_calls'; message = @{ content = ''; tool_calls = @(@{ id = 'ma-1'; type = 'function'; function = @{ name = 'memory'; arguments = '{"action":"append","content":"Turn memory rule"}' } }) } }) } | ConvertTo-Json -Depth 10 -Compress
+        }
+        elseif ($script:memTurnStep -eq 3) {
+            $r = @{ choices = @(@{ finish_reason = 'tool_calls'; message = @{ content = ''; tool_calls = @(@{ id = 'mv-2'; type = 'function'; function = @{ name = 'memory'; arguments = '{"action":"view"}' } }) } }) } | ConvertTo-Json -Depth 10 -Compress
+        }
+        else {
+            $r = @{ choices = @(@{ finish_reason = 'stop'; message = @{ content = 'Memory turn ok.' } }) } | ConvertTo-Json -Depth 10 -Compress
+        }
+        Set-Content -LiteralPath $OutFile -Value $r -Encoding UTF8 -NoNewline
+    }
+    $memTurnState = @{
+        workspace = $workspacePath
+        messages = @(
+            @{ role = 'system'; content = (Build-SystemPrompt -Root $workspacePath -ConfigDir '') },
+            @{ role = 'user'; content = 'View, append, and view memory' }
+        )
+    }
+    Invoke-AgentTurn -State $memTurnState -Endpoint 'https://example.invalid/v1/chat/completions' -ModelId 'test-model' -ApiKey 'fake' -Root $workspacePath -Steps 6 -MaxRepeatCalls 2
+    Assert-True ((-not $memTurnState.loop_detected) -and $memTurnState.messages[-1].content -eq 'Memory turn ok.' -and $memTurnState.messages[0].content.Contains('Turn memory rule')) 'Invoke-AgentTurn did not advance mutationEpoch or update system prompt after memory append.'
 }
 finally {
     Remove-TestEnvironment -Env $envData

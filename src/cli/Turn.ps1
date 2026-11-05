@@ -262,6 +262,16 @@ function Invoke-AgentTurn {
                 }
                 catch {}
             }
+            elseif ($canonToolName -eq 'memory') {
+                try {
+                    $parsedOut = $output | ConvertFrom-Json -ErrorAction Stop
+                    if ($parsedOut.success -and $parsedOut.action -in @('append', 'set', 'clear')) {
+                        $mutationEpoch++
+                        Sync-AgentMemoryContext -State $State -Root $Root | Out-Null
+                    }
+                }
+                catch {}
+            }
         }
         if ($loopAborted) {
             if ($script:OutputMode -ne 'json') {
