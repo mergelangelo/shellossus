@@ -668,6 +668,62 @@ try {
     }
     Invoke-AgentTurn -State $memTurnState -Endpoint 'https://example.invalid/v1/chat/completions' -ModelId 'test-model' -ApiKey 'fake' -Root $workspacePath -Steps 6 -MaxRepeatCalls 2
     Assert-True ((-not $memTurnState.loop_detected) -and $memTurnState.messages[-1].content -eq 'Memory turn ok.' -and $memTurnState.messages[0].content.Contains('Turn memory rule')) 'Invoke-AgentTurn did not advance mutationEpoch or update system prompt after memory append.'
+
+    # Regression (Item 7d): After context compaction removes old role='tool' messages from $State.messages,
+    # Invoke-AgentTurn must remember that scoped AGENTS.md instructions were already delivered and not re-block with instructions_required.
+    $scopedCompDir = Join-Path $workspacePath 'scoped-compact/sub'
+    New-Item -ItemType Directory -Path $scopedCompDir -Force | Out-Null
+    Set-Content -LiteralPath (Join-Path $workspacePath 'scoped-compact/AGENTS.md') -Value 'Scoped compact parent rule.' -Encoding UTF8
+    Set-Content -LiteralPath (Join-Path $scopedCompDir 'data.txt') -Value 'initial-data' -Encoding UTF8
+    $script:scTurnStep = 0
+    function Invoke-WebRequest {
+        param($Uri, $Method, $Headers, $ContentType, $Body, $TimeoutSec, $ErrorAction, [switch]$UseBasicParsing, $OutFile)
+        $payload = $Body | ConvertFrom-Json
+        if ($payload.messages[0].content -like '*context compaction assistant*') {
+            $r = @{ choices = @(@{ finish_reason = 'stop'; message = @{ content = "## Goal`nCompacted scoped history" } }) } | ConvertTo-Json -Depth 10 -Compress
+            Set-Content -LiteralPath $OutFile -Value $r -Encoding UTF8 -NoNewline
+            return
+        }
+        $script:scTurnStep++
+        if ($script:scTurnStep -eq 1) {
+            $r = @{ choices = @(@{ finish_reason = 'tool_calls'; message = @{ content = ''; tool_calls = @(@{ id = 'sc-r1'; type = 'function'; function = @{ name = 'read_file'; arguments = '{"path":"scoped-compact/sub/data.txt"}' } }) } }) } | ConvertTo-Json -Depth 10 -Compress
+        }
+        elseif ($script:scTurnStep -eq 2) {
+            $r = @{ choices = @(@{ finish_reason = 'tool_calls'; message = @{ content = ''; tool_calls = @(@{ id = 'sc-r2'; type = 'function'; function = @{ name = 'read_file'; arguments = '{"path":"scoped-compact/sub/data.txt"}' } }) } }) } | ConvertTo-Json -Depth 10 -Compress
+        }
+        elseif ($script:scTurnStep -eq 3) {
+            $r = @{ choices = @(@{ finish_reason = 'stop'; message = @{ content = 'First scoped read done.' } }) } | ConvertTo-Json -Depth 10 -Compress
+        }
+        elseif ($script:scTurnStep -eq 4) {
+            $r = @{ choices = @(@{ finish_reason = 'tool_calls'; message = @{ content = ''; tool_calls = @(@{ id = 'sc-w1'; type = 'function'; function = @{ name = 'write_file'; arguments = '{"path":"scoped-compact/sub/after-compact.txt","content":"ok-after-compact"}' } }) } }) } | ConvertTo-Json -Depth 10 -Compress
+        }
+        else {
+            $lastToolRes = $payload.messages[-1].content | ConvertFrom-Json
+            Assert-True ($lastToolRes.status -eq 'written') "Expected status=written after compaction without re-triggering instructions_required, got: $($payload.messages[-1].content)"
+            $r = @{ choices = @(@{ finish_reason = 'stop'; message = @{ content = 'Post-compact write succeeded immediately.' } }) } | ConvertTo-Json -Depth 10 -Compress
+        }
+        Set-Content -LiteralPath $OutFile -Value $r -Encoding UTF8 -NoNewline
+    }
+    $script:AgentPermission = 'AutoEdit'
+    $scState = @{
+        workspace = $workspacePath
+        messages = @(
+            @{ role = 'system'; content = 'sys' },
+            @{ role = 'user'; content = 'Read scoped file' }
+        )
+    }
+    Invoke-AgentTurn -State $scState -Endpoint 'https://example.invalid/v1/chat/completions' -ModelId 'test-model' -ApiKey 'fake' -Root $workspacePath -Steps 5
+    $scState.messages += @(
+        @{ role = 'user'; content = 'Filler turn' },
+        @{ role = 'assistant'; content = 'Filler reply' }
+    )
+    $didScCompact = Invoke-AgentCompact -State $scState -Endpoint 'https://example.invalid/v1/chat/completions' -ModelId 'test-model' -ApiKey 'fake' -KeepRecent 2
+    Assert-True ($didScCompact -and (@($scState.messages | Where-Object { $_.role -eq 'tool' }).Count -eq 0)) 'Compaction did not remove old tool messages from $State.messages.'
+    $scState.messages += @{ role = 'user'; content = 'Now write in same scoped dir after compaction' }
+    Invoke-AgentTurn -State $scState -Endpoint 'https://example.invalid/v1/chat/completions' -ModelId 'test-model' -ApiKey 'fake' -Root $workspacePath -Steps 4
+    Assert-True ((Test-Path -LiteralPath (Join-Path $scopedCompDir 'after-compact.txt')) -and $scState.messages[-1].content -eq 'Post-compact write succeeded immediately.') 'Scoped AGENTS.md check re-blocked file tool call after compaction.'
+    $script:AgentPermission = 'Ask'
+    Remove-Item -LiteralPath (Join-Path $workspacePath 'scoped-compact') -Recurse -Force
 }
 finally {
     Remove-TestEnvironment -Env $envData
