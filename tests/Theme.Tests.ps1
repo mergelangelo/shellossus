@@ -119,7 +119,8 @@ try {
     Assert-True ($plainMem.Contains('MEMORY (WORKSPACE)') -and $plainMem.Contains('+ Invariant note')) 'Format-MemoryCard failed.'
     Assert-True ($memCard[0].Contains($script:Gm.BoldPurple)) 'Format-MemoryCard header missing BoldPurple color sequence.'
 
-    # Regression (Item 10): All TUI boxed cards have aligned right walls on every line.
+    # Regression (Item 10): All TUI boxed cards have aligned right walls on every line and fit Get-TerminalWidth without overflowing.
+    $expectedTermW = Get-TerminalWidth
     Ensure-SessionTree -State $statusState
     $statusCardAligned = @(Format-TuiStatusCard -State $statusState -Model 'glm-5' -MaxSteps 50 -SessionFile 'test.jsonl' -UndoCount 2)
     $treeCardAligned = @(Format-TuiTreeCard -State $statusState)
@@ -137,12 +138,28 @@ try {
         Assert-True ($cLines.Count -ge 3) "$($cardEntry.name) should have at least 3 lines."
         $firstPlain = Strip-AnsiCodes -Text $cLines[0]
         $expectedW = $firstPlain.Length
+        Assert-True ($expectedW -eq $expectedTermW) "$($cardEntry.name) width ($expectedW) did not match terminal width ($expectedTermW)."
         Assert-True ($firstPlain.EndsWith($script:Box.TR)) "$($cardEntry.name) top border does not end with TR corner."
         $lastPlain = Strip-AnsiCodes -Text $cLines[$cLines.Count - 1]
         Assert-True ($lastPlain.Length -eq $expectedW -and $lastPlain.EndsWith($script:Box.BR)) "$($cardEntry.name) bottom border misaligned."
         for ($rIdx = 1; $rIdx -lt ($cLines.Count - 1); $rIdx++) {
             $rowPlain = Strip-AnsiCodes -Text $cLines[$rIdx]
             Assert-True ($rowPlain.Length -eq $expectedW -and $rowPlain.EndsWith($script:Box.V)) "$($cardEntry.name) row $rIdx right border misaligned (len=$($rowPlain.Length), expected=$expectedW): $rowPlain"
+        }
+    }
+
+    foreach ($testW in @(60, 140)) {
+        $longLine = $script:Gm.Aqua + ('word12345 ' * 15).Trim() + $script:Gm.Reset
+        $resizedBox = @(Format-TuiCardBox -Header ' Test Card ' -BodyLines @($longLine) -Width $testW)
+        Assert-True ($resizedBox.Count -ge 3) "Format-TuiCardBox failed at width $testW."
+        foreach ($rbLn in $resizedBox) {
+            $rbPlain = Strip-AnsiCodes -Text $rbLn
+            Assert-True ($rbPlain.Length -eq $testW) "Format-TuiCardBox line length ($($rbPlain.Length)) did not match width $testW."
+        }
+        $resizedBar = @(Format-TuiStatusBar -State $statusState -Root $ws -Model 'glm-5' -UndoCount 2 -Width $testW)
+        foreach ($sbLn in $resizedBar) {
+            $sbPlain = Strip-AnsiCodes -Text $sbLn
+            Assert-True ($sbPlain.Length -eq $testW) "Format-TuiStatusBar line length ($($sbPlain.Length)) did not match width $testW."
         }
     }
 
