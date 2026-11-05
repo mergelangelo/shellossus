@@ -285,6 +285,29 @@ try {
     Assert-True ((Get-Content -LiteralPath (Join-Path $workspacePath 'fuzzy.txt') -Raw -Encoding UTF8) -eq "alpha   `r`nbeta`t`r`ngamma") 'Undo did not restore modified file from backup.'
     Assert-True (-not (Test-Path -LiteralPath (Join-Path $workspacePath 'temp-new.txt'))) 'Undo did not remove newly created file.'
 
+    # Automatic parent directory creation in write_file and /undo cleanup of empty created directories.
+    $script:CurrentTurnWrites = @()
+    $script:approval = 'n'
+    $call.function.name = 'write_file'
+    $call.function.arguments = '{"path":"new_pkg/sub_mod/created.txt","content":"nested-content"}'
+    $declinedNested = Invoke-AgentTool -Root $workspacePath -Call $call | ConvertFrom-Json
+    Assert-True ($declinedNested.status -eq 'cancelled') 'Declined nested write_file should return cancelled.'
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $workspacePath 'new_pkg'))) 'Declined nested write_file must not create missing parent directories.'
+    $script:approval = 'WRITE'
+    $approvedNested = Invoke-AgentTool -Root $workspacePath -Call $call | ConvertFrom-Json
+    $nestedFilePath = Join-Path (Join-Path (Join-Path $workspacePath 'new_pkg') 'sub_mod') 'created.txt'
+    Assert-True ($approvedNested.status -eq 'written' -and (Test-Path -LiteralPath $nestedFilePath)) 'Approved nested write_file did not create file and parent directories.'
+    Assert-True ((Get-Content -LiteralPath $nestedFilePath -Raw -Encoding UTF8) -ceq 'nested-content') 'Nested write_file content mismatch.'
+    $nestedUndoEntry = @{ messages = @(@{ role = 'system'; content = 'sys' }); writes = @($script:CurrentTurnWrites) }
+    $nestedUndoState = @{ messages = @(@{ role = 'system'; content = 'sys' }, @{ role = 'user'; content = 'create nested' }) }
+    Invoke-AgentUndo -State $nestedUndoState -UndoEntry $nestedUndoEntry
+    Assert-True (-not (Test-Path -LiteralPath $nestedFilePath)) 'Undo did not remove created file in nested directory.'
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path (Join-Path $workspacePath 'new_pkg') 'sub_mod'))) 'Undo did not remove empty leaf directory created by write_file.'
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $workspacePath 'new_pkg'))) 'Undo did not remove empty ancestor directory created by write_file.'
+    $call.function.arguments = '{"path":"missing_dir/../../outside.txt","content":"bad"}'
+    $travNested = Invoke-AgentTool -Root $workspacePath -Call $call | ConvertFrom-Json
+    Assert-True ([bool]$travNested.error) 'write_file allowed traversal through nonexistent directory outside workspace.'
+
     Set-Content -LiteralPath (Join-Path $workspacePath 'batch.txt') -Value "one`r`ntwo`r`nthree`r`nfour" -Encoding UTF8 -NoNewline
     $call.function.name = 'edit_file'
     $call.function.arguments = '{"path":"batch.txt","edits":[{"old_text":"one","new_text":"1"},{"old_text":"four","new_text":"4"}]}'
