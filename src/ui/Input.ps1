@@ -64,19 +64,18 @@ function Invoke-TuiSelector {
     if ($script:OutputMode -ne 'json') {
         $w = Get-TerminalWidth
         $hdr = ' ' + $script:Gm.BoldOrange + $Title + $script:Gm.Reset + ' '
-        $hdrVis = (Strip-AnsiCodes -Text $hdr).Length
-        $dashes = $w - 5 - $hdrVis
-        if ($dashes -lt 2) { $dashes = 2 }
-        Write-Host ('  ' + $script:Gm.Grey0 + $script:Box.TL + $script:Box.H + $script:Gm.Reset + $hdr + $script:Gm.Grey0 + ($script:Box.H * $dashes) + $script:Box.TR + $script:Gm.Reset)
+        $body = @()
         for ($i = 0; $i -lt $Items.Count; $i++) {
             $it = $Items[$i]
             $marker = if ($it.active) { $script:Gm.BoldGreen + $script:Box.Dot + $script:Gm.Reset } else { ' ' }
             $numStr = $script:Gm.Yellow + ("[{0}]" -f ($i + 1)) + $script:Gm.Reset
             $lblStr = $script:Gm.Aqua + [string]$it.label + $script:Gm.Reset
             $descStr = if ($it.description) { $script:Gm.Grey1 + ' - ' + [string]$it.description + $script:Gm.Reset } else { '' }
-            Write-Host ('  ' + $script:Gm.Grey0 + $script:Box.V + $script:Gm.Reset + " $marker $numStr $lblStr$descStr")
+            $body += "$marker $numStr $lblStr$descStr"
         }
-        Write-Host ('  ' + $script:Gm.Grey0 + $script:Box.BL + ($script:Box.H * ($w - 4)) + $script:Box.BR + $script:Gm.Reset)
+        foreach ($ln in @(Format-TuiCardBox -Header $hdr -BodyLines $body -Width $w)) {
+            Write-Host $ln
+        }
         Write-Host ('  ' + $script:Gm.BoldYellow + $PromptText + ': ' + $script:Gm.Fg) -NoNewline
     }
     $rawChoice = Read-Host

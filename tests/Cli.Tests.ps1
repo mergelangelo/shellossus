@@ -724,6 +724,31 @@ try {
     Assert-True ((Test-Path -LiteralPath (Join-Path $scopedCompDir 'after-compact.txt')) -and $scState.messages[-1].content -eq 'Post-compact write succeeded immediately.') 'Scoped AGENTS.md check re-blocked file tool call after compaction.'
     $script:AgentPermission = 'Ask'
     Remove-Item -LiteralPath (Join-Path $workspacePath 'scoped-compact') -Recurse -Force
+
+    # Regression (Item 11): REPL /memory command (Invoke-ReplMemoryCommand) supports workspace & global scopes and view/add/set/clear/all actions.
+    $replMemCfgDir = Join-Path $testRoot 'repl-mem-global'
+    New-Item -ItemType Directory -Path $replMemCfgDir -Force | Out-Null
+    $replMemState = @{
+        workspace = $workspacePath
+        messages = @(
+            @{ role = 'system'; content = (Build-SystemPrompt -Root $workspacePath -ConfigDir $replMemCfgDir) },
+            @{ role = 'user'; content = 'hello' }
+        )
+    }
+    Invoke-ReplMemoryCommand -State $replMemState -RootPath $workspacePath -ConfigDir $replMemCfgDir -MemArg 'global add Global pref 1'
+    $globalMemFile = Join-Path $replMemCfgDir 'MEMORY.md'
+    Assert-True ((Test-Path -LiteralPath $globalMemFile) -and (Get-Content -LiteralPath $globalMemFile -Raw).Contains('Global pref 1') -and $replMemState.messages[0].content.Contains('Global pref 1')) 'Invoke-ReplMemoryCommand global add failed.'
+    Invoke-ReplMemoryCommand -State $replMemState -RootPath $workspacePath -ConfigDir $replMemCfgDir -MemArg 'global set # Global Replaced'
+    Assert-True ((Get-Content -LiteralPath $globalMemFile -Raw).Contains('# Global Replaced') -and (-not (Get-Content -LiteralPath $globalMemFile -Raw).Contains('Global pref 1')) -and $replMemState.messages[0].content.Contains('# Global Replaced')) 'Invoke-ReplMemoryCommand global set failed.'
+    Invoke-ReplMemoryCommand -State $replMemState -RootPath $workspacePath -ConfigDir $replMemCfgDir -MemArg 'set # Workspace Replaced'
+    $wsMemFile = Join-Path $workspacePath '.shellossus/MEMORY.md'
+    Assert-True ((Test-Path -LiteralPath $wsMemFile) -and (Get-Content -LiteralPath $wsMemFile -Raw).Contains('# Workspace Replaced') -and $replMemState.messages[0].content.Contains('# Workspace Replaced')) 'Invoke-ReplMemoryCommand workspace set failed.'
+    Invoke-ReplMemoryCommand -State $replMemState -RootPath $workspacePath -ConfigDir $replMemCfgDir -MemArg 'global view'
+    Invoke-ReplMemoryCommand -State $replMemState -RootPath $workspacePath -ConfigDir $replMemCfgDir -MemArg 'all'
+    Invoke-ReplMemoryCommand -State $replMemState -RootPath $workspacePath -ConfigDir $replMemCfgDir -MemArg 'global clear'
+    Assert-True ((-not (Test-Path -LiteralPath $globalMemFile)) -and (-not $replMemState.messages[0].content.Contains('# Global Replaced')) -and $replMemState.messages[0].content.Contains('# Workspace Replaced')) 'Invoke-ReplMemoryCommand global clear failed.'
+    Invoke-ReplMemoryCommand -State $replMemState -RootPath $workspacePath -ConfigDir $replMemCfgDir -MemArg 'clear'
+    Assert-True (-not (Test-Path -LiteralPath $wsMemFile)) 'Invoke-ReplMemoryCommand workspace clear failed.'
 }
 finally {
     Remove-TestEnvironment -Env $envData
