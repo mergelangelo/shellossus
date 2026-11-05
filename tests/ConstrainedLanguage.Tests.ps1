@@ -168,6 +168,8 @@ try {
 
     $clTreeNodes = @(Get-SessionTree -State $reloadedTreeState)
     Assert-True ($clTreeNodes.Count -eq 3) 'ConstrainedLanguage Get-SessionTree failed.'
+    $clArrCopy = @(Copy-SessionHashtableArray -Items $reloadedTreeState.messages)
+    Assert-True ($clArrCopy.Count -eq $reloadedTreeState.messages.Count -and $clArrCopy[0].content -eq 'sys') 'ConstrainedLanguage Copy-SessionHashtableArray failed.'
 
     Switch-SessionBranch -State $resumedCompState -TargetId $resumedCompState.leaf_id | Out-Null
     Assert-True ($resumedCompState.messages[1].content.StartsWith('[Compacted Conversation Summary]')) 'ConstrainedLanguage compaction branch switch failed.'

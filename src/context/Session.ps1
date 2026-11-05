@@ -250,6 +250,18 @@ function Copy-SessionHashtable {
     return $copy
 }
 
+function Copy-SessionHashtableArray {
+    param($Items)
+    if ($null -eq $Items) { return @() }
+    $copied = @()
+    foreach ($it in @($Items)) {
+        if ($null -ne $it) {
+            $copied += (Copy-SessionHashtable -InputObject $it)
+        }
+    }
+    return $copied
+}
+
 function Invoke-SessionFork {
     param($State, [string]$SessionDir, [string]$Workspace = '', [string]$Model = '', [string]$FromId = '', [string]$EntryId = '', [string]$NewName = '')
     Ensure-SessionTree -State $State

@@ -792,6 +792,71 @@ try {
     Assert-True ((-not (Test-Path -LiteralPath $globalMemFile)) -and (-not $replMemState.messages[0].content.Contains('# Global Replaced')) -and $replMemState.messages[0].content.Contains('# Workspace Replaced')) 'Invoke-ReplMemoryCommand global clear failed.'
     Invoke-ReplMemoryCommand -State $replMemState -RootPath $workspacePath -ConfigDir $replMemCfgDir -MemArg 'clear'
     Assert-True (-not (Test-Path -LiteralPath $wsMemFile)) 'Invoke-ReplMemoryCommand workspace clear failed.'
+
+    # Regression (Task 6): Copy-SessionHashtableArray produces independent hashtable copies, and single-shot -Prompt rolls back writes and emits turn_end status='error' on failure.
+    $copyTestState = @{
+        messages = @(
+            @{ role = 'system'; content = 'original-sys' },
+            @{ role = 'user'; content = 'original-user' }
+        )
+        tree_entries = @(
+            @{ id = 'e0001'; parent_id = $null; role = 'user'; content = 'original-user' }
+        )
+    }
+    $beforeTurnSnap = @(Copy-SessionHashtableArray -Items $copyTestState.messages)
+    $beforeTreeSnap = @(Copy-SessionHashtableArray -Items $copyTestState.tree_entries)
+    $copyTestState.messages[0].content = 'mutated-sys'
+    $copyTestState.tree_entries[0].content = 'mutated-user'
+    Assert-True ($beforeTurnSnap.Count -eq 2 -and ($beforeTurnSnap[0] -is [hashtable]) -and $beforeTurnSnap[0].content -eq 'original-sys' -and $beforeTreeSnap.Count -eq 1 -and ($beforeTreeSnap[0] -is [hashtable]) -and $beforeTreeSnap[0].content -eq 'original-user') 'Copy-SessionHashtableArray did not deep-copy session hashtables.'
+
+    $singleShotRollbackFile = Join-Path $workspacePath 'single-shot-rollback.txt'
+    $global:ssStep = 0
+    $global:ssSawFile = $false
+    $global:ssJsonLines = @()
+    $global:ssTargetFile = $singleShotRollbackFile
+    function Invoke-WebRequest {
+        param($Uri, $Method, $Headers, $ContentType, $Body, $TimeoutSec, $ErrorAction, [switch]$UseBasicParsing, $OutFile)
+        $global:ssStep++
+        if ($global:ssStep -eq 1) {
+            $r = @{ choices = @(@{ finish_reason = 'tool_calls'; message = @{
+                content = ''
+                tool_calls = @(@{ id = 'ss-w1'; type = 'function'; function = @{ name = 'write_file'; arguments = '{"path":"single-shot-rollback.txt","content":"temp-data"}' } })
+            } }) } | ConvertTo-Json -Depth 10 -Compress
+            Set-Content -LiteralPath $OutFile -Value $r -Encoding UTF8 -NoNewline
+            return
+        }
+        if (Test-Path -LiteralPath $global:ssTargetFile) { $global:ssSawFile = $true }
+        throw 'HTTP 500 Internal Server Error'
+    }
+    function Start-Sleep {
+        param($Seconds, $Milliseconds)
+    }
+    function Write-Host {
+        param([Parameter(Position = 0, ValueFromRemainingArguments = $true)]$Object, [switch]$NoNewline, $ForegroundColor, $BackgroundColor)
+        $text = ($Object | ForEach-Object { [string]$_ }) -join ' '
+        if ($text.Trim()) { $global:ssJsonLines += $text }
+    }
+    $ssThrew = $false
+    try {
+        & "$PSScriptRoot\..\shellossus.ps1" -Workspace $workspacePath -BaseUrl 'https://example.invalid/v1' -Model 'test-model' -Prompt 'Write file then fail' -Permission AutoEdit -Mode json -NoSession -ConfigPath $setupCfgFile
+    }
+    catch {
+        if ($_.Exception.Message -like '*500*') { $ssThrew = $true }
+    }
+    finally {
+        Remove-Item Function:\Start-Sleep -ErrorAction SilentlyContinue
+        Remove-Item Function:\Write-Host -ErrorAction SilentlyContinue
+    }
+    try {
+        Assert-True ($ssThrew -and $global:ssSawFile) "Single-shot -Prompt test did not execute step 1 write followed by step 2 HTTP 500 failure (step=$($global:ssStep), sawFile=$($global:ssSawFile), threw=$ssThrew)."
+        Assert-True (-not (Test-Path -LiteralPath $singleShotRollbackFile)) 'Single-shot -Prompt failure did not roll back file created during turn.'
+        Assert-True ($global:ssJsonLines.Count -ge 2) 'Single-shot -Prompt in JSON mode did not emit JSON events.'
+        $lastSsEv = $global:ssJsonLines[-1] | ConvertFrom-Json -ErrorAction Stop
+        Assert-True ($lastSsEv.type -eq 'turn_end' -and $lastSsEv.status -eq 'error' -and $lastSsEv.error -like '*500*') "Single-shot -Prompt failure did not emit turn_end status='error' event: $($global:ssJsonLines[-1])"
+    }
+    finally {
+        Remove-Variable -Name ssStep, ssSawFile, ssJsonLines, ssTargetFile -Scope Global -ErrorAction SilentlyContinue
+    }
 }
 finally {
     Remove-TestEnvironment -Env $envData

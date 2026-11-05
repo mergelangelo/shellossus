@@ -7841,6 +7841,18 @@ function Copy-SessionHashtable {
     return $copy
 }
 
+function Copy-SessionHashtableArray {
+    param($Items)
+    if ($null -eq $Items) { return @() }
+    $copied = @()
+    foreach ($it in @($Items)) {
+        if ($null -ne $it) {
+            $copied += (Copy-SessionHashtable -InputObject $it)
+        }
+    }
+    return $copied
+}
+
 function Invoke-SessionFork {
     param($State, [string]$SessionDir, [string]$Workspace = '', [string]$Model = '', [string]$FromId = '', [string]$EntryId = '', [string]$NewName = '')
     Ensure-SessionTree -State $State
@@ -10117,12 +10129,40 @@ if (-not $LibraryOnly) {
     }
     try {
         if ($Prompt) {
+            $beforeTurn = @(Copy-SessionHashtableArray -Items $state.messages)
+            $beforeLeafId = if ($state.leaf_id) { [string]$state.leaf_id } else { '' }
+            $beforeTreeEntries = @(Copy-SessionHashtableArray -Items $state.tree_entries)
+            $stBefore = Get-ContextStats -State $state
+            if ($stBefore.est_tokens -gt $stBefore.compact_threshold_tokens) {
+                if ($script:OutputMode -ne 'json') {
+                    $limStr = Format-TokenCount -Tokens $stBefore.compact_threshold_tokens
+                    Write-Host ($script:Gm.Yellow + "  [auto-compact] Context exceeds $limStr tokens, compacting older history..." + $script:Gm.Reset)
+                }
+                try { Invoke-AgentCompact -State $state -Endpoint $endpoint -ModelId $Model -ApiKey $agentKey | Out-Null } catch {}
+            }
+            $script:CurrentTurnWrites = @()
             $tplPrompt = Resolve-PromptTemplate -Root $rootPath -ConfigDir $configDir -InputText $Prompt.Trim()
             $effectivePrompt = if ($null -ne $tplPrompt) { $tplPrompt } else { $Prompt }
             $expandedPrompt = Expand-UserPrompt -Root $rootPath -Prompt $effectivePrompt
             $state.messages += @{ role = 'user'; content = $expandedPrompt }
-            Invoke-AgentTurn -State $state -Endpoint $endpoint -ModelId $Model -ApiKey $agentKey -Root $rootPath -Steps $MaxSteps
-            Save-AgentSession -SessionFile $sessionFile -State $state -Workspace $rootPath -Model $Model
+            try {
+                Invoke-AgentTurn -State $state -Endpoint $endpoint -ModelId $Model -ApiKey $agentKey -Root $rootPath -Steps $MaxSteps
+                Save-AgentSession -SessionFile $sessionFile -State $state -Workspace $rootPath -Model $Model
+            }
+            catch {
+                $errMsg = Format-AgentError -ErrorRecord $_
+                $state.messages = $beforeTurn
+                try {
+                    Invoke-AgentUndo -State $state -UndoEntry @{ messages = $beforeTurn; leaf_id = $beforeLeafId; tree_entries = $beforeTreeEntries; writes = @($script:CurrentTurnWrites) }
+                }
+                catch {
+                    if ($script:OutputMode -ne 'json') {
+                        Write-Host ($script:Gm.Red + 'Rollback warning: ' + $_.Exception.Message + $script:Gm.Reset)
+                    }
+                }
+                Write-AgentJsonEvent -EventType 'turn_end' -Payload @{ status = 'error'; error = $errMsg }
+                throw
+            }
             return
         }
         Write-TuiStartupBanner -RootPath $rootPath -ConfigDir $configDir -Model $Model
@@ -10506,9 +10546,9 @@ if (-not $LibraryOnly) {
                     Write-Host ($script:Gm.Grey1 + '  Nothing to continue.' + $script:Gm.Reset)
                     continue
                 }
-                $beforeTurn = @($state.messages)
+                $beforeTurn = @(Copy-SessionHashtableArray -Items $state.messages)
                 $beforeLeafId = if ($state.leaf_id) { [string]$state.leaf_id } else { '' }
-                $beforeTreeEntries = @(if ($state.tree_entries) { @($state.tree_entries) })
+                $beforeTreeEntries = @(Copy-SessionHashtableArray -Items $state.tree_entries)
                 $stBefore = Get-ContextStats -State $state
                 if ($stBefore.est_tokens -gt $stBefore.compact_threshold_tokens) {
                     $limStr = Format-TokenCount -Tokens $stBefore.compact_threshold_tokens
@@ -10572,9 +10612,9 @@ if (-not $LibraryOnly) {
                 }
                 continue
             }
-            $beforeTurn = @($state.messages)
+            $beforeTurn = @(Copy-SessionHashtableArray -Items $state.messages)
             $beforeLeafId = if ($state.leaf_id) { [string]$state.leaf_id } else { '' }
-            $beforeTreeEntries = @(if ($state.tree_entries) { @($state.tree_entries) })
+            $beforeTreeEntries = @(Copy-SessionHashtableArray -Items $state.tree_entries)
             $stBefore = Get-ContextStats -State $state
             if ($stBefore.est_tokens -gt $stBefore.compact_threshold_tokens) {
                 $limStr = Format-TokenCount -Tokens $stBefore.compact_threshold_tokens
