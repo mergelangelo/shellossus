@@ -1021,7 +1021,18 @@ try {
         $createdDirLink = $true
     }
     catch {
-        $createdDirLink = $false
+        if ($env:OS -eq 'Windows_NT') {
+            try {
+                New-Item -ItemType Junction -Path $dotShellLink -Target $memOutsideDir -ErrorAction Stop | Out-Null
+                $createdDirLink = $true
+            }
+            catch {
+                $createdDirLink = $false
+            }
+        }
+        else {
+            $createdDirLink = $false
+        }
     }
     if ($createdDirLink) {
         Assert-True (Test-PathHasReparsePoint -Path (Join-Path $dotShellLink 'MEMORY.md') -StopAt $memSymlinkWs) 'Test-PathHasReparsePoint failed to detect symlinked .shellossus parent directory.'
