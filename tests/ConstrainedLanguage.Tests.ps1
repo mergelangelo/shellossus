@@ -189,9 +189,9 @@ try {
     Assert-True ($constrainedConfig.SHELLOSSUS_API_KEY -eq $loadedConfig.SHELLOSSUS_API_KEY) 'ConstrainedLanguage config roundtrip failed.'
 
     $clProfilePath = Join-Path $testRoot 'cl-profile.ps1'
-    & "$PSScriptRoot\..\install.ps1" -AgentPath "$PSScriptRoot\..\shellossus.ps1" -ProfilePath $clProfilePath -Shortcut 'shoscl'
+    Invoke-AgentProfileInstall -AgentPath "$PSScriptRoot\..\shellossus.ps1" -ProfilePath $clProfilePath -Shortcut 'shoscl'
     $clProfText = Get-Content -LiteralPath $clProfilePath -Raw -Encoding UTF8
-    Assert-True ($clProfText.Contains('function global:shellossus') -and $clProfText.Contains('function global:shoscl')) 'ConstrainedLanguage install.ps1 failed.'
+    Assert-True ($clProfText.Contains('function global:shellossus') -and $clProfText.Contains('function global:shoscl')) 'ConstrainedLanguage Invoke-AgentProfileInstall failed.'
 
     $clEmptyCont = @{ messages = @(@{ role = 'system'; content = 'sys' }) }
     Assert-True (-not (Invoke-AgentContinue -State $clEmptyCont -Endpoint 'https://example.invalid/v1/chat/completions' -ModelId 'test-model' -ApiKey 'fake' -Root $workspacePath -Steps 2)) 'ConstrainedLanguage Invoke-AgentContinue failed.'

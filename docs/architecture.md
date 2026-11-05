@@ -14,16 +14,23 @@
   - Walks all ancestor directories of every resolved item and rejects NTFS junctions, symlinks, or reparse points (`Attributes -band 1024`).
   - Blocks access to `.env`, `.env.*` (except `.env.example`), and the active user configuration file (`$script:AgentConfigPath`).
 
-### 2. [`src/Theme.ps1`](../src/Theme.ps1)
-- **Palette (`$script:Gm`):** Exact 24-bit TrueColor RGB sequences from `sainnhe/gruvbox-material` (`dark medium`, `#282828` background, `#d4be98` foreground).
-- **Markdown & Table Renderer (`Write-AgentReply`, `Format-MarkdownTable`, `Format-MarkdownInline`):**
-  - Renders headings (`H1`–`H4`), bulleted/numbered lists, blockquotes, fenced code blocks, inline code, bold, italic, and links.
-  - Buffers contiguous Markdown table lines, computes visible column widths (`Get-VisibleLength`), and pads cells so ANSI escape codes do not distort table alignment.
-- **Reasoning Display (`Write-AgentReasoning`):** Renders model `reasoning_content` in `compact` (last 3 lines), `full`, or `hide` mode.
+### 2. [`src/Theme.ps1`](../src/Theme.ps1) & [`src/ui/`](../src/ui/)
+- **Palette & Prompt Frame (`Theme.ps1`):** Exact 24-bit TrueColor RGB sequences from `sainnhe/gruvbox-material` (`dark medium`, `#282828` background, `#d4be98` foreground), context gauge, permission badges, and status bar (`Write-TuiPromptFrame`).
+- **TUI Cards & Diffs (`ui/Cards.ps1`):** Tool execution cards, task board cards, plan review, memory cards, and unified diff rendering (`Format-UnifiedDiff`).
+- **Interactive Input (`ui/Input.ps1`):** Multi-line prompt input (`Read-TuiMultilineInput`), interactive TUI selector (`Invoke-TuiSelector`), and confirmation prompts (`Read-TuiConfirmation`).
+- **Markdown, Table & Mascot Renderer (`ui/Markdown.ps1`):**
+  - Renders headings (`H1`–`H4`), bulleted/numbered lists, blockquotes, fenced code blocks, inline code, bold, italic, and links (`Write-AgentReply`, `Format-MarkdownInline`).
+  - Buffers contiguous Markdown table lines, computes visible column widths (`Get-VisibleLength`), and pads cells so ANSI escape codes do not distort table alignment (`Format-MarkdownTable`).
+  - Renders model `reasoning_content` in `compact` (last 3 lines), `full`, or `hide` mode (`Write-AgentReasoning`) and the ASCII/Unicode mascot (`Write-TuiMascotCard`).
 
 ### 3. [`src/tools/`](../src/tools/)
-- **Common & Schemas (`Common.ps1`):** Canonical name mapping (`Resolve-ToolCanonicalName`), tool enablement check, argument normalizers (`Format-*Arguments`), and strict schema validation (`Test-AgentToolArguments`).
-- **File Operations (`Files.ps1`):** Ignore rules, directory walking (`Invoke-WorkspaceWalk`), and transactional fuzzy/batch file edits (`Invoke-AgentWrite`).
+- **Common State & Truncation (`Common.ps1`):** Runtime state variables, canonical name mapping (`Resolve-ToolCanonicalName`), tool enablement check (`Test-IsToolEnabled`), line/head/tail truncation, and environment inspection (`Get-AgentEnvironment`).
+- **Schemas & Capabilities (`Schemas.ps1`):** Capability probing (`Get-AgentCapabilities`) and OpenAI tool schema definitions (`Get-AgentTools`).
+- **Argument Normalizers (`Normalizers.ps1`):** Tolerant alias and schema normalizers (`Format-EditArguments`, `Format-RunAgentArguments`, `Format-TodoArguments`, `Format-AskUserArguments`, `Format-MemoryArguments`).
+- **Schema Validation (`Validation.ps1`):** Strict tool argument validation before execution (`Test-AgentToolArguments`).
+- **Ignore Rules & Directory Walk (`Ignore.ps1`):** `.gitignore` / `.ignore` parsing, ancestor rule resolution, and workspace walking (`Invoke-WorkspaceWalk`).
+- **File Writing & Editing (`Files.ps1`):** Fuzzy line matching (`Find-EditMatch`), diff previews (`Format-DiffSnippet`), line-ending preservation, and transactional single/batch file writes (`Invoke-AgentWrite`).
+- **File Discovery & Reading (`Search.ps1`):** Directory listing (`Invoke-AgentListFiles`), glob file search (`Invoke-AgentFindFiles`), regex/literal content search (`Invoke-AgentGrepFiles`), and paginated file reading (`Invoke-AgentReadFile`).
 - **Undo Engine (`Undo.ps1`):** Transactional disk rollback and turn reversal (`Invoke-AgentUndo`).
 - **Process & Shell (`Shell.ps1`):** Process tracking (`Stop-AgentProcessTree`) and sanitized command execution (`Invoke-AgentCommand`).
 - **Web & Search (`Web.ps1`):** URL encoding, HTML text extraction, web search (`Invoke-AgentWebSearch`), and page fetch (`Invoke-AgentFetchUrl`).
@@ -31,21 +38,25 @@
 - **Interactive Questioning (`AskUser.ps1`):** Plan review and user clarification questions tool (`Invoke-AgentAskUser`).
 - **Persistent Memory (`Memory.ps1`):** Long-term cross-session knowledge storage in `MEMORY.md` (`Invoke-AgentMemory`).
 - **Subagents (`Agents.ps1`):** Delegated task execution across specialized roles (`Invoke-AgentSubagent`).
-- **Dispatcher (`Dispatch.ps1`):** Master tool caller (`Invoke-AgentTool`) routing calls and executing file queries (`list_files`, `find_files`, `grep_files`).
+- **Dispatcher (`Dispatch.ps1`):** Master tool router (`Invoke-AgentTool`).
 
 ### 4. [`src/context/`](../src/context/)
-- **Prompt Assembly (`Prompt.ps1`):** System prompt builder (`Build-SystemPrompt`), loading `AGENTS.md`, `SOUL.md`, `MEMORY.md`, skills, and subagent roles.
+- **Prompt Assembly (`Prompt.ps1`):** System prompt builder (`Build-SystemPrompt`), loading `AGENTS.md`, `SOUL.md`, `MEMORY.md`, and capability blocks (`Sync-AgentCapabilities`).
+- **Skills & Subagent Catalog (`Catalog.ps1`):** Discovery and resolution of `SKILL.md` skills (`Get-SkillsCatalog`, `Resolve-SkillCommand`) and built-in/custom subagent roles (`Get-AgentRolesCatalog`, `Resolve-AgentRoleCommand`).
 - **Templates & Expansion (`Templates.ps1`):** Reusable slash prompt templates (`.shellossus/prompts/`) and inline `@file` / `!cmd` prompt attachments.
-- **Session Trees (`Session.ps1`):** Multi-branch conversation trees, atomic JSONL session storage, and standalone HTML export.
+- **Session Branch Tree (`SessionTree.ps1`):** Multi-branch conversation DAG construction, boundary validation, and branch switching (`Ensure-SessionTree`, `Get-SessionTree`, `Switch-SessionBranch`).
+- **Session Persistence & Export (`Session.ps1`):** Atomic JSONL session storage (`Save-AgentSession`, `Invoke-SessionResume`), session forking (`Invoke-SessionFork`), and standalone HTML export (`Export-AgentSessionHtml`).
 - **Context Compaction (`Compaction.ps1`):** Token budgeting, token estimation, semantic compaction boundaries, and structured handoffs (`Invoke-AgentCompact`).
 
-### 5. [`src/Cli.ps1`](../src/Cli.ps1)
-- **Turn Loop (`Invoke-AgentTurn`):**
-  - Sends UTF-8 JSON requests via `Invoke-WebRequest -OutFile` (avoiding PowerShell 5.1 default ANSI decoding issues).
-  - Retries transient HTTP/network failures (`408`, `429`, `500`, `502`, `503`, `504`, timeouts) with backoff.
+### 5. [`src/cli/`](../src/cli/) & [`src/Cli.ps1`](../src/Cli.ps1)
+- **Profile Installer (`cli/Install.ps1`):** Built-in `-Install` launcher installer (`Invoke-AgentProfileInstall`) registering `global:shellossus` and optional conflict-checked shortcuts in `$PROFILE`.
+- **HTTP Transport & JSON Events (`cli/Http.ps1`):** UTF-8 file-backed HTTP transport (`Invoke-AgentHttpRequest`) with transient retry/backoff, spinner (`Wait-AgentProcessWithSpinner`), and JSON mode event emitter (`Write-AgentJsonEvent`).
+- **Turn Loop (`cli/Turn.ps1`):**
+  - Loop detection via canonical tool call signatures (`Get-ToolCallSignature`).
   - Automatically triggers `Invoke-AgentCompact` and retries once if the API reports a context-length overflow.
-  - Verifies `finish_reason` before accepting the assistant message or executing any `tool_calls` (rejecting truncated `finish_reason=length` responses).
-- **Interactive REPL:** Handles slash commands, `!cmd` / `!!cmd` shortcuts, turn rollback on failure, and `-Prompt` single-shot execution.
+  - Verifies `finish_reason` before accepting the assistant message or executing any `tool_calls` (`Invoke-AgentTurn`, `Invoke-AgentContinue`).
+- **REPL Helpers & Pickers (`cli/Repl.ps1`):** Slash command aliases (`Resolve-ReplCommandAlias`), status/tree/help/startup cards, and interactive pickers for `/permission`, `/diagnostics`, `/reasoning`, `/context`, and `/model`.
+- **Entrypoint & REPL Loop (`Cli.ps1`):** Handles `-Install`, `-Setup`, `-Doctor`, `-Mascot`, `-Export`, `-Prompt` single-shot execution, and the interactive REPL loop.
 
 ### 6. [`src/Doctor.ps1`](../src/Doctor.ps1)
 - **Diagnostics (`Get-AgentDoctorReport`):** Reports PowerShell/version support, language mode, configuration parsing, effective model/key settings, workspace access, session storage, and endpoint/model-catalog results. `-Doctor` runs before startup prompts or session creation, even with incomplete settings; `/doctor` checks the current model and session directory without changing conversation or undo state.
@@ -55,7 +66,7 @@
 
 ## Built-in Tool Reference
 
-These are the 13 canonical tools from `Get-AgentTools` in `src/tools/Common.ps1`. Availability also depends on permission mode and `-Tools` / `-ExcludeTools` / `-NoTools`.
+These are the 13 canonical tools from `Get-AgentTools` in `src/tools/Schemas.ps1`. Availability also depends on permission mode and `-Tools` / `-ExcludeTools` / `-NoTools`.
 
 | Tool | Purpose | Filesystem / undo scope |
 | --- | --- | --- |

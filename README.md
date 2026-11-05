@@ -24,17 +24,17 @@ Drop [`shellossus.ps1`](shellossus.ps1) onto any machine and connect to any Open
 
 ### 1. Install Launcher (One-Time)
 
-Clone the repository or copy [`shellossus.ps1`](shellossus.ps1) and [`install.ps1`](install.ps1) into a permanent folder (e.g. `C:\Users\YOU\Tools\shellossus`), then run:
+Clone the repository or copy [`shellossus.ps1`](shellossus.ps1) into a permanent folder (e.g. `C:\Users\YOU\Tools\shellossus`), then run:
 
 ```powershell
-.\install.ps1
+.\shellossus.ps1 -Install
 ```
 
-During installation, `install.ps1` always registers the full `shellossus` command and lets you pick an optional shortcut (`s`, `sss`, `shos`, a custom name, or no shortcut), verifying with `Get-Command -All` that the chosen shortcut does not conflict with existing commands. Non-interactive installation is also supported:
+During installation, `-Install` always registers the full `shellossus` command and lets you pick an optional shortcut (`s`, `sss`, `shos`, a custom name, or no shortcut), verifying with `Get-Command -All` that the chosen shortcut does not conflict with existing commands. Non-interactive installation is also supported:
 
 ```powershell
-.\install.ps1 -Shortcut s
-.\install.ps1 -NoShortcut
+.\shellossus.ps1 -Install -Shortcut s
+.\shellossus.ps1 -Install -NoShortcut
 ```
 
 Open a new PowerShell window and configure your API endpoint, model ID, and key (stored in `%USERPROFILE%\.shellossus\.env`, outside your project):
@@ -123,14 +123,15 @@ shellossus -Prompt "Explain @src/tools/Files.ps1" # Single-shot non-interactive 
 ├── SECURITY.md         # Vulnerability reporting policy and threat model
 ├── shellossus.ps1      # Standalone single-file distribution (built from src/*.ps1)
 ├── build.ps1           # Bundler and sync verifier (.\build.ps1 / .\build.ps1 -Check)
-├── install.ps1         # PowerShell profile launcher installer
 ├── src/
 │   ├── Config.ps1      # .env parser, workspace path boundary & reparse-point checks
-│   ├── Theme.ps1       # Gruvbox Material RGB palette, Markdown & table renderer
+│   ├── Theme.ps1       # Gruvbox Material RGB palette, status bar, and prompt frame
+│   ├── ui/             # TUI cards/diffs (Cards), multiline/picker input (Input), Markdown/tables (Markdown)
+│   ├── tools/          # Modular tools & schemas (Common, Schemas, Normalizers, Validation, Ignore, Files, Search, Shell, Undo, Web, Todo, AskUser, Memory, Agents, Dispatch)
+│   ├── context/        # Prompt builder, skills/roles catalog, templates, session tree, persistence, compaction
 │   ├── Doctor.ps1      # Runtime, endpoint, model catalog, and session storage diagnostics
-│   ├── tools/          # Modular tools (Files, Shell, Undo, Web, Todo, AskUser, Memory, Agents)
-│   ├── context/        # Prompt builder, skills, templates, sessions, compaction
-│   └── Cli.ps1         # Agent turn loop, retry/overflow recovery, interactive REPL
+│   ├── cli/            # Profile installer (Install), HTTP transport (Http), agent turn loop (Turn), REPL cards & pickers (Repl)
+│   └── Cli.ps1         # CLI entrypoint, setup, single-shot execution, and interactive REPL loop
 ├── tests/
 │   ├── smoke.ps1       # Test runner (.\build.ps1 -Check + all *.Tests.ps1 suites)
 │   └── *.Tests.ps1     # Modular suites (Config, Theme, Tools, Context, Cli, Doctor, Reliability, ConstrainedLanguage)
