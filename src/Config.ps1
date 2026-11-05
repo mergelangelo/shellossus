@@ -103,13 +103,44 @@ function Format-ConfigPath {
     param([string]$Path)
     if (-not $Path) { return '' }
     if (Test-Path -LiteralPath $Path) { return (Get-Item -LiteralPath $Path -Force).FullName }
-    $parent = Split-Path $Path -Parent
-    $leaf = Split-Path $Path -Leaf
-    if (-not $parent) { $parent = '.' }
-    if (Test-Path -LiteralPath $parent) {
-        return (Join-Path (Get-Item -LiteralPath $parent -Force).FullName $leaf)
+    $segments = @()
+    $curr = $Path
+    for ($depth = 0; $depth -lt 64; $depth++) {
+        if (-not $curr) { break }
+        $leaf = Split-Path $curr -Leaf
+        $parent = Split-Path $curr -Parent
+        if ($leaf -and $leaf -ne '.') {
+            $segments = @($leaf) + $segments
+        }
+        if (-not $parent) {
+            if ($curr -notmatch '^([a-zA-Z]:[/\\]?|[/\\])$') { $curr = '.' }
+            break
+        }
+        if ($parent -ieq $curr) { break }
+        $curr = $parent
+        while ((Split-Path $curr -Leaf) -eq '.') {
+            $nextParent = Split-Path $curr -Parent
+            if (-not $nextParent -or $nextParent -ieq $curr) {
+                $curr = '.'
+                break
+            }
+            $curr = $nextParent
+        }
+        if (Test-Path -LiteralPath $curr) { break }
     }
-    return $Path
+    $basePath = if ($curr -and (Test-Path -LiteralPath $curr)) {
+        (Get-Item -LiteralPath $curr -Force).FullName
+    }
+    elseif ($curr -match '^[a-zA-Z]:[/\\]?$') {
+        $curr
+    }
+    else {
+        (Get-Item -LiteralPath (Get-Location).Path -Force).FullName
+    }
+    foreach ($seg in $segments) {
+        $basePath = Join-Path $basePath $seg
+    }
+    return $basePath
 }
 
 function Format-AgentError {
@@ -139,7 +170,9 @@ function Format-PreviewText {
 function Test-IsSecretFile {
     param($Item)
     if ($Item.PSIsContainer) { return $false }
-    return ($Item.Name -eq '.env' -or ($Item.Name -like '.env.*' -and $Item.Name -ne '.env.example') -or $Item.FullName -eq $script:AgentConfigPath -or ($script:LegacyAgentConfigPath -and $Item.FullName -eq $script:LegacyAgentConfigPath))
+    $cleanName = ($Item.Name -replace ':.*$', '').TrimEnd('.', ' ')
+    $cleanFull = ($Item.FullName -replace '(?<!^[a-zA-Z]):.*$', '').TrimEnd('.', ' ')
+    return ($cleanName -eq '.env' -or ($cleanName -like '.env.*' -and $cleanName -ne '.env.example') -or $cleanFull -eq $script:AgentConfigPath -or ($script:LegacyAgentConfigPath -and $cleanFull -eq $script:LegacyAgentConfigPath))
 }
 
 function Test-AgentPathWithinRoot {
@@ -190,6 +223,7 @@ function Test-PathHasReparsePoint {
 function Resolve-AgentPath {
     param([string]$Root, [string]$RelativePath, [switch]$AllowRegisteredSkill)
     if (-not $RelativePath) { $RelativePath = '.' }
+    if (($RelativePath -replace '^[a-zA-Z]:', '').Contains(':')) { throw 'Invalid path syntax.' }
     if ($AllowRegisteredSkill -and $script:RegisteredSkills -and $script:RegisteredSkills.Count -gt 0) {
         $skillTarget = $null
         if ($script:RegisteredSkills.ContainsKey($RelativePath)) {

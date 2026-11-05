@@ -106,7 +106,8 @@ function Invoke-AgentWrite {
         if (-not $leaf -or $leaf -match '[<>:"/\\|?*\x00-\x1f]' -or $leaf -match '[. ]$') { throw 'Invalid file name.' }
         if ($leaf -match '^(?i:CON|PRN|AUX|NUL|COM[0-9]|LPT[0-9])(?:\.|$)') { throw 'Reserved file name.' }
         $path = Join-Path $parent $leaf
-        if ($leaf -eq '.env' -or ($leaf -like '.env.*' -and $leaf -ne '.env.example') -or $path -eq $script:AgentConfigPath) { throw 'Agent tools cannot write credential configuration files.' }
+        $cleanLeaf = ($leaf -replace ':.*$', '').TrimEnd('.', ' ')
+        if ($cleanLeaf -eq '.env' -or ($cleanLeaf -like '.env.*' -and $cleanLeaf -ne '.env.example') -or $path -eq $script:AgentConfigPath -or ($script:LegacyAgentConfigPath -and $path -eq $script:LegacyAgentConfigPath)) { throw 'Agent tools cannot write credential configuration files.' }
         if ($Arguments.content -isnot [string]) { throw 'content must be a string.' }
         $allowOverwrite = ($Arguments.overwrite -eq $true)
         if (Test-Path -LiteralPath $path) {

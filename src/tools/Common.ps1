@@ -20,6 +20,7 @@ $script:ActiveState = $null
 $script:SubagentDepth = 0
 $script:MaxSubagentDepth = 1
 $script:ActiveSessionTodos = @()
+$script:AutoApproveWeb = $false
 
 function Resolve-ToolCanonicalName {
     param([string]$Name)

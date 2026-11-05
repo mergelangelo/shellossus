@@ -173,7 +173,10 @@ function Test-SafeWebUrl {
         if ($hostName.Contains(':')) {
             if ($hostName -match '^[0:]+0*1(?:%.*)?$' -or
                 $hostName -match '^[0:]+(?:%.*)?$' -or
-                $hostName -match '^(?:fe[89ab][0-9a-f]:|f[cd][0-9a-f]{2}:|ff[0-9a-f]{2}:|[0:]*:ffff:)') {
+                $hostName -match '^(?:fe[89ab][0-9a-f]:|f[cd][0-9a-f]{2}:|ff[0-9a-f]{2}:|[0:]*:ffff:)' -or
+                $hostName -match '^::(?:ffff:(?:0:+)?)?(?:127\.|10\.|192\.168\.|169\.254\.|172\.(?:1[6-9]|2\d|3[01])\.|0\.)' -or
+                $hostName -match '^(?:0+:){0,6}(?:::(?:ffff:(?:0:+)?)?|ffff:)?(?:7f[0-9a-f]{2}|0?a[0-9a-f]{2}|c0a8|a9fe|ac1[0-9a-f]):[0-9a-f]{1,4}$' -or
+                $hostName -match '^64:ff9b:') {
                 throw "Blocked request to local or private IPv6 address: $hostName"
             }
         }
@@ -206,7 +209,7 @@ function Test-SafeWebUrl {
 
 function Request-AgentWebConfirmation {
     param([string]$ToolName, [string]$Target)
-    if ($script:AgentPermission -in @('AutoEdit', 'Auto')) {
+    if ($script:AgentPermission -in @('AutoEdit', 'Auto') -or $script:AutoApproveWeb) {
         return @{ approved = $true; response = $null }
     }
     if ($script:OutputMode -eq 'json') {
@@ -222,10 +225,8 @@ function Request-AgentWebConfirmation {
     $promptStr = '  ' + $script:Gm.Grey0 + $script:Box.V + ' ' + $script:Gm.BoldYellow + 'Confirm outbound web request [y]es, [n]o, [a]ll: ' + $script:Gm.Fg
     $choice = Read-TuiConfirmation -PromptText $promptStr -ActionType 'web'
     if ($choice -eq 'a') {
-        if ($script:AgentPermission -eq 'Ask') {
-            $script:AgentPermission = 'AutoEdit'
-            Write-Host ('  ' + $script:Gm.Grey0 + $script:Box.V + ' ' + $script:Gm.Aqua + $script:Box.Check + ' [switched permission to AutoEdit for this session]' + $script:Gm.Reset)
-        }
+        $script:AutoApproveWeb = $true
+        Write-Host ('  ' + $script:Gm.Grey0 + $script:Box.V + ' ' + $script:Gm.Aqua + $script:Box.Check + ' [auto-approving web requests for this session]' + $script:Gm.Reset)
         return @{ approved = $true; response = $null }
     }
     if ($choice -eq 'y') {
@@ -306,11 +307,22 @@ function Invoke-AgentWebDownload {
     }
     $webCommand = Get-Command -Name 'Invoke-WebRequest' -ErrorAction SilentlyContinue
     if ($webCommand -and $webCommand.CommandType -eq 'Function') {
+        $savedSKey = $env:SHELLOSSUS_API_KEY
+        $savedHKey = $env:H_AGENT_API_KEY
+        $savedOKey = $env:OPENAI_API_KEY
         try {
+            $env:SHELLOSSUS_API_KEY = $null
+            $env:H_AGENT_API_KEY = $null
+            $env:OPENAI_API_KEY = $null
             Invoke-WebRequest @request
         }
         catch {
             throw (Format-WebRequestError -ErrorRecord $_)
+        }
+        finally {
+            $env:SHELLOSSUS_API_KEY = $savedSKey
+            $env:H_AGENT_API_KEY = $savedHKey
+            $env:OPENAI_API_KEY = $savedOKey
         }
     }
     else {
@@ -319,6 +331,9 @@ function Invoke-AgentWebDownload {
         $proc = $null
         $oldUri = $env:SHELLOSSUS_WEB_DOWNLOAD_URI
         $oldFile = $env:SHELLOSSUS_WEB_DOWNLOAD_FILE
+        $savedSKey = $env:SHELLOSSUS_API_KEY
+        $savedHKey = $env:H_AGENT_API_KEY
+        $savedOKey = $env:OPENAI_API_KEY
         try {
             $worker = @'
 $ErrorActionPreference = 'Stop'
@@ -347,6 +362,9 @@ try {
             }
             else { @('-NoProfile', '-NonInteractive', '-Command', $worker) }
             try {
+                $env:SHELLOSSUS_API_KEY = $null
+                $env:H_AGENT_API_KEY = $null
+                $env:OPENAI_API_KEY = $null
                 $env:SHELLOSSUS_WEB_DOWNLOAD_URI = $Uri
                 $env:SHELLOSSUS_WEB_DOWNLOAD_FILE = $OutFile
                 $proc = Start-Process -FilePath (Get-AgentEnvironment).shell_exe -ArgumentList $workerArguments -RedirectStandardOutput $stdout.FullName -RedirectStandardError $stderr.FullName -NoNewWindow -PassThru -ErrorAction Stop
@@ -354,6 +372,9 @@ try {
             finally {
                 $env:SHELLOSSUS_WEB_DOWNLOAD_URI = $oldUri
                 $env:SHELLOSSUS_WEB_DOWNLOAD_FILE = $oldFile
+                $env:SHELLOSSUS_API_KEY = $savedSKey
+                $env:H_AGENT_API_KEY = $savedHKey
+                $env:OPENAI_API_KEY = $savedOKey
             }
             $started = Get-Date
             while (-not $proc.HasExited) {

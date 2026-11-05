@@ -1104,6 +1104,127 @@ try {
     $rulesV3 = @(Read-DirectoryIgnoreRules -RootFull $workspacePath -DirFull $cacheIgDir)
     Assert-True ($rulesV3.Count -eq 0) 'Read-DirectoryIgnoreRules did not invalidate cache when .gitignore was deleted.'
     Remove-Item -LiteralPath $cacheIgDir -Recurse -Force
+
+    # Regression: Invoke-AgentWrite blocks writing to $script:LegacyAgentConfigPath.
+    $savedLegacyCfg = $script:LegacyAgentConfigPath
+    try {
+        $script:LegacyAgentConfigPath = Format-ConfigPath -Path (Join-Path $workspacePath '.\legacy-uncreated.cfg')
+        $legacyWriteCall = @{ id = 'w-leg-cfg'; function = @{ name = 'write_file'; arguments = '{"path":"legacy-uncreated.cfg","content":"bad"}' } }
+        $legacyWriteRes = Invoke-AgentTool -Root $workspacePath -Call $legacyWriteCall | ConvertFrom-Json
+        Assert-True ($legacyWriteRes.error -like '*credential*') 'Invoke-AgentWrite did not block writing to $script:LegacyAgentConfigPath.'
+    }
+    finally {
+        $script:LegacyAgentConfigPath = $savedLegacyCfg
+    }
+
+    # Regression: Format-AskUserArguments and Format-MemoryArguments preserve unknown arguments and non-string types for validation.
+    $unknownAskRes = Invoke-AgentTool -Root $workspacePath -Call @{ id = 'ask-unk'; function = @{ name = 'ask_user'; arguments = '{"question":"Continue?","unexpected_param":123}' } } | ConvertFrom-Json
+    Assert-True ($unknownAskRes.error -like '*Unknown argument*unexpected_param*') "ask_user did not reject unknown argument: $($unknownAskRes.error)"
+    $unknownMemRes = Invoke-AgentTool -Root $workspacePath -Call @{ id = 'mem-unk'; function = @{ name = 'memory'; arguments = '{"action":"view","unexpected_param":123}' } } | ConvertFrom-Json
+    Assert-True ($unknownMemRes.error -like '*Unknown argument*unexpected_param*') "memory did not reject unknown argument: $($unknownMemRes.error)"
+    $badTypeMemRes = Invoke-AgentTool -Root $workspacePath -Call @{ id = 'mem-type'; function = @{ name = 'memory'; arguments = '{"action":"append","content":12345}' } } | ConvertFrom-Json
+    Assert-True ($badTypeMemRes.error -like '*must be a string*') "memory did not reject non-string content: $($badTypeMemRes.error)"
+
+    # Regression: Request-AgentWebConfirmation 'a' ([a]ll) sets $script:AutoApproveWeb = $true without escalating $script:AgentPermission to AutoEdit.
+    $savedPermWebAll = $script:AgentPermission
+    $savedAutoWebAll = $script:AutoApproveWeb
+    $savedApprovalWebAll = $script:approval
+    try {
+        $script:AgentPermission = 'Ask'
+        $script:AutoApproveWeb = $false
+        $script:approval = 'a'
+        $webConf1 = Request-AgentWebConfirmation -ToolName 'fetch_url' -Target 'https://example.com/1'
+        Assert-True ($webConf1.approved -and $script:AutoApproveWeb -eq $true) 'Entering a at web confirmation did not set $script:AutoApproveWeb = $true.'
+        Assert-True ($script:AgentPermission -eq 'Ask') "Entering a at web confirmation must not escalate AgentPermission to AutoEdit (got $($script:AgentPermission))."
+        $promptsBeforeWeb2 = $script:prompts
+        $script:approval = 'n'
+        $webConf2 = Request-AgentWebConfirmation -ToolName 'fetch_url' -Target 'https://example.com/2'
+        Assert-True ($webConf2.approved -and $script:prompts -eq $promptsBeforeWeb2) 'Subsequent web request was not auto-approved when $script:AutoApproveWeb is true.'
+    }
+    finally {
+        $script:AgentPermission = $savedPermWebAll
+        $script:AutoApproveWeb = $savedAutoWebAll
+        $script:approval = $savedApprovalWebAll
+    }
+
+    # Regression: Test-SafeWebUrl blocks IPv4-compatible/mapped IPv6, hex-encoded private IPv4 in IPv6, and NAT64 prefix.
+    foreach ($ipv6SsrfUrl in @(
+        'http://[::127.0.0.1]/',
+        'http://[::ffff:127.0.0.1]/',
+        'http://[::10.0.0.1]/',
+        'http://[::192.168.1.1]/',
+        'http://[::169.254.169.254]/',
+        'http://[::172.16.0.1]/',
+        'http://[::7f00:1]/',
+        'http://[::ffff:7f00:1]/',
+        'http://[0:0:0:0:0:0:7f00:1]/',
+        'http://[0:0:0:0:0:ffff:7f00:1]/',
+        'http://[64:ff9b::127.0.0.1]/',
+        'http://[64:ff9b::7f00:1]/'
+    )) {
+        $v6Blocked = $false
+        try {
+            $null = Test-SafeWebUrl -Url $ipv6SsrfUrl
+        }
+        catch {
+            $v6Blocked = $true
+        }
+        Assert-True $v6Blocked "Test-SafeWebUrl failed to block IPv6 SSRF URL: $ipv6SsrfUrl"
+    }
+
+    # Regression: Invoke-AgentWebDownload scrubs SHELLOSSUS_API_KEY, H_AGENT_API_KEY, and OPENAI_API_KEY during download and restores them in finally.
+    $savedEnvS = $env:SHELLOSSUS_API_KEY
+    $savedEnvH = $env:H_AGENT_API_KEY
+    $savedEnvO = $env:OPENAI_API_KEY
+    $script:leakedKeysDuringWeb = $true
+    function Invoke-WebRequest {
+        param($Uri, $Method, $Headers, $ContentType, $Body, $TimeoutSec, $ErrorAction, [switch]$UseBasicParsing, $OutFile)
+        $script:leakedKeysDuringWeb = ([bool]$env:SHELLOSSUS_API_KEY -or [bool]$env:H_AGENT_API_KEY -or [bool]$env:OPENAI_API_KEY)
+        Set-Content -LiteralPath $OutFile -Value 'ok' -Encoding UTF8 -NoNewline
+    }
+    $dlTmp = New-TemporaryFile
+    try {
+        $env:SHELLOSSUS_API_KEY = 'sec-s'
+        $env:H_AGENT_API_KEY = 'sec-h'
+        $env:OPENAI_API_KEY = 'sec-o'
+        Invoke-AgentWebDownload -Uri 'https://example.com/test' -OutFile $dlTmp.FullName
+        Assert-True (-not $script:leakedKeysDuringWeb) 'Invoke-AgentWebDownload did not scrub API keys from environment during download.'
+        Assert-True ($env:SHELLOSSUS_API_KEY -eq 'sec-s' -and $env:H_AGENT_API_KEY -eq 'sec-h' -and $env:OPENAI_API_KEY -eq 'sec-o') 'Invoke-AgentWebDownload did not restore API keys after download.'
+    }
+    finally {
+        $env:SHELLOSSUS_API_KEY = $savedEnvS
+        $env:H_AGENT_API_KEY = $savedEnvH
+        $env:OPENAI_API_KEY = $savedEnvO
+        Remove-Item Function:\Invoke-WebRequest -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $dlTmp.FullName -Force -ErrorAction SilentlyContinue
+    }
+
+    # Regression: Wait-AgentProcessWithSpinner clamps long status labels to terminal width without [Math]::Max.
+    $script:clampedSpinOut = @()
+    $script:spinFakeProc = @{ Id = 0; HasExited = $false; ExitCode = 0 }
+    $script:spinPolls = 0
+    function Get-TerminalWidth { return 40 }
+    function Write-Host {
+        param([Parameter(Position = 0, ValueFromRemainingArguments = $true)]$Object, [switch]$NoNewline, $ForegroundColor, $BackgroundColor)
+        $script:clampedSpinOut += (($Object | ForEach-Object { [string]$_ }) -join ' ')
+    }
+    function Start-Sleep {
+        param($Seconds, $Milliseconds)
+        $script:spinPolls++
+        if ($script:spinPolls -ge 1) { $script:spinFakeProc.HasExited = $true }
+    }
+    try {
+        $script:OutputMode = 'text'
+        $veryLongLabel = 'Waiting for subagent with an extremely long status label that exceeds forty columns'
+        Wait-AgentProcessWithSpinner -Process $script:spinFakeProc -StatusLabel $veryLongLabel -TimeoutSec 10 -PollMs 10
+        $visFrame = (Strip-AnsiCodes -Text $script:clampedSpinOut[0]).TrimStart("`r")
+        Assert-True ($visFrame.Length -le 39) "Wait-AgentProcessWithSpinner did not clamp spinner line to (Get-TerminalWidth) - 1 (got length $($visFrame.Length): $visFrame)."
+    }
+    finally {
+        Remove-Item Function:\Get-TerminalWidth -ErrorAction SilentlyContinue
+        Remove-Item Function:\Write-Host -ErrorAction SilentlyContinue
+        Remove-Item Function:\Start-Sleep -ErrorAction SilentlyContinue
+    }
 }
 finally {
     Remove-TestEnvironment -Env $envData
