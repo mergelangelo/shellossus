@@ -41,7 +41,8 @@ function Get-SoulContext {
                 $text = Get-Content -LiteralPath $item.FullName -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
                 if ($text -and $text.Trim()) {
                     if ($text.Length -gt 8000) { $text = $text.Substring(0, 8000) + "`n...(truncated)" }
-                    $parts += ("<soul source=`"$($item.FullName)`">`n" + $text.Trim() + "`n</soul>")
+                    $escapedSource = Escape-XmlText -Text $item.FullName
+                    $parts += ("<soul source=`"$escapedSource`">`n" + $text.Trim() + "`n</soul>")
                 }
             }
         }
@@ -72,7 +73,8 @@ function Get-MemoryContext {
                 $text = Get-Content -LiteralPath $item.FullName -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
                 if ($text -and $text.Trim()) {
                     if ($text.Length -gt 8000) { $text = $text.Substring(0, 8000) + "`n...(truncated)" }
-                    $parts += ("<memory source=`"$($item.FullName)`">`n" + $text.Trim() + "`n</memory>")
+                    $escapedSource = Escape-XmlText -Text $item.FullName
+                    $parts += ("<memory source=`"$escapedSource`">`n" + $text.Trim() + "`n</memory>")
                 }
             }
         }
@@ -352,8 +354,11 @@ function Build-SystemPrompt {
     if ($ConfigDir) { $sysCandidates += (Join-Path $ConfigDir 'SYSTEM.md') }
     foreach ($cand in $sysCandidates) {
         if ($cand -and (Test-Path -LiteralPath $cand)) {
-            $customSys = Get-Content -LiteralPath $cand -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
-            if ($customSys -and $customSys.Trim()) { $basePrompt = $customSys.Trim(); break }
+            $cItem = Get-Item -LiteralPath $cand -Force -ErrorAction SilentlyContinue
+            if ($cItem -and (-not $cItem.PSIsContainer) -and (($cItem.Attributes -band 1024) -eq 0) -and $cItem.Length -le 256KB) {
+                $customSys = Get-Content -LiteralPath $cItem.FullName -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
+                if ($customSys -and $customSys.Trim()) { $basePrompt = $customSys.Trim(); break }
+            }
         }
     }
     $basePrompt += "`n`n" + (Format-CapabilitiesPromptBlock -Root $Root)
@@ -365,8 +370,11 @@ function Build-SystemPrompt {
     }
     foreach ($cand in $appendCandidates) {
         if ($cand -and (Test-Path -LiteralPath $cand)) {
-            $appText = Get-Content -LiteralPath $cand -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
-            if ($appText -and $appText.Trim()) { $basePrompt += "`n`n" + $appText.Trim() }
+            $cItem = Get-Item -LiteralPath $cand -Force -ErrorAction SilentlyContinue
+            if ($cItem -and (-not $cItem.PSIsContainer) -and (($cItem.Attributes -band 1024) -eq 0) -and $cItem.Length -le 256KB) {
+                $appText = Get-Content -LiteralPath $cItem.FullName -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
+                if ($appText -and $appText.Trim()) { $basePrompt += "`n`n" + $appText.Trim() }
+            }
         }
     }
     $soulText = Get-SoulContext -Root $Root -ConfigDir $ConfigDir
