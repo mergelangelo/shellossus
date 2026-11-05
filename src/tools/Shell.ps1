@@ -63,6 +63,15 @@ function Update-AgentProcessTree {
 
 function Stop-AgentProcessTree {
     param($Process, [hashtable]$Tracked)
+    if ($null -eq $Tracked) {
+        $Tracked = @{}
+        if ($Process -and -not $Process.HasExited) {
+            try {
+                $Tracked[[string]$Process.Id] = @{ id = [int]$Process.Id; start_ticks = $Process.StartTime.Ticks; depth = 0 }
+            }
+            catch { }
+        }
+    }
     $cleanupErrors = @()
     try { Update-AgentProcessTree -Tracked $Tracked }
     catch { $cleanupErrors += "Cannot inspect process descendants: $($_.Exception.Message)" }
