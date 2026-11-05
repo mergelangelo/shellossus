@@ -61,14 +61,18 @@ function Save-AgentSession {
             $lines += ($bEntry | ConvertTo-Json -Depth 20 -Compress)
         }
     }
-    $tempSession = New-TemporaryFile -ErrorAction Stop
+    $parentDir = if ($parent) { $parent } else { (Get-Location).Path }
+    $tempPath = Join-Path $parentDir ('.session-tmp-' + $PID + '-' + (Get-Random -Minimum 100000 -Maximum 999999) + '.jsonl')
     try {
-        Set-Content -LiteralPath $tempSession.FullName -Value $lines -Encoding UTF8 -ErrorAction Stop
-        Move-Item -LiteralPath $tempSession.FullName -Destination $SessionFile -Force -ErrorAction Stop
+        Set-Content -LiteralPath $tempPath -Value $lines -Encoding UTF8 -ErrorAction Stop
+        if (-not (Test-Path -LiteralPath $tempPath)) {
+            throw "Failed to stage session file: $tempPath"
+        }
+        Move-Item -LiteralPath $tempPath -Destination $SessionFile -Force -ErrorAction Stop
     }
     finally {
-        if (Test-Path -LiteralPath $tempSession.FullName) {
-            Remove-Item -LiteralPath $tempSession.FullName -Force -ErrorAction SilentlyContinue
+        if (Test-Path -LiteralPath $tempPath) {
+            Remove-Item -LiteralPath $tempPath -Force -ErrorAction SilentlyContinue
         }
     }
 }
@@ -109,9 +113,10 @@ function Read-AgentSession {
     $script:ActiveSessionTodos = @()
     if ($null -ne $State) {
         $State.todos = @()
+        $State.tree_entries = @()
         $State.session_name = ''
         $State.parent_session = ''
-        $State.leaf_id = $null
+        $State.leaf_id = ''
     }
     foreach ($line in @(Get-Content -LiteralPath $SessionFile -Encoding UTF8 -ErrorAction Stop)) {
         $trimmed = $line.Trim()
@@ -126,7 +131,7 @@ function Read-AgentSession {
                 $State.model = [string]$obj.model
                 $State.session_name = if ($obj.name) { [string]$obj.name } elseif ($obj.session_name) { [string]$obj.session_name } else { '' }
                 $State.parent_session = if ($obj.parent_session) { [string]$obj.parent_session } else { '' }
-                $State.leaf_id = if ($obj.leaf_id) { [string]$obj.leaf_id } else { $null }
+                $State.leaf_id = if ($obj.leaf_id) { [string]$obj.leaf_id } else { '' }
                 $State.todos = @($loadedTodos)
             }
             continue
@@ -212,6 +217,39 @@ function Invoke-SessionResume {
     return $State
 }
 
+function Copy-SessionHashtable {
+    param($InputObject)
+    if ($null -eq $InputObject) { return $null }
+    if ($InputObject -is [string] -or $InputObject -is [ValueType]) { return $InputObject }
+    if ($InputObject -is [array]) {
+        $arrCopy = @()
+        foreach ($el in $InputObject) {
+            $arrCopy += (Copy-SessionHashtable -InputObject $el)
+        }
+        return ,$arrCopy
+    }
+    $props = if ($InputObject -is [hashtable]) { @($InputObject.Keys) } else { @(Get-Member -InputObject $InputObject -MemberType NoteProperty | ForEach-Object { $_.Name }) }
+    $copy = @{}
+    foreach ($p in $props) {
+        $val = $null
+        if ($InputObject -is [hashtable]) { $val = $InputObject[$p] } else { $val = $InputObject.$p }
+        if ($null -eq $val -or $val -is [string] -or $val -is [ValueType]) {
+            $copy[$p] = $val
+        }
+        elseif ($val -is [array] -or $p -eq 'tool_calls') {
+            $subArr = @()
+            foreach ($subEl in @($val)) {
+                $subArr += (Copy-SessionHashtable -InputObject $subEl)
+            }
+            $copy[$p] = $subArr
+        }
+        else {
+            $copy[$p] = (Copy-SessionHashtable -InputObject $val)
+        }
+    }
+    return $copy
+}
+
 function Invoke-SessionFork {
     param($State, [string]$SessionDir, [string]$Workspace = '', [string]$Model = '', [string]$FromId = '', [string]$EntryId = '', [string]$NewName = '')
     Ensure-SessionTree -State $State
@@ -219,6 +257,26 @@ function Invoke-SessionFork {
     $effMdl = if ($Model) { $Model } elseif ($State.model) { [string]$State.model } else { '' }
     $effName = if ($NewName) { $NewName } elseif ($State.session_name) { "$($State.session_name) (fork)" } else { '' }
     $effId = if ($EntryId) { $EntryId } else { $FromId }
+    $forkMessages = @()
+    foreach ($m in @($State.messages)) {
+        if ($null -ne $m) {
+            $forkMessages += (Copy-SessionHashtable -InputObject $m)
+        }
+    }
+    $forkTreeEntries = @()
+    foreach ($te in @($State.tree_entries)) {
+        if ($null -ne $te) {
+            $forkTreeEntries += (Copy-SessionHashtable -InputObject $te)
+        }
+    }
+    $forkTodos = @()
+    if ($State.todos) {
+        foreach ($td in @($State.todos)) {
+            if ($null -ne $td) {
+                $forkTodos += (Copy-SessionHashtable -InputObject $td)
+            }
+        }
+    }
     $forkState = @{
         session_id = 'sess-' + (Get-Date -Format 'yyyyMMdd-HHmmss') + '-' + (Get-Random -Minimum 100000 -Maximum 999999)
         session_name = $effName
@@ -226,8 +284,9 @@ function Invoke-SessionFork {
         workspace = $effWs
         model = $effMdl
         leaf_id = $State.leaf_id
-        messages = @($State.messages)
-        tree_entries = @($State.tree_entries)
+        messages = $forkMessages
+        tree_entries = $forkTreeEntries
+        todos = $forkTodos
         undo_stack = @()
         last_failed_question = ''
     }
@@ -249,6 +308,9 @@ function Export-AgentSessionHtml {
     foreach ($m in @($State.messages)) {
         $role = [string]$m.role
         if ($role -eq 'system') { continue }
+        if ($role -eq 'user' -and $m.content -and ([string]$m.content).StartsWith('[Capability State Change]')) { continue }
+        $isCompaction = ($m.entry_type -eq 'compaction') -or ($role -eq 'user' -and $m.content -and ([string]$m.content).StartsWith('[Compacted Conversation Summary]'))
+        $roleLabel = if ($isCompaction) { 'COMPACTION SUMMARY' } else { $role.ToUpper() }
         $bodyParts = @()
         if ($m.reasoning_content) {
             $bodyParts += '<div class="reasoning"><strong>Thinking:</strong><pre>' + (Escape-XmlText ([string]$m.reasoning_content)) + '</pre></div>'
@@ -264,7 +326,7 @@ function Export-AgentSessionHtml {
             }
         }
         $idBadge = if ($m.id) { ' <span class="badge">#' + (Escape-XmlText ([string]$m.id)) + '</span>' } else { '' }
-        $cards += ('<div class="card role-' + (Escape-XmlText $role) + '"><div class="role-header">' + (Escape-XmlText $role.ToUpper()) + $idBadge + '</div>' + ($bodyParts -join "`n") + '</div>')
+        $cards += ('<div class="card role-' + (Escape-XmlText $role) + '"><div class="role-header">' + (Escape-XmlText $roleLabel) + $idBadge + '</div>' + ($bodyParts -join "`n") + '</div>')
     }
     $th = if ($script:ActiveThemeSpec) { $script:ActiveThemeSpec } else { (Get-AgentThemesCatalog)[0] }
     $html = @(

@@ -4682,6 +4682,33 @@ function Invoke-AgentUndo {
     $State.messages = @($UndoEntry.messages)
     $State.last_prompt_tokens = 0
     $State.last_prompt_chars = 0
+    if ($State -is [hashtable] -and ($State.ContainsKey('tree_entries') -or $State.ContainsKey('leaf_id'))) {
+        if ($UndoEntry -is [hashtable] -and $UndoEntry.ContainsKey('leaf_id') -and $UndoEntry.leaf_id) {
+            $State.leaf_id = [string]$UndoEntry.leaf_id
+        }
+        else {
+            $restoredLeaf = ''
+            $lastMsgId = ''
+            foreach ($m in @($State.messages)) {
+                if ($m -and $m.role -ne 'system' -and $m.id) {
+                    $lastMsgId = [string]$m.id
+                }
+            }
+            if ($lastMsgId) {
+                $restoredLeaf = $lastMsgId
+                foreach ($m in @($State.messages)) {
+                    if ($m -and $m.id -and $m.parent_id -and ([string]$m.parent_id -eq $lastMsgId) -and ($m.entry_type -eq 'compaction' -or ($m.content -is [string] -and $m.content.StartsWith('[Compacted Conversation Summary]')))) {
+                        $restoredLeaf = [string]$m.id
+                        break
+                    }
+                }
+            }
+            $State.leaf_id = $restoredLeaf
+        }
+        if (Get-Command -Name 'Ensure-SessionTree' -ErrorAction SilentlyContinue) {
+            Ensure-SessionTree -State $State
+        }
+    }
 }
 
 # --- src/tools/Web.ps1 ---
@@ -6278,7 +6305,8 @@ function Get-SoulContext {
                 $text = Get-Content -LiteralPath $item.FullName -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
                 if ($text -and $text.Trim()) {
                     if ($text.Length -gt 8000) { $text = $text.Substring(0, 8000) + "`n...(truncated)" }
-                    $parts += ("<soul source=`"$($item.FullName)`">`n" + $text.Trim() + "`n</soul>")
+                    $escapedSource = Escape-XmlText -Text $item.FullName
+                    $parts += ("<soul source=`"$escapedSource`">`n" + $text.Trim() + "`n</soul>")
                 }
             }
         }
@@ -6309,7 +6337,8 @@ function Get-MemoryContext {
                 $text = Get-Content -LiteralPath $item.FullName -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
                 if ($text -and $text.Trim()) {
                     if ($text.Length -gt 8000) { $text = $text.Substring(0, 8000) + "`n...(truncated)" }
-                    $parts += ("<memory source=`"$($item.FullName)`">`n" + $text.Trim() + "`n</memory>")
+                    $escapedSource = Escape-XmlText -Text $item.FullName
+                    $parts += ("<memory source=`"$escapedSource`">`n" + $text.Trim() + "`n</memory>")
                 }
             }
         }
@@ -6589,8 +6618,11 @@ function Build-SystemPrompt {
     if ($ConfigDir) { $sysCandidates += (Join-Path $ConfigDir 'SYSTEM.md') }
     foreach ($cand in $sysCandidates) {
         if ($cand -and (Test-Path -LiteralPath $cand)) {
-            $customSys = Get-Content -LiteralPath $cand -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
-            if ($customSys -and $customSys.Trim()) { $basePrompt = $customSys.Trim(); break }
+            $cItem = Get-Item -LiteralPath $cand -Force -ErrorAction SilentlyContinue
+            if ($cItem -and (-not $cItem.PSIsContainer) -and (($cItem.Attributes -band 1024) -eq 0) -and $cItem.Length -le 256KB) {
+                $customSys = Get-Content -LiteralPath $cItem.FullName -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
+                if ($customSys -and $customSys.Trim()) { $basePrompt = $customSys.Trim(); break }
+            }
         }
     }
     $basePrompt += "`n`n" + (Format-CapabilitiesPromptBlock -Root $Root)
@@ -6602,8 +6634,11 @@ function Build-SystemPrompt {
     }
     foreach ($cand in $appendCandidates) {
         if ($cand -and (Test-Path -LiteralPath $cand)) {
-            $appText = Get-Content -LiteralPath $cand -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
-            if ($appText -and $appText.Trim()) { $basePrompt += "`n`n" + $appText.Trim() }
+            $cItem = Get-Item -LiteralPath $cand -Force -ErrorAction SilentlyContinue
+            if ($cItem -and (-not $cItem.PSIsContainer) -and (($cItem.Attributes -band 1024) -eq 0) -and $cItem.Length -le 256KB) {
+                $appText = Get-Content -LiteralPath $cItem.FullName -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
+                if ($appText -and $appText.Trim()) { $basePrompt += "`n`n" + $appText.Trim() }
+            }
         }
     }
     $soulText = Get-SoulContext -Root $Root -ConfigDir $ConfigDir
@@ -7392,14 +7427,18 @@ function Save-AgentSession {
             $lines += ($bEntry | ConvertTo-Json -Depth 20 -Compress)
         }
     }
-    $tempSession = New-TemporaryFile -ErrorAction Stop
+    $parentDir = if ($parent) { $parent } else { (Get-Location).Path }
+    $tempPath = Join-Path $parentDir ('.session-tmp-' + $PID + '-' + (Get-Random -Minimum 100000 -Maximum 999999) + '.jsonl')
     try {
-        Set-Content -LiteralPath $tempSession.FullName -Value $lines -Encoding UTF8 -ErrorAction Stop
-        Move-Item -LiteralPath $tempSession.FullName -Destination $SessionFile -Force -ErrorAction Stop
+        Set-Content -LiteralPath $tempPath -Value $lines -Encoding UTF8 -ErrorAction Stop
+        if (-not (Test-Path -LiteralPath $tempPath)) {
+            throw "Failed to stage session file: $tempPath"
+        }
+        Move-Item -LiteralPath $tempPath -Destination $SessionFile -Force -ErrorAction Stop
     }
     finally {
-        if (Test-Path -LiteralPath $tempSession.FullName) {
-            Remove-Item -LiteralPath $tempSession.FullName -Force -ErrorAction SilentlyContinue
+        if (Test-Path -LiteralPath $tempPath) {
+            Remove-Item -LiteralPath $tempPath -Force -ErrorAction SilentlyContinue
         }
     }
 }
@@ -7440,9 +7479,10 @@ function Read-AgentSession {
     $script:ActiveSessionTodos = @()
     if ($null -ne $State) {
         $State.todos = @()
+        $State.tree_entries = @()
         $State.session_name = ''
         $State.parent_session = ''
-        $State.leaf_id = $null
+        $State.leaf_id = ''
     }
     foreach ($line in @(Get-Content -LiteralPath $SessionFile -Encoding UTF8 -ErrorAction Stop)) {
         $trimmed = $line.Trim()
@@ -7457,7 +7497,7 @@ function Read-AgentSession {
                 $State.model = [string]$obj.model
                 $State.session_name = if ($obj.name) { [string]$obj.name } elseif ($obj.session_name) { [string]$obj.session_name } else { '' }
                 $State.parent_session = if ($obj.parent_session) { [string]$obj.parent_session } else { '' }
-                $State.leaf_id = if ($obj.leaf_id) { [string]$obj.leaf_id } else { $null }
+                $State.leaf_id = if ($obj.leaf_id) { [string]$obj.leaf_id } else { '' }
                 $State.todos = @($loadedTodos)
             }
             continue
@@ -7543,6 +7583,39 @@ function Invoke-SessionResume {
     return $State
 }
 
+function Copy-SessionHashtable {
+    param($InputObject)
+    if ($null -eq $InputObject) { return $null }
+    if ($InputObject -is [string] -or $InputObject -is [ValueType]) { return $InputObject }
+    if ($InputObject -is [array]) {
+        $arrCopy = @()
+        foreach ($el in $InputObject) {
+            $arrCopy += (Copy-SessionHashtable -InputObject $el)
+        }
+        return ,$arrCopy
+    }
+    $props = if ($InputObject -is [hashtable]) { @($InputObject.Keys) } else { @(Get-Member -InputObject $InputObject -MemberType NoteProperty | ForEach-Object { $_.Name }) }
+    $copy = @{}
+    foreach ($p in $props) {
+        $val = $null
+        if ($InputObject -is [hashtable]) { $val = $InputObject[$p] } else { $val = $InputObject.$p }
+        if ($null -eq $val -or $val -is [string] -or $val -is [ValueType]) {
+            $copy[$p] = $val
+        }
+        elseif ($val -is [array] -or $p -eq 'tool_calls') {
+            $subArr = @()
+            foreach ($subEl in @($val)) {
+                $subArr += (Copy-SessionHashtable -InputObject $subEl)
+            }
+            $copy[$p] = $subArr
+        }
+        else {
+            $copy[$p] = (Copy-SessionHashtable -InputObject $val)
+        }
+    }
+    return $copy
+}
+
 function Invoke-SessionFork {
     param($State, [string]$SessionDir, [string]$Workspace = '', [string]$Model = '', [string]$FromId = '', [string]$EntryId = '', [string]$NewName = '')
     Ensure-SessionTree -State $State
@@ -7550,6 +7623,26 @@ function Invoke-SessionFork {
     $effMdl = if ($Model) { $Model } elseif ($State.model) { [string]$State.model } else { '' }
     $effName = if ($NewName) { $NewName } elseif ($State.session_name) { "$($State.session_name) (fork)" } else { '' }
     $effId = if ($EntryId) { $EntryId } else { $FromId }
+    $forkMessages = @()
+    foreach ($m in @($State.messages)) {
+        if ($null -ne $m) {
+            $forkMessages += (Copy-SessionHashtable -InputObject $m)
+        }
+    }
+    $forkTreeEntries = @()
+    foreach ($te in @($State.tree_entries)) {
+        if ($null -ne $te) {
+            $forkTreeEntries += (Copy-SessionHashtable -InputObject $te)
+        }
+    }
+    $forkTodos = @()
+    if ($State.todos) {
+        foreach ($td in @($State.todos)) {
+            if ($null -ne $td) {
+                $forkTodos += (Copy-SessionHashtable -InputObject $td)
+            }
+        }
+    }
     $forkState = @{
         session_id = 'sess-' + (Get-Date -Format 'yyyyMMdd-HHmmss') + '-' + (Get-Random -Minimum 100000 -Maximum 999999)
         session_name = $effName
@@ -7557,8 +7650,9 @@ function Invoke-SessionFork {
         workspace = $effWs
         model = $effMdl
         leaf_id = $State.leaf_id
-        messages = @($State.messages)
-        tree_entries = @($State.tree_entries)
+        messages = $forkMessages
+        tree_entries = $forkTreeEntries
+        todos = $forkTodos
         undo_stack = @()
         last_failed_question = ''
     }
@@ -7580,6 +7674,9 @@ function Export-AgentSessionHtml {
     foreach ($m in @($State.messages)) {
         $role = [string]$m.role
         if ($role -eq 'system') { continue }
+        if ($role -eq 'user' -and $m.content -and ([string]$m.content).StartsWith('[Capability State Change]')) { continue }
+        $isCompaction = ($m.entry_type -eq 'compaction') -or ($role -eq 'user' -and $m.content -and ([string]$m.content).StartsWith('[Compacted Conversation Summary]'))
+        $roleLabel = if ($isCompaction) { 'COMPACTION SUMMARY' } else { $role.ToUpper() }
         $bodyParts = @()
         if ($m.reasoning_content) {
             $bodyParts += '<div class="reasoning"><strong>Thinking:</strong><pre>' + (Escape-XmlText ([string]$m.reasoning_content)) + '</pre></div>'
@@ -7595,7 +7692,7 @@ function Export-AgentSessionHtml {
             }
         }
         $idBadge = if ($m.id) { ' <span class="badge">#' + (Escape-XmlText ([string]$m.id)) + '</span>' } else { '' }
-        $cards += ('<div class="card role-' + (Escape-XmlText $role) + '"><div class="role-header">' + (Escape-XmlText $role.ToUpper()) + $idBadge + '</div>' + ($bodyParts -join "`n") + '</div>')
+        $cards += ('<div class="card role-' + (Escape-XmlText $role) + '"><div class="role-header">' + (Escape-XmlText $roleLabel) + $idBadge + '</div>' + ($bodyParts -join "`n") + '</div>')
     }
     $th = if ($script:ActiveThemeSpec) { $script:ActiveThemeSpec } else { (Get-AgentThemesCatalog)[0] }
     $html = @(
@@ -10167,25 +10264,26 @@ if (-not $LibraryOnly) {
                     Write-Host ($script:Gm.Grey1 + '  Nothing to continue.' + $script:Gm.Reset)
                     continue
                 }
-                $beforeTurn = @($state.messages)
-                $script:CurrentTurnWrites = @()
                 $stBefore = Get-ContextStats -State $state
                 if ($stBefore.est_tokens -gt $stBefore.compact_threshold_tokens) {
                     $limStr = Format-TokenCount -Tokens $stBefore.compact_threshold_tokens
                     Write-Host ($script:Gm.Yellow + "  [auto-compact] Context exceeds $limStr tokens, compacting older history..." + $script:Gm.Reset)
                     try { Invoke-AgentCompact -State $state -Endpoint $endpoint -ModelId $Model -ApiKey $agentKey | Out-Null } catch {}
                 }
+                $beforeTurn = @($state.messages)
+                $beforeLeafId = if ($state.leaf_id) { [string]$state.leaf_id } else { '' }
+                $script:CurrentTurnWrites = @()
                 Write-Host ($script:Gm.Aqua + "  [continue] Continuing agent turn (up to $contSteps steps)..." + $script:Gm.Reset)
                 try {
                     Invoke-AgentContinue -State $state -Endpoint $endpoint -ModelId $Model -ApiKey $agentKey -Root $rootPath -Steps $contSteps | Out-Null
                     $lastFailedQuestion = ''
-                    $undoStack += @{ messages = $beforeTurn; writes = @($script:CurrentTurnWrites) }
+                    $undoStack += @{ messages = $beforeTurn; leaf_id = $beforeLeafId; writes = @($script:CurrentTurnWrites) }
                     Save-AgentSession -SessionFile $sessionFile -State $state -Workspace $rootPath -Model $Model
                 }
                 catch {
                     $state.messages = $beforeTurn
                     try {
-                        Invoke-AgentUndo -State $state -UndoEntry @{ messages = $beforeTurn; writes = @($script:CurrentTurnWrites) }
+                        Invoke-AgentUndo -State $state -UndoEntry @{ messages = $beforeTurn; leaf_id = $beforeLeafId; writes = @($script:CurrentTurnWrites) }
                     }
                     catch {
                         Write-Host ($script:Gm.Red + 'Rollback warning: ' + $_.Exception.Message + $script:Gm.Reset)
@@ -10231,27 +10329,28 @@ if (-not $LibraryOnly) {
                 }
                 continue
             }
-            $beforeTurn = @($state.messages)
-            $script:CurrentTurnWrites = @()
             $stBefore = Get-ContextStats -State $state
             if ($stBefore.est_tokens -gt $stBefore.compact_threshold_tokens) {
                 $limStr = Format-TokenCount -Tokens $stBefore.compact_threshold_tokens
                 Write-Host ($script:Gm.Yellow + "  [auto-compact] Context exceeds $limStr tokens, compacting older history..." + $script:Gm.Reset)
                 try { Invoke-AgentCompact -State $state -Endpoint $endpoint -ModelId $Model -ApiKey $agentKey | Out-Null } catch {}
             }
+            $beforeTurn = @($state.messages)
+            $beforeLeafId = if ($state.leaf_id) { [string]$state.leaf_id } else { '' }
+            $script:CurrentTurnWrites = @()
             $expandedQuestion = Expand-UserPrompt -Root $rootPath -Prompt $question
             $state.messages += @{ role = 'user'; content = $expandedQuestion }
             try {
                 Invoke-AgentTurn -State $state -Endpoint $endpoint -ModelId $Model -ApiKey $agentKey -Root $rootPath -Steps $MaxSteps
                 $lastFailedQuestion = ''
-                $undoStack += @{ messages = $beforeTurn; writes = @($script:CurrentTurnWrites) }
+                $undoStack += @{ messages = $beforeTurn; leaf_id = $beforeLeafId; writes = @($script:CurrentTurnWrites) }
                 Save-AgentSession -SessionFile $sessionFile -State $state -Workspace $rootPath -Model $Model
             }
             catch {
                 $lastFailedQuestion = $question
                 $state.messages = $beforeTurn
                 try {
-                    Invoke-AgentUndo -State $state -UndoEntry @{ messages = $beforeTurn; writes = @($script:CurrentTurnWrites) }
+                    Invoke-AgentUndo -State $state -UndoEntry @{ messages = $beforeTurn; leaf_id = $beforeLeafId; writes = @($script:CurrentTurnWrites) }
                 }
                 catch {
                     Write-Host ($script:Gm.Red + 'Rollback warning: ' + $_.Exception.Message + $script:Gm.Reset)

@@ -145,4 +145,31 @@ function Invoke-AgentUndo {
     $State.messages = @($UndoEntry.messages)
     $State.last_prompt_tokens = 0
     $State.last_prompt_chars = 0
+    if ($State -is [hashtable] -and ($State.ContainsKey('tree_entries') -or $State.ContainsKey('leaf_id'))) {
+        if ($UndoEntry -is [hashtable] -and $UndoEntry.ContainsKey('leaf_id') -and $UndoEntry.leaf_id) {
+            $State.leaf_id = [string]$UndoEntry.leaf_id
+        }
+        else {
+            $restoredLeaf = ''
+            $lastMsgId = ''
+            foreach ($m in @($State.messages)) {
+                if ($m -and $m.role -ne 'system' -and $m.id) {
+                    $lastMsgId = [string]$m.id
+                }
+            }
+            if ($lastMsgId) {
+                $restoredLeaf = $lastMsgId
+                foreach ($m in @($State.messages)) {
+                    if ($m -and $m.id -and $m.parent_id -and ([string]$m.parent_id -eq $lastMsgId) -and ($m.entry_type -eq 'compaction' -or ($m.content -is [string] -and $m.content.StartsWith('[Compacted Conversation Summary]')))) {
+                        $restoredLeaf = [string]$m.id
+                        break
+                    }
+                }
+            }
+            $State.leaf_id = $restoredLeaf
+        }
+        if (Get-Command -Name 'Ensure-SessionTree' -ErrorAction SilentlyContinue) {
+            Ensure-SessionTree -State $State
+        }
+    }
 }

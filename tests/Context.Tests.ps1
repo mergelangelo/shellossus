@@ -385,6 +385,91 @@ try {
     }
     $didUsageCompact = Invoke-AgentCompact -State $usageCompactState -Endpoint 'https://example.invalid/v1/chat/completions' -ModelId 'test-model' -ApiKey 'fake' -KeepRecent 2
     Assert-True ($didUsageCompact -and $usageCompactState.usage_input_tokens -eq 420 -and $usageCompactState.usage_output_tokens -eq 100) 'Invoke-AgentCompact did not add $reply.usage to $State.usage_input_tokens / $State.usage_output_tokens.'
+
+    # Regression (Task 4):
+    # 1. Invoke-AgentUndo restores $State.leaf_id (including when pre-turn leaf was a compaction entry).
+    $undoTreeState = @{
+        session_id = 'sess-undo-tree'
+        workspace = $workspacePath
+        model = 'test-model'
+        messages = @(
+            @{ role = 'system'; content = 'sys' },
+            @{ role = 'user'; content = 'turn 1 user' },
+            @{ role = 'assistant'; content = 'turn 1 assistant' },
+            @{ role = 'user'; content = 'turn 2 user' },
+            @{ role = 'assistant'; content = 'turn 2 assistant' }
+        )
+    }
+    Ensure-SessionTree -State $undoTreeState
+    $null = Invoke-AgentCompact -State $undoTreeState -Endpoint 'https://example.invalid/v1/chat/completions' -ModelId 'test-model' -ApiKey 'fake' -KeepRecent 2
+    $compLeafBeforeTurn = [string]$undoTreeState.leaf_id
+    $beforeTurnMsgs = @($undoTreeState.messages)
+    $undoTreeState.messages += @{ role = 'user'; content = 'turn 3 user' }
+    $undoTreeState.messages += @{ role = 'assistant'; content = 'turn 3 assistant' }
+    Ensure-SessionTree -State $undoTreeState
+    Assert-True ($undoTreeState.leaf_id -ne $compLeafBeforeTurn) 'Turn 3 did not advance leaf_id.'
+    Invoke-AgentUndo -State $undoTreeState -UndoEntry @{ messages = $beforeTurnMsgs; writes = @() }
+    Assert-True ($undoTreeState.leaf_id -eq $compLeafBeforeTurn) "Invoke-AgentUndo did not restore leaf_id to compaction leaf ($compLeafBeforeTurn vs $($undoTreeState.leaf_id))."
+
+    # 2. Read-AgentSession on a reused $State resets tree_entries so repeated reads do not duplicate branch_entry records.
+    $reusedReadState = @{ tree_entries = @() }
+    $null = Read-AgentSession -SessionFile $treeSessionFile -State $reusedReadState
+    $firstBranchCount = @($reusedReadState.tree_entries).Count
+    $null = Read-AgentSession -SessionFile $treeSessionFile -State $reusedReadState
+    Assert-True ($firstBranchCount -gt 0 -and @($reusedReadState.tree_entries).Count -eq $firstBranchCount) 'Read-AgentSession duplicated tree_entries on reused State hashtable.'
+
+    # 3. Invoke-SessionFork deep-clones messages, tool_calls, tree_entries, and todos so mutating fork does not mutate parent.
+    $forkParentState = @{
+        session_id = 'sess-fork-parent'
+        workspace = $workspacePath
+        model = 'test-model'
+        todos = @(@{ content = 'Original Todo'; status = 'pending' })
+        messages = @(
+            @{ role = 'system'; content = 'sys' },
+            @{ role = 'user'; content = 'run tool' },
+            @{ role = 'assistant'; content = ''; tool_calls = @(@{ id = 'tc_fork'; type = 'function'; function = @{ name = 'list_files'; arguments = '{"path":"."}' } }) },
+            @{ role = 'tool'; tool_call_id = 'tc_fork'; content = '{"entries":[]}' },
+            @{ role = 'assistant'; content = 'original reply' }
+        )
+    }
+    Ensure-SessionTree -State $forkParentState
+    $forkCloneRes = Invoke-SessionFork -State $forkParentState -SessionDir $treeSessionDir -NewName 'Isolated Fork'
+    $forkCloneRes.state.messages[1].content = 'mutated in fork'
+    $forkCloneRes.state.messages[2].tool_calls[0].function.arguments = '{"path":"mutated"}'
+    $forkCloneRes.state.tree_entries[0].content = 'mutated tree entry'
+    Assert-True (@($forkCloneRes.state.todos).Count -eq 1 -and $forkCloneRes.state.todos[0].content -eq 'Original Todo') 'Invoke-SessionFork did not copy todos into forkState.'
+    $forkCloneRes.state.todos[0].status = 'completed'
+    Assert-True ($forkParentState.messages[1].content -eq 'run tool' -and $forkParentState.messages[2].tool_calls[0].function.arguments -eq '{"path":"."}' -and $forkParentState.tree_entries[0].content -eq 'run tool' -and $forkParentState.todos[0].status -eq 'pending') 'Mutating forked state mutated parent state in memory.'
+
+    # 4. Export-AgentSessionHtml skips [Capability State Change] and labels compaction summaries as COMPACTION SUMMARY.
+    $htmlFilterState = @{
+        session_id = 'sess-html-filter'
+        workspace = $workspacePath
+        model = 'test-model'
+        messages = @(
+            @{ role = 'system'; content = 'sys' },
+            @{ id = 'e0005'; entry_type = 'compaction'; role = 'user'; content = "[Compacted Conversation Summary]`n## Goal`nShip fix" },
+            @{ role = 'user'; content = "[Capability State Change]`nPermission mode is now Ask." },
+            @{ id = 'e0006'; role = 'user'; content = 'Real user prompt' }
+        )
+    }
+    $filteredHtmlPath = Join-Path $testRoot 'filtered-export.html'
+    $null = Export-AgentSessionHtml -State $htmlFilterState -OutputPath $filteredHtmlPath
+    $filteredHtml = Get-Content -LiteralPath $filteredHtmlPath -Raw -Encoding UTF8
+    Assert-True (-not $filteredHtml.Contains('[Capability State Change]')) 'Export-AgentSessionHtml included ephemeral [Capability State Change] message.'
+    Assert-True ($filteredHtml.Contains('COMPACTION SUMMARY')) 'Export-AgentSessionHtml did not render COMPACTION SUMMARY header for compaction message.'
+
+    # 5. Get-SoulContext / Get-MemoryContext XML-escape source attributes, and Build-SystemPrompt validates SYSTEM.md / APPEND_SYSTEM.md size and container/reparse attributes.
+    $ampCfgDir = Join-Path $testRoot 'cfg&special'
+    New-Item -ItemType Directory -Path $ampCfgDir -Force | Out-Null
+    Set-Content -LiteralPath (Join-Path $ampCfgDir 'SOUL.md') -Value 'Soul with amp path.' -Encoding UTF8
+    Set-Content -LiteralPath (Join-Path $ampCfgDir 'MEMORY.md') -Value 'Memory with amp path.' -Encoding UTF8
+    Set-Content -LiteralPath (Join-Path $ampCfgDir 'SYSTEM.md') -Value ('S' * 300000) -Encoding UTF8
+    $soulXml = Get-SoulContext -Root '' -ConfigDir $ampCfgDir
+    $memXml = Get-MemoryContext -Root '' -ConfigDir $ampCfgDir
+    Assert-True ($soulXml.Contains('cfg&amp;special') -and $memXml.Contains('cfg&amp;special')) 'Get-SoulContext or Get-MemoryContext did not XML-escape source path.'
+    $sysIgnoreOversized = Build-SystemPrompt -Root $workspacePath -ConfigDir $ampCfgDir
+    Assert-True ($sysIgnoreOversized.Contains('You are Shellossus')) 'Build-SystemPrompt did not ignore oversized SYSTEM.md (>256KB).'
 }
 finally {
     Remove-TestEnvironment -Env $envData
