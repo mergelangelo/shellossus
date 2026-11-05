@@ -205,6 +205,31 @@ function Get-WorkspaceRelativePath {
     return $FullPath
 }
 
+function Test-PathHasReparsePoint {
+    param([string]$Path, [string]$StopAt = '')
+    if (-not $Path) { return $false }
+    $stopNorm = ''
+    if ($StopAt -and (Test-Path -LiteralPath $StopAt)) {
+        $stopItem = Get-Item -LiteralPath $StopAt -Force -ErrorAction SilentlyContinue
+        if ($stopItem) { $stopNorm = $stopItem.FullName.TrimEnd('\').TrimEnd('/') }
+    }
+    $curr = $Path
+    for ($depth = 0; $depth -lt 64; $depth++) {
+        if (-not $curr) { break }
+        if (Test-Path -LiteralPath $curr) {
+            $item = Get-Item -LiteralPath $curr -Force -ErrorAction SilentlyContinue
+            if ($item) {
+                if (($item.Attributes -band 1024) -ne 0) { return $true }
+                if ($stopNorm -and ($item.FullName.TrimEnd('\').TrimEnd('/') -ieq $stopNorm)) { break }
+            }
+        }
+        $parent = Split-Path $curr -Parent
+        if (-not $parent -or ($parent -ieq $curr)) { break }
+        $curr = $parent
+    }
+    return $false
+}
+
 function Resolve-AgentPath {
     param([string]$Root, [string]$RelativePath, [switch]$AllowRegisteredSkill)
     if (-not $RelativePath) { $RelativePath = '.' }
@@ -1387,6 +1412,9 @@ function Read-TuiConfirmation {
             return 'y'
         }
         if ($ActionType -eq 'run' -and ($lower -in @('r', 'run') -or $trimmed -ceq 'RUN')) {
+            return 'y'
+        }
+        if ($ActionType -eq 'web' -and ($lower -in @('w', 'web', 'write', 'r', 'run') -or $trimmed -in @('WRITE', 'RUN', 'WEB'))) {
             return 'y'
         }
         if ($lower -in @('a', 'all', 'always')) {
@@ -2976,6 +3004,60 @@ function Convert-IgnorePatternToRule {
     $anchored = $pat.StartsWith('/')
     if ($anchored) { $pat = $pat.TrimStart('/') }
     if ($pat.Contains('/')) { $anchored = $true }
+    $charClasses = @()
+    if ($pat.Contains('[')) {
+        $sb = ''
+        $i = 0
+        while ($i -lt $pat.Length) {
+            $ch = [string]$pat[$i]
+            if ($ch -eq '[' -and ($i -eq 0 -or ([string]$pat[$i - 1]) -ne '\')) {
+                $j = $i + 1
+                if ($j -lt $pat.Length -and (([string]$pat[$j]) -eq '!' -or ([string]$pat[$j]) -eq '^')) { $j++ }
+                if ($j -lt $pat.Length -and ([string]$pat[$j]) -eq ']') { $j++ }
+                $closeIdx = -1
+                while ($j -lt $pat.Length) {
+                    $c = [string]$pat[$j]
+                    if ($c -eq '/') { break }
+                    if ($c -eq '\' -and ($j + 1) -lt $pat.Length) {
+                        $j += 2
+                        continue
+                    }
+                    if ($c -eq ']') {
+                        $closeIdx = $j
+                        break
+                    }
+                    $j++
+                }
+                if ($closeIdx -gt ($i + 1)) {
+                    $inner = $pat.Substring($i + 1, $closeIdx - $i - 1)
+                    $negClass = $false
+                    if ($inner.StartsWith('!') -or $inner.StartsWith('^')) {
+                        $negClass = $true
+                        $inner = $inner.Substring(1)
+                    }
+                    $candidateRx = if ($negClass) { '[^/' + $inner + ']' } else { '[' + $inner + ']' }
+                    $validClass = $false
+                    try {
+                        $null = '' -match $candidateRx
+                        $validClass = $true
+                    }
+                    catch {
+                        $validClass = $false
+                    }
+                    if ($validClass) {
+                        $ccIdx = $charClasses.Count
+                        $charClasses += $candidateRx
+                        $sb += "__CC_${ccIdx}__"
+                        $i = $closeIdx + 1
+                        continue
+                    }
+                }
+            }
+            $sb += $ch
+            $i++
+        }
+        $pat = $sb
+    }
     $rx = $pat -replace '([.+^$()\[\]{}|\\])', '\$1'
     $rx = $rx -replace '/\*\*/', '__DBLSTAR_SLASH__'
     $rx = $rx -replace '^\*\*/', '__LEAD_DBLSTAR__'
@@ -2987,6 +3069,9 @@ function Convert-IgnorePatternToRule {
     $rx = $rx.Replace('__LEAD_DBLSTAR__', '(?:.+/)?')
     $rx = $rx.Replace('__TRAIL_DBLSTAR__', '(?:/.*)?')
     $rx = $rx.Replace('__ANY__', '.*')
+    for ($ccIdx = 0; $ccIdx -lt $charClasses.Count; $ccIdx++) {
+        $rx = $rx.Replace("__CC_${ccIdx}__", [string]$charClasses[$ccIdx])
+    }
     $prefRx = if ($DirPrefix) { ($DirPrefix -replace '([.+^$()\[\]{}|\\*?\-])', '\$1') } else { '' }
     $tailRx = if ($dirOnly) { '/.*$' } else { '(?:/.*)?$' }
     $finalRx = if ($anchored) {
@@ -4309,15 +4394,209 @@ function ConvertFrom-UrlEncodedString {
     param([string]$Text)
     if (-not $Text) { return '' }
     $work = $Text.Replace('+', ' ')
-    $parts = @($work -split '(%[0-9A-Fa-f]{2})')
-    for ($i = 1; $i -lt $parts.Count; $i += 2) {
-        $hex = $parts[$i].Substring(1)
-        $byteVal = [int]('0x' + $hex)
-        if ($byteVal -ge 0x20 -and $byteVal -le 0x7E) {
-            $parts[$i] = [string][char]$byteVal
+    $len = $work.Length
+    $out = @()
+    $i = 0
+    while ($i -lt $len) {
+        if (($i + 2) -lt $len -and $work[$i] -eq '%' -and ($work.Substring($i + 1, 2) -match '^[0-9A-Fa-f]{2}$')) {
+            $b1 = [int]('0x' + $work.Substring($i + 1, 2))
+            if ($b1 -le 0x7F) {
+                if ($b1 -ge 0x20 -and $b1 -le 0x7E) {
+                    $out += [string][char]$b1
+                }
+                else {
+                    $out += $work.Substring($i, 3)
+                }
+                $i += 3
+                continue
+            }
+            if ($b1 -ge 0xC2 -and $b1 -le 0xDF -and ($i + 5) -lt $len -and $work[$i + 3] -eq '%' -and ($work.Substring($i + 4, 2) -match '^[0-9A-Fa-f]{2}$')) {
+                $b2 = [int]('0x' + $work.Substring($i + 4, 2))
+                if ($b2 -ge 0x80 -and $b2 -le 0xBF) {
+                    $cp = (($b1 - 0xC0) * 64) + ($b2 - 0x80)
+                    $out += [string][char]$cp
+                    $i += 6
+                    continue
+                }
+            }
+            if ($b1 -ge 0xE0 -and $b1 -le 0xEF -and ($i + 8) -lt $len -and $work[$i + 3] -eq '%' -and ($work.Substring($i + 4, 2) -match '^[0-9A-Fa-f]{2}$') -and $work[$i + 6] -eq '%' -and ($work.Substring($i + 7, 2) -match '^[0-9A-Fa-f]{2}$')) {
+                $b2 = [int]('0x' + $work.Substring($i + 4, 2))
+                $b3 = [int]('0x' + $work.Substring($i + 7, 2))
+                if ($b2 -ge 0x80 -and $b2 -le 0xBF -and $b3 -ge 0x80 -and $b3 -le 0xBF) {
+                    $cp = (($b1 - 0xE0) * 4096) + (($b2 - 0x80) * 64) + ($b3 - 0x80)
+                    if ($cp -ge 0x800 -and ($cp -lt 0xD800 -or $cp -gt 0xDFFF)) {
+                        $out += [string][char]$cp
+                        $i += 9
+                        continue
+                    }
+                }
+            }
+            if ($b1 -ge 0xF0 -and $b1 -le 0xF4 -and ($i + 11) -lt $len -and $work[$i + 3] -eq '%' -and ($work.Substring($i + 4, 2) -match '^[0-9A-Fa-f]{2}$') -and $work[$i + 6] -eq '%' -and ($work.Substring($i + 7, 2) -match '^[0-9A-Fa-f]{2}$') -and $work[$i + 9] -eq '%' -and ($work.Substring($i + 10, 2) -match '^[0-9A-Fa-f]{2}$')) {
+                $b2 = [int]('0x' + $work.Substring($i + 4, 2))
+                $b3 = [int]('0x' + $work.Substring($i + 7, 2))
+                $b4 = [int]('0x' + $work.Substring($i + 10, 2))
+                if ($b2 -ge 0x80 -and $b2 -le 0xBF -and $b3 -ge 0x80 -and $b3 -le 0xBF -and $b4 -ge 0x80 -and $b4 -le 0xBF) {
+                    $point = (($b1 - 0xF0) * 262144) + (($b2 - 0x80) * 4096) + (($b3 - 0x80) * 64) + ($b4 - 0x80)
+                    if ($point -ge 0x10000 -and $point -le 0x10FFFF) {
+                        $offset = $point - 0x10000
+                        $lowTen = $offset % 1024
+                        $highTen = [int](($offset - $lowTen) / 1024)
+                        $out += ([string][char](0xD800 + $highTen) + [string][char](0xDC00 + $lowTen))
+                        $i += 12
+                        continue
+                    }
+                }
+            }
+            $out += $work.Substring($i, 3)
+            $i += 3
+            continue
+        }
+        $out += [string]$work[$i]
+        $i++
+    }
+    return ($out -join '')
+}
+
+function Test-SafeWebUrl {
+    param([string]$Url)
+    if (-not $Url -or $Url -notmatch '^https?://[^\s]+$') {
+        throw 'url must be a valid http:// or https:// URL.'
+    }
+    $rawHostPart = ''
+    if ($Url -match '^https?://([^/?#]+)') {
+        $rawHostPart = $Matches[1]
+        if ($rawHostPart -match '@') {
+            throw 'URLs with embedded credentials are not allowed.'
+        }
+        $rawHostOnly = ($rawHostPart -replace ':\d+$', '').Trim('[', ']').ToLower().TrimEnd('.')
+        if ($rawHostOnly -match '^(?:0x[0-9a-f]+|\d+)$' -or $rawHostOnly -match '^(?:0x[0-9a-f]+|\d+)(?:\.(?:0x[0-9a-f]+|\d+)){1,2}$') {
+            throw "Blocked request to local or private network address: $rawHostOnly"
+        }
+        if ($rawHostOnly -match '^(\d+)\.(\d+)\.(\d+)\.(\d+)$') {
+            foreach ($octStr in @($Matches[1], $Matches[2], $Matches[3], $Matches[4])) {
+                if ($octStr.Length -gt 1 -and $octStr.StartsWith('0')) {
+                    throw "Blocked request to local or private network address: $rawHostOnly"
+                }
+            }
         }
     }
-    return ($parts -join '')
+    $uri = $null
+    try {
+        $uri = [uri]$Url
+    }
+    catch {
+        throw 'url must be a valid http:// or https:// URL.'
+    }
+    if (-not $uri.IsAbsoluteUri -or $uri.Scheme -notin @('http', 'https') -or -not $uri.Host) {
+        throw 'url must be a valid http:// or https:// URL.'
+    }
+    if ($uri.UserInfo) {
+        throw 'URLs with embedded credentials are not allowed.'
+    }
+    $hostName = $uri.DnsSafeHost.Trim().ToLower().TrimEnd('.')
+    if (-not $hostName) {
+        $hostName = $uri.Host.Trim('[', ']').ToLower().TrimEnd('.')
+    }
+    if ($hostName -in @('localhost', 'local', 'internal', 'metadata', 'metadata.google.internal', 'instance-data', '0.0.0.0') -or
+        $hostName -like '*.localhost' -or $hostName -like '*.local' -or $hostName -like '*.internal') {
+        throw "Blocked request to local or private host: $hostName"
+    }
+    if ($hostName -in @('::1', '::', '0:0:0:0:0:0:0:1', '0:0:0:0:0:0:0:0') -or
+        $hostName -match '^(?:fe[89ab][0-9a-f]:|fc[0-9a-f]{2}:|fd[0-9a-f]{2}:|::ffff:)') {
+        throw "Blocked request to local or private IPv6 address: $hostName"
+    }
+    if ($hostName -match '^(?:0x[0-9a-f]+|\d+)$' -or $hostName -match '^\d+(?:\.\d+){1,2}$') {
+        throw "Blocked request to local or private network address: $hostName"
+    }
+    if ($hostName -match '^(\d+)\.(\d+)\.(\d+)\.(\d+)$') {
+        $o1 = [int]$Matches[1]
+        $o2 = [int]$Matches[2]
+        $o3 = [int]$Matches[3]
+        $o4 = [int]$Matches[4]
+        if ($o1 -gt 255 -or $o2 -gt 255 -or $o3 -gt 255 -or $o4 -gt 255) {
+            throw "Invalid IPv4 address in URL: $hostName"
+        }
+        $isPrivate = ($o1 -eq 0) -or
+            ($o1 -eq 10) -or
+            ($o1 -eq 127) -or
+            ($o1 -eq 169 -and $o2 -eq 254) -or
+            ($o1 -eq 172 -and $o2 -ge 16 -and $o2 -le 31) -or
+            ($o1 -eq 192 -and $o2 -eq 168) -or
+            ($o1 -eq 100 -and $o2 -ge 64 -and $o2 -le 127) -or
+            ($o1 -ge 224)
+        if ($isPrivate) {
+            throw "Blocked request to local or private IPv4 address: $hostName"
+        }
+    }
+    return $true
+}
+
+function Request-AgentWebConfirmation {
+    param([string]$ToolName, [string]$Target)
+    if ($script:AgentPermission -in @('AutoEdit', 'Auto')) {
+        return @{ approved = $true; response = $null }
+    }
+    if ($script:OutputMode -eq 'json') {
+        return @{
+            approved = $false
+            response = (@{
+                status = 'cancelled'
+                message = 'Interactive confirmation is disabled in JSON mode. Use -Permission AutoEdit or Auto to allow outbound web requests.'
+            } | ConvertTo-Json -Compress)
+        }
+    }
+    Write-Host ("`n  " + $script:Gm.Grey0 + $script:Box.TL + $script:Box.H + ' ' + $script:Gm.BoldYellow + $script:Box.Arrow + " $ToolName " + $script:Gm.Fg1 + (Format-PreviewText $Target) + $script:Gm.Reset)
+    $promptStr = '  ' + $script:Gm.Grey0 + $script:Box.V + ' ' + $script:Gm.BoldYellow + 'Confirm outbound web request [y]es, [n]o, [a]ll: ' + $script:Gm.Fg
+    $choice = Read-TuiConfirmation -PromptText $promptStr -ActionType 'web'
+    if ($choice -eq 'a') {
+        if ($script:AgentPermission -eq 'Ask') {
+            $script:AgentPermission = 'AutoEdit'
+            Write-Host ('  ' + $script:Gm.Grey0 + $script:Box.V + ' ' + $script:Gm.Aqua + $script:Box.Check + ' [switched permission to AutoEdit for this session]' + $script:Gm.Reset)
+        }
+        return @{ approved = $true; response = $null }
+    }
+    if ($choice -eq 'y') {
+        return @{ approved = $true; response = $null }
+    }
+    Write-Host ('  ' + $script:Gm.Grey0 + $script:Box.BL + $script:Box.H + ' ' + $script:Gm.Red + $script:Box.Cross + ' cancelled' + $script:Gm.Reset)
+    return @{
+        approved = $false
+        response = (@{
+            status = 'cancelled'
+            message = 'User declined web request. Do not retry without a new user request.'
+        } | ConvertTo-Json -Compress)
+    }
+}
+
+function Format-WebRequestError {
+    param($ErrorRecord)
+    $code = 0
+    try {
+        if ($ErrorRecord -and $ErrorRecord.Exception -and $ErrorRecord.Exception.Response -and $ErrorRecord.Exception.Response.StatusCode) {
+            $code = [int]$ErrorRecord.Exception.Response.StatusCode
+        }
+    }
+    catch {}
+    $rawMsg = if ($ErrorRecord -and $ErrorRecord.Exception -and $ErrorRecord.Exception.Message) {
+        [string]$ErrorRecord.Exception.Message
+    }
+    else {
+        [string]$ErrorRecord
+    }
+    $cleanMsg = (($rawMsg -replace '[\r\n]+', ' ').Trim())
+    if ($cleanMsg.Length -gt 240) {
+        $cleanMsg = $cleanMsg.Substring(0, 240) + '...'
+    }
+    if ($code -gt 0 -and ($cleanMsg -notmatch "\b$code\b")) {
+        return "Web request failed (HTTP $code): $cleanMsg"
+    }
+    if ($cleanMsg -match '^Web request ') {
+        return $cleanMsg
+    }
+    if ($cleanMsg) {
+        return "Web request failed: $cleanMsg"
+    }
+    return 'Web request failed.'
 }
 
 function ConvertFrom-HtmlToText {
@@ -4354,7 +4633,12 @@ function Invoke-AgentWebDownload {
     }
     $webCommand = Get-Command -Name 'Invoke-WebRequest' -ErrorAction SilentlyContinue
     if ($webCommand -and $webCommand.CommandType -eq 'Function') {
-        Invoke-WebRequest @request
+        try {
+            Invoke-WebRequest @request
+        }
+        catch {
+            throw (Format-WebRequestError -ErrorRecord $_)
+        }
     }
     else {
         $stdout = New-TemporaryFile -ErrorAction Stop
@@ -4367,7 +4651,22 @@ function Invoke-AgentWebDownload {
 $ErrorActionPreference = 'Stop'
 try {
     Invoke-WebRequest -Uri $env:SHELLOSSUS_WEB_DOWNLOAD_URI -Method Get -Headers @{ 'User-Agent' = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Shellossus/1.0' } -TimeoutSec 30 -UseBasicParsing -OutFile $env:SHELLOSSUS_WEB_DOWNLOAD_FILE -ErrorAction Stop
-} catch { exit 1 }
+} catch {
+    $code = 0
+    try {
+        if ($_.Exception.Response -and $_.Exception.Response.StatusCode) {
+            $code = [int]$_.Exception.Response.StatusCode
+        }
+    } catch {}
+    $msg = if ($_.Exception -and $_.Exception.Message) { [string]$_.Exception.Message } else { [string]$_ }
+    $msg = ($msg -replace '[\r\n]+', ' ').Trim()
+    if ($code -gt 0 -and ($msg -notmatch "\b$code\b")) {
+        Write-Output "HTTP ${code}: $msg"
+    } else {
+        Write-Output $msg
+    }
+    exit 1
+}
 '@
             $workerArguments = if ($env:OS -eq 'Windows_NT') {
                 $escaped = ($worker -replace '(\\*)"', '$1$1\"') -replace '(\\*)$', '$1$1'
@@ -4390,7 +4689,21 @@ try {
                 if (((Get-Date) - $started).TotalSeconds -gt 35) { throw 'Web request timed out.' }
                 Start-Sleep -Milliseconds 100
             }
-            if ($null -ne $proc.ExitCode -and $proc.ExitCode -ne 0) { throw 'Web request failed.' }
+            if ($null -ne $proc.ExitCode -and $proc.ExitCode -ne 0) {
+                $errOut = ''
+                if (Test-Path -LiteralPath $stdout.FullName) {
+                    $errOut = Get-Content -LiteralPath $stdout.FullName -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
+                }
+                if ((-not $errOut -or -not $errOut.Trim()) -and (Test-Path -LiteralPath $stderr.FullName)) {
+                    $errOut = Get-Content -LiteralPath $stderr.FullName -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
+                }
+                $errDetail = if ($errOut -and $errOut.Trim()) { ($errOut -replace '[\r\n]+', ' ').Trim() } else { '' }
+                if ($errDetail.Length -gt 240) { $errDetail = $errDetail.Substring(0, 240) + '...' }
+                if ($errDetail) {
+                    throw "Web request failed: $errDetail"
+                }
+                throw 'Web request failed.'
+            }
         }
         finally {
             if ($proc -and -not $proc.HasExited) {
@@ -4408,14 +4721,14 @@ function Invoke-AgentFetchUrl {
     param($Arguments)
     $toolStart = Get-Date
     $url = if ($Arguments.url) { $Arguments.url.Trim() } else { '' }
-    if ($url -notmatch '^https?://[^\s]+$') {
-        throw 'url must be a valid http:// or https:// URL.'
-    }
+    $null = Test-SafeWebUrl -Url $url
     $maxChars = 20000
     if ($null -ne $Arguments.max_chars) {
         $maxChars = [int]$Arguments.max_chars
         if ($maxChars -lt 500 -or $maxChars -gt 50000) { throw 'max_chars must be between 500 and 50000.' }
     }
+    $conf = Request-AgentWebConfirmation -ToolName 'fetch_url' -Target $url
+    if (-not $conf.approved) { return $conf.response }
     $rawMode = ($Arguments.raw -eq $true)
     $tempOut = New-TemporaryFile -ErrorAction Stop
     try {
@@ -4463,6 +4776,9 @@ function Invoke-AgentWebSearch {
     $encodedQ = ConvertTo-UrlEncodedString -Text $query
     $baseSearchUrl = if ($env:SHELLOSSUS_SEARCH_URL) { $env:SHELLOSSUS_SEARCH_URL } else { 'https://html.duckduckgo.com/html/?q=' }
     $searchUri = $baseSearchUrl + $encodedQ
+    $null = Test-SafeWebUrl -Url $searchUri
+    $conf = Request-AgentWebConfirmation -ToolName 'web_search' -Target $query
+    if (-not $conf.approved) { return $conf.response }
     $tempOut = New-TemporaryFile -ErrorAction Stop
     try {
         Invoke-AgentWebDownload -Uri $searchUri -OutFile $tempOut.FullName
@@ -4719,45 +5035,54 @@ function Invoke-AgentMemory {
         Join-Path (if ($env:USERPROFILE) { $env:USERPROFILE } else { $HOME }) '.shellossus'
     }
 
+    $parentDir = $null
     $targetPath = $null
     $displayRel = $null
+    $stopRoot = ''
     if ($scope -eq 'global') {
-        if (-not (Test-Path -LiteralPath $configDir)) {
-            New-Item -ItemType Directory -Path $configDir -Force -ErrorAction Stop | Out-Null
-        }
+        $parentDir = $configDir
         $targetPath = Join-Path $configDir 'MEMORY.md'
         $displayRel = '~/.shellossus/MEMORY.md'
+        $stopRoot = $configDir
     }
     else {
+        $stopRoot = $Root
+        if ($Root -and (Test-PathHasReparsePoint -Path $Root -StopAt $Root)) {
+            throw 'Reparse points are not allowed.'
+        }
         $dotDir = Join-Path $Root '.shellossus'
         $wsDotMem = Join-Path $dotDir 'MEMORY.md'
         $wsRootMem = Join-Path $Root 'MEMORY.md'
+        if ((Test-PathHasReparsePoint -Path $wsRootMem -StopAt $Root) -or (Test-PathHasReparsePoint -Path $wsDotMem -StopAt $Root)) {
+            throw 'Reparse points are not allowed.'
+        }
         if (Test-Path -LiteralPath $wsRootMem) {
+            $parentDir = $Root
             $targetPath = $wsRootMem
             $displayRel = 'MEMORY.md'
         }
         else {
-            if (-not (Test-Path -LiteralPath $dotDir)) {
-                New-Item -ItemType Directory -Path $dotDir -Force -ErrorAction Stop | Out-Null
-            }
+            $parentDir = $dotDir
             $targetPath = $wsDotMem
             $displayRel = '.shellossus/MEMORY.md'
         }
     }
 
-    if (Test-Path -LiteralPath $targetPath) {
-        $candItem = Get-Item -LiteralPath $targetPath -Force -ErrorAction Stop
-        if (($candItem.Attributes -band 1024) -ne 0) { throw 'Reparse points are not allowed.' }
+    if (Test-PathHasReparsePoint -Path $targetPath -StopAt $stopRoot) {
+        throw 'Reparse points are not allowed.'
     }
 
     $existing = ''
     if (Test-Path -LiteralPath $targetPath) {
+        $candItem = Get-Item -LiteralPath $targetPath -Force -ErrorAction Stop
+        if ($candItem.PSIsContainer) { throw 'MEMORY.md path is a directory.' }
         $existing = Get-Content -LiteralPath $targetPath -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
         if ($null -eq $existing) { $existing = '' }
     }
 
     $summaryText = ''
     $cardContent = ''
+    $updatedText = $existing
 
     if ($action -eq 'view') {
         $summaryText = if ($existing.Trim()) { "$($existing.Length) chars read" } else { 'empty' }
@@ -4775,36 +5100,107 @@ function Invoke-AgentMemory {
         else {
             "# Project Memory`n`n" + $newBullet + "`n"
         }
-        Set-Content -LiteralPath $targetPath -Value $updatedText -Encoding UTF8 -ErrorAction Stop
-        $existing = $updatedText
         $summaryText = "appended to $displayRel"
         $cardContent = "+ $newBullet"
     }
     elseif ($action -eq 'set') {
         $updatedText = $content.Trim() + "`n"
-        Set-Content -LiteralPath $targetPath -Value $updatedText -Encoding UTF8 -ErrorAction Stop
-        $existing = $updatedText
         $summaryText = "updated $displayRel ($($updatedText.Length) chars)"
         $cardContent = $updatedText.Trim()
     }
     elseif ($action -eq 'clear') {
-        if (Test-Path -LiteralPath $targetPath) {
-            Remove-Item -LiteralPath $targetPath -Force -ErrorAction SilentlyContinue
-        }
-        $existing = ''
+        $updatedText = ''
         $summaryText = "cleared $displayRel"
         $cardContent = '(memory cleared)'
     }
 
+    $cardPrinted = $false
     if ($action -in @('append', 'set', 'clear')) {
+        $needsConfirm = ($script:AgentPermission -eq 'Ask') -and (-not ($Arguments.user_initiated -eq $true))
+        if ($needsConfirm) {
+            if ($script:OutputMode -eq 'json') {
+                return (@{
+                    status = 'cancelled'
+                    success = $false
+                    action = $action
+                    scope = $scope
+                    path = $displayRel
+                    message = 'Interactive confirmation is disabled in JSON mode. Use -Permission AutoEdit or Auto to allow memory modifications.'
+                } | ConvertTo-Json -Depth 5 -Compress)
+            }
+            Write-MemoryCard -Scope $scope -Action $action -Content $cardContent
+            $cardPrinted = $true
+            $promptStr = '  ' + $script:Gm.BoldYellow + $script:Box.Arrow + " Confirm memory $action ($displayRel) [y]es, [n]o, [a]ll edits: " + $script:Gm.Fg
+            $choice = Read-TuiConfirmation -PromptText $promptStr -ActionType 'write'
+            if ($choice -eq 'a') {
+                $script:AgentPermission = 'AutoEdit'
+                Write-Host ('  ' + $script:Gm.Aqua + $script:Box.Check + ' [switched permission to AutoEdit for this session]' + $script:Gm.Reset)
+            }
+            elseif ($choice -ne 'y') {
+                Write-Host ('  ' + $script:Gm.Red + $script:Box.Cross + ' cancelled' + $script:Gm.Reset)
+                return (@{
+                    status = 'cancelled'
+                    success = $false
+                    action = $action
+                    scope = $scope
+                    path = $displayRel
+                    message = 'User declined memory modification. Do not retry without a new user request.'
+                } | ConvertTo-Json -Depth 5 -Compress)
+            }
+        }
+
+        if (Test-PathHasReparsePoint -Path $targetPath -StopAt $stopRoot) {
+            throw 'Reparse points are not allowed.'
+        }
+        if ($action -in @('append', 'set')) {
+            if (-not (Test-Path -LiteralPath $parentDir)) {
+                New-Item -ItemType Directory -Path $parentDir -Force -ErrorAction Stop | Out-Null
+            }
+            if (Test-PathHasReparsePoint -Path $targetPath -StopAt $stopRoot) {
+                throw 'Reparse points are not allowed.'
+            }
+            $stageFile = New-TemporaryFile -ErrorAction Stop
+            try {
+                Set-Content -LiteralPath $stageFile.FullName -Value $updatedText -Encoding UTF8 -NoNewline -ErrorAction Stop
+                $stagedCheck = Get-Content -LiteralPath $stageFile.FullName -Raw -Encoding UTF8 -ErrorAction Stop
+                if ($null -eq $stagedCheck) { $stagedCheck = '' }
+                if ($stagedCheck -cne $updatedText) { throw 'Staged memory verification failed. No write performed.' }
+                if (Test-PathHasReparsePoint -Path $targetPath -StopAt $stopRoot) {
+                    throw 'Reparse points are not allowed.'
+                }
+                Move-Item -LiteralPath $stageFile.FullName -Destination $targetPath -Force -ErrorAction Stop
+                $writtenCheck = Get-Content -LiteralPath $targetPath -Raw -Encoding UTF8 -ErrorAction Stop
+                if ($null -eq $writtenCheck) { $writtenCheck = '' }
+                if ($writtenCheck -cne $updatedText) { throw 'Written memory verification failed.' }
+            }
+            finally {
+                if ($stageFile -and (Test-Path -LiteralPath $stageFile.FullName)) {
+                    Remove-Item -LiteralPath $stageFile.FullName -Force -ErrorAction SilentlyContinue
+                }
+            }
+            $existing = $updatedText
+        }
+        elseif ($action -eq 'clear') {
+            if (Test-Path -LiteralPath $targetPath) {
+                if (Test-PathHasReparsePoint -Path $targetPath -StopAt $stopRoot) {
+                    throw 'Reparse points are not allowed.'
+                }
+                Remove-Item -LiteralPath $targetPath -Force -ErrorAction Stop
+            }
+            $existing = ''
+        }
+
         Sync-AgentMemoryContext -State $script:ActiveState -Root $Root -ConfigDir $configDir | Out-Null
     }
 
     $elapsedMs = [int](((Get-Date) - $toolStart).TotalMilliseconds)
     Write-ToolCallCard -Name 'memory' -Target $displayRel -Detail $action -Status 'ok' -Summary $summaryText -ElapsedMs $elapsedMs
-    Write-MemoryCard -Scope $scope -Action $action -Content $cardContent
+    if (-not $cardPrinted) {
+        Write-MemoryCard -Scope $scope -Action $action -Content $cardContent
+    }
 
     $resObj = @{
+        status = $(if ($action -eq 'view') { 'ok' } else { 'written' })
         success = $true
         action = $action
         scope = $scope
@@ -8540,7 +8936,7 @@ function Invoke-ReplMemoryCommand {
     }
 
     try {
-        $callArg = @{ action = $action; scope = $scope; content = $content; config_dir = $effConfigDir }
+        $callArg = @{ action = $action; scope = $scope; content = $content; config_dir = $effConfigDir; user_initiated = $true }
         $null = Invoke-AgentMemory -Root $RootPath -Arguments $callArg
         if ($action -in @('append', 'set', 'clear')) {
             Sync-AgentMemoryContext -State $State -Root $RootPath -ConfigDir $effConfigDir | Out-Null

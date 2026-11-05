@@ -126,6 +126,9 @@ function Read-TuiConfirmation {
         if ($ActionType -eq 'run' -and ($lower -in @('r', 'run') -or $trimmed -ceq 'RUN')) {
             return 'y'
         }
+        if ($ActionType -eq 'web' -and ($lower -in @('w', 'web', 'write', 'r', 'run') -or $trimmed -in @('WRITE', 'RUN', 'WEB'))) {
+            return 'y'
+        }
         if ($lower -in @('a', 'all', 'always')) {
             return 'a'
         }

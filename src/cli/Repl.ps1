@@ -287,7 +287,7 @@ function Invoke-ReplMemoryCommand {
     }
 
     try {
-        $callArg = @{ action = $action; scope = $scope; content = $content; config_dir = $effConfigDir }
+        $callArg = @{ action = $action; scope = $scope; content = $content; config_dir = $effConfigDir; user_initiated = $true }
         $null = Invoke-AgentMemory -Root $RootPath -Arguments $callArg
         if ($action -in @('append', 'set', 'clear')) {
             Sync-AgentMemoryContext -State $State -Root $RootPath -ConfigDir $effConfigDir | Out-Null

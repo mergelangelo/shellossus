@@ -666,7 +666,14 @@ try {
             @{ role = 'user'; content = 'View, append, and view memory' }
         )
     }
-    Invoke-AgentTurn -State $memTurnState -Endpoint 'https://example.invalid/v1/chat/completions' -ModelId 'test-model' -ApiKey 'fake' -Root $workspacePath -Steps 6 -MaxRepeatCalls 2
+    $prevPermMemTurn = $script:AgentPermission
+    $script:AgentPermission = 'AutoEdit'
+    try {
+        Invoke-AgentTurn -State $memTurnState -Endpoint 'https://example.invalid/v1/chat/completions' -ModelId 'test-model' -ApiKey 'fake' -Root $workspacePath -Steps 6 -MaxRepeatCalls 2
+    }
+    finally {
+        $script:AgentPermission = $prevPermMemTurn
+    }
     Assert-True ((-not $memTurnState.loop_detected) -and $memTurnState.messages[-1].content -eq 'Memory turn ok.' -and $memTurnState.messages[0].content.Contains('Turn memory rule')) 'Invoke-AgentTurn did not advance mutationEpoch or update system prompt after memory append.'
 
     # Regression (Item 7d): After context compaction removes old role='tool' messages from $State.messages,
