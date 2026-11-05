@@ -140,6 +140,50 @@ try {
 
     Write-TuiMascotCard -Mode 'compact'
     Write-TuiMascotCard -Mode 'full'
+
+    # Theme catalog, alias resolution, palette switching, config persistence, and HTML export theme integration.
+    $themesCatalog = @(Get-AgentThemesCatalog)
+    Assert-True ($themesCatalog.Count -eq 9) 'Expected 9 built-in themes in catalog.'
+    foreach ($tSpec in $themesCatalog) {
+        $appliedSpec = Set-AgentTheme -Name $tSpec.id
+        Assert-True ($appliedSpec.id -eq $tSpec.id -and $script:ActiveTheme -eq $tSpec.id) "Set-AgentTheme failed for $($tSpec.id)."
+        Assert-True ($script:Gm.OscInit.Contains($tSpec.bg0) -and $script:Gm.OscInit.Contains($tSpec.fg)) "OscInit mismatch for $($tSpec.id)."
+        Assert-True ([bool]$script:Gm.BoldAqua -and [bool]$script:Gm.BoldPurple) "Missing BoldAqua or BoldPurple in $($tSpec.id) palette."
+    }
+    Assert-True ((Resolve-ThemeCanonicalName -Name 'mocha') -eq 'catppuccin-mocha') 'Alias mocha failed.'
+    Assert-True ((Resolve-ThemeCanonicalName -Name 'tokyo') -eq 'tokyo-night') 'Alias tokyo failed.'
+    Assert-True ((Resolve-ThemeCanonicalName -Name 'onedark') -eq 'one-dark') 'Alias onedark failed.'
+    Assert-True ((Resolve-ThemeCanonicalName -Name 'rosepine') -eq 'rose-pine') 'Alias rosepine failed.'
+    Assert-True ((Resolve-ThemeCanonicalName -Name 'light') -eq 'catppuccin-latte') 'Alias light failed.'
+    $badThemeThrew = $false
+    try { Set-AgentTheme -Name 'nonexistent-theme' | Out-Null } catch { $badThemeThrew = $true }
+    Assert-True $badThemeThrew 'Set-AgentTheme should throw on unknown theme.'
+
+    # Interactive /theme command & config persistence
+    $themeCfgFile = Join-Path $ws 'theme-test.env'
+    Save-AgentConfig -Path $themeCfgFile -Config @{
+        SHELLOSSUS_BASE_URL = 'https://example.invalid/v1'
+        SHELLOSSUS_MODEL = 'test-model'
+        SHELLOSSUS_API_KEY = 'secret-key'
+        SHELLOSSUS_WORKSPACE = ''
+    }
+    $prevCfgPath = $script:AgentConfigPath
+    $script:AgentConfigPath = $themeCfgFile
+    try {
+        Invoke-ReplThemeCommand -ThemeArg 'dracula'
+        Assert-True ($script:ActiveTheme -eq 'dracula') 'Invoke-ReplThemeCommand direct switch to dracula failed.'
+        $reloadedCfg = Read-AgentConfig -Path $themeCfgFile
+        Assert-True ($reloadedCfg.SHELLOSSUS_THEME -eq 'dracula' -and $reloadedCfg.SHELLOSSUS_API_KEY -eq 'secret-key') 'Theme persistence in .env config failed.'
+
+        # Interactive picker via /theme without args (select #2 = catppuccin-mocha)
+        $script:mlQueue = @('2')
+        Invoke-ReplThemeCommand -ThemeArg ''
+        Assert-True ($script:ActiveTheme -eq 'catppuccin-mocha') 'Invoke-ReplThemeCommand interactive selector failed.'
+    }
+    finally {
+        $script:AgentConfigPath = $prevCfgPath
+        $null = Set-AgentTheme -Name 'gruvbox-material'
+    }
 }
 finally {
     Remove-Item Function:\Read-Host -ErrorAction SilentlyContinue

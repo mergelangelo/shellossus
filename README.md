@@ -17,7 +17,7 @@ Drop [`shellossus.ps1`](shellossus.ps1) onto any machine and connect to any Open
 | **Session Tree, Fork & Export** | Workspace-scoped `.jsonl` sessions (`-Continue`, `/sessions`, `/resume`), branch navigation (`/tree`), session forking (`/fork`), and standalone HTML export (`/export`) |
 | **Smart Context Compaction** | Iterative structured handoffs (`/compact [focus]`) with cumulative `<read-files>` / `<modified-files>` tracking and automatic context-overflow recovery |
 | **Context & Extensibility** | Auto-loads `AGENTS.md`, `SOUL.md` (ethos/persona), `MEMORY.md` (cross-session memory), `SYSTEM.md`, `APPEND_SYSTEM.md`, `skills/*/SKILL.md` (`/skill:name`), `/<template>` prompts (`$1`, `$@`, `${1:-default}`), `@file` attachments, and `!cmd` / `!!cmd` |
-| **TrueColor Terminal UI** | `sainnhe/gruvbox-material` (dark medium) palette with Markdown headings, lists, code blocks, auto-aligned tables, collapsible `reasoning` blocks, and `-Mode json` event streaming |
+| **TrueColor Terminal UI & 9 Themes** | Built-in palettes (`gruvbox-material`, `catppuccin-mocha`, `tokyo-night`, `dracula`, `nord`, `one-dark`, `rose-pine`, `kanagawa`, `catppuccin-latte`) with `/theme` picker, Markdown headings, lists, code blocks, auto-aligned tables, collapsible `reasoning` blocks, and `-Mode json` event streaming |
 | **Enterprise & Lockdown Ready** | Pure ASCII single-script distribution (`shellossus.ps1`), NTFS junction/symlink boundary protection, `.env` secret blocking, and full `ConstrainedLanguage` mode compatibility |
 
 ## Quick Start
@@ -95,6 +95,7 @@ shellossus -Prompt "Explain @src/tools/Files.ps1" # Single-shot non-interactive 
 | `/reload` | Reload context files (`AGENTS.md`, `SOUL.md`, `MEMORY.md`, `SYSTEM.md`), skills, and templates |
 | `/hotkeys` | Show input shortcuts and syntax reference |
 | `/model <id>` | Switch model ID for the current session |
+| `/theme [name]` (`/th`) | Pick or switch color theme (`gruvbox-material`, `catppuccin-mocha`, `tokyo-night`, `dracula`, `nord`, `one-dark`, `rose-pine`, `kanagawa`, `catppuccin-latte`) |
 | `/sessions` | List recent saved sessions |
 | `/resume <num\|name>` | Load a saved session |
 | `/save [name]` | Save current session (optionally under a custom filename) |

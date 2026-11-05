@@ -15,7 +15,7 @@
   - Blocks access to `.env`, `.env.*` (except `.env.example`), and the active user configuration file (`$script:AgentConfigPath`).
 
 ### 2. [`src/Theme.ps1`](../src/Theme.ps1) & [`src/ui/`](../src/ui/)
-- **Palette & Prompt Frame (`Theme.ps1`):** Exact 24-bit TrueColor RGB sequences from `sainnhe/gruvbox-material` (`dark medium`, `#282828` background, `#d4be98` foreground), context gauge, permission badges, and status bar (`Write-TuiPromptFrame`).
+- **Palettes & Prompt Frame (`Theme.ps1`):** 9 built-in 24-bit TrueColor RGB themes (`gruvbox-material` default, `catppuccin-mocha`, `tokyo-night`, `dracula`, `nord`, `one-dark`, `rose-pine`, `kanagawa`, `catppuccin-latte`), dynamic palette builder (`Set-AgentTheme`), context gauge, permission badges, and status bar (`Write-TuiPromptFrame`).
 - **TUI Cards & Diffs (`ui/Cards.ps1`):** Tool execution cards, task board cards, plan review, memory cards, and unified diff rendering (`Format-UnifiedDiff`).
 - **Interactive Input (`ui/Input.ps1`):** Multi-line prompt input (`Read-TuiMultilineInput`), interactive TUI selector (`Invoke-TuiSelector`), and confirmation prompts (`Read-TuiConfirmation`).
 - **Markdown, Table & Mascot Renderer (`ui/Markdown.ps1`):**

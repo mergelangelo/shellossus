@@ -8,6 +8,7 @@ param(
     [string]$ContextWindow = $env:SHELLOSSUS_CONTEXT_WINDOW,
     [string]$CompactThreshold = $env:SHELLOSSUS_COMPACT_THRESHOLD,
     [string]$Permission = 'Ask',
+    [string]$Theme = $env:SHELLOSSUS_THEME,
     [string]$ReasoningEffort = '',
     [string]$Prompt = '',
     [string]$Mode = 'text',
@@ -72,7 +73,7 @@ function Read-AgentConfig {
         $lineNumber++
         $trimmed = $line.Trim()
         if (-not $trimmed -or $trimmed.StartsWith('#')) { continue }
-        if ($trimmed -notmatch '^(?:(SHELLOSSUS|H_AGENT)_(BASE_URL|MODEL|API_KEY|WORKSPACE|CONTEXT_WINDOW|COMPACT_THRESHOLD))\s*=(.*)$') {
+        if ($trimmed -notmatch '^(?:(SHELLOSSUS|H_AGENT)_(BASE_URL|MODEL|API_KEY|WORKSPACE|CONTEXT_WINDOW|COMPACT_THRESHOLD|THEME))\s*=(.*)$') {
             throw "Invalid config entry at line $lineNumber. Expected a supported SHELLOSSUS_* key=value."
         }
         $prefix = $Matches[1].ToUpper()
@@ -108,7 +109,7 @@ function Save-AgentConfig {
         if ($value.Contains('"')) { throw 'Config values cannot contain double quotes.' }
         $lines += $key + '="' + $value + '"'
     }
-    foreach ($optKey in @('SHELLOSSUS_CONTEXT_WINDOW', 'SHELLOSSUS_COMPACT_THRESHOLD')) {
+    foreach ($optKey in @('SHELLOSSUS_CONTEXT_WINDOW', 'SHELLOSSUS_COMPACT_THRESHOLD', 'SHELLOSSUS_THEME')) {
         if ($Config.ContainsKey($optKey) -and $Config[$optKey]) {
             $optVal = [string]$Config[$optKey]
             if ($optVal -match "[`r`n]" -or $optVal.Contains('"')) { throw 'Invalid optional config value.' }
@@ -118,6 +119,27 @@ function Save-AgentConfig {
     $parent = Split-Path $Path -Parent
     if ($parent -and -not (Test-Path -LiteralPath $parent)) { New-Item -ItemType Directory -Path $parent -ErrorAction Stop | Out-Null }
     Set-Content -LiteralPath $Path -Value $lines -Encoding UTF8 -ErrorAction Stop
+}
+
+function Update-AgentConfigOptionalKey {
+    param([string]$Path, [string]$Key, [string]$Value)
+    if (-not $Path -or -not $Key) { return $false }
+    $effectivePath = Resolve-AgentConfigPath -Path $Path
+    if (-not $effectivePath -or -not (Test-Path -LiteralPath $effectivePath)) { return $false }
+    $cfg = @{}
+    try {
+        $cfg = Read-AgentConfig -Path $effectivePath
+        if (-not $cfg -or $cfg.Count -eq 0) { return $false }
+        $cfg[$Key] = $Value
+        Save-AgentConfig -Path $effectivePath -Config $cfg
+        return $true
+    }
+    catch {
+        return $false
+    }
+    finally {
+        if ($cfg) { $cfg.Clear() }
+    }
 }
 
 function Format-ConfigPath {
@@ -236,36 +258,325 @@ function Resolve-AgentPath {
 }
 
 # --- src/Theme.ps1 ---
-# Terminal UI theme (sainnhe/gruvbox-material dark medium), status bar, and prompt frame.
+# Terminal UI themes, palette switching, status bar, and prompt frame.
 
 $script:Esc = [string][char]27
 $script:Bel = [string][char]7
-# sainnhe/gruvbox-material (dark medium) exact RGB palette
-$script:Gm = @{
-    Reset       = "$script:Esc[0m"
-    Bg0         = "$script:Esc[48;2;40;40;40m"       # #282828
-    Bg1         = "$script:Esc[48;2;50;48;47m"       # #32302f
-    BgDiffRed   = "$script:Esc[48;2;64;33;32m"       # #402120
-    BgDiffGreen = "$script:Esc[48;2;52;56;27m"       # #34381b
-    Fg          = "$script:Esc[38;2;212;190;152m"    # #d4be98
-    Fg1         = "$script:Esc[38;2;221;199;161m"    # #ddc7a1
-    Red         = "$script:Esc[38;2;234;105;98m"     # #ea6962
-    BoldRed     = "$script:Esc[1;38;2;234;105;98m"   # #ea6962 bold (H1)
-    Orange      = "$script:Esc[38;2;231;138;78m"     # #e78a4e
-    BoldOrange  = "$script:Esc[1;38;2;231;138;78m"   # #e78a4e bold (H2 / **bold**)
-    Yellow      = "$script:Esc[38;2;216;166;87m"     # #d8a657
-    BoldYellow  = "$script:Esc[1;38;2;216;166;87m"   # #d8a657 bold (H3)
-    Green       = "$script:Esc[38;2;169;182;101m"    # #a9b665
-    BoldGreen   = "$script:Esc[1;38;2;169;182;101m"  # #a9b665 bold (Shellossus: / H4)
-    Aqua        = "$script:Esc[38;2;137;180;130m"    # #89b482
-    Blue        = "$script:Esc[38;2;125;174;163m"    # #7daea3
-    BoldBlue    = "$script:Esc[1;38;2;125;174;163m"  # #7daea3 bold (You: / Table header)
-    Purple      = "$script:Esc[3;38;2;211;134;155m"  # #d3869b italic (*italic*)
-    Grey0       = "$script:Esc[38;2;124;111;100m"    # #7c6f64
-    Grey1       = "$script:Esc[38;2;146;131;116m"    # #928374
-    Grey2       = "$script:Esc[38;2;168;153;132m"    # #a89984
-    OscInit     = "$script:Esc]11;#282828$script:Bel$script:Esc]10;#d4be98$script:Bel"
+$script:ActiveTheme = 'gruvbox-material'
+$script:ActiveThemeSpec = $null
+
+function Get-AgentThemesCatalog {
+    return @(
+        @{
+            id          = 'gruvbox-material'
+            label       = 'Gruvbox Material'
+            description = 'Warm retro dark medium palette (#282828 / #d4be98)'
+            bg_outer    = '#1d2021'
+            bg0         = '#282828'
+            bg1         = '#32302f'
+            bg_diff_red = '#402120'
+            bg_diff_grn = '#34381b'
+            fg          = '#d4be98'
+            fg1         = '#ddc7a1'
+            red         = '#ea6962'
+            orange      = '#e78a4e'
+            yellow      = '#d8a657'
+            green       = '#a9b665'
+            aqua        = '#89b482'
+            blue        = '#7daea3'
+            purple      = '#d3869b'
+            grey0       = '#7c6f64'
+            grey1       = '#928374'
+            grey2       = '#a89984'
+        },
+        @{
+            id          = 'catppuccin-mocha'
+            label       = 'Catppuccin Mocha'
+            description = 'Soothing pastel dark palette (#1e1e2e / #cdd6f4)'
+            bg_outer    = '#181825'
+            bg0         = '#1e1e2e'
+            bg1         = '#313244'
+            bg_diff_red = '#3c2330'
+            bg_diff_grn = '#23392e'
+            fg          = '#cdd6f4'
+            fg1         = '#f5e0dc'
+            red         = '#f38ba8'
+            orange      = '#fab387'
+            yellow      = '#f9e2af'
+            green       = '#a6e3a1'
+            aqua        = '#94e2d5'
+            blue        = '#89b4fa'
+            purple      = '#cba6f7'
+            grey0       = '#6c7086'
+            grey1       = '#9399b2'
+            grey2       = '#a6adc8'
+        },
+        @{
+            id          = 'tokyo-night'
+            label       = 'Tokyo Night'
+            description = 'Deep indigo neon dark palette (#1a1b26 / #c0caf5)'
+            bg_outer    = '#16161e'
+            bg0         = '#1a1b26'
+            bg1         = '#24283b'
+            bg_diff_red = '#3f222c'
+            bg_diff_grn = '#203532'
+            fg          = '#c0caf5'
+            fg1         = '#dce0f7'
+            red         = '#f7768e'
+            orange      = '#ff9e64'
+            yellow      = '#e0af68'
+            green       = '#9ece6a'
+            aqua        = '#73daca'
+            blue        = '#7aa2f7'
+            purple      = '#bb9af7'
+            grey0       = '#565f89'
+            grey1       = '#787c99'
+            grey2       = '#9aa5ce'
+        },
+        @{
+            id          = 'dracula'
+            label       = 'Dracula'
+            description = 'High-contrast gothic dark palette (#282a36 / #f8f8f2)'
+            bg_outer    = '#21222c'
+            bg0         = '#282a36'
+            bg1         = '#343746'
+            bg_diff_red = '#4a2633'
+            bg_diff_grn = '#234232'
+            fg          = '#f8f8f2'
+            fg1         = '#ffffff'
+            red         = '#ff5555'
+            orange      = '#ffb86c'
+            yellow      = '#f1fa8c'
+            green       = '#50fa7b'
+            aqua        = '#8be9fd'
+            blue        = '#6272a4'
+            purple      = '#bd93f9'
+            grey0       = '#6272a4'
+            grey1       = '#7b88b8'
+            grey2       = '#9ea8cc'
+        },
+        @{
+            id          = 'nord'
+            label       = 'Nord'
+            description = 'Arctic bluish-grey dark palette (#2e3440 / #d8dee9)'
+            bg_outer    = '#242933'
+            bg0         = '#2e3440'
+            bg1         = '#3b4252'
+            bg_diff_red = '#48323c'
+            bg_diff_grn = '#32443c'
+            fg          = '#d8dee9'
+            fg1         = '#eceff4'
+            red         = '#bf616a'
+            orange      = '#d08770'
+            yellow      = '#ebcb8b'
+            green       = '#a3be8c'
+            aqua        = '#88c0d0'
+            blue        = '#81a1c1'
+            purple      = '#b48ead'
+            grey0       = '#616e88'
+            grey1       = '#7b88a1'
+            grey2       = '#96a3bc'
+        },
+        @{
+            id          = 'one-dark'
+            label       = 'One Dark Pro'
+            description = 'Classic Atom and VS Code dark palette (#282c34 / #abb2bf)'
+            bg_outer    = '#21252b'
+            bg0         = '#282c34'
+            bg1         = '#333842'
+            bg_diff_red = '#45272d'
+            bg_diff_grn = '#283b2e'
+            fg          = '#abb2bf'
+            fg1         = '#c8ccd4'
+            red         = '#e06c75'
+            orange      = '#d19a66'
+            yellow      = '#e5c07b'
+            green       = '#98c379'
+            aqua        = '#56b6c2'
+            blue        = '#61afef'
+            purple      = '#c678dd'
+            grey0       = '#5c6370'
+            grey1       = '#7f848e'
+            grey2       = '#9da5b4'
+        },
+        @{
+            id          = 'rose-pine'
+            label       = 'Rose Pine'
+            description = 'Muted pine and rose dark palette (#191724 / #e0def4)'
+            bg_outer    = '#13111c'
+            bg0         = '#191724'
+            bg1         = '#26233a'
+            bg_diff_red = '#3d2131'
+            bg_diff_grn = '#1f333a'
+            fg          = '#e0def4'
+            fg1         = '#f0effa'
+            red         = '#eb6f92'
+            orange      = '#ea9a97'
+            yellow      = '#f6c177'
+            green       = '#9ccfd8'
+            aqua        = '#31748f'
+            blue        = '#7aa2f7'
+            purple      = '#c4a7e7'
+            grey0       = '#6e6a86'
+            grey1       = '#908caa'
+            grey2       = '#b4b1cc'
+        },
+        @{
+            id          = 'kanagawa'
+            label       = 'Kanagawa Wave'
+            description = 'Japanese ink and wave dark palette (#1f1f28 / #dcd7ba)'
+            bg_outer    = '#16161d'
+            bg0         = '#1f1f28'
+            bg1         = '#2a2a37'
+            bg_diff_red = '#43242b'
+            bg_diff_grn = '#2b3328'
+            fg          = '#dcd7ba'
+            fg1         = '#eae6cf'
+            red         = '#c34043'
+            orange      = '#ffa066'
+            yellow      = '#dca561'
+            green       = '#76946a'
+            aqua        = '#6a9589'
+            blue        = '#7e9cd8'
+            purple      = '#957fb8'
+            grey0       = '#727169'
+            grey1       = '#938aa9'
+            grey2       = '#a6a69c'
+        },
+        @{
+            id          = 'catppuccin-latte'
+            label       = 'Catppuccin Latte'
+            description = 'Warm daylight high-contrast light palette (#eff1f5 / #4c4f69)'
+            bg_outer    = '#e6e9ef'
+            bg0         = '#eff1f5'
+            bg1         = '#ccd0da'
+            bg_diff_red = '#f2d5cf'
+            bg_diff_grn = '#d5e8d4'
+            fg          = '#4c4f69'
+            fg1         = '#2c2f44'
+            red         = '#d20f39'
+            orange      = '#fe640b'
+            yellow      = '#df8e1d'
+            green       = '#40a02b'
+            aqua        = '#179299'
+            blue        = '#1e66f5'
+            purple      = '#8839ef'
+            grey0       = '#8c8fa1'
+            grey1       = '#6c6f85'
+            grey2       = '#5c5f77'
+        }
+    )
 }
+
+function Resolve-ThemeCanonicalName {
+    param([string]$Name)
+    if (-not $Name) { return '' }
+    $norm = ($Name.Trim().ToLower() -replace '[_\s]+', '-')
+    switch ($norm) {
+        'gruvbox'           { return 'gruvbox-material' }
+        'gruvbox-material'  { return 'gruvbox-material' }
+        'default'           { return 'gruvbox-material' }
+        'catppuccin'        { return 'catppuccin-mocha' }
+        'mocha'             { return 'catppuccin-mocha' }
+        'catppuccin-mocha'  { return 'catppuccin-mocha' }
+        'tokyo'             { return 'tokyo-night' }
+        'tokyonight'        { return 'tokyo-night' }
+        'tokyo-night'       { return 'tokyo-night' }
+        'dracula'           { return 'dracula' }
+        'nord'              { return 'nord' }
+        'onedark'           { return 'one-dark' }
+        'one-dark'          { return 'one-dark' }
+        'one-dark-pro'      { return 'one-dark' }
+        'atom'              { return 'one-dark' }
+        'rosepine'          { return 'rose-pine' }
+        'rose-pine'         { return 'rose-pine' }
+        'kanagawa'          { return 'kanagawa' }
+        'kanagawa-wave'     { return 'kanagawa' }
+        'latte'             { return 'catppuccin-latte' }
+        'light'             { return 'catppuccin-latte' }
+        'catppuccin-latte'  { return 'catppuccin-latte' }
+        default             { return '' }
+    }
+}
+
+function ConvertFrom-HexToRgbTriplet {
+    param([string]$Hex)
+    $clean = $Hex.TrimStart('#')
+    $r = [int]('0x' + $clean.Substring(0, 2))
+    $g = [int]('0x' + $clean.Substring(2, 2))
+    $b = [int]('0x' + $clean.Substring(4, 2))
+    return "$r;$g;$b"
+}
+
+function Build-TuiPalette {
+    param($Spec)
+    $bg0Rgb   = ConvertFrom-HexToRgbTriplet -Hex $Spec.bg0
+    $bg1Rgb   = ConvertFrom-HexToRgbTriplet -Hex $Spec.bg1
+    $bgRedRgb = ConvertFrom-HexToRgbTriplet -Hex $Spec.bg_diff_red
+    $bgGrnRgb = ConvertFrom-HexToRgbTriplet -Hex $Spec.bg_diff_grn
+    $fgRgb    = ConvertFrom-HexToRgbTriplet -Hex $Spec.fg
+    $fg1Rgb   = ConvertFrom-HexToRgbTriplet -Hex $Spec.fg1
+    $redRgb   = ConvertFrom-HexToRgbTriplet -Hex $Spec.red
+    $orgRgb   = ConvertFrom-HexToRgbTriplet -Hex $Spec.orange
+    $yelRgb   = ConvertFrom-HexToRgbTriplet -Hex $Spec.yellow
+    $grnRgb   = ConvertFrom-HexToRgbTriplet -Hex $Spec.green
+    $aquRgb   = ConvertFrom-HexToRgbTriplet -Hex $Spec.aqua
+    $bluRgb   = ConvertFrom-HexToRgbTriplet -Hex $Spec.blue
+    $purRgb   = ConvertFrom-HexToRgbTriplet -Hex $Spec.purple
+    $gr0Rgb   = ConvertFrom-HexToRgbTriplet -Hex $Spec.grey0
+    $gr1Rgb   = ConvertFrom-HexToRgbTriplet -Hex $Spec.grey1
+    $gr2Rgb   = ConvertFrom-HexToRgbTriplet -Hex $Spec.grey2
+    return @{
+        Reset       = "$script:Esc[0m"
+        Bg0         = "$script:Esc[48;2;$($bg0Rgb)m"
+        Bg1         = "$script:Esc[48;2;$($bg1Rgb)m"
+        BgDiffRed   = "$script:Esc[48;2;$($bgRedRgb)m"
+        BgDiffGreen = "$script:Esc[48;2;$($bgGrnRgb)m"
+        Fg          = "$script:Esc[38;2;$($fgRgb)m"
+        Fg1         = "$script:Esc[38;2;$($fg1Rgb)m"
+        Red         = "$script:Esc[38;2;$($redRgb)m"
+        BoldRed     = "$script:Esc[1;38;2;$($redRgb)m"
+        Orange      = "$script:Esc[38;2;$($orgRgb)m"
+        BoldOrange  = "$script:Esc[1;38;2;$($orgRgb)m"
+        Yellow      = "$script:Esc[38;2;$($yelRgb)m"
+        BoldYellow  = "$script:Esc[1;38;2;$($yelRgb)m"
+        Green       = "$script:Esc[38;2;$($grnRgb)m"
+        BoldGreen   = "$script:Esc[1;38;2;$($grnRgb)m"
+        Aqua        = "$script:Esc[38;2;$($aquRgb)m"
+        BoldAqua    = "$script:Esc[1;38;2;$($aquRgb)m"
+        Blue        = "$script:Esc[38;2;$($bluRgb)m"
+        BoldBlue    = "$script:Esc[1;38;2;$($bluRgb)m"
+        Purple      = "$script:Esc[3;38;2;$($purRgb)m"
+        BoldPurple  = "$script:Esc[1;38;2;$($purRgb)m"
+        Grey0       = "$script:Esc[38;2;$($gr0Rgb)m"
+        Grey1       = "$script:Esc[38;2;$($gr1Rgb)m"
+        Grey2       = "$script:Esc[38;2;$($gr2Rgb)m"
+        OscInit     = "$script:Esc]11;$($Spec.bg0)$script:Bel$script:Esc]10;$($Spec.fg)$script:Bel"
+    }
+}
+
+function Set-AgentTheme {
+    param([string]$Name)
+    $canon = Resolve-ThemeCanonicalName -Name $Name
+    $catalog = @(Get-AgentThemesCatalog)
+    if (-not $canon) {
+        $validList = ($catalog | ForEach-Object { $_.id }) -join ', '
+        throw "Unknown theme '$Name'. Available themes: $validList"
+    }
+    $found = $null
+    foreach ($t in $catalog) {
+        if ($t.id -eq $canon) {
+            $found = $t
+            break
+        }
+    }
+    $script:ActiveTheme = $found.id
+    $script:ActiveThemeSpec = $found
+    $script:Gm = Build-TuiPalette -Spec $found
+    return $found
+}
+
+$null = Set-AgentTheme -Name 'gruvbox-material'
 
 $script:Box = @{
     TL       = [string][char]0x256D
@@ -6124,22 +6435,23 @@ function Export-AgentSessionHtml {
         $idBadge = if ($m.id) { ' <span class="badge">#' + (Escape-XmlText ([string]$m.id)) + '</span>' } else { '' }
         $cards += ('<div class="card role-' + (Escape-XmlText $role) + '"><div class="role-header">' + (Escape-XmlText $role.ToUpper()) + $idBadge + '</div>' + ($bodyParts -join "`n") + '</div>')
     }
+    $th = if ($script:ActiveThemeSpec) { $script:ActiveThemeSpec } else { (Get-AgentThemesCatalog)[0] }
     $html = @(
         '<!DOCTYPE html>',
         '<html lang="en"><head><meta charset="utf-8">',
         ('<title>' + (Escape-XmlText $title) + '</title>'),
         '<style>',
-        'body { background: #1d2021; color: #d4be98; font-family: Consolas, monospace; margin: 2rem auto; max-width: 960px; padding: 0 1rem; }',
-        'h1 { color: #a9b665; border-bottom: 1px solid #3c3836; padding-bottom: 0.5rem; }',
-        '.meta { color: #928374; margin-bottom: 1.5rem; font-size: 0.9rem; }',
-        '.card { background: #282828; border: 1px solid #3c3836; border-radius: 6px; padding: 1rem; margin-bottom: 1rem; }',
-        '.role-user { border-left: 4px solid #7daea3; }',
-        '.role-assistant { border-left: 4px solid #a9b665; }',
-        '.role-tool { border-left: 4px solid #d8a657; background: #242424; }',
-        '.role-header { font-weight: bold; margin-bottom: 0.5rem; color: #e78a4e; }',
-        '.badge { color: #928374; font-weight: normal; font-size: 0.85rem; }',
-        '.reasoning { color: #928374; border-left: 2px solid #504945; padding-left: 0.75rem; margin-bottom: 0.5rem; }',
-        '.tool-call { color: #d8a657; margin-top: 0.5rem; }',
+        ("body { background: $($th.bg_outer); color: $($th.fg); font-family: Consolas, monospace; margin: 2rem auto; max-width: 960px; padding: 0 1rem; }"),
+        ("h1 { color: $($th.green); border-bottom: 1px solid $($th.bg1); padding-bottom: 0.5rem; }"),
+        (".meta { color: $($th.grey1); margin-bottom: 1.5rem; font-size: 0.9rem; }"),
+        (".card { background: $($th.bg0); border: 1px solid $($th.bg1); border-radius: 6px; padding: 1rem; margin-bottom: 1rem; }"),
+        (".role-user { border-left: 4px solid $($th.blue); }"),
+        (".role-assistant { border-left: 4px solid $($th.green); }"),
+        (".role-tool { border-left: 4px solid $($th.yellow); background: $($th.bg_outer); }"),
+        (".role-header { font-weight: bold; margin-bottom: 0.5rem; color: $($th.orange); }"),
+        (".badge { color: $($th.grey1); font-weight: normal; font-size: 0.85rem; }"),
+        (".reasoning { color: $($th.grey1); border-left: 2px solid $($th.grey0); padding-left: 0.75rem; margin-bottom: 0.5rem; }"),
+        (".tool-call { color: $($th.yellow); margin-top: 0.5rem; }"),
         'pre { white-space: pre-wrap; word-wrap: break-word; margin: 0; }',
         '</style></head><body>',
         ('<h1>' + (Escape-XmlText $title) + '</h1>'),
@@ -7481,6 +7793,9 @@ function Resolve-ReplCommandAlias {
     if ($t -match '^/mem(?:\s+(.+))?$') {
         return $(if ($Matches[1]) { '/memory ' + $Matches[1] } else { '/memory' })
     }
+    if ($t -match '^/th(?:\s+(.+))?$') {
+        return $(if ($Matches[1]) { '/theme ' + $Matches[1] } else { '/theme' })
+    }
     return $t
 }
 
@@ -7505,7 +7820,7 @@ function Format-TuiStatusCard {
     $lines = @(
         ('  ' + $script:Gm.Grey0 + $script:Box.TL + $script:Box.H + $script:Gm.Reset + $hdr + $script:Gm.Grey0 + ($script:Box.H * $dashes) + $script:Box.TR + $script:Gm.Reset),
         ($barV + $script:Gm.Grey1 + 'Model:       ' + $script:Gm.Fg1 + $Model + $script:Gm.Grey1 + " (reasoning: view=$($script:ShowReasoning), effort=$effLabel)" + $script:Gm.Reset),
-        ($barV + $script:Gm.Grey1 + 'Permission:  ' + (Format-PermissionBadge -Permission $script:AgentPermission) + $script:Gm.Grey1 + " | MaxSteps: $MaxSteps | Undo stack: $UndoCount" + $script:Gm.Reset),
+        ($barV + $script:Gm.Grey1 + 'Permission:  ' + (Format-PermissionBadge -Permission $script:AgentPermission) + $script:Gm.Grey1 + " | Theme: $($script:ActiveTheme) | MaxSteps: $MaxSteps | Undo stack: $UndoCount" + $script:Gm.Reset),
         ($barV + $script:Gm.Grey1 + 'Context:     ' + (Format-ContextGauge -Tokens $st.est_tokens -MaxTokens $st.context_window_tokens -CompactTokens $st.compact_threshold_tokens -Width 12) + $script:Gm.Grey1 + " | Auto-compact: $compLabel | Msgs: $($st.messages)" + $script:Gm.Reset),
         ($barV + $script:Gm.Grey1 + 'API Tokens:  ' + $script:Gm.Aqua + "in=$inTok out=$outTok" + $script:Gm.Grey1 + " (total=$(Format-TokenCount -Tokens ($inTok + $outTok)))" + $script:Gm.Reset),
         ($barV + $script:Gm.Grey1 + 'Session:     ' + $script:Gm.Fg + "$($State.session_id) " + $script:Gm.Grey1 + "| Name: $nmInfo | Leaf: $leafInfo" + $script:Gm.Reset),
@@ -7560,6 +7875,7 @@ function Write-TuiHelpCard {
     Write-Host ($barV + $script:Gm.BoldYellow + 'Mode & Model (call without args for interactive picker)' + $script:Gm.Reset)
     Write-Host ($barV + $script:Gm.Aqua + '  /permission (/p) [mode]      ' + $script:Gm.Fg + 'Pick or set: ReadOnly | Ask | AutoEdit | Auto' + $script:Gm.Reset)
     Write-Host ($barV + $script:Gm.Aqua + '  /model (/m) [id]             ' + $script:Gm.Fg + 'Pick or switch active model ID' + $script:Gm.Reset)
+    Write-Host ($barV + $script:Gm.Aqua + '  /theme (/th) [name]          ' + $script:Gm.Fg + 'Pick or switch color theme (gruvbox-material, catppuccin-mocha, tokyo-night, dracula, nord, ...)' + $script:Gm.Reset)
     Write-Host ($barV + $script:Gm.Aqua + '  /context (/ctx) [win] [comp] ' + $script:Gm.Fg + 'Pick or set context window & auto-compact threshold (default 128k / 96k)' + $script:Gm.Reset)
     Write-Host ($barV + $script:Gm.Aqua + '  /reasoning [arg]             ' + $script:Gm.Fg + 'Pick view (compact|full|hide) or effort (low|medium|high|off)' + $script:Gm.Reset)
     Write-Host ($barV + $script:Gm.Aqua + '  /status (/s, /tokens)        ' + $script:Gm.Fg + 'Show TUI dashboard (context gauge, tokens, tools, session)' + $script:Gm.Reset)
@@ -7833,6 +8149,39 @@ function Select-ReplModelId {
     return $NewModel
 }
 
+function Invoke-ReplThemeCommand {
+    param([string]$ThemeArg = '')
+    if (-not $ThemeArg) {
+        $catalog = @(Get-AgentThemesCatalog)
+        $tItems = @()
+        foreach ($th in $catalog) {
+            $tItems += @{
+                label       = "$($th.id) ($($th.label))"
+                value       = $th.id
+                description = $th.description
+                active      = ($th.id -eq $script:ActiveTheme)
+            }
+        }
+        $pickedTheme = Invoke-TuiSelector -Title "Color Theme (current: $($script:ActiveTheme))" -Items $tItems
+        if ($pickedTheme) { $ThemeArg = [string]$pickedTheme }
+    }
+    if ($ThemeArg) {
+        try {
+            $applied = Set-AgentTheme -Name $ThemeArg
+            if ($script:OutputMode -ne 'json') {
+                Write-Host $script:Gm.OscInit -NoNewline
+            }
+            if ($script:AgentConfigPath) {
+                $null = Update-AgentConfigOptionalKey -Path $script:AgentConfigPath -Key 'SHELLOSSUS_THEME' -Value $applied.id
+            }
+            Write-Host ($script:Gm.Green + "  Theme set to: $($applied.id) ($($applied.label))" + $script:Gm.Reset)
+        }
+        catch {
+            Write-Host ($script:Gm.Red + '  ' + $_.Exception.Message + $script:Gm.Reset)
+        }
+    }
+}
+
 # --- src/Cli.ps1 ---
 # CLI entrypoint: interactive setup, configuration resolution, single-shot execution, and interactive REPL loop.
 
@@ -7856,6 +8205,15 @@ if (-not $LibraryOnly) {
         if (-not $Doctor) { throw }
         $doctorConfigState = 'invalid'
     }
+    if (-not $Theme -and $config.SHELLOSSUS_THEME) { $Theme = $config.SHELLOSSUS_THEME }
+    if ($Theme) {
+        try {
+            $null = Set-AgentTheme -Name $Theme
+        }
+        catch {
+            if (-not $Doctor) { throw }
+        }
+    }
     if ($Setup -and -not $Doctor) {
         Write-Host ($script:Gm.OscInit + $script:Gm.Fg + "Save settings to: $ConfigPath" + $script:Gm.Reset)
         Write-Host ($script:Gm.Yellow + 'API key is stored as plain text in your user profile, outside the project.' + $script:Gm.Reset)
@@ -7876,12 +8234,17 @@ if (-not $LibraryOnly) {
         if (-not $inputKey) { $inputKey = $config.SHELLOSSUS_API_KEY }
         if (-not $inputKey) { throw 'API key is required.' }
         $inputWorkspace = Read-Host 'Default workspace (Enter = current folder at each launch)'
-        Save-AgentConfig -Path $ConfigPath -Config @{
+        $newCfg = @{
             SHELLOSSUS_BASE_URL = $inputUrl
             SHELLOSSUS_MODEL = $inputModel
             SHELLOSSUS_API_KEY = $inputKey
             SHELLOSSUS_WORKSPACE = $inputWorkspace
         }
+        foreach ($optK in @('SHELLOSSUS_CONTEXT_WINDOW', 'SHELLOSSUS_COMPACT_THRESHOLD', 'SHELLOSSUS_THEME')) {
+            if ($config.ContainsKey($optK) -and $config[$optK]) { $newCfg[$optK] = $config[$optK] }
+        }
+        if ($Theme -and $script:ActiveTheme) { $newCfg['SHELLOSSUS_THEME'] = $script:ActiveTheme }
+        Save-AgentConfig -Path $ConfigPath -Config $newCfg
         Remove-Variable inputKey -ErrorAction SilentlyContinue
         Write-Host ($script:Gm.BoldGreen + 'Settings saved. Run shellossus -Doctor to check them, then start shellossus from your working folder.' + $script:Gm.Reset)
         return
@@ -8315,6 +8678,11 @@ if (-not $LibraryOnly) {
                     $script:ActiveModelId = $Model
                     Write-Host ($script:Gm.Green + "  Model switched to: $Model" + $script:Gm.Reset)
                 }
+                continue
+            }
+            if ($trimmedQ -match '^/theme(?:\s+(.+))?$') {
+                $thArg = if ($Matches[1]) { $Matches[1].Trim() } else { '' }
+                Invoke-ReplThemeCommand -ThemeArg $thArg
                 continue
             }
             if ($trimmedQ -match '^/compact(?:\s+(.+))?$') {

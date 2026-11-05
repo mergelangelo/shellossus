@@ -262,6 +262,9 @@ try {
         @{ label = 'Two'; value = 'v2'; description = 'd2'; active = $true }
     )
     Assert-True ($clPicked -eq 'v2') 'ConstrainedLanguage Invoke-TuiSelector failed.'
+    $null = Set-AgentTheme -Name 'tokyo-night'
+    Assert-True ($script:ActiveTheme -eq 'tokyo-night' -and $script:Gm.OscInit.Contains('#1a1b26')) 'ConstrainedLanguage Set-AgentTheme failed.'
+    $null = Set-AgentTheme -Name 'gruvbox-material'
     $script:approval = 'WRITE'
 
     $clCyr = ([string][char]0x0447) + ([string][char]0x0442) + ([string][char]0x043E) + '?'

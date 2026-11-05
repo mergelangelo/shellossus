@@ -50,6 +50,7 @@ param(
     [string]$ContextWindow = $env:SHELLOSSUS_CONTEXT_WINDOW,
     [string]$CompactThreshold = $env:SHELLOSSUS_COMPACT_THRESHOLD,
     [string]$Permission = 'Ask',
+    [string]$Theme = $env:SHELLOSSUS_THEME,
     [string]$ReasoningEffort = '',
     [string]$Prompt = '',
     [string]$Mode = 'text',

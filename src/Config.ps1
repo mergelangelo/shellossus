@@ -30,7 +30,7 @@ function Read-AgentConfig {
         $lineNumber++
         $trimmed = $line.Trim()
         if (-not $trimmed -or $trimmed.StartsWith('#')) { continue }
-        if ($trimmed -notmatch '^(?:(SHELLOSSUS|H_AGENT)_(BASE_URL|MODEL|API_KEY|WORKSPACE|CONTEXT_WINDOW|COMPACT_THRESHOLD))\s*=(.*)$') {
+        if ($trimmed -notmatch '^(?:(SHELLOSSUS|H_AGENT)_(BASE_URL|MODEL|API_KEY|WORKSPACE|CONTEXT_WINDOW|COMPACT_THRESHOLD|THEME))\s*=(.*)$') {
             throw "Invalid config entry at line $lineNumber. Expected a supported SHELLOSSUS_* key=value."
         }
         $prefix = $Matches[1].ToUpper()
@@ -66,7 +66,7 @@ function Save-AgentConfig {
         if ($value.Contains('"')) { throw 'Config values cannot contain double quotes.' }
         $lines += $key + '="' + $value + '"'
     }
-    foreach ($optKey in @('SHELLOSSUS_CONTEXT_WINDOW', 'SHELLOSSUS_COMPACT_THRESHOLD')) {
+    foreach ($optKey in @('SHELLOSSUS_CONTEXT_WINDOW', 'SHELLOSSUS_COMPACT_THRESHOLD', 'SHELLOSSUS_THEME')) {
         if ($Config.ContainsKey($optKey) -and $Config[$optKey]) {
             $optVal = [string]$Config[$optKey]
             if ($optVal -match "[`r`n]" -or $optVal.Contains('"')) { throw 'Invalid optional config value.' }
@@ -76,6 +76,27 @@ function Save-AgentConfig {
     $parent = Split-Path $Path -Parent
     if ($parent -and -not (Test-Path -LiteralPath $parent)) { New-Item -ItemType Directory -Path $parent -ErrorAction Stop | Out-Null }
     Set-Content -LiteralPath $Path -Value $lines -Encoding UTF8 -ErrorAction Stop
+}
+
+function Update-AgentConfigOptionalKey {
+    param([string]$Path, [string]$Key, [string]$Value)
+    if (-not $Path -or -not $Key) { return $false }
+    $effectivePath = Resolve-AgentConfigPath -Path $Path
+    if (-not $effectivePath -or -not (Test-Path -LiteralPath $effectivePath)) { return $false }
+    $cfg = @{}
+    try {
+        $cfg = Read-AgentConfig -Path $effectivePath
+        if (-not $cfg -or $cfg.Count -eq 0) { return $false }
+        $cfg[$Key] = $Value
+        Save-AgentConfig -Path $effectivePath -Config $cfg
+        return $true
+    }
+    catch {
+        return $false
+    }
+    finally {
+        if ($cfg) { $cfg.Clear() }
+    }
 }
 
 function Format-ConfigPath {

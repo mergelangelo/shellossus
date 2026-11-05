@@ -20,6 +20,15 @@ if (-not $LibraryOnly) {
         if (-not $Doctor) { throw }
         $doctorConfigState = 'invalid'
     }
+    if (-not $Theme -and $config.SHELLOSSUS_THEME) { $Theme = $config.SHELLOSSUS_THEME }
+    if ($Theme) {
+        try {
+            $null = Set-AgentTheme -Name $Theme
+        }
+        catch {
+            if (-not $Doctor) { throw }
+        }
+    }
     if ($Setup -and -not $Doctor) {
         Write-Host ($script:Gm.OscInit + $script:Gm.Fg + "Save settings to: $ConfigPath" + $script:Gm.Reset)
         Write-Host ($script:Gm.Yellow + 'API key is stored as plain text in your user profile, outside the project.' + $script:Gm.Reset)
@@ -40,12 +49,17 @@ if (-not $LibraryOnly) {
         if (-not $inputKey) { $inputKey = $config.SHELLOSSUS_API_KEY }
         if (-not $inputKey) { throw 'API key is required.' }
         $inputWorkspace = Read-Host 'Default workspace (Enter = current folder at each launch)'
-        Save-AgentConfig -Path $ConfigPath -Config @{
+        $newCfg = @{
             SHELLOSSUS_BASE_URL = $inputUrl
             SHELLOSSUS_MODEL = $inputModel
             SHELLOSSUS_API_KEY = $inputKey
             SHELLOSSUS_WORKSPACE = $inputWorkspace
         }
+        foreach ($optK in @('SHELLOSSUS_CONTEXT_WINDOW', 'SHELLOSSUS_COMPACT_THRESHOLD', 'SHELLOSSUS_THEME')) {
+            if ($config.ContainsKey($optK) -and $config[$optK]) { $newCfg[$optK] = $config[$optK] }
+        }
+        if ($Theme -and $script:ActiveTheme) { $newCfg['SHELLOSSUS_THEME'] = $script:ActiveTheme }
+        Save-AgentConfig -Path $ConfigPath -Config $newCfg
         Remove-Variable inputKey -ErrorAction SilentlyContinue
         Write-Host ($script:Gm.BoldGreen + 'Settings saved. Run shellossus -Doctor to check them, then start shellossus from your working folder.' + $script:Gm.Reset)
         return
@@ -479,6 +493,11 @@ if (-not $LibraryOnly) {
                     $script:ActiveModelId = $Model
                     Write-Host ($script:Gm.Green + "  Model switched to: $Model" + $script:Gm.Reset)
                 }
+                continue
+            }
+            if ($trimmedQ -match '^/theme(?:\s+(.+))?$') {
+                $thArg = if ($Matches[1]) { $Matches[1].Trim() } else { '' }
+                Invoke-ReplThemeCommand -ThemeArg $thArg
                 continue
             }
             if ($trimmedQ -match '^/compact(?:\s+(.+))?$') {
