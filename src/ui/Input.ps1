@@ -3,8 +3,9 @@
 function Read-TuiMultilineInput {
     $first = Read-Host
     if ($null -eq $first) { return $null }
-    if ($first.StartsWith('"""') -or $first.StartsWith('<<<')) {
-        $fence = if ($first.StartsWith('"""')) { '"""' } else { '>>>' }
+    if ($first.StartsWith('"""') -or $first.StartsWith('<<<') -or $first.StartsWith('```')) {
+        $isBacktickFence = $first.StartsWith('```')
+        $fence = if ($first.StartsWith('"""')) { '"""' } elseif ($isBacktickFence) { '```' } else { '>>>' }
         $altFence = $first.Substring(0, 3)
         $rest = $first.Substring(3)
         $restTrimmed = $rest.TrimEnd(' ', "`t")
@@ -12,7 +13,11 @@ function Read-TuiMultilineInput {
             return $restTrimmed.Substring(0, $restTrimmed.Length - 3)
         }
         $lines = @()
-        if ($rest) { $lines += $rest }
+        if ($rest) {
+            if (-not ($isBacktickFence -and ($restTrimmed -match '^[a-zA-Z0-9_+-]+$'))) {
+                $lines += $rest
+            }
+        }
         while ($true) {
             if ($script:OutputMode -ne 'json') {
                 Write-Host ($script:Gm.Grey0 + '  ' + $script:Box.V + ' ... ' + $script:Gm.Fg) -NoNewline
@@ -51,6 +56,23 @@ function Read-TuiMultilineInput {
             break
         }
         return ($lines -join "`n")
+    }
+    $rhCmd = Get-Command -Name 'Read-Host' -ErrorAction SilentlyContinue
+    if ((-not $rhCmd -or $rhCmd.CommandType -ne 'Function') -and $Host -and $Host.UI -and $Host.UI.RawUI) {
+        $hasBufferedKeys = $false
+        try { $hasBufferedKeys = [bool]$Host.UI.RawUI.KeyAvailable } catch { $hasBufferedKeys = $false }
+        if ($hasBufferedKeys) {
+            $pastedLines = @($first)
+            while ($true) {
+                $moreKeys = $false
+                try { $moreKeys = [bool]$Host.UI.RawUI.KeyAvailable } catch { $moreKeys = $false }
+                if (-not $moreKeys) { break }
+                $nextPasted = Read-Host
+                if ($null -eq $nextPasted) { break }
+                $pastedLines += $nextPasted
+            }
+            return ($pastedLines -join "`n")
+        }
     }
     return $first
 }

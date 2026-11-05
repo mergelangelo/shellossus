@@ -306,6 +306,9 @@ function Invoke-AgentWebDownload {
         ErrorAction = 'Stop'
     }
     $webCommand = Get-Command -Name 'Invoke-WebRequest' -ErrorAction SilentlyContinue
+    if ($webCommand -and $webCommand.CommandType -ne 'Function') {
+        $request['MaximumRedirection'] = 0
+    }
     if ($webCommand -and $webCommand.CommandType -eq 'Function') {
         $savedSKey = $env:SHELLOSSUS_API_KEY
         $savedHKey = $env:H_AGENT_API_KEY
@@ -338,7 +341,7 @@ function Invoke-AgentWebDownload {
             $worker = @'
 $ErrorActionPreference = 'Stop'
 try {
-    Invoke-WebRequest -Uri $env:SHELLOSSUS_WEB_DOWNLOAD_URI -Method Get -Headers @{ 'User-Agent' = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Shellossus/1.0' } -TimeoutSec 30 -UseBasicParsing -OutFile $env:SHELLOSSUS_WEB_DOWNLOAD_FILE -ErrorAction Stop
+    Invoke-WebRequest -Uri $env:SHELLOSSUS_WEB_DOWNLOAD_URI -Method Get -Headers @{ 'User-Agent' = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Shellossus/1.0' } -MaximumRedirection 0 -TimeoutSec 30 -UseBasicParsing -OutFile $env:SHELLOSSUS_WEB_DOWNLOAD_FILE -ErrorAction Stop
 } catch {
     $code = 0
     try {

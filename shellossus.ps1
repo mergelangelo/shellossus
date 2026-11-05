@@ -146,6 +146,19 @@ function Test-ValidAgentBaseUrl {
     return $false
 }
 
+function Test-IsLoopbackBaseUrl {
+    param([string]$Url)
+    if (-not (Test-ValidAgentBaseUrl -Url $Url)) { return $false }
+    try {
+        $uri = [uri]$Url
+        $h = ($uri.Host -replace '^\[|\]$', '').Trim().ToLower()
+        return ($h -eq 'localhost' -or $h -eq '127.0.0.1' -or $h -match '^(?:::1|(?:0{1,4}:){7}0{0,3}1)$')
+    }
+    catch {
+        return $false
+    }
+}
+
 function Update-AgentConfigOptionalKey {
     param([string]$Path, [string]$Key, [string]$Value)
     if (-not $Path -or -not $Key) { return $false }
@@ -1542,8 +1555,9 @@ function Write-UnifiedDiffCard {
 function Read-TuiMultilineInput {
     $first = Read-Host
     if ($null -eq $first) { return $null }
-    if ($first.StartsWith('"""') -or $first.StartsWith('<<<')) {
-        $fence = if ($first.StartsWith('"""')) { '"""' } else { '>>>' }
+    if ($first.StartsWith('"""') -or $first.StartsWith('<<<') -or $first.StartsWith('```')) {
+        $isBacktickFence = $first.StartsWith('```')
+        $fence = if ($first.StartsWith('"""')) { '"""' } elseif ($isBacktickFence) { '```' } else { '>>>' }
         $altFence = $first.Substring(0, 3)
         $rest = $first.Substring(3)
         $restTrimmed = $rest.TrimEnd(' ', "`t")
@@ -1551,7 +1565,11 @@ function Read-TuiMultilineInput {
             return $restTrimmed.Substring(0, $restTrimmed.Length - 3)
         }
         $lines = @()
-        if ($rest) { $lines += $rest }
+        if ($rest) {
+            if (-not ($isBacktickFence -and ($restTrimmed -match '^[a-zA-Z0-9_+-]+$'))) {
+                $lines += $rest
+            }
+        }
         while ($true) {
             if ($script:OutputMode -ne 'json') {
                 Write-Host ($script:Gm.Grey0 + '  ' + $script:Box.V + ' ... ' + $script:Gm.Fg) -NoNewline
@@ -1590,6 +1608,23 @@ function Read-TuiMultilineInput {
             break
         }
         return ($lines -join "`n")
+    }
+    $rhCmd = Get-Command -Name 'Read-Host' -ErrorAction SilentlyContinue
+    if ((-not $rhCmd -or $rhCmd.CommandType -ne 'Function') -and $Host -and $Host.UI -and $Host.UI.RawUI) {
+        $hasBufferedKeys = $false
+        try { $hasBufferedKeys = [bool]$Host.UI.RawUI.KeyAvailable } catch { $hasBufferedKeys = $false }
+        if ($hasBufferedKeys) {
+            $pastedLines = @($first)
+            while ($true) {
+                $moreKeys = $false
+                try { $moreKeys = [bool]$Host.UI.RawUI.KeyAvailable } catch { $moreKeys = $false }
+                if (-not $moreKeys) { break }
+                $nextPasted = Read-Host
+                if ($null -eq $nextPasted) { break }
+                $pastedLines += $nextPasted
+            }
+            return ($pastedLines -join "`n")
+        }
     }
     return $first
 }
@@ -1778,6 +1813,26 @@ function Format-MarkdownTable {
             if ($len -gt $widths[$i]) { $widths[$i] = $len }
         }
     }
+    $maxTableW = (Get-TerminalWidth) - $Indent.Length - 4
+    $borderOverhead = 4 + (($colCount - 1) * 3)
+    $minTableW = $borderOverhead + ($colCount * 4)
+    if ($maxTableW -ge $minTableW) {
+        $totalW = $borderOverhead
+        foreach ($cw in $widths) { $totalW += $cw }
+        while ($totalW -gt $maxTableW) {
+            $maxIdx = -1
+            $maxVal = 4
+            for ($i = 0; $i -lt $colCount; $i++) {
+                if ($widths[$i] -gt $maxVal) {
+                    $maxVal = $widths[$i]
+                    $maxIdx = $i
+                }
+            }
+            if ($maxIdx -lt 0) { break }
+            $widths[$maxIdx]--
+            $totalW--
+        }
+    }
     $result = @()
     $headerDone = $false
     foreach ($r in $rows) {
@@ -1792,11 +1847,16 @@ function Format-MarkdownTable {
         $baseColor = if (-not $headerDone) { $script:Gm.BoldBlue } else { $script:Gm.Fg }
         for ($i = 0; $i -lt $colCount; $i++) {
             $val = if ($i -lt $r.cells.Count) { $r.cells[$i] } else { '' }
-            $visLen = Get-VisibleLength -Text $val
+            $formattedVal = Format-MarkdownInline -Text $val -BaseColor $baseColor
+            $visLen = (Strip-AnsiCodes -Text $formattedVal).Length
+            if ($visLen -gt $widths[$i]) {
+                $formattedVal = Limit-AnsiLineToWidth -Text $formattedVal -MaxWidth $widths[$i]
+                $visLen = (Strip-AnsiCodes -Text $formattedVal).Length
+            }
             $padLen = $widths[$i] - $visLen
             $pad = if ($padLen -gt 0) { ' ' * $padLen } else { '' }
             $sep = if ($i -lt ($colCount - 1)) { ' | ' } else { ' |' }
-            $lineOut += (Format-MarkdownInline -Text $val -BaseColor $baseColor) + $pad + $script:Gm.Grey0 + $sep + $script:Gm.Reset
+            $lineOut += $formattedVal + $pad + $script:Gm.Grey0 + $sep + $script:Gm.Reset
         }
         $result += $lineOut
     }
@@ -1834,7 +1894,8 @@ function Write-AgentReply {
             $codeFenceLen = $fenceSeq.Length
             $lang = $Matches[2].Trim()
             $label = if ($lang) { " $lang " } else { ' code ' }
-            Write-Host ($barV + $script:Gm.Grey0 + $script:Box.TL + $script:Box.H + $script:Gm.Aqua + $label + $script:Gm.Grey0 + ($script:Box.H * 24) + $script:Gm.Reset)
+            $topHCount = if ((29 - $label.Length) -ge 4) { 29 - $label.Length } else { 4 }
+            Write-Host ($barV + $script:Gm.Grey0 + $script:Box.TL + $script:Box.H + $script:Gm.Aqua + $label + $script:Gm.Grey0 + ($script:Box.H * $topHCount) + $script:Gm.Reset)
             $inCode = $true
         }
         elseif ($inCode -and $trimmedStart -match ('^' + ($codeFenceChar * $codeFenceLen) + $codeFenceChar + '*\s*$')) {
@@ -1983,6 +2044,7 @@ function Write-TuiMascotCard {
     param([string]$Mode = 'full')
     if ($script:OutputMode -eq 'json') { return }
     $w = Get-TerminalWidth
+    if ($w -lt 48) { $w = 48 }
     $hdr = ' ' + $script:Gm.BoldGreen + $script:Box.Dot + ' Shellossus Mascot ' + $script:Gm.Reset + ' '
     $body = @()
     foreach ($line in @(Get-TuiMascotLines -Mode $Mode)) {
@@ -4737,6 +4799,9 @@ function Invoke-AgentUndo {
     $State.last_prompt_tokens = 0
     $State.last_prompt_chars = 0
     if ($State -is [hashtable] -and ($State.ContainsKey('tree_entries') -or $State.ContainsKey('leaf_id'))) {
+        if ($UndoEntry -is [hashtable] -and $UndoEntry.ContainsKey('tree_entries') -and $null -ne $UndoEntry.tree_entries) {
+            $State.tree_entries = @($UndoEntry.tree_entries)
+        }
         if ($UndoEntry -is [hashtable] -and $UndoEntry.ContainsKey('leaf_id') -and $UndoEntry.leaf_id) {
             $State.leaf_id = [string]$UndoEntry.leaf_id
         }
@@ -5074,6 +5139,9 @@ function Invoke-AgentWebDownload {
         ErrorAction = 'Stop'
     }
     $webCommand = Get-Command -Name 'Invoke-WebRequest' -ErrorAction SilentlyContinue
+    if ($webCommand -and $webCommand.CommandType -ne 'Function') {
+        $request['MaximumRedirection'] = 0
+    }
     if ($webCommand -and $webCommand.CommandType -eq 'Function') {
         $savedSKey = $env:SHELLOSSUS_API_KEY
         $savedHKey = $env:H_AGENT_API_KEY
@@ -5106,7 +5174,7 @@ function Invoke-AgentWebDownload {
             $worker = @'
 $ErrorActionPreference = 'Stop'
 try {
-    Invoke-WebRequest -Uri $env:SHELLOSSUS_WEB_DOWNLOAD_URI -Method Get -Headers @{ 'User-Agent' = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Shellossus/1.0' } -TimeoutSec 30 -UseBasicParsing -OutFile $env:SHELLOSSUS_WEB_DOWNLOAD_FILE -ErrorAction Stop
+    Invoke-WebRequest -Uri $env:SHELLOSSUS_WEB_DOWNLOAD_URI -Method Get -Headers @{ 'User-Agent' = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Shellossus/1.0' } -MaximumRedirection 0 -TimeoutSec 30 -UseBasicParsing -OutFile $env:SHELLOSSUS_WEB_DOWNLOAD_FILE -ErrorAction Stop
 } catch {
     $code = 0
     try {
@@ -8759,6 +8827,9 @@ function Invoke-AgentHttpRequest {
             TimeoutSec = $TimeoutSec
             ErrorAction = 'Stop'
         }
+        if ($iwrCmd -and $iwrCmd.CommandType -ne 'Function') {
+            $request['MaximumRedirection'] = 0
+        }
         Invoke-WebRequest @request -UseBasicParsing -OutFile $OutFile
         return
     }
@@ -8772,7 +8843,7 @@ function Invoke-AgentHttpRequest {
         $workerCmd = @'
 $ErrorActionPreference = 'Stop'
 try {
-    Invoke-WebRequest -Uri $env:SHELLOSSUS_HTTP_URI -Method 'Post' -Headers @{ Authorization = ('Bearer ' + $env:SHELLOSSUS_HTTP_KEY) } -ContentType 'application/json; charset=utf-8' -InFile $env:SHELLOSSUS_HTTP_IN -OutFile $env:SHELLOSSUS_HTTP_OUT -TimeoutSec ([int]$env:SHELLOSSUS_HTTP_TIMEOUT) -UseBasicParsing -ErrorAction Stop
+    Invoke-WebRequest -Uri $env:SHELLOSSUS_HTTP_URI -Method 'Post' -Headers @{ Authorization = ('Bearer ' + $env:SHELLOSSUS_HTTP_KEY) } -ContentType 'application/json; charset=utf-8' -InFile $env:SHELLOSSUS_HTTP_IN -OutFile $env:SHELLOSSUS_HTTP_OUT -MaximumRedirection 0 -TimeoutSec ([int]$env:SHELLOSSUS_HTTP_TIMEOUT) -UseBasicParsing -ErrorAction Stop
 }
 catch {
     $msg = $_.Exception.Message
@@ -9763,6 +9834,7 @@ if (-not $LibraryOnly) {
         Write-Host ($script:Gm.Yellow + 'Key input is visible. Enter keeps the saved key, if any.' + $script:Gm.Reset)
         $inputKey = Read-Host 'API key'
         if (-not $inputKey) { $inputKey = $config.SHELLOSSUS_API_KEY }
+        if (-not $inputKey -and (Test-IsLoopbackBaseUrl -Url $inputUrl)) { $inputKey = 'local' }
         if (-not $inputKey) { throw 'API key is required.' }
         $defaultWorkspace = ''
         if ($PSBoundParameters.Keys -contains 'Workspace') { $defaultWorkspace = $Workspace }
@@ -9869,6 +9941,9 @@ if (-not $LibraryOnly) {
     if (-not $agentKey) { $agentKey = $env:H_AGENT_API_KEY }
     if (-not $agentKey) { $agentKey = $config.SHELLOSSUS_API_KEY }
     $config.Clear()
+    if (-not $agentKey -and (Test-IsLoopbackBaseUrl -Url $BaseUrl)) {
+        $agentKey = 'local'
+    }
     if (-not $agentKey) {
         Write-Host ($script:Gm.Yellow + 'Key input is visible. Run shellossus -Setup to save settings for next time.' + $script:Gm.Reset)
         $agentKey = Read-Host 'API key'
@@ -10320,26 +10395,27 @@ if (-not $LibraryOnly) {
                     Write-Host ($script:Gm.Grey1 + '  Nothing to continue.' + $script:Gm.Reset)
                     continue
                 }
+                $beforeTurn = @($state.messages)
+                $beforeLeafId = if ($state.leaf_id) { [string]$state.leaf_id } else { '' }
+                $beforeTreeEntries = @(if ($state.tree_entries) { @($state.tree_entries) })
                 $stBefore = Get-ContextStats -State $state
                 if ($stBefore.est_tokens -gt $stBefore.compact_threshold_tokens) {
                     $limStr = Format-TokenCount -Tokens $stBefore.compact_threshold_tokens
                     Write-Host ($script:Gm.Yellow + "  [auto-compact] Context exceeds $limStr tokens, compacting older history..." + $script:Gm.Reset)
                     try { Invoke-AgentCompact -State $state -Endpoint $endpoint -ModelId $Model -ApiKey $agentKey | Out-Null } catch {}
                 }
-                $beforeTurn = @($state.messages)
-                $beforeLeafId = if ($state.leaf_id) { [string]$state.leaf_id } else { '' }
                 $script:CurrentTurnWrites = @()
                 Write-Host ($script:Gm.Aqua + "  [continue] Continuing agent turn (up to $contSteps steps)..." + $script:Gm.Reset)
                 try {
                     Invoke-AgentContinue -State $state -Endpoint $endpoint -ModelId $Model -ApiKey $agentKey -Root $rootPath -Steps $contSteps | Out-Null
                     $lastFailedQuestion = ''
-                    $undoStack += @{ messages = $beforeTurn; leaf_id = $beforeLeafId; writes = @($script:CurrentTurnWrites) }
+                    $undoStack += @{ messages = $beforeTurn; leaf_id = $beforeLeafId; tree_entries = $beforeTreeEntries; writes = @($script:CurrentTurnWrites) }
                     Save-AgentSession -SessionFile $sessionFile -State $state -Workspace $rootPath -Model $Model
                 }
                 catch {
                     $state.messages = $beforeTurn
                     try {
-                        Invoke-AgentUndo -State $state -UndoEntry @{ messages = $beforeTurn; leaf_id = $beforeLeafId; writes = @($script:CurrentTurnWrites) }
+                        Invoke-AgentUndo -State $state -UndoEntry @{ messages = $beforeTurn; leaf_id = $beforeLeafId; tree_entries = $beforeTreeEntries; writes = @($script:CurrentTurnWrites) }
                     }
                     catch {
                         Write-Host ($script:Gm.Red + 'Rollback warning: ' + $_.Exception.Message + $script:Gm.Reset)
@@ -10385,28 +10461,29 @@ if (-not $LibraryOnly) {
                 }
                 continue
             }
+            $beforeTurn = @($state.messages)
+            $beforeLeafId = if ($state.leaf_id) { [string]$state.leaf_id } else { '' }
+            $beforeTreeEntries = @(if ($state.tree_entries) { @($state.tree_entries) })
             $stBefore = Get-ContextStats -State $state
             if ($stBefore.est_tokens -gt $stBefore.compact_threshold_tokens) {
                 $limStr = Format-TokenCount -Tokens $stBefore.compact_threshold_tokens
                 Write-Host ($script:Gm.Yellow + "  [auto-compact] Context exceeds $limStr tokens, compacting older history..." + $script:Gm.Reset)
                 try { Invoke-AgentCompact -State $state -Endpoint $endpoint -ModelId $Model -ApiKey $agentKey | Out-Null } catch {}
             }
-            $beforeTurn = @($state.messages)
-            $beforeLeafId = if ($state.leaf_id) { [string]$state.leaf_id } else { '' }
             $script:CurrentTurnWrites = @()
             $expandedQuestion = Expand-UserPrompt -Root $rootPath -Prompt $question
             $state.messages += @{ role = 'user'; content = $expandedQuestion }
             try {
                 Invoke-AgentTurn -State $state -Endpoint $endpoint -ModelId $Model -ApiKey $agentKey -Root $rootPath -Steps $MaxSteps
                 $lastFailedQuestion = ''
-                $undoStack += @{ messages = $beforeTurn; leaf_id = $beforeLeafId; writes = @($script:CurrentTurnWrites) }
+                $undoStack += @{ messages = $beforeTurn; leaf_id = $beforeLeafId; tree_entries = $beforeTreeEntries; writes = @($script:CurrentTurnWrites) }
                 Save-AgentSession -SessionFile $sessionFile -State $state -Workspace $rootPath -Model $Model
             }
             catch {
                 $lastFailedQuestion = $question
                 $state.messages = $beforeTurn
                 try {
-                    Invoke-AgentUndo -State $state -UndoEntry @{ messages = $beforeTurn; leaf_id = $beforeLeafId; writes = @($script:CurrentTurnWrites) }
+                    Invoke-AgentUndo -State $state -UndoEntry @{ messages = $beforeTurn; leaf_id = $beforeLeafId; tree_entries = $beforeTreeEntries; writes = @($script:CurrentTurnWrites) }
                 }
                 catch {
                     Write-Host ($script:Gm.Red + 'Rollback warning: ' + $_.Exception.Message + $script:Gm.Reset)

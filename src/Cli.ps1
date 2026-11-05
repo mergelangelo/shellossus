@@ -47,6 +47,7 @@ if (-not $LibraryOnly) {
         Write-Host ($script:Gm.Yellow + 'Key input is visible. Enter keeps the saved key, if any.' + $script:Gm.Reset)
         $inputKey = Read-Host 'API key'
         if (-not $inputKey) { $inputKey = $config.SHELLOSSUS_API_KEY }
+        if (-not $inputKey -and (Test-IsLoopbackBaseUrl -Url $inputUrl)) { $inputKey = 'local' }
         if (-not $inputKey) { throw 'API key is required.' }
         $defaultWorkspace = ''
         if ($PSBoundParameters.Keys -contains 'Workspace') { $defaultWorkspace = $Workspace }
@@ -153,6 +154,9 @@ if (-not $LibraryOnly) {
     if (-not $agentKey) { $agentKey = $env:H_AGENT_API_KEY }
     if (-not $agentKey) { $agentKey = $config.SHELLOSSUS_API_KEY }
     $config.Clear()
+    if (-not $agentKey -and (Test-IsLoopbackBaseUrl -Url $BaseUrl)) {
+        $agentKey = 'local'
+    }
     if (-not $agentKey) {
         Write-Host ($script:Gm.Yellow + 'Key input is visible. Run shellossus -Setup to save settings for next time.' + $script:Gm.Reset)
         $agentKey = Read-Host 'API key'
@@ -604,26 +608,27 @@ if (-not $LibraryOnly) {
                     Write-Host ($script:Gm.Grey1 + '  Nothing to continue.' + $script:Gm.Reset)
                     continue
                 }
+                $beforeTurn = @($state.messages)
+                $beforeLeafId = if ($state.leaf_id) { [string]$state.leaf_id } else { '' }
+                $beforeTreeEntries = @(if ($state.tree_entries) { @($state.tree_entries) })
                 $stBefore = Get-ContextStats -State $state
                 if ($stBefore.est_tokens -gt $stBefore.compact_threshold_tokens) {
                     $limStr = Format-TokenCount -Tokens $stBefore.compact_threshold_tokens
                     Write-Host ($script:Gm.Yellow + "  [auto-compact] Context exceeds $limStr tokens, compacting older history..." + $script:Gm.Reset)
                     try { Invoke-AgentCompact -State $state -Endpoint $endpoint -ModelId $Model -ApiKey $agentKey | Out-Null } catch {}
                 }
-                $beforeTurn = @($state.messages)
-                $beforeLeafId = if ($state.leaf_id) { [string]$state.leaf_id } else { '' }
                 $script:CurrentTurnWrites = @()
                 Write-Host ($script:Gm.Aqua + "  [continue] Continuing agent turn (up to $contSteps steps)..." + $script:Gm.Reset)
                 try {
                     Invoke-AgentContinue -State $state -Endpoint $endpoint -ModelId $Model -ApiKey $agentKey -Root $rootPath -Steps $contSteps | Out-Null
                     $lastFailedQuestion = ''
-                    $undoStack += @{ messages = $beforeTurn; leaf_id = $beforeLeafId; writes = @($script:CurrentTurnWrites) }
+                    $undoStack += @{ messages = $beforeTurn; leaf_id = $beforeLeafId; tree_entries = $beforeTreeEntries; writes = @($script:CurrentTurnWrites) }
                     Save-AgentSession -SessionFile $sessionFile -State $state -Workspace $rootPath -Model $Model
                 }
                 catch {
                     $state.messages = $beforeTurn
                     try {
-                        Invoke-AgentUndo -State $state -UndoEntry @{ messages = $beforeTurn; leaf_id = $beforeLeafId; writes = @($script:CurrentTurnWrites) }
+                        Invoke-AgentUndo -State $state -UndoEntry @{ messages = $beforeTurn; leaf_id = $beforeLeafId; tree_entries = $beforeTreeEntries; writes = @($script:CurrentTurnWrites) }
                     }
                     catch {
                         Write-Host ($script:Gm.Red + 'Rollback warning: ' + $_.Exception.Message + $script:Gm.Reset)
@@ -669,28 +674,29 @@ if (-not $LibraryOnly) {
                 }
                 continue
             }
+            $beforeTurn = @($state.messages)
+            $beforeLeafId = if ($state.leaf_id) { [string]$state.leaf_id } else { '' }
+            $beforeTreeEntries = @(if ($state.tree_entries) { @($state.tree_entries) })
             $stBefore = Get-ContextStats -State $state
             if ($stBefore.est_tokens -gt $stBefore.compact_threshold_tokens) {
                 $limStr = Format-TokenCount -Tokens $stBefore.compact_threshold_tokens
                 Write-Host ($script:Gm.Yellow + "  [auto-compact] Context exceeds $limStr tokens, compacting older history..." + $script:Gm.Reset)
                 try { Invoke-AgentCompact -State $state -Endpoint $endpoint -ModelId $Model -ApiKey $agentKey | Out-Null } catch {}
             }
-            $beforeTurn = @($state.messages)
-            $beforeLeafId = if ($state.leaf_id) { [string]$state.leaf_id } else { '' }
             $script:CurrentTurnWrites = @()
             $expandedQuestion = Expand-UserPrompt -Root $rootPath -Prompt $question
             $state.messages += @{ role = 'user'; content = $expandedQuestion }
             try {
                 Invoke-AgentTurn -State $state -Endpoint $endpoint -ModelId $Model -ApiKey $agentKey -Root $rootPath -Steps $MaxSteps
                 $lastFailedQuestion = ''
-                $undoStack += @{ messages = $beforeTurn; leaf_id = $beforeLeafId; writes = @($script:CurrentTurnWrites) }
+                $undoStack += @{ messages = $beforeTurn; leaf_id = $beforeLeafId; tree_entries = $beforeTreeEntries; writes = @($script:CurrentTurnWrites) }
                 Save-AgentSession -SessionFile $sessionFile -State $state -Workspace $rootPath -Model $Model
             }
             catch {
                 $lastFailedQuestion = $question
                 $state.messages = $beforeTurn
                 try {
-                    Invoke-AgentUndo -State $state -UndoEntry @{ messages = $beforeTurn; leaf_id = $beforeLeafId; writes = @($script:CurrentTurnWrites) }
+                    Invoke-AgentUndo -State $state -UndoEntry @{ messages = $beforeTurn; leaf_id = $beforeLeafId; tree_entries = $beforeTreeEntries; writes = @($script:CurrentTurnWrites) }
                 }
                 catch {
                     Write-Host ($script:Gm.Red + 'Rollback warning: ' + $_.Exception.Message + $script:Gm.Reset)

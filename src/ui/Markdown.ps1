@@ -90,6 +90,26 @@ function Format-MarkdownTable {
             if ($len -gt $widths[$i]) { $widths[$i] = $len }
         }
     }
+    $maxTableW = (Get-TerminalWidth) - $Indent.Length - 4
+    $borderOverhead = 4 + (($colCount - 1) * 3)
+    $minTableW = $borderOverhead + ($colCount * 4)
+    if ($maxTableW -ge $minTableW) {
+        $totalW = $borderOverhead
+        foreach ($cw in $widths) { $totalW += $cw }
+        while ($totalW -gt $maxTableW) {
+            $maxIdx = -1
+            $maxVal = 4
+            for ($i = 0; $i -lt $colCount; $i++) {
+                if ($widths[$i] -gt $maxVal) {
+                    $maxVal = $widths[$i]
+                    $maxIdx = $i
+                }
+            }
+            if ($maxIdx -lt 0) { break }
+            $widths[$maxIdx]--
+            $totalW--
+        }
+    }
     $result = @()
     $headerDone = $false
     foreach ($r in $rows) {
@@ -104,11 +124,16 @@ function Format-MarkdownTable {
         $baseColor = if (-not $headerDone) { $script:Gm.BoldBlue } else { $script:Gm.Fg }
         for ($i = 0; $i -lt $colCount; $i++) {
             $val = if ($i -lt $r.cells.Count) { $r.cells[$i] } else { '' }
-            $visLen = Get-VisibleLength -Text $val
+            $formattedVal = Format-MarkdownInline -Text $val -BaseColor $baseColor
+            $visLen = (Strip-AnsiCodes -Text $formattedVal).Length
+            if ($visLen -gt $widths[$i]) {
+                $formattedVal = Limit-AnsiLineToWidth -Text $formattedVal -MaxWidth $widths[$i]
+                $visLen = (Strip-AnsiCodes -Text $formattedVal).Length
+            }
             $padLen = $widths[$i] - $visLen
             $pad = if ($padLen -gt 0) { ' ' * $padLen } else { '' }
             $sep = if ($i -lt ($colCount - 1)) { ' | ' } else { ' |' }
-            $lineOut += (Format-MarkdownInline -Text $val -BaseColor $baseColor) + $pad + $script:Gm.Grey0 + $sep + $script:Gm.Reset
+            $lineOut += $formattedVal + $pad + $script:Gm.Grey0 + $sep + $script:Gm.Reset
         }
         $result += $lineOut
     }
@@ -146,7 +171,8 @@ function Write-AgentReply {
             $codeFenceLen = $fenceSeq.Length
             $lang = $Matches[2].Trim()
             $label = if ($lang) { " $lang " } else { ' code ' }
-            Write-Host ($barV + $script:Gm.Grey0 + $script:Box.TL + $script:Box.H + $script:Gm.Aqua + $label + $script:Gm.Grey0 + ($script:Box.H * 24) + $script:Gm.Reset)
+            $topHCount = if ((29 - $label.Length) -ge 4) { 29 - $label.Length } else { 4 }
+            Write-Host ($barV + $script:Gm.Grey0 + $script:Box.TL + $script:Box.H + $script:Gm.Aqua + $label + $script:Gm.Grey0 + ($script:Box.H * $topHCount) + $script:Gm.Reset)
             $inCode = $true
         }
         elseif ($inCode -and $trimmedStart -match ('^' + ($codeFenceChar * $codeFenceLen) + $codeFenceChar + '*\s*$')) {
@@ -295,6 +321,7 @@ function Write-TuiMascotCard {
     param([string]$Mode = 'full')
     if ($script:OutputMode -eq 'json') { return }
     $w = Get-TerminalWidth
+    if ($w -lt 48) { $w = 48 }
     $hdr = ' ' + $script:Gm.BoldGreen + $script:Box.Dot + ' Shellossus Mascot ' + $script:Gm.Reset + ' '
     $body = @()
     foreach ($line in @(Get-TuiMascotLines -Mode $Mode)) {

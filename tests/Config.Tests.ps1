@@ -138,6 +138,13 @@ try {
     Assert-True ($reloadedAfterUpdates.SHELLOSSUS_MODEL -eq 'persisted-model') 'SHELLOSSUS_MODEL was not persisted by Update-AgentConfigOptionalKey.'
     Assert-True ($reloadedAfterUpdates.SHELLOSSUS_THEME -eq 'nord') 'SHELLOSSUS_THEME was not persisted by Update-AgentConfigOptionalKey.'
     Assert-True ($reloadedAfterUpdates.SHELLOSSUS_CONTEXT_WINDOW -eq '64000' -and $reloadedAfterUpdates.SHELLOSSUS_COMPACT_THRESHOLD -eq '48000') 'Invoke-ReplContextCommand did not persist SHELLOSSUS_CONTEXT_WINDOW and SHELLOSSUS_COMPACT_THRESHOLD.'
+
+    # Task 7: Test-IsLoopbackBaseUrl detects valid loopback endpoints and rejects remote or invalid endpoints.
+    Assert-True (Test-IsLoopbackBaseUrl -Url 'http://localhost:11434/v1') 'Test-IsLoopbackBaseUrl rejected http://localhost:11434/v1.'
+    Assert-True (Test-IsLoopbackBaseUrl -Url 'http://127.0.0.1:8000/v1') 'Test-IsLoopbackBaseUrl rejected http://127.0.0.1:8000/v1.'
+    Assert-True (Test-IsLoopbackBaseUrl -Url 'http://[::1]:11434/v1') 'Test-IsLoopbackBaseUrl rejected http://[::1]:11434/v1.'
+    Assert-True (-not (Test-IsLoopbackBaseUrl -Url 'https://api.openai.com/v1')) 'Test-IsLoopbackBaseUrl accepted non-loopback https://api.openai.com/v1.'
+    Assert-True (-not (Test-IsLoopbackBaseUrl -Url 'http://example.invalid/v1')) 'Test-IsLoopbackBaseUrl accepted invalid remote HTTP URL.'
 }
 finally {
     Remove-TestEnvironment -Env $envData

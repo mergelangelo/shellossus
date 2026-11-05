@@ -103,6 +103,19 @@ function Test-ValidAgentBaseUrl {
     return $false
 }
 
+function Test-IsLoopbackBaseUrl {
+    param([string]$Url)
+    if (-not (Test-ValidAgentBaseUrl -Url $Url)) { return $false }
+    try {
+        $uri = [uri]$Url
+        $h = ($uri.Host -replace '^\[|\]$', '').Trim().ToLower()
+        return ($h -eq 'localhost' -or $h -eq '127.0.0.1' -or $h -match '^(?:::1|(?:0{1,4}:){7}0{0,3}1)$')
+    }
+    catch {
+        return $false
+    }
+}
+
 function Update-AgentConfigOptionalKey {
     param([string]$Path, [string]$Key, [string]$Value)
     if (-not $Path -or -not $Key) { return $false }

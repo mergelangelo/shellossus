@@ -411,6 +411,19 @@ try {
     Invoke-AgentUndo -State $undoTreeState -UndoEntry @{ messages = $beforeTurnMsgs; writes = @() }
     Assert-True ($undoTreeState.leaf_id -eq $compLeafBeforeTurn) "Invoke-AgentUndo did not restore leaf_id to compaction leaf ($compLeafBeforeTurn vs $($undoTreeState.leaf_id))."
 
+    # Task 7: Invoke-AgentUndo restores tree_entries when $UndoEntry includes tree_entries (rolling back an auto-compaction turn leaves no dangling compaction entry).
+    $beforeAutoCompactMsgs = @($undoTreeState.messages)
+    $beforeAutoCompactLeaf = [string]$undoTreeState.leaf_id
+    $beforeAutoCompactTree = @($undoTreeState.tree_entries)
+    $undoTreeState.messages += @(
+        @{ role = 'user'; content = 'extra turn user' },
+        @{ role = 'assistant'; content = 'extra turn assistant' }
+    )
+    $null = Invoke-AgentCompact -State $undoTreeState -Endpoint 'https://example.invalid/v1/chat/completions' -ModelId 'test-model' -ApiKey 'fake' -KeepRecent 2
+    Assert-True (@($undoTreeState.tree_entries).Count -gt $beforeAutoCompactTree.Count) 'Expected auto-compaction to append tree entries.'
+    Invoke-AgentUndo -State $undoTreeState -UndoEntry @{ messages = $beforeAutoCompactMsgs; leaf_id = $beforeAutoCompactLeaf; tree_entries = $beforeAutoCompactTree; writes = @() }
+    Assert-True (@($undoTreeState.tree_entries).Count -eq $beforeAutoCompactTree.Count -and $undoTreeState.leaf_id -eq $beforeAutoCompactLeaf) 'Invoke-AgentUndo did not restore tree_entries after auto-compaction rollback.'
+
     # 2. Read-AgentSession on a reused $State resets tree_entries so repeated reads do not duplicate branch_entry records.
     $reusedReadState = @{ tree_entries = @() }
     $null = Read-AgentSession -SessionFile $treeSessionFile -State $reusedReadState
