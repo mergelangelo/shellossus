@@ -483,6 +483,20 @@ try {
     Assert-True ($soulXml.Contains('cfg&amp;special') -and $memXml.Contains('cfg&amp;special')) 'Get-SoulContext or Get-MemoryContext did not XML-escape source path.'
     $sysIgnoreOversized = Build-SystemPrompt -Root $workspacePath -ConfigDir $ampCfgDir
     Assert-True ($sysIgnoreOversized.Contains('You are Shellossus')) 'Build-SystemPrompt did not ignore oversized SYSTEM.md (>256KB).'
+
+    # 6. @file truncation notices (>300 lines and >20000 chars) and skipping nonexistent or binary @file tokens.
+    $longLines = @(1..350 | ForEach-Object { "line-$_" }) -join "`n"
+    Set-AgentUtf8Content -LiteralPath (Join-Path $workspacePath 'long.txt') -Value $longLines
+    $expandedLong = Expand-UserPrompt -Root $workspacePath -Prompt 'Inspect @long.txt'
+    Assert-True ($expandedLong.Contains('<file path="long.txt">') -and $expandedLong.Contains('line-300') -and (-not $expandedLong.Contains('line-301')) -and $expandedLong.Contains('[... truncated at 300 lines / 20000 chars; use read_file with start_line to read more ...]')) 'Expand-UserPrompt did not truncate >300-line @file at line 300 with truncation notice.'
+
+    Set-AgentUtf8Content -LiteralPath (Join-Path $workspacePath 'wide.txt') -Value ('W' * 25000)
+    $expandedWide = Expand-UserPrompt -Root $workspacePath -Prompt 'Inspect @wide.txt'
+    Assert-True ($expandedWide.Contains('<file path="wide.txt">') -and $expandedWide.Contains(('W' * 20000) + "`n[... truncated at 300 lines / 20000 chars; use read_file with start_line to read more ...]") -and (-not $expandedWide.Contains('W' * 20001))) 'Expand-UserPrompt did not truncate >20000-char @file at 20000 chars with truncation notice.'
+
+    Set-AgentUtf8Content -LiteralPath (Join-Path $workspacePath 'bin.dat') -Value "abc`0def"
+    $expandedSkipped = Expand-UserPrompt -Root $workspacePath -Prompt 'Check @nonexistent.txt and @bin.dat'
+    Assert-True ($expandedSkipped -eq 'Check @nonexistent.txt and @bin.dat' -and (-not $expandedSkipped.Contains('<file'))) 'Expand-UserPrompt attached nonexistent or binary @file.'
 }
 finally {
     Remove-TestEnvironment -Env $envData

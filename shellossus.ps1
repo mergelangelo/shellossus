@@ -7226,17 +7226,27 @@ function Expand-UserPrompt {
             try {
                 $resolved = Resolve-AgentPath -Root $Root -RelativePath $rel
                 $item = Get-Item -LiteralPath $resolved -Force -ErrorAction Stop
-                if (-not $item.PSIsContainer -and $item.Length -le 1MB) {
-                    $lines = @(Get-Content -LiteralPath $resolved -Encoding UTF8 -TotalCount 301 -ErrorAction Stop)
-                    $content = ($lines | Select-Object -First 300) -join "`n"
-                    if ($content.Length -gt 20000) { $content = $content.Substring(0, 20000) }
-                    $attachments += "<file path=`"$rel`">`n$content`n</file>"
-                    if ($script:OutputMode -ne 'json') {
-                        Write-Host ($script:Gm.Aqua + '  [@file] ' + $script:Gm.Grey1 + $rel + $script:Gm.Reset)
-                    }
+                if ($item.PSIsContainer) { throw 'Target is a directory.' }
+                if ($item.Length -gt 1MB) { throw 'File exceeds 1 MiB limit.' }
+                $lines = @(Get-Content -LiteralPath $resolved -Encoding UTF8 -TotalCount 301 -ErrorAction Stop)
+                $truncatedByLines = ($lines.Count -gt 300)
+                $content = ($lines | Select-Object -First 300) -join "`n"
+                $truncatedByChars = ($content.Length -gt 20000)
+                if ($truncatedByChars) { $content = $content.Substring(0, 20000) }
+                if ($content -match '\x00') { throw 'Binary content is not supported.' }
+                if ($truncatedByLines -or $truncatedByChars) {
+                    $content = $content + "`n[... truncated at 300 lines / 20000 chars; use read_file with start_line to read more ...]"
+                }
+                $attachments += "<file path=`"$rel`">`n$content`n</file>"
+                if ($script:OutputMode -ne 'json') {
+                    Write-Host ($script:Gm.Aqua + '  [@file] ' + $script:Gm.Grey1 + $rel + $script:Gm.Reset)
                 }
             }
-            catch {}
+            catch {
+                if ($script:OutputMode -ne 'json') {
+                    Write-Host ($script:Gm.Yellow + '  [@file] Skipped ' + $rel + ': ' + $_.Exception.Message + $script:Gm.Reset)
+                }
+            }
         }
     }
     if ($attachments.Count -gt 0) {
