@@ -229,6 +229,7 @@ if (-not $LibraryOnly) {
             Write-Host ('  ' + $script:Gm.BoldBlue + $script:Box.Arrow + ' You: ' + $script:Gm.Fg) -NoNewline
             $question = Read-TuiMultilineInput
             Write-Host $script:Gm.Reset -NoNewline
+            if ($null -eq $question) { break }
             if (-not $question) { continue }
             $rawTrimmed = $question.Trim()
             $trimmedQ = Resolve-ReplCommandAlias -InputText $rawTrimmed

@@ -59,7 +59,15 @@ function Invoke-DoctorModelsRequest {
     }
     catch {
         $code = 0
-        if ($_.Exception.Response -and $_.Exception.Response.StatusCode) { $code = [int]$_.Exception.Response.StatusCode }
+        if ($_.Exception.Response -and $_.Exception.Response.StatusCode) {
+            $code = [int]$_.Exception.Response.StatusCode
+        }
+        elseif ($_.Exception.InnerException -and $_.Exception.InnerException.Response -and $_.Exception.InnerException.Response.StatusCode) {
+            $code = [int]$_.Exception.InnerException.Response.StatusCode
+        }
+        if ($code -eq 0 -and ($_.Exception.Message -match 'redirection' -or $_.FullyQualifiedErrorId -match 'WebCmdletWebResponseException|MaximumRedirect')) {
+            $code = 302
+        }
         return @{ code = $code; valid_catalog = $false; ids = @() }
     }
     finally {
@@ -154,8 +162,14 @@ function Get-AgentDoctorReport {
         $checks += @{ name = 'endpoint'; status = $status; message = ($message + " Base URL: $BaseUrl") }
     }
     # Never include server bodies, headers, or raw exceptions in a shareable report.
+    $trimmedKey = if ($hasKey) { $ApiKey.Trim() } else { '' }
     foreach ($check in $checks) {
-        if ($ApiKey) { $check.message = $check.message.Replace($ApiKey, '[redacted]') }
+        if ($hasKey) {
+            $check.message = $check.message.Replace($ApiKey, '[redacted]')
+            if ($trimmedKey -and $trimmedKey -ne $ApiKey) {
+                $check.message = $check.message.Replace($trimmedKey, '[redacted]')
+            }
+        }
         $check.message = (Format-PreviewText -Text $check.message) -replace '[\r\n\t]', ' '
     }
     $failed = @($checks | Where-Object { $_.status -eq 'fail' }).Count
@@ -170,9 +184,16 @@ function Write-AgentDoctorReport {
         Write-Output (ConvertTo-AsciiJson -Json ($event | ConvertTo-Json -Depth 6 -Compress))
         return
     }
-    Write-Host 'Shellossus doctor'
+    Write-Host ($script:Gm.BoldGreen + 'Shellossus doctor' + $script:Gm.Reset)
     foreach ($check in $Report.checks) {
-        Write-Host ('[{0}] {1}: {2}' -f $check.status.ToUpper(), $check.name, $check.message)
+        $stUpper = $check.status.ToUpper()
+        $stColor = switch ($stUpper) {
+            'PASS' { $script:Gm.BoldGreen }
+            'WARN' { $script:Gm.BoldYellow }
+            'FAIL' { $script:Gm.BoldRed }
+            default { $script:Gm.BoldAqua }
+        }
+        Write-Host ('{0}[{1}]{2} {3}: {4}' -f $stColor, $stUpper, $script:Gm.Reset, $check.name, $check.message)
     }
     Write-Host ("Checks complete: $($Report.failures) failure(s), $($Report.warnings) warning(s). No chat request was sent.")
 }
