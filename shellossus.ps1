@@ -136,8 +136,8 @@ function Test-ValidAgentBaseUrl {
             return $true
         }
         if ($uri.Scheme -ieq 'http') {
-            $h = $uri.Host.ToLower().Trim('[', ']')
-            if ($h -eq 'localhost' -or $h -eq '127.0.0.1' -or $h -eq '::1' -or $h -eq '0:0:0:0:0:0:0:1') {
+            $h = ($uri.Host -replace '^\[|\]$', '').Trim().ToLower()
+            if ($h -eq 'localhost' -or $h -eq '127.0.0.1' -or $h -match '^(?:::1|(?:0{1,4}:){7}0{0,3}1)$') {
                 return $true
             }
         }
