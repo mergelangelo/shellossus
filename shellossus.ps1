@@ -6256,10 +6256,12 @@ function Get-AgentSessionMeta {
         try {
             $obj = $trimmed | ConvertFrom-Json -ErrorAction Stop
             if ($obj.type -eq 'session_meta') {
+                $resolvedName = if ($obj.name) { [string]$obj.name } elseif ($obj.session_name) { [string]$obj.session_name } else { '' }
                 return @{
                     version = [int]$obj.version
                     id = [string]$obj.id
-                    name = if ($obj.name) { [string]$obj.name } else { '' }
+                    name = $resolvedName
+                    session_name = $resolvedName
                     workspace = [string]$obj.workspace
                     model = [string]$obj.model
                     parent_session = if ($obj.parent_session) { [string]$obj.parent_session } else { '' }
@@ -6278,25 +6280,28 @@ function Read-AgentSession {
     param([string]$SessionFile, $State = $null)
     if (-not (Test-Path -LiteralPath $SessionFile)) { throw "Session file not found: $SessionFile" }
     $messages = @()
+    $script:ActiveSessionTodos = @()
+    if ($null -ne $State) {
+        $State.todos = @()
+        $State.session_name = ''
+        $State.parent_session = ''
+        $State.leaf_id = $null
+    }
     foreach ($line in @(Get-Content -LiteralPath $SessionFile -Encoding UTF8 -ErrorAction Stop)) {
         $trimmed = $line.Trim()
         if (-not $trimmed) { continue }
         $obj = $trimmed | ConvertFrom-Json -ErrorAction Stop
         if ($obj.type -eq 'session_meta') {
+            $loadedTodos = if ($obj.todos) { @($obj.todos) } else { @() }
+            $script:ActiveSessionTodos = $loadedTodos
             if ($null -ne $State) {
                 $State.session_id = [string]$obj.id
                 $State.workspace = [string]$obj.workspace
                 $State.model = [string]$obj.model
-                if ($obj.name) { $State.session_name = [string]$obj.name }
-                if ($obj.parent_session) { $State.parent_session = [string]$obj.parent_session }
-                if ($obj.leaf_id) { $State.leaf_id = [string]$obj.leaf_id }
-                if ($obj.todos) {
-                    $State.todos = @($obj.todos)
-                    $script:ActiveSessionTodos = @($obj.todos)
-                }
-            }
-            elseif ($obj.todos) {
-                $script:ActiveSessionTodos = @($obj.todos)
+                $State.session_name = if ($obj.name) { [string]$obj.name } elseif ($obj.session_name) { [string]$obj.session_name } else { '' }
+                $State.parent_session = if ($obj.parent_session) { [string]$obj.parent_session } else { '' }
+                $State.leaf_id = if ($obj.leaf_id) { [string]$obj.leaf_id } else { $null }
+                $State.todos = $loadedTodos
             }
             continue
         }
@@ -8724,7 +8729,8 @@ if (-not $LibraryOnly) {
                     for ($i = 0; $i -lt $list.Count; $i++) {
                         $meta = Get-AgentSessionMeta -SessionFile $list[$i].FullName
                         $mdlInfo = if ($meta -and $meta.model) { "model: $($meta.model)" } else { '' }
-                        $nmTag = if ($meta -and $meta.session_name) { "[$($meta.session_name)] " } else { '' }
+                        $sName = if ($meta -and $meta.session_name) { [string]$meta.session_name } elseif ($meta -and $meta.name) { [string]$meta.name } else { '' }
+                        $nmTag = if ($sName) { "[$sName] " } else { '' }
                         $desc = ("{0}{1} ({2})" -f $nmTag, $list[$i].LastWriteTime.ToString('yyyy-MM-dd HH:mm'), $mdlInfo)
                         $sItems += @{
                             label = $list[$i].Name

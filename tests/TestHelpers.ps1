@@ -15,7 +15,8 @@ $script:NoContextFiles = $false
 $script:Diagnostics = $false
 $script:MaxRepeatToolCalls = 3
 $script:ActiveWorkspace = ''
-$script:RegisteredSkillPaths = @{}
+$script:RegisteredSkills = @{}
+$script:ActiveSessionTodos = @()
 
 function Assert-True {
     param($Condition, [string]$Message)

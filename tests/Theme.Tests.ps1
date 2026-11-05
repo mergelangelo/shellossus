@@ -59,6 +59,7 @@ try {
     $todoCard = @(Format-TodoCard -Todos @(@{ content = 'Task 1'; status = 'completed' }, @{ content = 'Task 2'; status = 'in_progress' }, @{ content = 'Task 3'; status = 'pending' }))
     $plainTodo = ($todoCard | ForEach-Object { Strip-AnsiCodes -Text $_ }) -join "`n"
     Assert-True ($plainTodo.Contains('TODO') -and $plainTodo.Contains('1/3 completed') -and $plainTodo.Contains('[x] Task 1') -and $plainTodo.Contains('[>] Task 2') -and $plainTodo.Contains('[ ] Task 3')) "Format-TodoCard output unexpected: $plainTodo"
+    Assert-True ($todoCard[0].Contains($script:Gm.BoldAqua)) 'Format-TodoCard header missing BoldAqua color sequence.'
 
     $diffCard = @(Format-UnifiedDiff -Path 'src/App.ps1' -ToolName 'edit_file' -Before "line1`nold_a`nold_b`nline4" -After "line1`nnew_a`nline4" -ContextLines 1)
     $plainDiff = ($diffCard | ForEach-Object { Strip-AnsiCodes -Text $_ }) -join "`n"
@@ -106,6 +107,7 @@ try {
     $memCard = @(Format-MemoryCard -Scope 'workspace' -Action 'append' -Content '+ Invariant note')
     $plainMem = ($memCard | ForEach-Object { Strip-AnsiCodes -Text $_ }) -join "`n"
     Assert-True ($plainMem.Contains('MEMORY (WORKSPACE)') -and $plainMem.Contains('+ Invariant note')) 'Format-MemoryCard failed.'
+    Assert-True ($memCard[0].Contains($script:Gm.BoldPurple)) 'Format-MemoryCard header missing BoldPurple color sequence.'
 
     # Read-TuiConfirmation tests via mock Read-Host
     $script:mlQueue = @('y')

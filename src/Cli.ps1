@@ -539,7 +539,8 @@ if (-not $LibraryOnly) {
                     for ($i = 0; $i -lt $list.Count; $i++) {
                         $meta = Get-AgentSessionMeta -SessionFile $list[$i].FullName
                         $mdlInfo = if ($meta -and $meta.model) { "model: $($meta.model)" } else { '' }
-                        $nmTag = if ($meta -and $meta.session_name) { "[$($meta.session_name)] " } else { '' }
+                        $sName = if ($meta -and $meta.session_name) { [string]$meta.session_name } elseif ($meta -and $meta.name) { [string]$meta.name } else { '' }
+                        $nmTag = if ($sName) { "[$sName] " } else { '' }
                         $desc = ("{0}{1} ({2})" -f $nmTag, $list[$i].LastWriteTime.ToString('yyyy-MM-dd HH:mm'), $mdlInfo)
                         $sItems += @{
                             label = $list[$i].Name
