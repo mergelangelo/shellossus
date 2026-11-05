@@ -331,13 +331,16 @@ function Set-AgentUtf8Content {
     else {
         Set-Content -LiteralPath $LiteralPath -Value $Value -Encoding UTF8 -NoNewline -ErrorAction Stop
         if ($PSVersionTable.PSVersion.Major -lt 6) {
-            $rawBytes = @(Get-Content -LiteralPath $LiteralPath -Encoding Byte -ReadCount 0 -ErrorAction Stop)
-            if ($rawBytes.Count -ge 3 -and $rawBytes[0] -eq 239 -and $rawBytes[1] -eq 187 -and $rawBytes[2] -eq 191) {
+            $rawBytes = Get-Content -LiteralPath $LiteralPath -Encoding Byte -ReadCount 0 -ErrorAction Stop
+            if ($rawBytes -is [array] -and $rawBytes.Count -eq 1 -and $rawBytes[0] -is [array]) {
+                $rawBytes = $rawBytes[0]
+            }
+            if ($null -ne $rawBytes -and $rawBytes.Count -ge 3 -and $rawBytes[0] -eq 239 -and $rawBytes[1] -eq 187 -and $rawBytes[2] -eq 191) {
                 if ($rawBytes.Count -eq 3) {
                     $null = New-Item -ItemType File -Path $LiteralPath -Force -ErrorAction Stop
                 }
                 else {
-                    [byte[]]$stripped = @($rawBytes[3..($rawBytes.Count - 1)])
+                    [byte[]]$stripped = $rawBytes[3..($rawBytes.Count - 1)]
                     Set-Content -LiteralPath $LiteralPath -Value $stripped -Encoding Byte -ErrorAction Stop
                 }
             }
