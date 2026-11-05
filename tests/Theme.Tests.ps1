@@ -111,15 +111,32 @@ try {
     $script:mlQueue = @($null)
     Assert-True ($null -eq (Read-TuiMultilineInput)) 'Read-TuiMultilineInput should return $null on EOF.'
 
-    # Interactive selector helper: numbered pick and Enter cancel.
+    # Interactive selector helper: numbered pick, unambiguous prefix match, ambiguous prefix rejection, and Enter cancel.
     $items = @(
         @{ label = 'ReadOnly'; description = 'Safe inspection'; value = 'ReadOnly'; active = $false },
         @{ label = 'Ask'; description = 'Confirm writes and commands'; value = 'Ask'; active = $true },
-        @{ label = 'AutoEdit'; description = 'Auto-approve file edits'; value = 'AutoEdit'; active = $false }
+        @{ label = 'AutoEdit'; description = 'Auto-approve file edits'; value = 'AutoEdit'; active = $false },
+        @{ label = 'Auto'; description = 'Auto-approve edits and commands'; value = 'Auto'; active = $false }
     )
     $script:mlQueue = @('3')
     $picked = Invoke-TuiSelector -Title 'Select Permission' -Items $items
     Assert-True ($picked -eq 'AutoEdit') "Invoke-TuiSelector expected AutoEdit for input 3, got $picked"
+    $script:mlQueue = @('read')
+    $prefixReadPicked = Invoke-TuiSelector -Title 'Select Permission' -Items $items
+    Assert-True ($prefixReadPicked -eq 'ReadOnly') "Invoke-TuiSelector expected ReadOnly for unambiguous prefix 'read', got $prefixReadPicked"
+    $script:mlQueue = @('autoed')
+    $prefixAutoEdPicked = Invoke-TuiSelector -Title 'Select Permission' -Items $items
+    Assert-True ($prefixAutoEdPicked -eq 'AutoEdit') "Invoke-TuiSelector expected AutoEdit for unambiguous prefix 'autoed', got $prefixAutoEdPicked"
+    $script:mlQueue = @('auto')
+    $exactAutoPicked = Invoke-TuiSelector -Title 'Select Permission' -Items $items
+    Assert-True ($exactAutoPicked -eq 'Auto') "Invoke-TuiSelector expected exact match Auto for 'auto', got $exactAutoPicked"
+    $ambiguousItems = @(
+        @{ label = 'AutoEdit'; description = 'Auto-approve file edits'; value = 'AutoEdit'; active = $false },
+        @{ label = 'AutoRun'; description = 'Auto-approve commands'; value = 'AutoRun'; active = $false }
+    )
+    $script:mlQueue = @('auto')
+    $ambiguousPicked = Invoke-TuiSelector -Title 'Select Mode' -Items $ambiguousItems
+    Assert-True ($null -eq $ambiguousPicked) "Invoke-TuiSelector expected `$null for ambiguous prefix 'auto', got $ambiguousPicked"
     $script:mlQueue = @('Custom choice')
     $customPicked = Invoke-TuiSelector -Title 'Select Permission' -Items $items -AllowFreeText
     Assert-True ($customPicked -eq 'Custom choice') 'Invoke-TuiSelector -AllowFreeText failed.'

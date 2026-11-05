@@ -243,15 +243,17 @@ try {
     # Dynamic <capabilities> block in Build-SystemPrompt and Sync-AgentCapabilities across mode switches without notice bloat.
     $script:AgentPermission = 'ReadOnly'
     $roSys = Build-SystemPrompt -Root $workspacePath -ConfigDir ''
-    Assert-True ($roSys.Contains('Permission mode: ReadOnly.') -and $roSys.Contains('Available tools: list_files, read_file, find_files, grep_files, fetch_url, web_search, todo, ask_user, memory, run_agent.') -and $roSys.Contains('File modification and shell execution are unavailable.')) 'Build-SystemPrompt in ReadOnly mode did not render expected dynamic <capabilities> block.'
+    Assert-True ($roSys.Contains('Permission mode: ReadOnly.') -and $roSys.Contains('Available tools: list_files, read_file, find_files, grep_files, fetch_url, web_search, todo, ask_user, memory, run_agent.') -and $roSys.Contains('File modification and shell execution are unavailable.') -and $roSys.Contains('Web tools (fetch_url, web_search): network requests require explicit user confirmation before connecting.')) 'Build-SystemPrompt in ReadOnly mode did not render expected dynamic <capabilities> block.'
     Assert-True ($roSys.Contains('Environment: OS=') -and $roSys.Contains('Command shell (run_command):') -and $roSys.Contains('Get-Command') -and $roSys.Contains($workspacePath)) 'Build-SystemPrompt missing environment, run_command shell, workspace, or Get-Command guidance.'
     Assert-True (-not $roSys.Contains('Available tools: list_files, read_file, find_files, grep_files, write_file')) 'ReadOnly system prompt listed write_file as available.'
 
     $script:AgentPermission = 'AutoEdit'
+    $autoEditSys = Build-SystemPrompt -Root $workspacePath -ConfigDir ''
+    Assert-True ($autoEditSys.Contains('Web tools (fetch_url, web_search): network requests are automatically approved without confirmation.')) 'Build-SystemPrompt in AutoEdit mode did not indicate automatic web tool approval.'
     $syncState = @{
         workspace = $workspacePath
         messages = @(
-            @{ role = 'system'; content = (Build-SystemPrompt -Root $workspacePath -ConfigDir '') },
+            @{ role = 'system'; content = $autoEditSys },
             @{ role = 'user'; content = 'Write file' },
             @{ role = 'assistant'; content = 'Wrote file in AutoEdit.' }
         )

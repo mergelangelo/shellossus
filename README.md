@@ -68,7 +68,7 @@ Common launch flags:
 shellossus -Continue                        # Resume latest session for current workspace
 shellossus -Permission AutoEdit             # Edit files without prompting; ask before shell commands
 shellossus -Prompt "Explain @src/tools/Files.ps1" # Single-shot non-interactive mode
-shellossus -Mascot                          # Display the 8x8 mascot without starting a chat
+shellossus -Mascot                          # Display the 20x16 half-block mascot without starting a chat
 ```
 
 ## Interactive Commands
@@ -78,8 +78,9 @@ shellossus -Mascot                          # Display the 8x8 mascot without sta
 | `/help` | List available interactive commands |
 | `/status` | Show active model, permission mode, token estimate, and session path |
 | `/doctor` | Check the current runtime, settings, endpoint/model catalog, and session storage |
-| `/mascot` | Display the 8×8 mascot |
+| `/mascot` | Display the 20x16 half-block mascot |
 | `/permission <mode>` | Switch mode: `ReadOnly`, `Ask`, `AutoEdit`, `Auto` |
+| `/context [win] [comp]` (`/ctx`) | Show or configure context window size and auto-compaction threshold |
 | `/diagnostics [on\|off]` | Show or toggle pre-request capability and tool diagnostics |
 | `/reasoning <opt>` | Display: `compact`, `full`, `hide`; Effort: `low`, `medium`, `high`, `default` |
 | `/continue [steps]` | Continue execution after hitting the step limit (or continue the last response) |
@@ -104,6 +105,7 @@ shellossus -Mascot                          # Display the 8x8 mascot without sta
 | `/new` (`/clear`) | Start a fresh session |
 | `/agents` | List built-in (`recon`, `audit`, `craft`) and custom subagent roles |
 | `/agent:<role> <task>` | Delegate `<task>` to a specific subagent role |
+| `/skills` | List discovered local and global `SKILL.md` skills |
 | `/skill:<name> [args]` | Invoke a skill directly with arguments |
 | `/<template> [args]` | Expand a prompt template from `.shellossus/prompts/<name>.md` (`$1`, `$@`, `${1:-default}`, `${@:2}`) |
 | `@path/to/file` | Attach a workspace file inline into your prompt |

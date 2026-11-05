@@ -62,7 +62,7 @@ Tool availability and confirmation prompts are governed by four permission modes
 3. **`AutoEdit`**: Automatically approves file creations and edits while still requiring `RUN` confirmation for `run_command`.
 4. **`Auto`**: Automatically approves file-tool modifications and shell commands. Only the file tools enforce workspace boundaries; commands retain OS permissions.
 
-These confirmation rules apply to `write_file`, `edit_file`, `memory` (modifying actions `append`, `set`, `clear`), and `run_command`. `memory` uses staged atomic writes and prompts for confirmation in `Ask` mode, while remaining a fixed-path cross-session tool outside `/undo` backup tracking.
+These confirmation rules apply to `write_file`, `edit_file`, `memory` (modifying actions `append`, `set`, `clear`), and `run_command`. `memory` uses staged atomic writes and prompts for confirmation in `Ask` mode, while remaining a fixed-path cross-session tool outside `/undo` backup tracking. Outbound web tools (`fetch_url` and `web_search`) require explicit user confirmation in `ReadOnly` and `Ask` modes (with `[a]ll` approving web requests for the active session) and are automatically approved in `AutoEdit` and `Auto` modes.
 
 ### Section 2. Strict Argument Validation
 Tool arguments must be validated against the tool's schema before execution. Unknown parameters, missing required parameters, and mismatched types (such as a string `"false"` passed for a boolean parameter) must be rejected immediately.

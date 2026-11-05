@@ -269,6 +269,12 @@ try {
         @{ label = 'Two'; value = 'v2'; description = 'd2'; active = $true }
     )
     Assert-True ($clPicked -eq 'v2') 'ConstrainedLanguage Invoke-TuiSelector failed.'
+    $script:approval = 'on'
+    $clPrefixPicked = Invoke-TuiSelector -Title 'CL Picker' -Items @(
+        @{ label = 'One'; value = 'v1'; description = 'd1'; active = $false },
+        @{ label = 'Two'; value = 'v2'; description = 'd2'; active = $true }
+    )
+    Assert-True ($clPrefixPicked -eq 'v1') 'ConstrainedLanguage Invoke-TuiSelector prefix match failed.'
     $null = Set-AgentTheme -Name 'tokyo-night'
     Assert-True ($script:ActiveTheme -eq 'tokyo-night' -and $script:Gm.OscInit.Contains('#1a1b26')) 'ConstrainedLanguage Set-AgentTheme failed.'
     $null = Set-AgentTheme -Name 'gruvbox-material'

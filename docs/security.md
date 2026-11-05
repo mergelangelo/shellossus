@@ -17,7 +17,7 @@ You can set the permission mode at launch (`-Permission <Mode>`) or switch it at
 
 When resuming a saved session via `/resume`, `shellossus` resets the active permission mode to `Ask` unless `-Permission` was explicitly passed at launch.
 
-The table describes the model's `write_file`, `edit_file`, and `run_command` tools. It does not make the entire process read-only. `todo`, `ask_user`, and `memory` remain available (subject to tool filters); memory modifications (`append`, `set`, `clear`) are rejected in `ReadOnly` and require confirmation in `Ask` mode (using staged atomic writes without `/undo` backup tracking). Sessions can still be saved in `ReadOnly`. User-entered `!cmd` / `!!cmd` shortcuts execute directly, without `RUN` confirmation or a `ReadOnly` check. `ask_user` plan approval does not change these permission rules.
+The table describes the model's `write_file`, `edit_file`, and `run_command` tools. It does not make the entire process read-only. `todo`, `ask_user`, and `memory` remain available (subject to tool filters); memory modifications (`append`, `set`, `clear`) are rejected in `ReadOnly` and require confirmation in `Ask` mode (using staged atomic writes without `/undo` backup tracking). Outbound web tools (`fetch_url` and `web_search`) require explicit user confirmation in `ReadOnly` and `Ask` modes (with `[a]ll` approving web requests for the active session) and are automatically approved in `AutoEdit` and `Auto` modes. Sessions can still be saved in `ReadOnly`. User-entered `!cmd` / `!!cmd` shortcuts execute directly, without `RUN` confirmation or a `ReadOnly` check. `ask_user` plan approval does not change these permission rules.
 
 ---
 
