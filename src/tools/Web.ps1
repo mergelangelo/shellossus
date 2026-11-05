@@ -326,8 +326,8 @@ function Invoke-AgentWebDownload {
         }
     }
     else {
-        $stdout = New-TemporaryFile -ErrorAction Stop
-        $stderr = New-TemporaryFile -ErrorAction Stop
+        $stdout = New-AgentTempFile
+        $stderr = New-AgentTempFile
         $proc = $null
         $oldUri = $env:SHELLOSSUS_WEB_DOWNLOAD_URI
         $oldFile = $env:SHELLOSSUS_WEB_DOWNLOAD_FILE
@@ -424,7 +424,7 @@ function Invoke-AgentFetchUrl {
     $conf = Request-AgentWebConfirmation -ToolName 'fetch_url' -Target $url
     if (-not $conf.approved) { return $conf.response }
     $rawMode = ($Arguments.raw -eq $true)
-    $tempOut = New-TemporaryFile -ErrorAction Stop
+    $tempOut = New-AgentTempFile
     try {
         Invoke-AgentWebDownload -Uri $url -OutFile $tempOut.FullName
         $rawText = Get-Content -LiteralPath $tempOut.FullName -Raw -Encoding UTF8 -ErrorAction Stop
@@ -473,7 +473,7 @@ function Invoke-AgentWebSearch {
     $null = Test-SafeWebUrl -Url $searchUri
     $conf = Request-AgentWebConfirmation -ToolName 'web_search' -Target $query
     if (-not $conf.approved) { return $conf.response }
-    $tempOut = New-TemporaryFile -ErrorAction Stop
+    $tempOut = New-AgentTempFile
     try {
         Invoke-AgentWebDownload -Uri $searchUri -OutFile $tempOut.FullName
         $html = Get-Content -LiteralPath $tempOut.FullName -Raw -Encoding UTF8 -ErrorAction Stop

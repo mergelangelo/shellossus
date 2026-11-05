@@ -57,15 +57,15 @@ foreach ($suite in $matchedSuites) {
     Write-Host "==> Running $leaf ..."
     & $suite
     Write-Host "[PASS] $leaf"
-    if ($leaf -eq 'Doctor.Tests.ps1') {
-        $doctorShell = if ($PSVersionTable.PSEdition -eq 'Core') {
+    if ($leaf -in @('Doctor.Tests.ps1', 'Reliability.Tests.ps1')) {
+        $childShell = if ($PSVersionTable.PSEdition -eq 'Core') {
             if ($env:OS -eq 'Windows_NT') { 'pwsh.exe' } else { 'pwsh' }
         }
         else { 'powershell.exe' }
-        Write-Host '==> Running Doctor.Tests.ps1 in ConstrainedLanguage ...'
-        & (Join-Path $PSHOME $doctorShell) -NoProfile -File $suite -ConstrainedLanguage
-        if ($LASTEXITCODE -ne 0) { throw 'ConstrainedLanguage doctor checks failed.' }
-        Write-Host '[PASS] Doctor.Tests.ps1 (ConstrainedLanguage)'
+        Write-Host "==> Running $leaf in ConstrainedLanguage ..."
+        & (Join-Path $PSHOME $childShell) -NoProfile -File $suite -ConstrainedLanguage
+        if ($LASTEXITCODE -ne 0) { throw "ConstrainedLanguage checks failed for $leaf." }
+        Write-Host "[PASS] $leaf (ConstrainedLanguage)"
     }
 }
 

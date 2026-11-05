@@ -114,6 +114,7 @@ param(
 Assert-AsciiFile -Path $PSCommandPath
 
 $parts = @($header.Replace("`r`n", "`n").TrimEnd())
+$includedFiles = @{}
 foreach ($mod in $modules) {
     $normRel = $mod.Replace('\', '/')
     $subParts = $normRel -split '/'
@@ -124,13 +125,25 @@ foreach ($mod in $modules) {
     if (-not (Test-Path -LiteralPath $modPath)) {
         throw "Missing source module: $modPath"
     }
-    $raw = Get-Content -LiteralPath $modPath -Raw -Encoding UTF8 -ErrorAction Stop
-    Assert-AsciiContent -Path $modPath -Content ([string]$raw)
-    $normalized = $raw.Replace("`r`n", "`n").Trim()
+    $modFull = (Get-Item -LiteralPath $modPath -Force -ErrorAction Stop).FullName
+    $includedFiles[$modFull] = $true
+    $raw = Get-Content -LiteralPath $modFull -Raw -Encoding UTF8 -ErrorAction Stop
+    if ($null -eq $raw) { $raw = '' }
+    Assert-AsciiContent -Path $modFull -Content ([string]$raw)
+    $normalized = ([string]$raw).Replace("`r`n", "`n").Trim()
     $parts += "# --- src/$normRel ---`n" + $normalized
 }
 
-$extraDirs = @((Join-Path $PSScriptRoot 'src'), (Join-Path $PSScriptRoot 'tests'))
+$srcRoot = Join-Path $PSScriptRoot 'src'
+if (Test-Path -LiteralPath $srcRoot) {
+    foreach ($srcFile in @(Get-ChildItem -LiteralPath $srcRoot -Filter '*.ps1' -Recurse -File)) {
+        if (-not $includedFiles.ContainsKey($srcFile.FullName)) {
+            throw "Unlisted source module under src/: $($srcFile.FullName). Add it to `$modules in build.ps1."
+        }
+    }
+}
+
+$extraDirs = @($srcRoot, (Join-Path $PSScriptRoot 'tests'))
 foreach ($scanDir in $extraDirs) {
     if (Test-Path -LiteralPath $scanDir) {
         foreach ($psFile in @(Get-ChildItem -LiteralPath $scanDir -Filter '*.ps1' -Recurse -File)) {
@@ -147,7 +160,9 @@ if ($Check) {
     if (-not (Test-Path -LiteralPath $targetPath)) {
         throw "Target file missing: $targetPath"
     }
-    $existing = (Get-Content -LiteralPath $targetPath -Raw -Encoding UTF8 -ErrorAction Stop).Replace("`r`n", "`n")
+    $existingRaw = Get-Content -LiteralPath $targetPath -Raw -Encoding UTF8 -ErrorAction Stop
+    if ($null -eq $existingRaw) { $existingRaw = '' }
+    $existing = ([string]$existingRaw).Replace("`r`n", "`n")
     Assert-AsciiContent -Path $targetPath -Content $existing
     if ($existing -cne $assembled) {
         throw 'shellossus.ps1 is out of sync with src/*.ps1. Run .\build.ps1 to regenerate.'

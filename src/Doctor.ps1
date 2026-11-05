@@ -36,7 +36,7 @@ function Invoke-DoctorModelsRequest {
     param([string]$Uri, [string]$ApiKey)
     $responseFile = $null
     try {
-        $responseFile = New-TemporaryFile -ErrorAction Stop
+        $responseFile = New-AgentTempFile
         # Do not follow redirects with the user's credentials. Use the same UTF-8
         # file-backed response handling as the chat transport on PowerShell 5.1.
         # Avoid -PassThru: older PowerShell versions leave -OutFile empty with it.

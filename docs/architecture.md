@@ -8,7 +8,8 @@
 
 ### 1. [`src/Config.ps1`](../src/Config.ps1)
 - **Configuration I/O (`Read-AgentConfig`, `Save-AgentConfig`):** Parses and writes `SHELLOSSUS_*` key-value pairs as pure data without ever evaluating PowerShell expressions.
-- **Boundary & Secret Enforcement (`Resolve-AgentPath`, `Test-IsSecretFile`):**
+- **ConstrainedLanguage-Safe File Helpers (`New-AgentTempFile`, `Set-AgentUtf8Content`):** Allocates temporary files and writes UTF-8 content (including empty strings) using native PowerShell cmdlets without `.NET` static method invocations blocked in Windows PowerShell 5.1 `ConstrainedLanguage` mode.
+- **Boundary & Secret Enforcement (`Resolve-AgentPath`, `Test-PathHasReparsePoint`, `Test-IsSecretFile`):**
   - Resolves workspace-relative paths against the workspace root.
   - Rejects any path outside the workspace root (with a narrow read-only exception for registered global `SKILL.md` files when `-AllowRegisteredSkill` is passed by `read_file`).
   - Walks all ancestor directories of every resolved item and rejects NTFS junctions, symlinks, or reparse points (`Attributes -band 1024`).
@@ -84,17 +85,17 @@ These are the 13 canonical tools from `Get-AgentTools` in `src/tools/Schemas.ps1
 | `ask_user` | Ask a question or request plan review | Interactive response, not a general permission grant; no file undo |
 | `memory` | View/append/set/clear persistent notes | Workspace or configuration directory; no file undo |
 
-`run_command` is a process with the user's permissions, not an OS sandbox. User-entered `!` / `!!` shortcuts invoke it directly. The `memory` implementation uses its own fixed-path handling rather than `Resolve-AgentPath`; it checks the final file for reparse points but does not provide the file tools' ancestor-path guarantee. See [security boundaries and undo coverage](security.md).
+`run_command` is a process with the user's permissions, not an OS sandbox. User-entered `!` / `!!` shortcuts invoke it directly. The `memory` implementation uses fixed-path handling rather than `Resolve-AgentPath`, checks the target file and ancestor directories up to the scope root for reparse points (`Test-PathHasReparsePoint`), and requires confirmation in `Ask` mode while remaining outside `/undo` backup tracking. See [security boundaries and undo coverage](security.md).
 
 ---
 
 ## Build & Verification Pipeline
 
 1. Edit source modules in `src/*.ps1`.
-2. Run `.\build.ps1` to generate `shellossus.ps1` (pure ASCII, LF-normalized).
+2. Run `.\build.ps1` to generate `shellossus.ps1` (pure ASCII, LF-normalized, verifying all `.ps1` files under `src/` are included in `$modules`).
 3. Run `.\tests\smoke.ps1`, which:
    - Calls `.\build.ps1 -Check` to ensure `shellossus.ps1` matches `src/*.ps1`.
-   - Executes modular test suites (`Config.Tests.ps1`, `Theme.Tests.ps1`, `Tools.Tests.ps1`, `Context.Tests.ps1`, `Cli.Tests.ps1`, `Doctor.Tests.ps1`, `Reliability.Tests.ps1`) with isolated temporary workspaces. Doctor tests also run in a fresh process with `ConstrainedLanguage`; endpoint results are mocked, so tests send no real API requests.
+   - Executes modular test suites (`Config.Tests.ps1`, `Theme.Tests.ps1`, `Tools.Tests.ps1`, `Context.Tests.ps1`, `Cli.Tests.ps1`, `Doctor.Tests.ps1`, `Reliability.Tests.ps1`) with isolated temporary workspaces, and runs both `Doctor.Tests.ps1 -ConstrainedLanguage` and `Reliability.Tests.ps1 -ConstrainedLanguage` in fresh `ConstrainedLanguage` child processes. Endpoint results are mocked, so tests send no real API requests.
    - Runs `ConstrainedLanguage.Tests.ps1` to verify core operations under PowerShell `ConstrainedLanguage` mode.
 
-`Reliability.Tests.ps1 -ConstrainedLanguage` is a separate, optional invocation, currently excluded from `smoke.ps1`. It previously failed on Windows PowerShell 5.1 during overwrite verification; a green smoke run does not establish that the full reliability suite passes in that mode. The Windows CI workflow runs smoke under Windows PowerShell 5.1.
+The Windows CI workflow runs `.\tests\smoke.ps1` under Windows PowerShell 5.1.

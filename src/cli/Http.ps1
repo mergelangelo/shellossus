@@ -95,10 +95,10 @@ function Invoke-AgentHttpRequest {
         return
     }
     $shellExe = (Get-AgentEnvironment).shell_exe
-    $reqTemp = New-TemporaryFile -ErrorAction Stop
-    $errTemp = New-TemporaryFile -ErrorAction Stop
-    $stdoutTemp = New-TemporaryFile -ErrorAction Stop
-    $stderrTemp = New-TemporaryFile -ErrorAction Stop
+    $reqTemp = New-AgentTempFile
+    $errTemp = New-AgentTempFile
+    $stdoutTemp = New-AgentTempFile
+    $stderrTemp = New-AgentTempFile
     try {
         Set-Content -LiteralPath $reqTemp.FullName -Value $asciiBody -Encoding Ascii -NoNewline -ErrorAction Stop
         $workerCmd = @'

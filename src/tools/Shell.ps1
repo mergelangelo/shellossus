@@ -97,8 +97,8 @@ function Invoke-ShellCommand {
     $rootFull = (Get-Item -LiteralPath $Root -Force -ErrorAction Stop).FullName
     $envInfo = Get-AgentEnvironment -Root $rootFull
     $shellExe = $envInfo.shell_exe
-    $outTemp = New-TemporaryFile -ErrorAction Stop
-    $errTemp = New-TemporaryFile -ErrorAction Stop
+    $outTemp = New-AgentTempFile
+    $errTemp = New-AgentTempFile
     $savedSKey = $env:SHELLOSSUS_API_KEY
     $savedHKey = $env:H_AGENT_API_KEY
     $savedOKey = $env:OPENAI_API_KEY
