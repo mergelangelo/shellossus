@@ -222,6 +222,7 @@ function Format-UnifiedDiff {
         [int]$MaxLines = 80
     )
     $w = Get-TerminalWidth
+    $maxDiffChars = if (($w - 18) -ge 20) { $w - 18 } else { 20 }
     $afterNorm = if ($After) { $After.Replace("`r`n", "`n") } else { '' }
     $newLines = @(if ($afterNorm.Length -gt 0) { $afterNorm -split "`n" } else { @() })
     if ($null -eq $Before) {
@@ -231,7 +232,7 @@ function Format-UnifiedDiff {
         $showCount = if ($newLines.Count -gt $MaxLines) { $MaxLines } else { $newLines.Count }
         for ($i = 0; $i -lt $showCount; $i++) {
             $lnNum = ('{0,4}' -f ($i + 1))
-            $txt = Format-DiffLinePreview -Line $newLines[$i]
+            $txt = Format-DiffLinePreview -Line $newLines[$i] -MaxChars $maxDiffChars
             $body += ($script:Gm.Grey1 + $lnNum + ' ' + $script:Gm.BgDiffGreen + $script:Gm.Green + '+ ' + $txt + $script:Gm.Reset)
         }
         if ($newLines.Count -gt $MaxLines) {
@@ -383,7 +384,7 @@ function Format-UnifiedDiff {
                 for ($i = $op.o1; $i -lt $op.o2; $i++) {
                     $newLnIdx = $op.n1 + ($i - $op.o1)
                     $lnNum = ('{0,4}' -f ($newLnIdx + 1))
-                    $txt = Format-DiffLinePreview -Line $oldLines[$i]
+                    $txt = Format-DiffLinePreview -Line $oldLines[$i] -MaxChars $maxDiffChars
                     $body += ($script:Gm.Grey0 + $lnNum + '   ' + $txt + $script:Gm.Reset)
                 }
             }
@@ -391,14 +392,14 @@ function Format-UnifiedDiff {
                 for ($i = $op.o1; $i -lt $op.o2; $i++) {
                     if ($emitted -ge $MaxLines) { break }
                     $lnNum = ('{0,4}' -f ($i + 1))
-                    $txt = Format-DiffLinePreview -Line $oldLines[$i]
+                    $txt = Format-DiffLinePreview -Line $oldLines[$i] -MaxChars $maxDiffChars
                     $body += ($script:Gm.Red + $lnNum + ' ' + $script:Gm.BgDiffRed + $script:Gm.Red + '- ' + $txt + $script:Gm.Reset)
                     $emitted++
                 }
                 for ($i = $op.n1; $i -lt $op.n2; $i++) {
                     if ($emitted -ge $MaxLines) { break }
                     $lnNum = ('{0,4}' -f ($i + 1))
-                    $txt = Format-DiffLinePreview -Line $newLines[$i]
+                    $txt = Format-DiffLinePreview -Line $newLines[$i] -MaxChars $maxDiffChars
                     $body += ($script:Gm.Green + $lnNum + ' ' + $script:Gm.BgDiffGreen + $script:Gm.Green + '+ ' + $txt + $script:Gm.Reset)
                     $emitted++
                 }

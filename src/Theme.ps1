@@ -345,13 +345,131 @@ function Strip-AnsiCodes {
 
 function Get-TerminalWidth {
     try {
-        if ($Host -and $Host.UI -and $Host.UI.RawUI -and $Host.UI.RawUI.WindowSize) {
-            $w = [int]$Host.UI.RawUI.WindowSize.Width
-            if ($w -ge 50 -and $w -le 220) { return $w }
+        if ($Host -and $Host.UI -and $Host.UI.RawUI) {
+            $w = 0
+            if ($Host.UI.RawUI.WindowSize -and $Host.UI.RawUI.WindowSize.Width) {
+                $w = [int]$Host.UI.RawUI.WindowSize.Width
+            }
+            if ($w -le 0 -and $Host.UI.RawUI.BufferSize -and $Host.UI.RawUI.BufferSize.Width) {
+                $w = [int]$Host.UI.RawUI.BufferSize.Width
+            }
+            if ($w -ge 35 -and $w -le 500) {
+                return ($w - 1)
+            }
         }
     }
     catch {}
     return 90
+}
+
+function Limit-AnsiLineToWidth {
+    param(
+        [string]$Text,
+        [int]$MaxWidth
+    )
+    if (-not $Text -or $MaxWidth -le 0) { return '' }
+    $plain = Strip-AnsiCodes -Text $Text
+    if ($plain.Length -le $MaxWidth) { return $Text }
+    $ellipsis = if ($MaxWidth -ge 4) { '...' } else { '' }
+    $targetVis = $MaxWidth - $ellipsis.Length
+    if ($targetVis -le 0) {
+        return ($plain.Substring(0, $MaxWidth))
+    }
+    $tokens = @($Text -split '(\x1b\][^\x07]*\x07|\x1b\[[0-9;?]*[a-zA-Z])')
+    $out = ''
+    $visCount = 0
+    $hasAnsi = $false
+    foreach ($tok in $tokens) {
+        if (-not $tok) { continue }
+        if ($tok -match '^\x1b') {
+            $hasAnsi = $true
+            if ($visCount -lt $targetVis) {
+                $out += $tok
+            }
+            continue
+        }
+        $rem = $targetVis - $visCount
+        if ($rem -le 0) { break }
+        if ($tok.Length -le $rem) {
+            $out += $tok
+            $visCount += $tok.Length
+        }
+        else {
+            $out += $tok.Substring(0, $rem)
+            $visCount += $rem
+            break
+        }
+    }
+    $out += $ellipsis
+    if ($hasAnsi) { $out += $script:Gm.Reset }
+    return $out
+}
+
+function Split-AnsiLineToWidth {
+    param(
+        [string]$Text,
+        [int]$MaxWidth
+    )
+    if ($null -eq $Text) { return @('') }
+    if ($MaxWidth -le 0) { return @($Text) }
+    $plain = Strip-AnsiCodes -Text $Text
+    if ($plain.Length -le $MaxWidth) { return @($Text) }
+    $tokens = @($Text -split '(\x1b\][^\x07]*\x07|\x1b\[[0-9;?]*[a-zA-Z])')
+    $lines = @()
+    $currLine = ''
+    $currVis = 0
+    $activeFg = ''
+    $activeBg = ''
+    foreach ($tok in $tokens) {
+        if (-not $tok) { continue }
+        if ($tok -match '^\x1b') {
+            $currLine += $tok
+            if ($tok -eq "$script:Esc[0m") {
+                $activeFg = ''
+                $activeBg = ''
+            }
+            elseif ($tok -match '^\x1b\[(?:0;)?48;') {
+                $activeBg = $tok
+            }
+            elseif ($tok -match '^\x1b\[') {
+                $activeFg = $tok
+            }
+            continue
+        }
+        $pos = 0
+        while ($pos -lt $tok.Length) {
+            $remCols = $MaxWidth - $currVis
+            $remChars = $tok.Length - $pos
+            if ($remChars -le $remCols) {
+                $currLine += $tok.Substring($pos)
+                $currVis += $remChars
+                break
+            }
+            $slice = $tok.Substring($pos, $remCols)
+            $breakLen = $remCols
+            $advanceLen = $remCols
+            $lastSpace = $slice.LastIndexOf(' ')
+            if ($lastSpace -gt 0 -and ($currVis + $lastSpace) -ge [int]($MaxWidth / 2)) {
+                $breakLen = $lastSpace
+                $advanceLen = $lastSpace + 1
+            }
+            $currLine += $tok.Substring($pos, $breakLen)
+            if ($activeFg -or $activeBg) {
+                $currLine += $script:Gm.Reset
+            }
+            $lines += $currLine
+            $currLine = $activeBg + $activeFg
+            $currVis = 0
+            $pos += $advanceLen
+        }
+    }
+    if ($currVis -gt 0 -or $lines.Count -eq 0) {
+        if ($activeFg -or $activeBg) {
+            $currLine += $script:Gm.Reset
+        }
+        $lines += $currLine
+    }
+    return $lines
 }
 
 function Format-TuiCardBox {
@@ -361,29 +479,34 @@ function Format-TuiCardBox {
         [string]$Indent = '  ',
         [int]$Width = 0
     )
-    $w = if ($Width -ge 50) { $Width } else { Get-TerminalWidth }
+    $w = if ($Width -ge 30) { $Width } else { Get-TerminalWidth }
     $indLen = $Indent.Length
-    $hdrVis = (Strip-AnsiCodes -Text $Header).Length
     $boxW = $w
-    if (($indLen + 5 + $hdrVis) -gt $boxW) {
-        $boxW = $indLen + 5 + $hdrVis
+    if ($boxW -lt ($indLen + 14)) {
+        $boxW = $indLen + 14
+    }
+    $innerW = $boxW - $indLen - 4
+    $maxHdrVis = $boxW - $indLen - 5
+    $effHeader = $Header
+    $hdrVis = (Strip-AnsiCodes -Text $effHeader).Length
+    if ($hdrVis -gt $maxHdrVis) {
+        $effHeader = Limit-AnsiLineToWidth -Text $effHeader -MaxWidth $maxHdrVis
+        $hdrVis = (Strip-AnsiCodes -Text $effHeader).Length
     }
     $rowMeta = @()
     if ($null -ne $BodyLines) {
         foreach ($ln in @($BodyLines)) {
             $s = if ($null -ne $ln) { [string]$ln } else { '' }
-            $vLen = (Strip-AnsiCodes -Text $s).Length
-            if (($indLen + 4 + $vLen) -gt $boxW) {
-                $boxW = $indLen + 4 + $vLen
+            foreach ($wrappedLn in @(Split-AnsiLineToWidth -Text $s -MaxWidth $innerW)) {
+                $vLen = (Strip-AnsiCodes -Text $wrappedLn).Length
+                $rowMeta += @{ text = $wrappedLn; vis = $vLen }
             }
-            $rowMeta += @{ text = $s; vis = $vLen }
         }
     }
     $dashes = $boxW - $indLen - 3 - $hdrVis
     if ($dashes -lt 2) { $dashes = 2 }
-    $innerW = $boxW - $indLen - 4
     $out = @(
-        ($Indent + $script:Gm.Grey0 + $script:Box.TL + $script:Box.H + $script:Gm.Reset + $Header + $script:Gm.Grey0 + ($script:Box.H * $dashes) + $script:Box.TR + $script:Gm.Reset)
+        ($Indent + $script:Gm.Grey0 + $script:Box.TL + $script:Box.H + $script:Gm.Reset + $effHeader + $script:Gm.Grey0 + ($script:Box.H * $dashes) + $script:Box.TR + $script:Gm.Reset)
     )
     foreach ($rm in $rowMeta) {
         $padLen = $innerW - $rm.vis
@@ -500,9 +623,9 @@ function Format-PermissionBadge {
 
 function Format-TuiStatusBar {
     param($State, [string]$Root, [string]$Model, [int]$UndoCount = 0, [int]$Width = 0)
-    $w = if ($Width -ge 50) { $Width } else { Get-TerminalWidth }
+    $w = if ($Width -ge 30) { $Width } else { Get-TerminalWidth }
+    if ($w -lt 30) { $w = 30 }
     $innerW = $w - 4
-    if ($innerW -lt 46) { $innerW = 46 }
     $wsName = if ($Root) { Split-Path $Root -Leaf } else { 'workspace' }
     if (-not $wsName) { $wsName = $Root }
     $branch = Get-GitBranchLabel -Root $Root
@@ -510,7 +633,12 @@ function Format-TuiStatusBar {
     $sessLabel = if ($State -and $State.session_name) { [string]$State.session_name } elseif ($State -and $State.session_id) { [string]$State.session_id } else { '' }
     $sessSeg = if ($sessLabel) { ' ' + $script:Gm.Grey0 + $script:Box.H + ' ' + $script:Gm.Grey1 + $sessLabel + $script:Gm.Reset } else { '' }
     $topTitle = ' ' + $script:Gm.BoldGreen + $script:Box.Dot + ' ' + $wsName + $script:Gm.Reset + $branchSeg + $sessSeg + ' '
+    $maxTopVis = $w - 5
     $topVisLen = (Strip-AnsiCodes -Text $topTitle).Length
+    if ($topVisLen -gt $maxTopVis) {
+        $topTitle = Limit-AnsiLineToWidth -Text $topTitle -MaxWidth $maxTopVis
+        $topVisLen = (Strip-AnsiCodes -Text $topTitle).Length
+    }
     $topDashes = $w - 3 - $topVisLen
     if ($topDashes -lt 2) { $topDashes = 2 }
     $lineTop = $script:Gm.Grey0 + $script:Box.TL + $script:Box.H + $script:Gm.Reset + $topTitle + $script:Gm.Grey0 + ($script:Box.H * $topDashes) + $script:Box.TR + $script:Gm.Reset
@@ -530,7 +658,8 @@ function Format-TuiStatusBar {
     $effStr = if ($script:ReasoningEffort) { ':' + $script:ReasoningEffort } elseif ($script:ShowReasoning -eq 'hide') { ':hide' } else { '' }
     $modelSeg = $script:Gm.Fg1 + $Model + $script:Gm.Grey1 + $effStr + $script:Gm.Reset
     $permSeg = Format-PermissionBadge -Permission $script:AgentPermission
-    $gaugeSeg = Format-ContextGauge -Tokens $stBar.est_tokens -MaxTokens $stBar.context_window_tokens -CompactTokens $stBar.compact_threshold_tokens -Width 8
+    $gaugeW = if ($innerW -lt 90) { 4 } else { 8 }
+    $gaugeSeg = Format-ContextGauge -Tokens $stBar.est_tokens -MaxTokens $stBar.context_window_tokens -CompactTokens $stBar.compact_threshold_tokens -Width $gaugeW
     $inTok = if ($State -and $State.usage_input_tokens) { [int]$State.usage_input_tokens } else { 0 }
     $outTok = if ($State -and $State.usage_output_tokens) { [int]$State.usage_output_tokens } else { 0 }
     $tokSeg = if (($inTok + $outTok) -gt 0) {
@@ -542,6 +671,9 @@ function Format-TuiStatusBar {
     }
     elseif ($State -and $State.todos -and @($State.todos).Count -gt 0) {
         @($State.todos)
+    }
+    else {
+        @()
     })
     $todoSeg = if ($todoList.Count -gt 0) {
         $tTotal = $todoList.Count
@@ -557,12 +689,15 @@ function Format-TuiStatusBar {
     else { '' }
     $sep = ' ' + $script:Gm.Grey0 + $script:Box.V + $script:Gm.Reset + ' '
     $midContent = $modelSeg + $sep + $permSeg + $sep + $gaugeSeg + $tokSeg + $todoSeg + $undoSeg
-    $midVisLen = (Strip-AnsiCodes -Text $midContent).Length
-    $padRight = $innerW - $midVisLen
-    $padStr = if ($padRight -gt 0) { ' ' * $padRight } else { '' }
-    $lineMid = $script:Gm.Grey0 + $script:Box.V + $script:Gm.Reset + ' ' + $midContent + $padStr + ' ' + $script:Gm.Grey0 + $script:Box.V + $script:Gm.Reset
-    $lineBot = $script:Gm.Grey0 + $script:Box.BL + ($script:Box.H * ($w - 2)) + $script:Box.BR + $script:Gm.Reset
-    return @($lineTop, $lineMid, $lineBot)
+    $outLines = @($lineTop)
+    foreach ($midChunk in @(Split-AnsiLineToWidth -Text $midContent -MaxWidth $innerW)) {
+        $chunkVis = (Strip-AnsiCodes -Text $midChunk).Length
+        $padRight = $innerW - $chunkVis
+        $padStr = if ($padRight -gt 0) { ' ' * $padRight } else { '' }
+        $outLines += ($script:Gm.Grey0 + $script:Box.V + $script:Gm.Reset + ' ' + $midChunk + $padStr + ' ' + $script:Gm.Grey0 + $script:Box.V + $script:Gm.Reset)
+    }
+    $outLines += ($script:Gm.Grey0 + $script:Box.BL + ($script:Box.H * ($w - 2)) + $script:Box.BR + $script:Gm.Reset)
+    return $outLines
 }
 
 function Write-TuiPromptFrame {
