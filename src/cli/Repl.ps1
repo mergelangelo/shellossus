@@ -153,15 +153,17 @@ function Write-TuiStartupBanner {
     $loadedStr = if ($ctxLoaded.Count -gt 0) { $script:Gm.Aqua + 'Loaded: ' + $script:Gm.Fg + ($ctxLoaded -join ' | ') + $script:Gm.Reset } else { $script:Gm.Grey1 + 'Workspace ready' + $script:Gm.Reset }
     $modelStr = $script:Gm.Aqua + 'Model: ' + $script:Gm.Fg + $Model + $script:Gm.Grey1 + ' | ' + $script:Gm.Aqua + 'Mode: ' + $script:Gm.Fg + $script:AgentPermission + $script:Gm.Reset
     $shortcutsStr = $script:Gm.Grey1 + 'Shortcuts: ' + $script:Gm.Aqua + '? (/help)' + $script:Gm.Grey1 + ' | ' + $script:Gm.Aqua + '/p' + $script:Gm.Grey1 + ' mode | ' + $script:Gm.Aqua + '/m' + $script:Gm.Grey1 + ' model | ' + $script:Gm.Aqua + '/s' + $script:Gm.Grey1 + ' status | ' + $script:Gm.Aqua + '/u' + $script:Gm.Grey1 + ' undo' + $script:Gm.Reset
-    $textLines = @($loadedStr, $modelStr, $shortcutsStr, '', '')
+    $textLines = @($loadedStr, $modelStr, $shortcutsStr)
 
     $mascotLines = @(Get-TuiMascotLines -Mode 'compact')
     $body = @()
     if ($wInit -ge 76) {
-        $maxBannerTextW = $wInit - 23
-        for ($mIdx = 0; $mIdx -lt 5; $mIdx++) {
+        $mascotVisW = if ($mascotLines.Count -gt 0) { (Strip-AnsiCodes -Text $mascotLines[0]).Length } else { 20 }
+        $maxBannerTextW = $wInit - $mascotVisW - 9
+        for ($mIdx = 0; $mIdx -lt $mascotLines.Count; $mIdx++) {
             $mLine = $mascotLines[$mIdx]
-            $tLine = Limit-AnsiLineToWidth -Text $textLines[$mIdx] -MaxWidth $maxBannerTextW
+            $rawTextLine = if ($mIdx -lt $textLines.Count) { $textLines[$mIdx] } else { '' }
+            $tLine = Limit-AnsiLineToWidth -Text $rawTextLine -MaxWidth $maxBannerTextW
             $body += ('  ' + $mLine + '   ' + $tLine)
         }
     }
