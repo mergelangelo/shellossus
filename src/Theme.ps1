@@ -497,13 +497,12 @@ function Format-TuiStatusBar {
         ' ' + $script:Gm.Grey0 + $script:Box.V + ' ' + $script:Gm.Grey1 + 'in:' + (Format-TokenCount -Tokens $inTok) + ' out:' + (Format-TokenCount -Tokens $outTok) + $script:Gm.Reset
     }
     else { '' }
-    $todoList = if ($script:ActiveSessionTodos -and $script:ActiveSessionTodos.Count -gt 0) {
-        $script:ActiveSessionTodos
+    $todoList = @(if ($script:ActiveSessionTodos -and @($script:ActiveSessionTodos).Count -gt 0) {
+        @($script:ActiveSessionTodos)
     }
-    elseif ($State -and $State.todos -and $State.todos.Count -gt 0) {
-        $State.todos
-    }
-    else { @() }
+    elseif ($State -and $State.todos -and @($State.todos).Count -gt 0) {
+        @($State.todos)
+    })
     $todoSeg = if ($todoList.Count -gt 0) {
         $tTotal = $todoList.Count
         $tDone = @($todoList | Where-Object { $_.status -eq 'completed' }).Count

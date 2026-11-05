@@ -118,8 +118,8 @@ function Read-AgentSession {
         if (-not $trimmed) { continue }
         $obj = $trimmed | ConvertFrom-Json -ErrorAction Stop
         if ($obj.type -eq 'session_meta') {
-            $loadedTodos = if ($obj.todos) { @($obj.todos) } else { @() }
-            $script:ActiveSessionTodos = $loadedTodos
+            $loadedTodos = @(if ($obj.todos) { @($obj.todos) })
+            $script:ActiveSessionTodos = @($loadedTodos)
             if ($null -ne $State) {
                 $State.session_id = [string]$obj.id
                 $State.workspace = [string]$obj.workspace
@@ -127,7 +127,7 @@ function Read-AgentSession {
                 $State.session_name = if ($obj.name) { [string]$obj.name } elseif ($obj.session_name) { [string]$obj.session_name } else { '' }
                 $State.parent_session = if ($obj.parent_session) { [string]$obj.parent_session } else { '' }
                 $State.leaf_id = if ($obj.leaf_id) { [string]$obj.leaf_id } else { $null }
-                $State.todos = $loadedTodos
+                $State.todos = @($loadedTodos)
             }
             continue
         }

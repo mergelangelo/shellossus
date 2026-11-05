@@ -128,8 +128,8 @@ if (-not $LibraryOnly) {
     $script:OutputMode = if ($Mode) { $Mode.ToLower() } else { 'text' }
     if ($script:OutputMode -notin @('text', 'json')) { throw 'Mode must be text or json.' }
     $script:NoTools = [bool]$NoTools
-    $script:EnabledTools = if ($Tools) { @($Tools -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ }) } else { @() }
-    $script:ExcludedTools = if ($ExcludeTools) { @($ExcludeTools -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ }) } else { @() }
+    $script:EnabledTools = @(if ($Tools) { $Tools -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ } })
+    $script:ExcludedTools = @(if ($ExcludeTools) { $ExcludeTools -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ } })
     $script:NoSkills = [bool]$NoSkills
     $script:NoPromptTemplates = [bool]$NoPromptTemplates
     $script:NoContextFiles = [bool]$NoContextFiles
@@ -253,7 +253,7 @@ if (-not $LibraryOnly) {
                     Write-Host ($script:Gm.Grey1 + '  Cleared active todo list.' + $script:Gm.Reset)
                 }
                 else {
-                    $currTodos = if ($script:ActiveSessionTodos -and $script:ActiveSessionTodos.Count -gt 0) { $script:ActiveSessionTodos } elseif ($state -and $state.todos -and $state.todos.Count -gt 0) { $state.todos } else { @() }
+                    $currTodos = @(if ($script:ActiveSessionTodos -and @($script:ActiveSessionTodos).Count -gt 0) { @($script:ActiveSessionTodos) } elseif ($state -and $state.todos -and @($state.todos).Count -gt 0) { @($state.todos) })
                     if ($currTodos.Count -gt 0) {
                         Write-TodoCard -Todos $currTodos
                     }

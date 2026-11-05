@@ -173,7 +173,7 @@ function Invoke-AgentTurn {
         Write-AgentJsonEvent -EventType 'message_end' -Payload @{
             role = 'assistant'
             content = $message.content
-            tool_calls = if ($message.tool_calls) { @($message.tool_calls) } else { @() }
+            tool_calls = @(if ($message.tool_calls) { @($message.tool_calls) })
         }
         if ($message.content -and $script:OutputMode -ne 'json') { Write-AgentReply -Content $message.content }
         if (-not $message.tool_calls) {

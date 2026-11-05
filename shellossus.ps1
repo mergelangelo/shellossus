@@ -757,13 +757,12 @@ function Format-TuiStatusBar {
         ' ' + $script:Gm.Grey0 + $script:Box.V + ' ' + $script:Gm.Grey1 + 'in:' + (Format-TokenCount -Tokens $inTok) + ' out:' + (Format-TokenCount -Tokens $outTok) + $script:Gm.Reset
     }
     else { '' }
-    $todoList = if ($script:ActiveSessionTodos -and $script:ActiveSessionTodos.Count -gt 0) {
-        $script:ActiveSessionTodos
+    $todoList = @(if ($script:ActiveSessionTodos -and @($script:ActiveSessionTodos).Count -gt 0) {
+        @($script:ActiveSessionTodos)
     }
-    elseif ($State -and $State.todos -and $State.todos.Count -gt 0) {
-        $State.todos
-    }
-    else { @() }
+    elseif ($State -and $State.todos -and @($State.todos).Count -gt 0) {
+        @($State.todos)
+    })
     $todoSeg = if ($todoList.Count -gt 0) {
         $tTotal = $todoList.Count
         $tDone = @($todoList | Where-Object { $_.status -eq 'completed' }).Count
@@ -6292,8 +6291,8 @@ function Read-AgentSession {
         if (-not $trimmed) { continue }
         $obj = $trimmed | ConvertFrom-Json -ErrorAction Stop
         if ($obj.type -eq 'session_meta') {
-            $loadedTodos = if ($obj.todos) { @($obj.todos) } else { @() }
-            $script:ActiveSessionTodos = $loadedTodos
+            $loadedTodos = @(if ($obj.todos) { @($obj.todos) })
+            $script:ActiveSessionTodos = @($loadedTodos)
             if ($null -ne $State) {
                 $State.session_id = [string]$obj.id
                 $State.workspace = [string]$obj.workspace
@@ -6301,7 +6300,7 @@ function Read-AgentSession {
                 $State.session_name = if ($obj.name) { [string]$obj.name } elseif ($obj.session_name) { [string]$obj.session_name } else { '' }
                 $State.parent_session = if ($obj.parent_session) { [string]$obj.parent_session } else { '' }
                 $State.leaf_id = if ($obj.leaf_id) { [string]$obj.leaf_id } else { $null }
-                $State.todos = $loadedTodos
+                $State.todos = @($loadedTodos)
             }
             continue
         }
@@ -7644,7 +7643,7 @@ function Invoke-AgentTurn {
         Write-AgentJsonEvent -EventType 'message_end' -Payload @{
             role = 'assistant'
             content = $message.content
-            tool_calls = if ($message.tool_calls) { @($message.tool_calls) } else { @() }
+            tool_calls = @(if ($message.tool_calls) { @($message.tool_calls) })
         }
         if ($message.content -and $script:OutputMode -ne 'json') { Write-AgentReply -Content $message.content }
         if (-not $message.tool_calls) {
@@ -7832,7 +7831,7 @@ function Format-TuiStatusCard {
         ($barV + $script:Gm.Grey1 + 'File:        ' + $script:Gm.Grey2 + $sessFileStr + $script:Gm.Reset),
         ($barV + $script:Gm.Grey1 + 'Tools:       ' + $script:Gm.Aqua + $toolsStr + $script:Gm.Reset)
     )
-    $tdList = if ($script:ActiveSessionTodos -and $script:ActiveSessionTodos.Count -gt 0) { $script:ActiveSessionTodos } elseif ($State -and $State.todos -and $State.todos.Count -gt 0) { $State.todos } else { @() }
+    $tdList = @(if ($script:ActiveSessionTodos -and @($script:ActiveSessionTodos).Count -gt 0) { @($script:ActiveSessionTodos) } elseif ($State -and $State.todos -and @($State.todos).Count -gt 0) { @($State.todos) })
     if ($tdList.Count -gt 0) {
         $tDone = @($tdList | Where-Object { $_.status -eq 'completed' }).Count
         $tTot = $tdList.Count
@@ -8318,8 +8317,8 @@ if (-not $LibraryOnly) {
     $script:OutputMode = if ($Mode) { $Mode.ToLower() } else { 'text' }
     if ($script:OutputMode -notin @('text', 'json')) { throw 'Mode must be text or json.' }
     $script:NoTools = [bool]$NoTools
-    $script:EnabledTools = if ($Tools) { @($Tools -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ }) } else { @() }
-    $script:ExcludedTools = if ($ExcludeTools) { @($ExcludeTools -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ }) } else { @() }
+    $script:EnabledTools = @(if ($Tools) { $Tools -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ } })
+    $script:ExcludedTools = @(if ($ExcludeTools) { $ExcludeTools -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ } })
     $script:NoSkills = [bool]$NoSkills
     $script:NoPromptTemplates = [bool]$NoPromptTemplates
     $script:NoContextFiles = [bool]$NoContextFiles
@@ -8443,7 +8442,7 @@ if (-not $LibraryOnly) {
                     Write-Host ($script:Gm.Grey1 + '  Cleared active todo list.' + $script:Gm.Reset)
                 }
                 else {
-                    $currTodos = if ($script:ActiveSessionTodos -and $script:ActiveSessionTodos.Count -gt 0) { $script:ActiveSessionTodos } elseif ($state -and $state.todos -and $state.todos.Count -gt 0) { $state.todos } else { @() }
+                    $currTodos = @(if ($script:ActiveSessionTodos -and @($script:ActiveSessionTodos).Count -gt 0) { @($script:ActiveSessionTodos) } elseif ($state -and $state.todos -and @($state.todos).Count -gt 0) { @($state.todos) })
                     if ($currTodos.Count -gt 0) {
                         Write-TodoCard -Todos $currTodos
                     }
