@@ -623,6 +623,43 @@ try {
         }
         $parRes = Invoke-AgentTool -Root $workspacePath -Call $parCall | ConvertFrom-Json
         Assert-True ($parRes.status -eq 'completed' -and $parRes.mode -eq 'parallel' -and $parRes.tasks_count -eq 2 -and $parRes.output.Contains('Task 1 (recon)') -and $parRes.output.Contains('Task 2 (audit)')) 'Parallel run_agent execution failed.'
+
+        # Regression (Item 8d): parallel and pipeline propagate non-completed statuses (step_limit_reached, loop_detected, error).
+        function Invoke-WebRequest {
+            param($Uri, $Method, $Headers, $ContentType, $Body, $TimeoutSec, $ErrorAction, [switch]$UseBasicParsing, $OutFile)
+            $r = @{ choices = @(@{ finish_reason = 'tool_calls'; message = @{
+                content = ''
+                tool_calls = @(@{ id = 'sl-1'; type = 'function'; function = @{ name = 'list_files'; arguments = '{"path":"."}' } })
+            } }) } | ConvertTo-Json -Depth 10 -Compress
+            Set-Content -LiteralPath $OutFile -Value $r -Encoding UTF8 -NoNewline
+        }
+        $parLimitRes = Invoke-AgentTool -Root $workspacePath -Call @{
+            id = 'sub-par-lim'
+            function = @{ name = 'run_agent'; arguments = '{"max_steps":1,"parallel":[{"role":"recon","prompt":"Hit step limit"}]}' }
+        } | ConvertFrom-Json
+        Assert-True ($parLimitRes.status -eq 'step_limit_reached') "Expected parallel status=step_limit_reached when child task hit step limit, got $($parLimitRes.status)."
+
+        $pipeLoopRes = Invoke-AgentTool -Root $workspacePath -Call @{
+            id = 'sub-pipe-loop'
+            function = @{ name = 'run_agent'; arguments = '{"max_steps":10,"pipeline":[{"role":"recon","prompt":"Hit loop"}]}' }
+        } | ConvertFrom-Json
+        Assert-True ($pipeLoopRes.status -eq 'loop_detected') "Expected pipeline status=loop_detected when child step hit loop, got $($pipeLoopRes.status)."
+
+        function Invoke-WebRequest {
+            param($Uri, $Method, $Headers, $ContentType, $Body, $TimeoutSec, $ErrorAction, [switch]$UseBasicParsing, $OutFile)
+            throw 'Child subagent failure'
+        }
+        $parErrRes = Invoke-AgentTool -Root $workspacePath -Call @{
+            id = 'sub-par-err'
+            function = @{ name = 'run_agent'; arguments = '{"parallel":[{"role":"recon","prompt":"Fail task"}]}' }
+        } | ConvertFrom-Json
+        Assert-True ($parErrRes.status -eq 'error') "Expected parallel status=error when child task threw error, got $($parErrRes.status)."
+
+        $pipeErrRes = Invoke-AgentTool -Root $workspacePath -Call @{
+            id = 'sub-pipe-err'
+            function = @{ name = 'run_agent'; arguments = '{"pipeline":[{"role":"recon","prompt":"Fail step 1"},{"role":"recon","prompt":"Should not run"}]}' }
+        } | ConvertFrom-Json
+        Assert-True ($pipeErrRes.status -eq 'error' -and $pipeErrRes.steps_count -eq 1) "Expected pipeline status=error and early stop when step 1 failed, got status=$($pipeErrRes.status) steps=$($pipeErrRes.steps_count)."
     }
     finally {
         Remove-Item Function:\Invoke-WebRequest -ErrorAction SilentlyContinue

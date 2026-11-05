@@ -379,5 +379,14 @@ function Build-SystemPrompt {
     if ($skillsText) { $basePrompt += "`n`n" + $skillsText }
     $rolesText = Get-AgentRolesCatalog -Root $Root -ConfigDir $ConfigDir
     if ($rolesText) { $basePrompt += "`n`n" + $rolesText }
+    if ($env:SHELLOSSUS_SUB_ROLE) {
+        $subRolePrompt = if ($env:SHELLOSSUS_SUB_ROLE_PROMPT) {
+            [string]$env:SHELLOSSUS_SUB_ROLE_PROMPT
+        }
+        else {
+            try { [string](Resolve-AgentRole -Name $env:SHELLOSSUS_SUB_ROLE -Root $Root -ConfigDir $ConfigDir).system_prompt } catch { '' }
+        }
+        $basePrompt += "`n`n[Subagent Role: $($env:SHELLOSSUS_SUB_ROLE)]`n" + $subRolePrompt
+    }
     return $basePrompt
 }

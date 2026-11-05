@@ -78,6 +78,7 @@ function Get-ContextStats {
         $msgCount = $State.messages.Count
         foreach ($m in @($State.messages)) {
             if ($m.content) { $chars += ([string]$m.content).Length }
+            if ($m.reasoning_content) { $chars += ([string]$m.reasoning_content).Length }
             if ($m.tool_calls) { $chars += (($m.tool_calls | ConvertTo-Json -Depth 10 -Compress)).Length }
         }
     }
@@ -170,6 +171,12 @@ function Get-CompactionFileOperations {
     param([array]$Messages)
     $readSet = @{}
     $modSet = @{}
+    $toolResultsById = @{}
+    foreach ($m in $Messages) {
+        if ($m -and $m.role -eq 'tool' -and $m.tool_call_id -and $m.content -is [string]) {
+            $toolResultsById[[string]$m.tool_call_id] = [string]$m.content
+        }
+    }
     foreach ($m in $Messages) {
         if ($m.role -eq 'user' -and $m.content -is [string] -and $m.content.StartsWith('[Compacted Conversation Summary]')) {
             $cText = [string]$m.content
@@ -186,15 +193,41 @@ function Get-CompactionFileOperations {
         }
         if ($m.tool_calls) {
             foreach ($tc in @($m.tool_calls)) {
-                $fnName = if ($tc.function -and $tc.function.name) { [string]$tc.function.name } else { '' }
+                $tcId = if ($tc -and $tc.id) { [string]$tc.id } else { '' }
+                if (-not $tcId -or -not $toolResultsById.ContainsKey($tcId)) { continue }
+                $rawToolOut = $toolResultsById[$tcId]
+                if (-not $rawToolOut) { continue }
+                $parsedToolRes = $null
+                try {
+                    $parsedToolRes = $rawToolOut | ConvertFrom-Json -ErrorAction Stop
+                }
+                catch {
+                    continue
+                }
+                if ($null -eq $parsedToolRes -or $parsedToolRes.error) { continue }
+                $rawFnName = if ($tc.function -and $tc.function.name) { [string]$tc.function.name } else { '' }
+                $fnName = if (Get-Command -Name 'Resolve-ToolCanonicalName' -ErrorAction SilentlyContinue) {
+                    Resolve-ToolCanonicalName -Name $rawFnName
+                }
+                else {
+                    $rawFnName
+                }
                 $fnArgsRaw = if ($tc.function -and $tc.function.arguments) { [string]$tc.function.arguments } else { '' }
                 if (-not $fnArgsRaw) { continue }
                 try {
                     $parsedArgs = $fnArgsRaw | ConvertFrom-Json -ErrorAction Stop
                     $p = if ($parsedArgs.path) { [string]$parsedArgs.path } else { '' }
                     if ($p) {
-                        if ($fnName -eq 'read_file' -or $fnName -eq 'read') { $readSet[$p] = $true }
-                        elseif ($fnName -in @('write_file', 'edit_file', 'write', 'edit')) { $modSet[$p] = $true }
+                        if ($fnName -in @('read_file', 'read')) {
+                            if ($parsedToolRes.status -notin @('cancelled', 'instructions_required', 'repeated_call_warning', 'loop_detected', 'error')) {
+                                $readSet[$p] = $true
+                            }
+                        }
+                        elseif ($fnName -in @('write_file', 'edit_file', 'write', 'edit')) {
+                            if ($parsedToolRes.status -eq 'written') {
+                                $modSet[$p] = $true
+                            }
+                        }
                     }
                 }
                 catch {}
@@ -203,14 +236,16 @@ function Get-CompactionFileOperations {
         if ($m.role -eq 'tool' -and $m.content -is [string] -and ($m.content.Contains('"read_files"') -or $m.content.Contains('"modified_files"'))) {
             try {
                 $parsedToolOut = $m.content | ConvertFrom-Json -ErrorAction Stop
-                if ($parsedToolOut.read_files) {
-                    foreach ($srf in @($parsedToolOut.read_files)) {
-                        if ($srf -and ([string]$srf).Trim()) { $readSet[([string]$srf).Trim()] = $true }
+                if (-not $parsedToolOut.error) {
+                    if ($parsedToolOut.read_files) {
+                        foreach ($srf in @($parsedToolOut.read_files)) {
+                            if ($srf -and ([string]$srf).Trim()) { $readSet[([string]$srf).Trim()] = $true }
+                        }
                     }
-                }
-                if ($parsedToolOut.modified_files) {
-                    foreach ($smf in @($parsedToolOut.modified_files)) {
-                        if ($smf -and ([string]$smf).Trim()) { $modSet[([string]$smf).Trim()] = $true }
+                    if ($parsedToolOut.modified_files) {
+                        foreach ($smf in @($parsedToolOut.modified_files)) {
+                            if ($smf -and ([string]$smf).Trim()) { $modSet[([string]$smf).Trim()] = $true }
+                        }
                     }
                 }
             }
@@ -306,6 +341,10 @@ function Invoke-AgentCompact {
     }
     finally {
         Remove-Item -LiteralPath $tempFile.FullName -Force -ErrorAction SilentlyContinue
+    }
+    if ($reply -and $reply.usage) {
+        if ($reply.usage.prompt_tokens) { $State.usage_input_tokens = [int]$State.usage_input_tokens + [int]$reply.usage.prompt_tokens }
+        if ($reply.usage.completion_tokens) { $State.usage_output_tokens = [int]$State.usage_output_tokens + [int]$reply.usage.completion_tokens }
     }
     $choice = $reply.choices[0]
     if (-not $choice -or -not $choice.message) { throw 'Compaction returned no assistant message.' }

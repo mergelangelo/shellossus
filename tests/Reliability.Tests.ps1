@@ -140,35 +140,91 @@ try {
     }
     finally { Remove-Item Function:\Invoke-WebRequest -ErrorAction SilentlyContinue }
 
-    # Actual worker processes receive the same role/parent intersection. The
-    # worker only reports startup capabilities; no external API is contacted.
+    # Actual worker processes receive the same role/parent intersection, CLI flags
+    # (-NoSkills, -NoPromptTemplates, -NoContextFiles, -ReasoningEffort), role in system prompt
+    # rather than user -Prompt, and aggregate token usage into parent $State.
     $workerScript = Join-Path $envData.TestRoot 'policy-worker.ps1'
     $libraryPath = (Join-Path (Split-Path $PSScriptRoot -Parent) 'shellossus.ps1').Replace("'", "''")
     $workerText = @'
-param($Workspace, $BaseUrl, $Model, $Permission, $Mode, [switch]$NoSession, $MaxSteps, $Tools, [switch]$NoTools, $ExcludeTools, $Prompt, $ConfigPath)
+param(
+    $Workspace,
+    $BaseUrl,
+    $Model,
+    $Permission,
+    $Mode,
+    [switch]$NoSession,
+    $MaxSteps,
+    $Tools,
+    [switch]$NoTools,
+    $ExcludeTools,
+    $Prompt,
+    $ConfigPath,
+    [switch]$NoSkills,
+    [switch]$NoPromptTemplates,
+    [switch]$NoContextFiles,
+    $ReasoningEffort
+)
 $allowed = $Tools
 $disabled = [bool]$NoTools
 $denied = $ExcludeTools
+$passedNoSkills = [bool]$NoSkills
+$passedNoTemplates = [bool]$NoPromptTemplates
+$passedNoContext = [bool]$NoContextFiles
+$passedReasoning = [string]$ReasoningEffort
+$passedPrompt = [string]$Prompt
 . '__LIBRARY__' -LibraryOnly
 $script:EnabledTools = @($allowed -split ',' | Where-Object { $_ })
 $script:ExcludedTools = @($denied -split ',' | Where-Object { $_ })
 $script:NoTools = $disabled
+$script:NoSkills = $passedNoSkills
+$script:NoPromptTemplates = $passedNoTemplates
+$script:NoContextFiles = $passedNoContext
+$script:ReasoningEffort = $passedReasoning
 $script:AgentPermission = 'ReadOnly'
+$sysPrompt = Build-SystemPrompt -Root $Workspace -ConfigDir ''
 $names = @(Get-AgentTools | ForEach-Object { $_.function.name })
-@{ type = 'message_end'; role = 'assistant'; content = (@{ tools = $names; no_tools = $disabled } | ConvertTo-Json -Compress) } | ConvertTo-Json -Compress
-@{ type = 'turn_end'; status = 'completed' } | ConvertTo-Json -Compress
+$payload = @{
+    tools = $names
+    no_tools = $disabled
+    no_skills = $passedNoSkills
+    no_templates = $passedNoTemplates
+    no_context = $passedNoContext
+    reasoning_effort = $passedReasoning
+    user_prompt = $passedPrompt
+    sys_has_role = $sysPrompt.Contains("[Subagent Role: $($env:SHELLOSSUS_SUB_ROLE)]")
+}
+@{ type = 'message_end'; role = 'assistant'; content = ($payload | ConvertTo-Json -Compress) } | ConvertTo-Json -Compress
+@{ type = 'turn_end'; status = 'completed'; usage_input_tokens = 125; usage_output_tokens = 35 } | ConvertTo-Json -Compress
 '@
     Set-Content -LiteralPath $workerScript -Value $workerText.Replace('__LIBRARY__', $libraryPath) -Encoding Ascii
     $script:EnabledTools = @('r*', 'grep*')
     $script:ExcludedTools = @('grep_files')
-    $workerResults = @(Invoke-ParallelSubagentProcesses -Root $workspacePath -Tasks @(@{ role = 'reader'; prompt = 'inspect' }, @{ role = 'writer-only'; prompt = 'inspect' }) -ScriptPath $workerScript)
-    Assert-True ($workerResults.Count -eq 2) 'Parallel worker filter test did not return two results.'
-    $reader = $workerResults[0].output | ConvertFrom-Json
-    $writer = $workerResults[1].output | ConvertFrom-Json
-    Assert-True (($reader.tools -join ',') -eq 'read_file') 'Worker did not inherit aliases, wildcard filters, or exclusions.'
-    Assert-True ($writer.no_tools -and $writer.tools.Count -eq 0) 'Empty worker allowlist enabled tools.'
-    $script:EnabledTools = @()
-    $script:ExcludedTools = @()
+    $script:NoSkills = $true
+    $script:NoPromptTemplates = $true
+    $script:NoContextFiles = $true
+    $script:ReasoningEffort = 'high'
+    $parentStateForParallel = @{ usage_input_tokens = 10; usage_output_tokens = 5 }
+    $script:ActiveState = $parentStateForParallel
+    try {
+        $workerResults = @(Invoke-ParallelSubagentProcesses -Root $workspacePath -Tasks @(@{ role = 'reader'; prompt = 'inspect' }, @{ role = 'writer-only'; prompt = 'inspect' }) -ScriptPath $workerScript)
+        Assert-True ($workerResults.Count -eq 2) 'Parallel worker filter test did not return two results.'
+        $reader = $workerResults[0].output | ConvertFrom-Json
+        $writer = $workerResults[1].output | ConvertFrom-Json
+        Assert-True (($reader.tools -join ',') -eq 'read_file') 'Worker did not inherit aliases, wildcard filters, or exclusions.'
+        Assert-True ($writer.no_tools -and $writer.tools.Count -eq 0) 'Empty worker allowlist enabled tools.'
+        Assert-True ($reader.no_skills -and $reader.no_templates -and $reader.no_context -and $reader.reasoning_effort -eq 'high') 'Worker did not receive -NoSkills, -NoPromptTemplates, -NoContextFiles, or -ReasoningEffort.'
+        Assert-True ($reader.user_prompt -eq 'inspect' -and $reader.sys_has_role) ("Parallel worker mixed [Subagent Role] into user -Prompt instead of system prompt: " + ($reader | ConvertTo-Json -Compress))
+        Assert-True ($parentStateForParallel.usage_input_tokens -eq 260 -and $parentStateForParallel.usage_output_tokens -eq 75) "Parallel worker token usage was not aggregated into parent state (got in=$($parentStateForParallel.usage_input_tokens), out=$($parentStateForParallel.usage_output_tokens))."
+    }
+    finally {
+        $script:EnabledTools = @()
+        $script:ExcludedTools = @()
+        $script:NoSkills = $false
+        $script:NoPromptTemplates = $false
+        $script:NoContextFiles = $false
+        $script:ReasoningEffort = ''
+        $script:ActiveState = $null
+    }
 
     # A timed-out command must stop child and grandchild processes as well.
     # Keep an unrelated process alive to detect overly broad termination.

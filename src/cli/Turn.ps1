@@ -165,6 +165,7 @@ function Invoke-AgentTurn {
             $curChars = 0
             foreach ($m in @($State.messages)) {
                 if ($m.content) { $curChars += ([string]$m.content).Length }
+                if ($m.reasoning_content) { $curChars += ([string]$m.reasoning_content).Length }
                 if ($m.tool_calls) { $curChars += (($m.tool_calls | ConvertTo-Json -Depth 10 -Compress)).Length }
             }
             $State.last_prompt_chars = $curChars
@@ -177,12 +178,40 @@ function Invoke-AgentTurn {
         }
         if ($message.content -and $script:OutputMode -ne 'json') { Write-AgentReply -Content $message.content }
         if (-not $message.tool_calls) {
-            Write-AgentJsonEvent -EventType 'turn_end' -Payload @{ step = $step; status = 'completed' }
+            Write-AgentJsonEvent -EventType 'turn_end' -Payload @{
+                step = $step
+                status = 'completed'
+                usage_input_tokens = [int]$State.usage_input_tokens
+                usage_output_tokens = [int]$State.usage_output_tokens
+            }
             return
         }
         $loopAborted = $false
         # Only instructions visible before this model response count as received.
         $scopedMessages = @($State.messages)
+        $scopedTreeToolContents = @()
+        if ($State.tree_entries -and $State.leaf_id) {
+            $byId = @{}
+            foreach ($te in @($State.tree_entries)) {
+                if ($te -and $te.id) { $byId[[string]$te.id] = $te }
+            }
+            $curr = if ($byId.ContainsKey([string]$State.leaf_id)) { $byId[[string]$State.leaf_id] } else { $null }
+            $guard = 0
+            while ($null -ne $curr -and $guard -lt 5000) {
+                $guard++
+                if ($curr.role -eq 'tool' -and $curr.content) {
+                    $scopedTreeToolContents += [string]$curr.content
+                }
+                if ($curr.parent_id -and $byId.ContainsKey([string]$curr.parent_id)) {
+                    $curr = $byId[[string]$curr.parent_id]
+                }
+                else {
+                    $curr = $null
+                }
+            }
+        }
+        $priorFileOps = Get-CompactionFileOperations -Messages $scopedMessages
+        $priorScopedPaths = @($priorFileOps.read_files) + @($priorFileOps.modified_files)
         foreach ($call in $message.tool_calls) {
             $canonToolName = Resolve-ToolCanonicalName -Name ([string]$call.function.name)
             $sig = Get-ToolCallSignature -Call $call -Epoch $mutationEpoch
@@ -232,6 +261,24 @@ function Invoke-AgentTurn {
                             foreach ($prior in $scopedMessages) {
                                 if ($prior.role -eq 'tool' -and [string]$prior.content -ceq $notice) { $seen = $true; break }
                             }
+                            if (-not $seen) {
+                                foreach ($priorToolText in $scopedTreeToolContents) {
+                                    if ([string]$priorToolText -ceq $notice) { $seen = $true; break }
+                                }
+                            }
+                            if (-not $seen) {
+                                foreach ($priorPath in $priorScopedPaths) {
+                                    if (-not $priorPath) { continue }
+                                    try {
+                                        $priorInstr = Get-ScopedAgentInstructions -Root $Root -TargetPath ([string]$priorPath) -AllowRegisteredSkill
+                                        if ($priorInstr -and ($priorInstr -ceq $instructions -or $priorInstr.Contains($instructions))) {
+                                            $seen = $true
+                                            break
+                                        }
+                                    }
+                                    catch {}
+                                }
+                            }
                             if (-not $seen) { $output = $notice }
                         }
                     }
@@ -277,7 +324,13 @@ function Invoke-AgentTurn {
             if ($script:OutputMode -ne 'json') {
                 Write-Host ($script:Gm.Yellow + "Loop detected: repeated identical calls to '$($State.repeated_tool)'. Turn stopped (completed edits are preserved; use /undo to revert)." + $script:Gm.Reset)
             }
-            Write-AgentJsonEvent -EventType 'turn_end' -Payload @{ step = $step; status = 'loop_detected'; tool = $State.repeated_tool }
+            Write-AgentJsonEvent -EventType 'turn_end' -Payload @{
+                step = $step
+                status = 'loop_detected'
+                tool = $State.repeated_tool
+                usage_input_tokens = [int]$State.usage_input_tokens
+                usage_output_tokens = [int]$State.usage_output_tokens
+            }
             return
         }
     }
@@ -285,7 +338,12 @@ function Invoke-AgentTurn {
     if ($script:OutputMode -ne 'json') {
         Write-Host ($script:Gm.Yellow + 'Step limit reached. Use /continue to keep going, or /clear to start over.' + $script:Gm.Reset)
     }
-    Write-AgentJsonEvent -EventType 'turn_end' -Payload @{ step = $Steps; status = 'step_limit_reached' }
+    Write-AgentJsonEvent -EventType 'turn_end' -Payload @{
+        step = $Steps
+        status = 'step_limit_reached'
+        usage_input_tokens = [int]$State.usage_input_tokens
+        usage_output_tokens = [int]$State.usage_output_tokens
+    }
 }
 
 function Invoke-AgentContinue {

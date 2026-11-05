@@ -333,6 +333,58 @@ try {
     Assert-True (@($switchState.todos).Count -eq 1 -and @($script:ActiveSessionTodos).Count -eq 1 -and $switchState.session_name -eq 'Named Session A') 'Session A todos or name failed to load.'
     Invoke-SessionResume -SessionFile $sessNoTodosFile -State $switchState -CurrentWorkspace $workspacePath | Out-Null
     Assert-True (@($switchState.todos).Count -eq 0 -and @($script:ActiveSessionTodos).Count -eq 0 -and $switchState.session_name -eq '') 'Resuming session without todos leaked todos or session_name from previous session.'
+
+    # Regression (Item 7):
+    # - Get-CompactionFileOperations ignores cancelled, failed, unchanged, or instructions_required tool calls.
+    # - Invoke-AgentCompact adds $reply.usage to $State.usage_input_tokens / $State.usage_output_tokens.
+    # - Get-ContextStats accounts for $m.reasoning_content length in chars and est_tokens.
+    $filteredOps = Get-CompactionFileOperations -Messages @(
+        @{ role = 'assistant'; content = $null; tool_calls = @(
+            @{ id = 'r-ok'; type = 'function'; function = @{ name = 'read_file'; arguments = '{"path":"ok-read.txt"}' } },
+            @{ id = 'r-err'; type = 'function'; function = @{ name = 'read_file'; arguments = '{"path":"err-read.txt"}' } },
+            @{ id = 'r-blk'; type = 'function'; function = @{ name = 'read_file'; arguments = '{"path":"blocked-read.txt"}' } },
+            @{ id = 'w-ok'; type = 'function'; function = @{ name = 'write_file'; arguments = '{"path":"ok-write.txt","content":"a"}' } },
+            @{ id = 'w-can'; type = 'function'; function = @{ name = 'write_file'; arguments = '{"path":"cancelled-write.txt","content":"b"}' } },
+            @{ id = 'e-unc'; type = 'function'; function = @{ name = 'edit_file'; arguments = '{"path":"unchanged-edit.txt","old_text":"x","new_text":"x"}' } },
+            @{ id = 'e-blk'; type = 'function'; function = @{ name = 'edit_file'; arguments = '{"path":"blocked-edit.txt","old_text":"x","new_text":"y"}' } }
+        ) },
+        @{ role = 'tool'; tool_call_id = 'r-ok'; content = '{"text":"hello","start_line":1,"end_line":1}' },
+        @{ role = 'tool'; tool_call_id = 'r-err'; content = '{"error":"File not found"}' },
+        @{ role = 'tool'; tool_call_id = 'r-blk'; content = '{"status":"instructions_required","instructions":"rule"}' },
+        @{ role = 'tool'; tool_call_id = 'w-ok'; content = '{"status":"written","path":"ok-write.txt"}' },
+        @{ role = 'tool'; tool_call_id = 'w-can'; content = '{"status":"cancelled","message":"User declined."}' },
+        @{ role = 'tool'; tool_call_id = 'e-unc'; content = '{"status":"unchanged"}' },
+        @{ role = 'tool'; tool_call_id = 'e-blk'; content = '{"status":"instructions_required","instructions":"rule"}' }
+    )
+    Assert-True (@($filteredOps.read_files).Count -eq 1 -and $filteredOps.read_files[0] -eq 'ok-read.txt') 'Get-CompactionFileOperations included failed or blocked read_file calls.'
+    Assert-True (@($filteredOps.modified_files).Count -eq 1 -and $filteredOps.modified_files[0] -eq 'ok-write.txt') 'Get-CompactionFileOperations included cancelled, unchanged, or blocked write/edit calls.'
+
+    $reasoningMsg = @{ role = 'assistant'; content = 'abcd'; reasoning_content = ('r' * 400) }
+    $msgEst = Get-MessageEstimatedTokens -Message $reasoningMsg
+    $statsWithReasoning = Get-ContextStats -State @{ messages = @($reasoningMsg) }
+    Assert-True ($statsWithReasoning.chars -eq 404 -and $statsWithReasoning.est_tokens -eq $msgEst) 'Get-ContextStats did not include reasoning_content in chars and est_tokens.'
+
+    function Invoke-WebRequest {
+        param($Uri, $Method, $Headers, $ContentType, $Body, $TimeoutSec, $ErrorAction, [switch]$UseBasicParsing, $OutFile)
+        $resp = @{
+            choices = @(@{ finish_reason = 'stop'; message = @{ content = "## Goal`nCompacted with usage" } })
+            usage = @{ prompt_tokens = 320; completion_tokens = 85 }
+        } | ConvertTo-Json -Depth 10 -Compress
+        Set-Content -LiteralPath $OutFile -Value $resp -Encoding UTF8 -NoNewline
+    }
+    $usageCompactState = @{
+        usage_input_tokens = 100
+        usage_output_tokens = 15
+        messages = @(
+            @{ role = 'system'; content = 'sys' },
+            @{ role = 'user'; content = 'u1' },
+            @{ role = 'assistant'; content = 'a1' },
+            @{ role = 'user'; content = 'u2' },
+            @{ role = 'assistant'; content = 'a2' }
+        )
+    }
+    $didUsageCompact = Invoke-AgentCompact -State $usageCompactState -Endpoint 'https://example.invalid/v1/chat/completions' -ModelId 'test-model' -ApiKey 'fake' -KeepRecent 2
+    Assert-True ($didUsageCompact -and $usageCompactState.usage_input_tokens -eq 420 -and $usageCompactState.usage_output_tokens -eq 100) 'Invoke-AgentCompact did not add $reply.usage to $State.usage_input_tokens / $State.usage_output_tokens.'
 }
 finally {
     Remove-TestEnvironment -Env $envData
