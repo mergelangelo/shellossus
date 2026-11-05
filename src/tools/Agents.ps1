@@ -168,6 +168,7 @@ function Resolve-SubagentAggregateStatus {
     if (-not $Results -or $Results.Count -eq 0) { return 'completed' }
     $statuses = @($Results | ForEach-Object { [string]$_.status })
     if ($statuses -contains 'error') { return 'error' }
+    if ($statuses -contains 'timed_out') { return 'timed_out' }
     if ($statuses -contains 'loop_detected') { return 'loop_detected' }
     if ($statuses -contains 'step_limit_reached') { return 'step_limit_reached' }
     foreach ($st in $statuses) {
@@ -177,7 +178,7 @@ function Resolve-SubagentAggregateStatus {
 }
 
 function Invoke-ParallelSubagentProcesses {
-    param([string]$Root, [array]$Tasks, [int]$MaxSteps = 15, [string]$ScriptPath)
+    param([string]$Root, [array]$Tasks, [int]$MaxSteps = 15, [string]$ScriptPath, [int]$TimeoutSec = 180)
     $configDir = if ($script:AgentConfigPath) { Split-Path $script:AgentConfigPath -Parent } else { '' }
     $shellExe = (Get-AgentEnvironment -Root $Root).shell_exe
     $effEndpoint = if ($script:ActiveEndpoint) { $script:ActiveEndpoint } else { 'https://example.invalid/v1/chat/completions' }
@@ -289,15 +290,18 @@ if ($env:SHELLOSSUS_SUB_REASONING_EFFORT) { $workerArgs.ReasoningEffort = $env:S
                     prompt_file = $promptTemp.FullName
                     out_file = $outTemp.FullName
                     err_file = $errTemp.FullName
+                    timed_out = $false
                 }
             }
             $startWait = Get-Date
             while ($true) {
                 $running = @($workers | Where-Object { -not $_.proc.HasExited })
                 if ($running.Count -eq 0) { break }
-                if (((Get-Date) - $startWait).TotalSeconds -ge 180) {
+                if (((Get-Date) - $startWait).TotalSeconds -ge $TimeoutSec) {
                     foreach ($rw in $running) {
-                        Stop-Process -InputObject $rw.proc -Force -ErrorAction SilentlyContinue
+                        $rw.timed_out = $true
+                        $null = Stop-AgentProcessTree -Process $rw.proc
+                        Wait-Process -InputObject $rw.proc -Timeout 2 -ErrorAction SilentlyContinue
                     }
                     break
                 }
@@ -390,7 +394,13 @@ if ($env:SHELLOSSUS_SUB_REASONING_EFFORT) { $workerArgs.ReasoningEffort = $env:S
                         $replyText = if ($replyText) { $replyText + "`nSubagent error: " + $errRaw.Trim() } else { 'Subagent error: ' + $errRaw.Trim() }
                     }
                 }
-                if (-not $sawTurnEnd -and $wStatus -eq 'completed' -and $w.proc -and $w.proc.HasExited -and $w.proc.ExitCode -ne 0) {
+                if (-not $sawTurnEnd -and $w.timed_out) {
+                    $wStatus = 'timed_out'
+                    if (-not $replyText) {
+                        $replyText = "Subagent timed out after ${TimeoutSec}s."
+                    }
+                }
+                elseif (-not $sawTurnEnd -and $wStatus -eq 'completed' -and $w.proc -and $w.proc.HasExited -and $w.proc.ExitCode -ne 0) {
                     $wStatus = 'error'
                 }
                 $wUsageIn = if ($turnUsageIn -ge 0) { $turnUsageIn } else { $msgUsageIn }
@@ -416,7 +426,8 @@ if ($env:SHELLOSSUS_SUB_REASONING_EFFORT) { $workerArgs.ReasoningEffort = $env:S
         finally {
             foreach ($w in $workers) {
                 if ($w.proc -and (-not $w.proc.HasExited)) {
-                    Stop-Process -InputObject $w.proc -Force -ErrorAction SilentlyContinue
+                    $null = Stop-AgentProcessTree -Process $w.proc
+                    Wait-Process -InputObject $w.proc -Timeout 2 -ErrorAction SilentlyContinue
                 }
                 Remove-Item -LiteralPath $w.prompt_file -Force -ErrorAction SilentlyContinue
                 Remove-Item -LiteralPath $w.out_file -Force -ErrorAction SilentlyContinue

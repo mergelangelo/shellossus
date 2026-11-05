@@ -683,6 +683,14 @@ try {
             function = @{ name = 'run_agent'; arguments = '{"pipeline":[{"role":"recon","prompt":"Fail step 1"},{"role":"recon","prompt":"Should not run"}]}' }
         } | ConvertFrom-Json
         Assert-True ($pipeErrRes.status -eq 'error' -and $pipeErrRes.steps_count -eq 1) "Expected pipeline status=error and early stop when step 1 failed, got status=$($pipeErrRes.status) steps=$($pipeErrRes.steps_count)."
+
+        $slowWorkerScript = Join-Path $testRoot 'slow-subagent.ps1'
+        Set-Content -LiteralPath $slowWorkerScript -Value 'param([Parameter(ValueFromRemainingArguments = $true)]$Remaining) Start-Sleep -Seconds 30' -Encoding Ascii
+        $timedOutResults = @(Invoke-ParallelSubagentProcesses -Root $workspacePath -Tasks @(@{ role = 'recon'; prompt = 'Slow task' }) -ScriptPath $slowWorkerScript -TimeoutSec 1)
+        Assert-True ($timedOutResults.Count -eq 1 -and $timedOutResults[0].status -eq 'timed_out' -and $timedOutResults[0].output -eq 'Subagent timed out after 1s.') "Expected timed_out status and timeout message from Invoke-ParallelSubagentProcesses, got status=$($timedOutResults[0].status) output=$($timedOutResults[0].output)."
+        Assert-True ((Resolve-SubagentAggregateStatus -Results $timedOutResults) -eq 'timed_out') 'Resolve-SubagentAggregateStatus did not return timed_out.'
+        Assert-True ((Resolve-SubagentAggregateStatus -Results @(@{ status = 'completed' }, @{ status = 'step_limit_reached' }, @{ status = 'timed_out' })) -eq 'timed_out') 'Resolve-SubagentAggregateStatus did not prioritize timed_out above step_limit_reached.'
+        Assert-True ((Resolve-SubagentAggregateStatus -Results @(@{ status = 'timed_out' }, @{ status = 'error' })) -eq 'error') 'Resolve-SubagentAggregateStatus did not prioritize error above timed_out.'
     }
     finally {
         Remove-Item Function:\Invoke-WebRequest -ErrorAction SilentlyContinue
