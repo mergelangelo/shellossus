@@ -91,6 +91,9 @@ function Invoke-AgentHttpRequest {
             TimeoutSec = $TimeoutSec
             ErrorAction = 'Stop'
         }
+        if ($iwrCmd -and $iwrCmd.CommandType -ne 'Function') {
+            $request['MaximumRedirection'] = 0
+        }
         Invoke-WebRequest @request -UseBasicParsing -OutFile $OutFile
         return
     }
@@ -104,7 +107,7 @@ function Invoke-AgentHttpRequest {
         $workerCmd = @'
 $ErrorActionPreference = 'Stop'
 try {
-    Invoke-WebRequest -Uri $env:SHELLOSSUS_HTTP_URI -Method 'Post' -Headers @{ Authorization = ('Bearer ' + $env:SHELLOSSUS_HTTP_KEY) } -ContentType 'application/json; charset=utf-8' -InFile $env:SHELLOSSUS_HTTP_IN -OutFile $env:SHELLOSSUS_HTTP_OUT -TimeoutSec ([int]$env:SHELLOSSUS_HTTP_TIMEOUT) -UseBasicParsing -ErrorAction Stop
+    Invoke-WebRequest -Uri $env:SHELLOSSUS_HTTP_URI -Method 'Post' -Headers @{ Authorization = ('Bearer ' + $env:SHELLOSSUS_HTTP_KEY) } -ContentType 'application/json; charset=utf-8' -InFile $env:SHELLOSSUS_HTTP_IN -OutFile $env:SHELLOSSUS_HTTP_OUT -MaximumRedirection 0 -TimeoutSec ([int]$env:SHELLOSSUS_HTTP_TIMEOUT) -UseBasicParsing -ErrorAction Stop
 }
 catch {
     $msg = $_.Exception.Message

@@ -102,6 +102,12 @@ try {
     Assert-True ((Read-TuiMultilineInput) -eq "alpha`nbeta") 'Standalone closing fence with trailing spaces should not append empty line.'
     $script:mlQueue = @('<<<inline fenced>>>   ')
     Assert-True ((Read-TuiMultilineInput) -eq 'inline fenced') 'Inline closing fence with trailing spaces failed.'
+    $script:mlQueue = @('```', 'line one', 'line two', '```')
+    Assert-True ((Read-TuiMultilineInput) -eq "line one`nline two") 'Triple-backtick fenced Read-TuiMultilineInput failed.'
+    $script:mlQueue = @('```powershell', 'Get-ChildItem', '```')
+    Assert-True ((Read-TuiMultilineInput) -eq 'Get-ChildItem') 'Triple-backtick fenced Read-TuiMultilineInput with language tag failed.'
+    $script:mlQueue = @('```inline backtick```')
+    Assert-True ((Read-TuiMultilineInput) -eq 'inline backtick') 'Inline triple-backtick fenced Read-TuiMultilineInput failed.'
     $script:mlQueue = @($null)
     Assert-True ($null -eq (Read-TuiMultilineInput)) 'Read-TuiMultilineInput should return $null on EOF.'
 
@@ -419,6 +425,21 @@ try {
     # Regression: Format-TuiHelpCard fits 80-column card box without line wrapping (33 body lines + 2 borders = 35 lines).
     $helpLinesCheck = @(Format-TuiHelpCard)
     Assert-True ($helpLinesCheck.Count -eq 35) "Expected Format-TuiHelpCard to have 35 lines without wrapping, got $($helpLinesCheck.Count)."
+
+    # Regression (Task 7): Format-MarkdownTable clamps wide tables to fit within terminal width.
+    $wideColA = 'A' * 65
+    $wideColB = 'B' * 65
+    $clampedTable = @(Format-MarkdownTable -Lines @(
+        '| ColA | ColB |',
+        '| --- | --- |',
+        "| $wideColA | $wideColB |"
+    ) -Indent '')
+    $maxAllowedTableW = (Get-TerminalWidth) - 4
+    foreach ($ctLn in $clampedTable) {
+        $ctPlain = Strip-AnsiCodes -Text $ctLn
+        Assert-True ($ctPlain.Length -le $maxAllowedTableW) "Format-MarkdownTable row length ($($ctPlain.Length)) exceeded max table width ($maxAllowedTableW): $ctPlain"
+    }
+    Assert-True ((Strip-AnsiCodes -Text $clampedTable[2]).Contains('...')) 'Format-MarkdownTable did not truncate wide cells with ellipsis.'
 }
 finally {
     Remove-Item Function:\Read-Host -ErrorAction SilentlyContinue

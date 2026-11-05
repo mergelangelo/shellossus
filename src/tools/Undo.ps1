@@ -146,6 +146,9 @@ function Invoke-AgentUndo {
     $State.last_prompt_tokens = 0
     $State.last_prompt_chars = 0
     if ($State -is [hashtable] -and ($State.ContainsKey('tree_entries') -or $State.ContainsKey('leaf_id'))) {
+        if ($UndoEntry -is [hashtable] -and $UndoEntry.ContainsKey('tree_entries') -and $null -ne $UndoEntry.tree_entries) {
+            $State.tree_entries = @($UndoEntry.tree_entries)
+        }
         if ($UndoEntry -is [hashtable] -and $UndoEntry.ContainsKey('leaf_id') -and $UndoEntry.leaf_id) {
             $State.leaf_id = [string]$UndoEntry.leaf_id
         }

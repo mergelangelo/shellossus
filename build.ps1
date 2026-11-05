@@ -30,6 +30,9 @@ function Assert-AsciiFile {
     $rawText = Get-Content -LiteralPath $Path -Raw -Encoding UTF8 -ErrorAction Stop
     if ($null -eq $rawText) { $rawText = '' }
     Assert-AsciiContent -Path $Path -Content ([string]$rawText)
+    if ($Check -and ([string]$rawText).Contains("`r")) {
+        throw "CRLF line endings found in $Path. All .ps1 files must use LF line endings."
+    }
 }
 
 $modules = @(
@@ -162,9 +165,11 @@ if ($Check) {
     }
     $existingRaw = Get-Content -LiteralPath $targetPath -Raw -Encoding UTF8 -ErrorAction Stop
     if ($null -eq $existingRaw) { $existingRaw = '' }
-    $existing = ([string]$existingRaw).Replace("`r`n", "`n")
-    Assert-AsciiContent -Path $targetPath -Content $existing
-    if ($existing -cne $assembled) {
+    Assert-AsciiContent -Path $targetPath -Content ([string]$existingRaw)
+    if (([string]$existingRaw).Contains("`r")) {
+        throw "CRLF line endings found in $targetPath. Run .\build.ps1 to regenerate with LF."
+    }
+    if ([string]$existingRaw -cne $assembled) {
         throw 'shellossus.ps1 is out of sync with src/*.ps1. Run .\build.ps1 to regenerate.'
     }
     Write-Host 'build.ps1 -Check passed: shellossus.ps1 matches src/*.ps1 (strict 7-bit ASCII verified).'
