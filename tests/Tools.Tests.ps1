@@ -6,6 +6,107 @@ $testRoot = $envData.TestRoot
 $workspacePath = $envData.Workspace
 
 try {
+    # Workspace boundaries must not treat case variants or Unix backslashes as descendants.
+    Assert-True (Test-AgentPathWithinRoot -RootPath '/tmp/workspace' -TargetPath '/tmp/workspace/file.txt') 'Workspace child was rejected.'
+    Assert-True (-not (Test-AgentPathWithinRoot -RootPath '/tmp/workspace' -TargetPath '/tmp/WORKSPACE/file.txt')) 'Case-variant sibling was accepted.'
+    Assert-True (-not (Test-AgentPathWithinRoot -RootPath '/tmp/workspace' -TargetPath '/tmp/workspace-other/file.txt')) 'Prefix sibling was accepted.'
+    if ($env:OS -ne 'Windows_NT') {
+        Assert-True (-not (Test-AgentPathWithinRoot -RootPath '/tmp/workspace' -TargetPath '/tmp/workspace\outside.txt')) 'Unix backslash sibling was accepted.'
+        Assert-True (Test-AgentPathWithinRoot -RootPath '/tmp/workspace\' -TargetPath '/tmp/workspace\/file.txt') 'Unix directory with a trailing backslash was rejected.'
+        Assert-True (-not (Test-AgentPathWithinRoot -RootPath '/tmp/workspace\' -TargetPath '/tmp/workspace/file.txt')) 'Unix trailing backslash was removed from the workspace name.'
+    }
+    $caseSibling = Join-Path $testRoot 'WORKSPACE'
+    if (-not (Test-Path -LiteralPath $caseSibling)) {
+        New-Item -ItemType Directory -Path $caseSibling -ErrorAction Stop | Out-Null
+        $caseOutside = Join-Path $caseSibling 'outside.txt'
+        Set-Content -LiteralPath $caseOutside -Value 'outside' -Encoding UTF8 -NoNewline
+        $caseRejected = $false
+        try { $null = Resolve-AgentPath -Root $workspacePath -RelativePath $caseOutside }
+        catch { $caseRejected = $_.Exception.Message -like '*outside the workspace*' }
+        Assert-True $caseRejected 'Case-variant sibling passed workspace validation.'
+    }
+
+    # A symlink must be rejected before an overwrite preview can read its target.
+    $linkTarget = Join-Path $testRoot 'link-target.txt'
+    $linkPath = Join-Path $workspacePath 'file-link.txt'
+    Set-Content -LiteralPath $linkTarget -Value 'outside-private' -Encoding UTF8 -NoNewline
+    $fileLinkAvailable = $false
+    try {
+        New-Item -ItemType SymbolicLink -Path $linkPath -Target $linkTarget -ErrorAction Stop | Out-Null
+        $fileLinkAvailable = $true
+    }
+    catch { Write-Warning 'Symbolic link creation unavailable; file-link security check skipped.' }
+    if ($fileLinkAvailable) {
+        $savedOutputMode = $script:OutputMode
+        $script:OutputMode = 'json'
+        $linkRejected = $false
+        try {
+            $null = Invoke-AgentWrite -Root $workspacePath -Name 'write_file' -Arguments @{ path = 'file-link.txt'; content = 'new'; overwrite = $true }
+        }
+        catch { $linkRejected = $_.Exception.Message -like '*Reparse points*' }
+        finally { $script:OutputMode = $savedOutputMode }
+        Assert-True $linkRejected 'Overwrite did not reject the symlink before preview and confirmation.'
+        Assert-True ((Get-Content -LiteralPath $linkTarget -Raw -Encoding UTF8) -ceq 'outside-private') 'Overwrite changed the symlink target.'
+        Remove-Item -LiteralPath $linkPath -Force
+    }
+
+    # Undo must reject substituted parent links before restoring any file in the turn.
+    $undoDir = Join-Path $workspacePath 'undo-parent'
+    $savedUndoDir = Join-Path $workspacePath 'undo-parent-saved'
+    $outsideDir = Join-Path $testRoot 'undo-outside'
+    New-Item -ItemType Directory -Path $undoDir, $outsideDir -Force | Out-Null
+    Set-Content -LiteralPath (Join-Path $undoDir 'target.txt') -Value 'before' -Encoding UTF8 -NoNewline
+    Set-Content -LiteralPath (Join-Path $outsideDir 'target.txt') -Value 'after' -Encoding UTF8 -NoNewline
+    $savedPermission = $script:AgentPermission
+    $savedOutputMode = $script:OutputMode
+    $script:AgentPermission = 'AutoEdit'
+    $script:OutputMode = 'json'
+    $script:CurrentTurnWrites = @()
+    $null = Invoke-AgentWrite -Root $workspacePath -Name 'write_file' -Arguments @{ path = 'undo-safe.txt'; content = 'safe' }
+    $null = Invoke-AgentWrite -Root $workspacePath -Name 'edit_file' -Arguments @{ path = 'undo-parent/target.txt'; old_text = 'before'; new_text = 'after' }
+    $undoSecurityEntry = @{ messages = @(); writes = @($script:CurrentTurnWrites) }
+    Move-Item -LiteralPath $undoDir -Destination $savedUndoDir -ErrorAction Stop
+    $dirLinkAvailable = $false
+    try {
+        New-Item -ItemType SymbolicLink -Path $undoDir -Target $outsideDir -ErrorAction Stop | Out-Null
+        $dirLinkAvailable = $true
+    }
+    catch { Write-Warning 'Symbolic link creation unavailable; undo-link security check skipped.' }
+    if ($dirLinkAvailable) {
+        $undoRejected = $false
+        try { Invoke-AgentUndo -State @{ messages = @() } -UndoEntry $undoSecurityEntry }
+        catch { $undoRejected = $_.Exception.Message -like '*Unsafe undo path*' }
+        Assert-True $undoRejected 'Undo accepted a substituted parent symlink.'
+        Assert-True ((Get-Content -LiteralPath (Join-Path $outsideDir 'target.txt') -Raw -Encoding UTF8) -ceq 'after') 'Undo modified an external file.'
+        Assert-True (Test-Path -LiteralPath (Join-Path $workspacePath 'undo-safe.txt')) 'Undo preflight modified a different file.'
+        Assert-True (Test-Path -LiteralPath $undoSecurityEntry.writes[1].backup) 'Undo discarded the backup after rejecting a symlink.'
+        Remove-Item -LiteralPath $undoDir -Force
+    }
+    Move-Item -LiteralPath $savedUndoDir -Destination $undoDir -ErrorAction Stop
+    Invoke-AgentUndo -State @{ messages = @() } -UndoEntry $undoSecurityEntry
+    Assert-True ((Get-Content -LiteralPath (Join-Path $undoDir 'target.txt') -Raw -Encoding UTF8) -ceq 'before') 'Undo retry failed after removing the symlink.'
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $workspacePath 'undo-safe.txt'))) 'Undo retry did not remove the created file.'
+    if ($fileLinkAvailable) {
+        $script:CurrentTurnWrites = @()
+        $null = Invoke-AgentWrite -Root $workspacePath -Name 'edit_file' -Arguments @{ path = 'undo-parent/target.txt'; old_text = 'before'; new_text = 'after' }
+        $leafUndoEntry = @{ messages = @(); writes = @($script:CurrentTurnWrites) }
+        $undoLeaf = Join-Path $undoDir 'target.txt'
+        Remove-Item -LiteralPath $undoLeaf -Force
+        New-Item -ItemType SymbolicLink -Path $undoLeaf -Target (Join-Path $outsideDir 'target.txt') -ErrorAction Stop | Out-Null
+        $leafRejected = $false
+        try { Invoke-AgentUndo -State @{ messages = @() } -UndoEntry $leafUndoEntry }
+        catch { $leafRejected = $_.Exception.Message -like '*Unsafe undo path*' }
+        Assert-True $leafRejected 'Undo accepted a substituted target symlink.'
+        Assert-True ((Get-Content -LiteralPath (Join-Path $outsideDir 'target.txt') -Raw -Encoding UTF8) -ceq 'after') 'Undo modified the external symlink target.'
+        Remove-Item -LiteralPath $undoLeaf -Force
+        Set-Content -LiteralPath $undoLeaf -Value 'after' -Encoding UTF8 -NoNewline
+        Invoke-AgentUndo -State @{ messages = @() } -UndoEntry $leafUndoEntry
+        Assert-True ((Get-Content -LiteralPath $undoLeaf -Raw -Encoding UTF8) -ceq 'before') 'Undo retry failed after removing the target symlink.'
+    }
+    $script:AgentPermission = $savedPermission
+    $script:OutputMode = $savedOutputMode
+    $script:CurrentTurnWrites = @()
+
     Set-Content -LiteralPath (Join-Path $workspacePath 'hello.txt') -Value 'hello' -Encoding UTF8
     Set-Content -LiteralPath (Join-Path $testRoot 'outside.txt') -Value 'private' -Encoding UTF8
     Set-Content -LiteralPath (Join-Path $workspacePath '.env') -Value 'SECRET=hidden' -Encoding UTF8

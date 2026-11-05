@@ -121,6 +121,15 @@ function Test-IsSecretFile {
     return ($Item.Name -eq '.env' -or ($Item.Name -like '.env.*' -and $Item.Name -ne '.env.example') -or $Item.FullName -eq $script:AgentConfigPath -or ($script:LegacyAgentConfigPath -and $Item.FullName -eq $script:LegacyAgentConfigPath))
 }
 
+function Test-AgentPathWithinRoot {
+    param([string]$RootPath, [string]$TargetPath)
+    $prefix = if ($env:OS -eq 'Windows_NT') { $RootPath.TrimEnd('\').TrimEnd('/') } else { $RootPath.TrimEnd('/') }
+    if ($TargetPath -ceq $RootPath) { return $true }
+    if ($TargetPath.StartsWith($prefix + '/', [StringComparison]::Ordinal)) { return $true }
+    if ($env:OS -eq 'Windows_NT' -and $TargetPath.StartsWith($prefix + '\', [StringComparison]::Ordinal)) { return $true }
+    return $false
+}
+
 function Get-WorkspaceRelativePath {
     param([string]$Root, [string]$FullPath)
     $rootNorm = (Get-Item -LiteralPath $Root -Force).FullName.TrimEnd('\').TrimEnd('/')
@@ -171,10 +180,7 @@ function Resolve-AgentPath {
     if (Test-IsSecretFile $item) {
         throw 'Agent tools cannot access credential configuration files.'
     }
-    $prefix = $rootItem.FullName.TrimEnd('\').TrimEnd('/')
-    if (($item.FullName -ne $rootItem.FullName) -and
-        (-not $item.FullName.StartsWith($prefix + '\', [StringComparison]::OrdinalIgnoreCase)) -and
-        (-not $item.FullName.StartsWith($prefix + '/', [StringComparison]::OrdinalIgnoreCase))) {
+    if (-not (Test-AgentPathWithinRoot -RootPath $rootItem.FullName -TargetPath $item.FullName)) {
         throw 'Path is outside the workspace.'
     }
     # Reject junctions/symlinks, including those in workspace ancestors.

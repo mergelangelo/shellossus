@@ -1,5 +1,16 @@
 # Disk undo and multi-step turn rollback.
 
+function Assert-AgentUndoPath {
+    param($Write)
+    if (-not $Write.root -or -not $Write.full_path) { throw 'Undo entry has no workspace path.' }
+    $parent = Split-Path -Path $Write.full_path -Parent
+    $null = Resolve-AgentPath -Root $Write.root -RelativePath $parent
+    $target = Get-Item -LiteralPath $Write.full_path -Force -ErrorAction SilentlyContinue
+    if ($null -ne $target) {
+        $null = Resolve-AgentPath -Root $Write.root -RelativePath $Write.full_path
+    }
+}
+
 function Invoke-AgentUndo {
     param($State, $UndoEntry)
     if (-not $UndoEntry) { return }
@@ -9,6 +20,13 @@ function Invoke-AgentUndo {
     for ($i = $writes.Count - 1; $i -ge 0; $i--) {
         $w = $writes[$i]
         if (-not $w -or $w.undone) { continue }
+        try {
+            Assert-AgentUndoPath -Write $w
+        }
+        catch {
+            $preflightErrors += "Unsafe undo path for $($w.rel_path): $($_.Exception.Message)"
+            continue
+        }
         $fullKey = [string]$w.full_path
         $isLatestForPath = (-not $expectedByPath.ContainsKey($fullKey))
         if ($w.action -eq 'modified') {
@@ -89,6 +107,7 @@ function Invoke-AgentUndo {
         $w = $writes[$i]
         if (-not $w -or $w.undone) { continue }
         try {
+            Assert-AgentUndoPath -Write $w
             if ($w.action -eq 'modified') {
                 $expectedOrig = [string]$w.before_content
                 $backupNow = Get-Content -LiteralPath $w.backup -Raw -Encoding UTF8 -ErrorAction Stop

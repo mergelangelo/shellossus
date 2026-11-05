@@ -370,6 +370,7 @@ function Invoke-AgentWrite {
         $allowOverwrite = ($Arguments.overwrite -eq $true)
         if (Test-Path -LiteralPath $path) {
             if (-not $allowOverwrite) { throw 'File already exists. Use edit_file or set overwrite=true.' }
+            $path = Resolve-AgentPath -Root $Root -RelativePath $Arguments.path
             $existingItem = Get-Item -LiteralPath $path -Force
             if ($existingItem.PSIsContainer -or $existingItem.Length -gt 1MB) { throw 'Expected a text file up to 1 MiB.' }
             $before = Get-Content -LiteralPath $path -Raw -Encoding UTF8 -ErrorAction Stop
@@ -499,6 +500,7 @@ function Invoke-AgentWrite {
             }
             $script:CurrentTurnWrites += @{
                 action = 'modified'
+                root = $Root
                 full_path = $path
                 rel_path = $Arguments.path
                 backup = $backupPath
@@ -513,6 +515,7 @@ function Invoke-AgentWrite {
             if (Test-Path -LiteralPath $path) { throw 'File was created during confirmation. No write performed.' }
             $script:CurrentTurnWrites += @{
                 action = 'created'
+                root = $Root
                 full_path = $path
                 rel_path = $Arguments.path
                 after_content = $after
