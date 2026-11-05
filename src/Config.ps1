@@ -245,6 +245,35 @@ function Test-PathHasReparsePoint {
     return $false
 }
 
+function New-AgentTempFile {
+    $baseTmp = if ($env:TEMP) { $env:TEMP } elseif ($env:TMPDIR) { $env:TMPDIR } elseif ($env:TMP) { $env:TMP } else { '/tmp' }
+    if (-not (Test-Path -LiteralPath $baseTmp)) {
+        New-Item -ItemType Directory -Path $baseTmp -Force -ErrorAction Stop | Out-Null
+    }
+    for ($attempt = 0; $attempt -lt 20; $attempt++) {
+        $r1 = Get-Random -Minimum 100000 -Maximum 999999
+        $r2 = Get-Random -Minimum 100000 -Maximum 999999
+        $cand = Join-Path $baseTmp ("shellossus-$PID-$r1-$r2.tmp")
+        if (-not (Test-Path -LiteralPath $cand)) {
+            return (New-Item -ItemType File -Path $cand -ErrorAction Stop)
+        }
+    }
+    throw 'Failed to allocate a unique temporary file.'
+}
+
+function Set-AgentUtf8Content {
+    param(
+        [Parameter(Mandatory = $true)][string]$LiteralPath,
+        [AllowEmptyString()][string]$Value = ''
+    )
+    if ($null -eq $Value -or $Value.Length -eq 0) {
+        $null = New-Item -ItemType File -Path $LiteralPath -Force -ErrorAction Stop
+    }
+    else {
+        Set-Content -LiteralPath $LiteralPath -Value $Value -Encoding UTF8 -NoNewline -ErrorAction Stop
+    }
+}
+
 function Resolve-AgentPath {
     param([string]$Root, [string]$RelativePath, [switch]$AllowRegisteredSkill)
     if (-not $RelativePath) { $RelativePath = '.' }

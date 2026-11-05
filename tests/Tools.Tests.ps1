@@ -1182,7 +1182,7 @@ try {
         $script:leakedKeysDuringWeb = ([bool]$env:SHELLOSSUS_API_KEY -or [bool]$env:H_AGENT_API_KEY -or [bool]$env:OPENAI_API_KEY)
         Set-Content -LiteralPath $OutFile -Value 'ok' -Encoding UTF8 -NoNewline
     }
-    $dlTmp = New-TemporaryFile
+    $dlTmp = New-AgentTempFile
     try {
         $env:SHELLOSSUS_API_KEY = 'sec-s'
         $env:H_AGENT_API_KEY = 'sec-h'

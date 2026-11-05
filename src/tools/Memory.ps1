@@ -145,9 +145,9 @@ function Invoke-AgentMemory {
             if (Test-PathHasReparsePoint -Path $targetPath -StopAt $stopRoot) {
                 throw 'Reparse points are not allowed.'
             }
-            $stageFile = New-TemporaryFile -ErrorAction Stop
+            $stageFile = New-AgentTempFile
             try {
-                Set-Content -LiteralPath $stageFile.FullName -Value $updatedText -Encoding UTF8 -NoNewline -ErrorAction Stop
+                Set-AgentUtf8Content -LiteralPath $stageFile.FullName -Value $updatedText
                 $stagedCheck = Get-Content -LiteralPath $stageFile.FullName -Raw -Encoding UTF8 -ErrorAction Stop
                 if ($null -eq $stagedCheck) { $stagedCheck = '' }
                 if ($stagedCheck -cne $updatedText) { throw 'Staged memory verification failed. No write performed.' }

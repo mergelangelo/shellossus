@@ -216,10 +216,10 @@ function Invoke-AgentWrite {
             return (@{ status = 'cancelled'; message = 'User declined. Do not retry without a new user request.' } | ConvertTo-Json -Compress)
         }
     }
-    $stageFile = New-TemporaryFile -ErrorAction Stop
+    $stageFile = New-AgentTempFile
     $backupPath = $null
     try {
-        Set-Content -LiteralPath $stageFile.FullName -Value $after -Encoding UTF8 -NoNewline -ErrorAction Stop
+        Set-AgentUtf8Content -LiteralPath $stageFile.FullName -Value $after
         $stagedCheck = Get-Content -LiteralPath $stageFile.FullName -Raw -Encoding UTF8 -ErrorAction Stop
         if ($null -eq $stagedCheck) { $stagedCheck = '' }
         if ($stagedCheck -cne $after) { throw 'Staged file verification failed. No write performed.' }
@@ -228,7 +228,7 @@ function Invoke-AgentWrite {
             $current = Get-Content -LiteralPath $path -Raw -Encoding UTF8 -ErrorAction Stop
             if ($null -eq $current) { $current = '' }
             if ($current -cne $before) { throw 'File changed during confirmation. No write performed.' }
-            $backup = New-TemporaryFile -ErrorAction Stop
+            $backup = New-AgentTempFile
             Copy-Item -LiteralPath $path -Destination $backup.FullName -Force -ErrorAction Stop
             $backupCheck = Get-Content -LiteralPath $backup.FullName -Raw -Encoding UTF8 -ErrorAction Stop
             if ($null -eq $backupCheck) { $backupCheck = '' }

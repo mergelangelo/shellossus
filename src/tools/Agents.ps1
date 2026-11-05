@@ -243,11 +243,11 @@ if ($env:SHELLOSSUS_SUB_REASONING_EFFORT) { $workerArgs.ReasoningEffort = $env:S
                 $roleObj = Resolve-AgentRole -Name $rName -Root $Root -ConfigDir $configDir
                 $childTools = @(Get-SubagentToolNames -Role $roleObj -ForceReadOnly)
                 $effModel = if ($roleObj.model) { [string]$roleObj.model } elseif ($script:ActiveModelId) { $script:ActiveModelId } else { 'test-model' }
-                $promptTemp = New-TemporaryFile -ErrorAction Stop
-                $outTemp = New-TemporaryFile -ErrorAction Stop
-                $errTemp = New-TemporaryFile -ErrorAction Stop
+                $promptTemp = New-AgentTempFile
+                $outTemp = New-AgentTempFile
+                $errTemp = New-AgentTempFile
                 $fullPrompt = [string]$t.prompt
-                Set-Content -LiteralPath $promptTemp.FullName -Value $fullPrompt -Encoding UTF8 -NoNewline -ErrorAction Stop
+                Set-AgentUtf8Content -LiteralPath $promptTemp.FullName -Value $fullPrompt
                 if ($script:OutputMode -ne 'json') {
                     Write-Host ($script:Gm.Aqua + ("  [run_agent:{0}] (parallel ReadOnly) " -f $roleObj.name) + $script:Gm.Grey1 + (Invoke-TruncateLine -Line ([string]$t.prompt) -MaxChars 90).text + $script:Gm.Reset)
                 }

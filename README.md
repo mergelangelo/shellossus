@@ -53,7 +53,7 @@ shellossus -Doctor -Mode json             # One JSON report; exit 1 for failed c
 
 Doctor checks the PowerShell version and language mode, effective endpoint/model/key settings, workspace access, and session-directory create/write/rename/read/delete access. It creates the session directory if needed, removes its temporary probe, and skips storage checks with `-NoSession`. It sends one authenticated `GET <BaseUrl>/models` with a 10-second request timeout (DNS resolution can take longer); it does not follow redirects or generate a completion. Missing `/models` support, an unlisted model, or rate limiting produces a warning, not proof that chat is broken. A successful catalog lookup does not verify chat or tool-call support. Reports hide the API key and omit server response bodies; they still contain local paths, the validated API base URL, and the configured model ID.
 
-Settings use the same precedence as normal startup: launch arguments for endpoint/model/workspace, then `SHELLOSSUS_*` environment variables, legacy `H_AGENT_*`, then the saved configuration. The API key comes from `SHELLOSSUS_API_KEY`, legacy `H_AGENT_API_KEY`, or the configuration file. Use an **HTTPS API base URL**, normally ending in `/v1`; local HTTP-only servers need an HTTPS gateway to work with the current CLI.
+Settings use the same precedence as normal startup: launch arguments for endpoint/model/workspace, then `SHELLOSSUS_*` environment variables, legacy `H_AGENT_*`, then the saved configuration. The API key comes from `SHELLOSSUS_API_KEY`, legacy `H_AGENT_API_KEY`, or the configuration file. Remote endpoints require an **HTTPS API base URL** (normally ending in `/v1`), while local loopback servers (`http://localhost`, `http://127.0.0.1`, `http://[::1]`) are also supported over `http://`.
 
 ### 2. Run in Any Project
 
@@ -90,7 +90,7 @@ shellossus -Mascot                          # Display the 8x8 mascot without sta
 | `/name [name]` | Set or display the session name |
 | `/tree [entry-id]` | Show the conversation tree or switch active branch to `<entry-id>` |
 | `/fork [entry-id]` (`/clone`) | Fork the active branch (or from `<entry-id>`) into a new session file |
-| `/export [path.html\|.jsonl]` | Export the session to a standalone Gruvbox Material HTML page or JSONL |
+| `/export [path.html\|.jsonl]` | Export the session to a standalone themed HTML page or JSONL |
 | `/import <path.jsonl>` | Import and resume a JSONL session file |
 | `/copy` | Copy the last assistant message to the clipboard |
 | `/memory [clear\|add ..]` (`/mem`) | View, clear, or record persistent cross-session memories in `MEMORY.md` |
@@ -114,7 +114,7 @@ shellossus -Mascot                          # Display the 8x8 mascot without sta
 
 `list_files`, `read_file`, `find_files`, `grep_files`, `write_file`, `edit_file`, and `@file` attachments enforce workspace paths and reject reparse-point traversal. `read_file` can also read explicitly registered global `SKILL.md` files. **Shell commands are not sandboxed**: `run_command`, `!cmd`, and `!!cmd` start in the workspace but retain your OS permissions and can access other paths, programs, and the network. User-entered `!` / `!!` shortcuts run directly, without the model tool's permission prompt, including in `ReadOnly` mode.
 
-`memory` has workspace and global scopes. Global notes live beside the active configuration file; memory writes are blocked in `ReadOnly` but currently do not ask for `WRITE` in other modes. Sessions, exports, temporary files, and global customization files also have paths outside the workspace. See the [full boundary and permission reference](docs/security.md).
+`memory` has workspace and global scopes. Global notes live beside the active configuration file; memory writes check target and ancestor paths for reparse points, are blocked in `ReadOnly`, and require confirmation in `Ask` mode (while remaining outside `/undo` backup tracking). Sessions, exports, temporary files, and global customization files also have paths outside the workspace. See the [full boundary and permission reference](docs/security.md).
 
 `/undo` covers recorded `write_file` / `edit_file` changes in the active process, including in-process subagent edits. It checks backups and manual-edit conflicts before restoring files. It does **not** undo shell effects, `memory`, task-board state, settings, exports, network effects, or changes from other processes. Undo history is not restored by loading a saved session. A restore-time I/O failure can leave a partially restored turn; this is not a filesystem-wide transaction or a replacement for version control.
 

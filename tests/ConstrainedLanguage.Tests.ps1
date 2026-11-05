@@ -287,6 +287,25 @@ try {
     $clScoped = Get-ScopedAgentInstructions -Root $workspacePath -TargetPath 'cl-scoped/file.txt'
     Assert-True ($clScoped.Contains('Constrained scoped rule.')) 'ConstrainedLanguage scoped AGENTS.md lookup failed.'
     Assert-True ((ConvertFrom-HtmlToText -Html '<p>Hi &amp; bye</p>').Contains('Hi & bye')) 'ConstrainedLanguage ConvertFrom-HtmlToText failed.'
+
+    $clTmp = New-AgentTempFile
+    try {
+        Assert-True ($null -ne $clTmp -and (Test-Path -LiteralPath $clTmp.FullName)) 'ConstrainedLanguage New-AgentTempFile failed.'
+        Set-AgentUtf8Content -LiteralPath $clTmp.FullName -Value ''
+        $clEmptyRead = Get-Content -LiteralPath $clTmp.FullName -Raw -Encoding UTF8
+        if ($null -eq $clEmptyRead) { $clEmptyRead = '' }
+        Assert-True ($clEmptyRead -ceq '') 'ConstrainedLanguage Set-AgentUtf8Content with empty string failed.'
+        Set-AgentUtf8Content -LiteralPath $clTmp.FullName -Value 'cl-utf8-ok'
+        Assert-True ((Get-Content -LiteralPath $clTmp.FullName -Raw -Encoding UTF8) -ceq 'cl-utf8-ok') 'ConstrainedLanguage Set-AgentUtf8Content with non-empty string failed.'
+    }
+    finally {
+        if ($clTmp -and (Test-Path -LiteralPath $clTmp.FullName)) {
+            Remove-Item -LiteralPath $clTmp.FullName -Force -ErrorAction SilentlyContinue
+        }
+    }
+    $bundledText = Get-Content -LiteralPath "$PSScriptRoot\..\shellossus.ps1" -Raw -Encoding UTF8
+    $forbiddenTempCmd = 'New-' + 'TemporaryFile'
+    Assert-True (-not $bundledText.Contains($forbiddenTempCmd)) 'shellossus.ps1 must use New-AgentTempFile instead of the legacy utility temp-file cmdlet.'
 }
 finally {
     Remove-TestEnvironment -Env $envData

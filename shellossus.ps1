@@ -288,6 +288,35 @@ function Test-PathHasReparsePoint {
     return $false
 }
 
+function New-AgentTempFile {
+    $baseTmp = if ($env:TEMP) { $env:TEMP } elseif ($env:TMPDIR) { $env:TMPDIR } elseif ($env:TMP) { $env:TMP } else { '/tmp' }
+    if (-not (Test-Path -LiteralPath $baseTmp)) {
+        New-Item -ItemType Directory -Path $baseTmp -Force -ErrorAction Stop | Out-Null
+    }
+    for ($attempt = 0; $attempt -lt 20; $attempt++) {
+        $r1 = Get-Random -Minimum 100000 -Maximum 999999
+        $r2 = Get-Random -Minimum 100000 -Maximum 999999
+        $cand = Join-Path $baseTmp ("shellossus-$PID-$r1-$r2.tmp")
+        if (-not (Test-Path -LiteralPath $cand)) {
+            return (New-Item -ItemType File -Path $cand -ErrorAction Stop)
+        }
+    }
+    throw 'Failed to allocate a unique temporary file.'
+}
+
+function Set-AgentUtf8Content {
+    param(
+        [Parameter(Mandatory = $true)][string]$LiteralPath,
+        [AllowEmptyString()][string]$Value = ''
+    )
+    if ($null -eq $Value -or $Value.Length -eq 0) {
+        $null = New-Item -ItemType File -Path $LiteralPath -Force -ErrorAction Stop
+    }
+    else {
+        Set-Content -LiteralPath $LiteralPath -Value $Value -Encoding UTF8 -NoNewline -ErrorAction Stop
+    }
+}
+
 function Resolve-AgentPath {
     param([string]$Root, [string]$RelativePath, [switch]$AllowRegisteredSkill)
     if (-not $RelativePath) { $RelativePath = '.' }
@@ -3871,10 +3900,10 @@ function Invoke-AgentWrite {
             return (@{ status = 'cancelled'; message = 'User declined. Do not retry without a new user request.' } | ConvertTo-Json -Compress)
         }
     }
-    $stageFile = New-TemporaryFile -ErrorAction Stop
+    $stageFile = New-AgentTempFile
     $backupPath = $null
     try {
-        Set-Content -LiteralPath $stageFile.FullName -Value $after -Encoding UTF8 -NoNewline -ErrorAction Stop
+        Set-AgentUtf8Content -LiteralPath $stageFile.FullName -Value $after
         $stagedCheck = Get-Content -LiteralPath $stageFile.FullName -Raw -Encoding UTF8 -ErrorAction Stop
         if ($null -eq $stagedCheck) { $stagedCheck = '' }
         if ($stagedCheck -cne $after) { throw 'Staged file verification failed. No write performed.' }
@@ -3883,7 +3912,7 @@ function Invoke-AgentWrite {
             $current = Get-Content -LiteralPath $path -Raw -Encoding UTF8 -ErrorAction Stop
             if ($null -eq $current) { $current = '' }
             if ($current -cne $before) { throw 'File changed during confirmation. No write performed.' }
-            $backup = New-TemporaryFile -ErrorAction Stop
+            $backup = New-AgentTempFile
             Copy-Item -LiteralPath $path -Destination $backup.FullName -Force -ErrorAction Stop
             $backupCheck = Get-Content -LiteralPath $backup.FullName -Raw -Encoding UTF8 -ErrorAction Stop
             if ($null -eq $backupCheck) { $backupCheck = '' }
@@ -4367,8 +4396,8 @@ function Invoke-ShellCommand {
     $rootFull = (Get-Item -LiteralPath $Root -Force -ErrorAction Stop).FullName
     $envInfo = Get-AgentEnvironment -Root $rootFull
     $shellExe = $envInfo.shell_exe
-    $outTemp = New-TemporaryFile -ErrorAction Stop
-    $errTemp = New-TemporaryFile -ErrorAction Stop
+    $outTemp = New-AgentTempFile
+    $errTemp = New-AgentTempFile
     $savedSKey = $env:SHELLOSSUS_API_KEY
     $savedHKey = $env:H_AGENT_API_KEY
     $savedOKey = $env:OPENAI_API_KEY
@@ -5065,8 +5094,8 @@ function Invoke-AgentWebDownload {
         }
     }
     else {
-        $stdout = New-TemporaryFile -ErrorAction Stop
-        $stderr = New-TemporaryFile -ErrorAction Stop
+        $stdout = New-AgentTempFile
+        $stderr = New-AgentTempFile
         $proc = $null
         $oldUri = $env:SHELLOSSUS_WEB_DOWNLOAD_URI
         $oldFile = $env:SHELLOSSUS_WEB_DOWNLOAD_FILE
@@ -5163,7 +5192,7 @@ function Invoke-AgentFetchUrl {
     $conf = Request-AgentWebConfirmation -ToolName 'fetch_url' -Target $url
     if (-not $conf.approved) { return $conf.response }
     $rawMode = ($Arguments.raw -eq $true)
-    $tempOut = New-TemporaryFile -ErrorAction Stop
+    $tempOut = New-AgentTempFile
     try {
         Invoke-AgentWebDownload -Uri $url -OutFile $tempOut.FullName
         $rawText = Get-Content -LiteralPath $tempOut.FullName -Raw -Encoding UTF8 -ErrorAction Stop
@@ -5212,7 +5241,7 @@ function Invoke-AgentWebSearch {
     $null = Test-SafeWebUrl -Url $searchUri
     $conf = Request-AgentWebConfirmation -ToolName 'web_search' -Target $query
     if (-not $conf.approved) { return $conf.response }
-    $tempOut = New-TemporaryFile -ErrorAction Stop
+    $tempOut = New-AgentTempFile
     try {
         Invoke-AgentWebDownload -Uri $searchUri -OutFile $tempOut.FullName
         $html = Get-Content -LiteralPath $tempOut.FullName -Raw -Encoding UTF8 -ErrorAction Stop
@@ -5592,9 +5621,9 @@ function Invoke-AgentMemory {
             if (Test-PathHasReparsePoint -Path $targetPath -StopAt $stopRoot) {
                 throw 'Reparse points are not allowed.'
             }
-            $stageFile = New-TemporaryFile -ErrorAction Stop
+            $stageFile = New-AgentTempFile
             try {
-                Set-Content -LiteralPath $stageFile.FullName -Value $updatedText -Encoding UTF8 -NoNewline -ErrorAction Stop
+                Set-AgentUtf8Content -LiteralPath $stageFile.FullName -Value $updatedText
                 $stagedCheck = Get-Content -LiteralPath $stageFile.FullName -Raw -Encoding UTF8 -ErrorAction Stop
                 if ($null -eq $stagedCheck) { $stagedCheck = '' }
                 if ($stagedCheck -cne $updatedText) { throw 'Staged memory verification failed. No write performed.' }
@@ -5889,11 +5918,11 @@ if ($env:SHELLOSSUS_SUB_REASONING_EFFORT) { $workerArgs.ReasoningEffort = $env:S
                 $roleObj = Resolve-AgentRole -Name $rName -Root $Root -ConfigDir $configDir
                 $childTools = @(Get-SubagentToolNames -Role $roleObj -ForceReadOnly)
                 $effModel = if ($roleObj.model) { [string]$roleObj.model } elseif ($script:ActiveModelId) { $script:ActiveModelId } else { 'test-model' }
-                $promptTemp = New-TemporaryFile -ErrorAction Stop
-                $outTemp = New-TemporaryFile -ErrorAction Stop
-                $errTemp = New-TemporaryFile -ErrorAction Stop
+                $promptTemp = New-AgentTempFile
+                $outTemp = New-AgentTempFile
+                $errTemp = New-AgentTempFile
                 $fullPrompt = [string]$t.prompt
-                Set-Content -LiteralPath $promptTemp.FullName -Value $fullPrompt -Encoding UTF8 -NoNewline -ErrorAction Stop
+                Set-AgentUtf8Content -LiteralPath $promptTemp.FullName -Value $fullPrompt
                 if ($script:OutputMode -ne 'json') {
                     Write-Host ($script:Gm.Aqua + ("  [run_agent:{0}] (parallel ReadOnly) " -f $roleObj.name) + $script:Gm.Grey1 + (Invoke-TruncateLine -Line ([string]$t.prompt) -MaxChars 90).text + $script:Gm.Reset)
                 }
@@ -8088,7 +8117,7 @@ function Invoke-AgentCompact {
         )
         stream = $false
     } | ConvertTo-Json -Depth 20 -Compress
-    $tempFile = New-TemporaryFile -ErrorAction Stop
+    $tempFile = New-AgentTempFile
     try {
         Invoke-AgentHttpRequest -Uri $Endpoint -ApiKey $ApiKey -Body $summaryReq -OutFile $tempFile.FullName -TimeoutSec 180 -StatusLabel "Compacting context ($ModelId)"
         $reply = Get-Content -LiteralPath $tempFile.FullName -Raw -Encoding UTF8 -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
@@ -8180,7 +8209,7 @@ function Invoke-DoctorModelsRequest {
     param([string]$Uri, [string]$ApiKey)
     $responseFile = $null
     try {
-        $responseFile = New-TemporaryFile -ErrorAction Stop
+        $responseFile = New-AgentTempFile
         # Do not follow redirects with the user's credentials. Use the same UTF-8
         # file-backed response handling as the chat transport on PowerShell 5.1.
         # Avoid -PassThru: older PowerShell versions leave -OutFile empty with it.
@@ -8734,10 +8763,10 @@ function Invoke-AgentHttpRequest {
         return
     }
     $shellExe = (Get-AgentEnvironment).shell_exe
-    $reqTemp = New-TemporaryFile -ErrorAction Stop
-    $errTemp = New-TemporaryFile -ErrorAction Stop
-    $stdoutTemp = New-TemporaryFile -ErrorAction Stop
-    $stderrTemp = New-TemporaryFile -ErrorAction Stop
+    $reqTemp = New-AgentTempFile
+    $errTemp = New-AgentTempFile
+    $stdoutTemp = New-AgentTempFile
+    $stderrTemp = New-AgentTempFile
     try {
         Set-Content -LiteralPath $reqTemp.FullName -Value $asciiBody -Encoding Ascii -NoNewline -ErrorAction Stop
         $workerCmd = @'
@@ -8904,7 +8933,7 @@ function Invoke-AgentTurn {
         if ($script:ReasoningEffort) { $bodyObj.reasoning_effort = $script:ReasoningEffort }
         $body = $bodyObj | ConvertTo-Json -Depth 40 -Compress
         $statusLabel = "[step {0}/{1}] Waiting for {2}" -f ($step + 1), $Steps, $ModelId
-        $tempResponse = New-TemporaryFile -ErrorAction Stop
+        $tempResponse = New-AgentTempFile
         $reply = $null
         try {
             $maxRetries = 2

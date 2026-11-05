@@ -22,7 +22,7 @@ try {
         @{ before = 'a'; incoming = "a`nc"; expected = "a`nc" }
     )) {
         $path = Join-Path $workspacePath 'endings.txt'
-        Set-Content -LiteralPath $path -Value $case.before -Encoding UTF8 -NoNewline
+        Set-AgentUtf8Content -LiteralPath $path -Value $case.before
         $script:CurrentTurnWrites = @()
         $argsJson = @{ path = 'endings.txt'; content = $case.incoming; overwrite = $true } | ConvertTo-Json -Compress
         $res = Invoke-AgentTool -Root $workspacePath -Call @{ function = @{ name = 'write_file'; arguments = $argsJson } } | ConvertFrom-Json
@@ -280,9 +280,9 @@ Start-Sleep -Seconds 30
     $script:inspectionPidPath = Join-Path $processDir 'inspection.pid'
     $savedParentsFunction = ${function:Get-AgentProcessParents}
     function Get-AgentProcessParents {
-        $deadline = (Get-Date).AddSeconds(10)
+        $waitStart = Get-Date
         while (-not (Test-Path -LiteralPath $script:inspectionPidPath)) {
-            if ((Get-Date) -gt $deadline) { throw 'Inspection fixture did not start.' }
+            if (((Get-Date) - $waitStart).TotalSeconds -gt 10) { throw 'Inspection fixture did not start.' }
             Start-Sleep -Milliseconds 50
         }
         throw 'Injected process inspection failure.'

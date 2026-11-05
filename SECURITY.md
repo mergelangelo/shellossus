@@ -29,14 +29,14 @@ Please include:
 
 ### 1. Permission Modes & Confirmation Prompts
 By default, `shellossus` operates in **`Ask`** mode:
-- **`write_file` / `edit_file`:** In `Ask` mode, requires confirmation via single-key `[y]es` / `[a]ll` / `Enter` (or typing `WRITE`). The separate `memory` tool currently writes without this prompt in non-`ReadOnly` modes.
+- **`write_file` / `edit_file` / `memory`:** In `Ask` mode, modifying file or memory calls require confirmation via single-key `[y]es` / `[a]ll` / `Enter` (or typing `WRITE`).
 - **Command Execution:** In `Ask` / `AutoEdit` mode, requires confirmation via single-key `[y]es` / `[a]ll` / `Enter` (or typing `RUN`).
-- **`ReadOnly` Mode:** Strips file write tools and shell execution tools entirely from the model's capabilities and rejects unauthorized invocations.
+- **`ReadOnly` Mode:** Strips file write tools and shell execution tools entirely from the model's capabilities and rejects unauthorized invocations (including modifying `memory` actions).
 - User-entered `!cmd` / `!!cmd` shortcuts execute directly even in `ReadOnly`; this mode restricts model tools, not the user's explicit commands or session persistence.
 
 ### 2. Workspace Boundary & Junction Rejection
 - Workspace file tools and `@file` attachments enforce the workspace boundary and reject ancestor reparse points. `read_file` also permits registered global `SKILL.md` files.
-- Shell commands retain the user's OS permissions and are not confined to the workspace. Global `memory`, configuration/context loading, sessions, imports/exports, and temporary files have separate paths. `memory` does not provide the file tools' ancestor-path checks. See the [complete scope](docs/security.md#workspace-isolation--path-safety).
+- Shell commands retain the user's OS permissions and are not confined to the workspace. Global `memory`, configuration/context loading, sessions, imports/exports, and temporary files have separate paths. `memory` checks its target and ancestor directories up to the scope root for reparse points (`Test-PathHasReparsePoint`). See the [complete scope](docs/security.md#workspace-isolation--path-safety).
 
 ### 3. Credential & Environment Protection
 - `.env`, `.env.*` (excluding `.env.example`), and user profile configuration files are strictly forbidden from agent tools (`read_file`, `find_files`, `grep_files`, `@file`, `write_file`).

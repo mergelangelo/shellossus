@@ -92,7 +92,7 @@ function Invoke-AgentTurn {
         if ($script:ReasoningEffort) { $bodyObj.reasoning_effort = $script:ReasoningEffort }
         $body = $bodyObj | ConvertTo-Json -Depth 40 -Compress
         $statusLabel = "[step {0}/{1}] Waiting for {2}" -f ($step + 1), $Steps, $ModelId
-        $tempResponse = New-TemporaryFile -ErrorAction Stop
+        $tempResponse = New-AgentTempFile
         $reply = $null
         try {
             $maxRetries = 2

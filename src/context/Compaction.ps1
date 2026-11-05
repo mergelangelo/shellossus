@@ -334,7 +334,7 @@ function Invoke-AgentCompact {
         )
         stream = $false
     } | ConvertTo-Json -Depth 20 -Compress
-    $tempFile = New-TemporaryFile -ErrorAction Stop
+    $tempFile = New-AgentTempFile
     try {
         Invoke-AgentHttpRequest -Uri $Endpoint -ApiKey $ApiKey -Body $summaryReq -OutFile $tempFile.FullName -TimeoutSec 180 -StatusLabel "Compacting context ($ModelId)"
         $reply = Get-Content -LiteralPath $tempFile.FullName -Raw -Encoding UTF8 -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
