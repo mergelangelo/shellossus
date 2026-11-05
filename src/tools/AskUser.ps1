@@ -9,10 +9,21 @@ function Invoke-AgentAskUser {
     $plan = if ($Arguments.plan) { [string]$Arguments.plan } else { '' }
     $allowCustom = if ($null -ne $Arguments.allow_custom) { [bool]$Arguments.allow_custom } else { $true }
 
-    if ($script:OutputMode -ne 'json') {
-        if ($intent -eq 'plan-review' -and $plan) {
-            Write-PlanReviewCard -Question $q -Plan $plan
-        }
+    if ($script:OutputMode -eq 'json') {
+        return (@{
+            status    = 'cancelled'
+            question  = $q
+            intent    = $intent
+            answer    = $null
+            custom    = $null
+            approved  = $false
+            cancelled = $true
+            message   = 'Interactive user questions are disabled in JSON mode.'
+        } | ConvertTo-Json -Depth 5 -Compress)
+    }
+
+    if ($intent -eq 'plan-review' -and $plan) {
+        Write-PlanReviewCard -Question $q -Plan $plan
     }
 
     $selectorItems = @()
@@ -53,92 +64,41 @@ function Invoke-AgentAskUser {
     $isCancelled = $false
     $isApproved = $false
 
-    if ($script:OutputMode -eq 'json') {
-        $mocked = Read-Host
-        if ($mocked -and $mocked.Trim()) {
-            $trimmedMock = $mocked.Trim()
-            if ($trimmedMock -match '^\d+$') {
-                $idx = [int]$trimmedMock - 1
-                if ($idx -ge 0 -and $idx -lt $selectorItems.Count) {
-                    $chosenAnswer = $selectorItems[$idx].value
-                }
-                else {
-                    $chosenAnswer = $trimmedMock
-                }
-            }
-            elseif ($trimmedMock -ieq 'other' -or $trimmedMock -ieq 'custom' -or $trimmedMock -ieq 'o') {
-                $chosenAnswer = '__custom__'
-            }
-            else {
-                $matchedItem = $selectorItems | Where-Object { $_.value -ieq $trimmedMock -or $_.label -ieq $trimmedMock } | Select-Object -First 1
-                if ($matchedItem) {
-                    $chosenAnswer = $matchedItem.value
-                }
-                else {
-                    $chosenAnswer = $trimmedMock
-                    $customChoice = $trimmedMock
-                }
-            }
-        }
-        else {
-            if ($selectorItems.Count -gt 0) {
-                $chosenAnswer = $selectorItems[0].value
-            }
-            else {
-                $isCancelled = $true
-            }
-        }
+    $title = if ($intent -eq 'plan-review') { "Plan Review: $q" } else { "Question: $q" }
+    $prompt = if ($allowCustom) { 'Select number or type response (Enter cancels)' } else { 'Select number (Enter cancels)' }
+    $picked = Invoke-TuiSelector -Title $title -Items $selectorItems -PromptText $prompt -AllowFreeText:$allowCustom
+    if ($null -eq $picked -or -not [string]$picked.Trim()) {
+        $isCancelled = $true
     }
     else {
-        $title = if ($intent -eq 'plan-review') { "Plan Review: $q" } else { "Question: $q" }
-        $prompt = if ($allowCustom) { 'Select number or type response (Enter cancels)' } else { 'Select number (Enter cancels)' }
-        $picked = Invoke-TuiSelector -Title $title -Items $selectorItems -PromptText $prompt -AllowFreeText:$allowCustom
-        if ($null -eq $picked -or -not [string]$picked.Trim()) {
-            $isCancelled = $true
+        $pickedStr = [string]$picked.Trim()
+        if ($pickedStr -ieq 'other' -or $pickedStr -ieq 'custom' -or $pickedStr -ieq 'o') {
+            $chosenAnswer = '__custom__'
         }
         else {
-            $pickedStr = [string]$picked.Trim()
-            if ($pickedStr -ieq 'other' -or $pickedStr -ieq 'custom' -or $pickedStr -ieq 'o') {
-                $chosenAnswer = '__custom__'
+            $matchedItem = $selectorItems | Where-Object { $_.value -ieq $pickedStr -or $_.label -ieq $pickedStr } | Select-Object -First 1
+            if ($matchedItem) {
+                $chosenAnswer = $matchedItem.value
             }
             else {
-                $matchedItem = $selectorItems | Where-Object { $_.value -ieq $pickedStr -or $_.label -ieq $pickedStr } | Select-Object -First 1
-                if ($matchedItem) {
-                    $chosenAnswer = $matchedItem.value
-                }
-                else {
-                    $chosenAnswer = $pickedStr
-                    $customChoice = $pickedStr
-                }
+                $chosenAnswer = $pickedStr
+                $customChoice = $pickedStr
             }
         }
     }
 
     if (-not $isCancelled -and $chosenAnswer -eq '__custom__') {
-        if ($script:OutputMode -eq 'json') {
-            $custRaw = Read-Host
-            if ($null -ne $custRaw -and $custRaw.Trim()) {
-                $chosenAnswer = $custRaw.Trim()
-                $customChoice = $chosenAnswer
-            }
-            else {
-                $chosenAnswer = 'custom'
-                $customChoice = 'custom'
-            }
+        $promptLabel = if ($intent -eq 'plan-review') { 'Enter custom feedback: ' } else { 'Enter custom response: ' }
+        Write-Host ('  ' + $script:Gm.BoldYellow + $promptLabel + $script:Gm.Fg) -NoNewline
+        $custRaw = Read-Host
+        Write-Host $script:Gm.Reset -NoNewline
+        if ($null -ne $custRaw -and $custRaw.Trim()) {
+            $chosenAnswer = $custRaw.Trim()
+            $customChoice = $chosenAnswer
         }
         else {
-            $promptLabel = if ($intent -eq 'plan-review') { 'Enter custom feedback: ' } else { 'Enter custom response: ' }
-            Write-Host ('  ' + $script:Gm.BoldYellow + $promptLabel + $script:Gm.Fg) -NoNewline
-            $custRaw = Read-Host
-            Write-Host $script:Gm.Reset -NoNewline
-            if ($null -ne $custRaw -and $custRaw.Trim()) {
-                $chosenAnswer = $custRaw.Trim()
-                $customChoice = $chosenAnswer
-            }
-            else {
-                $isCancelled = $true
-                $chosenAnswer = $null
-            }
+            $isCancelled = $true
+            $chosenAnswer = $null
         }
     }
 

@@ -90,6 +90,10 @@ function Invoke-AgentMemory {
         $cardContent = '(memory cleared)'
     }
 
+    if ($action -in @('append', 'set', 'clear')) {
+        Sync-AgentMemoryContext -State $script:ActiveState -Root $Root -ConfigDir $configDir | Out-Null
+    }
+
     $elapsedMs = [int](((Get-Date) - $toolStart).TotalMilliseconds)
     Write-ToolCallCard -Name 'memory' -Target $displayRel -Detail $action -Status 'ok' -Summary $summaryText -ElapsedMs $elapsedMs
     Write-MemoryCard -Scope $scope -Action $action -Content $cardContent

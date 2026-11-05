@@ -80,6 +80,56 @@ function Get-MemoryContext {
     return ($parts -join "`n`n")
 }
 
+function Sync-AgentMemoryContext {
+    param($State = $null, [string]$Root = '', [string]$ConfigDir = '')
+    $effState = if ($null -ne $State) { $State } else { $script:ActiveState }
+    if (-not $effState -or -not $effState.messages -or @($effState.messages).Count -eq 0) { return $false }
+    if ($effState.messages[0].role -ne 'system') { return $false }
+    $effRoot = if ($Root) { $Root } elseif ($effState.workspace) { [string]$effState.workspace } elseif ($script:ActiveWorkspace) { $script:ActiveWorkspace } else { '' }
+    $effConfigDir = if ($ConfigDir) {
+        $ConfigDir
+    }
+    elseif ($script:AgentConfigPath) {
+        Split-Path $script:AgentConfigPath -Parent
+    }
+    else {
+        Join-Path (if ($env:USERPROFILE) { $env:USERPROFILE } else { $HOME }) '.shellossus'
+    }
+    $newMem = Get-MemoryContext -Root $effRoot -ConfigDir $effConfigDir
+    $sysContent = [string]$effState.messages[0].content
+    $memPattern = '(?s)<memory source="[^"]*">.*?</memory>(\r?\n\r?\n<memory source="[^"]*">.*?</memory>)*'
+    if ($sysContent -match $memPattern) {
+        $oldMem = [string]$Matches[0]
+        if ($newMem) {
+            if ($oldMem -cne $newMem) {
+                $effState.messages[0].content = $sysContent.Replace($oldMem, $newMem)
+                return $true
+            }
+        }
+        else {
+            $updatedSys = ($sysContent.Replace($oldMem, '') -replace '(\r?\n){3,}', "`n`n").Trim()
+            $effState.messages[0].content = $updatedSys
+            return $true
+        }
+        return $false
+    }
+    elseif ($newMem) {
+        if ($sysContent -match '(?s)</soul>') {
+            $idx = $sysContent.LastIndexOf('</soul>') + 7
+            $effState.messages[0].content = $sysContent.Substring(0, $idx) + "`n`n" + $newMem + $sysContent.Substring($idx)
+        }
+        elseif ($sysContent -match '(?s)</capabilities>') {
+            $idx = $sysContent.IndexOf('</capabilities>') + 15
+            $effState.messages[0].content = $sysContent.Substring(0, $idx) + "`n`n" + $newMem + $sysContent.Substring($idx)
+        }
+        else {
+            $effState.messages[0].content = if ($sysContent) { $sysContent.TrimEnd() + "`n`n" + $newMem } else { $newMem }
+        }
+        return $true
+    }
+    return $false
+}
+
 function Get-AgentsContext {
     param([string]$Root, [string]$ConfigDir)
     if ($script:NoContextFiles) { return '' }

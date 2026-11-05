@@ -800,6 +800,20 @@ try {
     $badAskRes = Invoke-AgentTool -Root $workspacePath -Call $badAskCall | ConvertFrom-Json
     Assert-True ($badAskRes.error -like '*question*') 'ask_user tool did not reject empty question.'
 
+    # Regression: ask_user in -Mode json must return status=cancelled immediately without calling Read-Host.
+    $prevModeAsk = $script:OutputMode
+    $script:OutputMode = 'json'
+    $savedApprovalAsk = $script:approval
+    $script:approval = $null
+    try {
+        $jsonAskRes = Invoke-AgentTool -Root $workspacePath -Call $cancelCall | ConvertFrom-Json
+        Assert-True ($jsonAskRes.status -eq 'cancelled' -and $jsonAskRes.cancelled -and (-not $jsonAskRes.approved) -and $null -eq $jsonAskRes.answer) 'ask_user in JSON mode did not cancel immediately.'
+    }
+    finally {
+        $script:OutputMode = $prevModeAsk
+        $script:approval = $savedApprovalAsk
+    }
+
     # memory tool tests
     Assert-True ((Resolve-ToolCanonicalName 'memory') -eq 'memory') 'Canonical memory name resolution failed.'
     Assert-True ((Resolve-ToolCanonicalName 'remember') -eq 'memory') 'Canonical remember alias resolution failed.'
@@ -809,7 +823,14 @@ try {
     $memNorm = Format-MemoryArguments -ArgsObj ([pscustomobject]@{ note = 'Use UTF-8'; action = 'APPEND'; scope = 'WORKSPACE' })
     Assert-True ($memNorm.action -eq 'append' -and $memNorm.scope -eq 'workspace' -and $memNorm.content -eq 'Use UTF-8') 'Format-MemoryArguments normalization failed.'
 
-    # append memory
+    # append memory (also verify live Sync-AgentMemoryContext updates active system prompt)
+    $memSyncState = @{
+        workspace = $workspacePath
+        messages = @(
+            @{ role = 'system'; content = (Build-SystemPrompt -Root $workspacePath -ConfigDir '') }
+        )
+    }
+    $script:ActiveState = $memSyncState
     $memAppendCall = @{
         id = 'mem-1'
         function = @{
@@ -819,6 +840,7 @@ try {
     }
     $memAppendRes = Invoke-AgentTool -Root $workspacePath -Call $memAppendCall | ConvertFrom-Json
     Assert-True ($memAppendRes.success -and $memAppendRes.action -eq 'append' -and ($memAppendRes.memory -like '*Keep all scripts ASCII*')) 'memory append failed.'
+    Assert-True ($memSyncState.messages[0].content.Contains('<memory source=') -and $memSyncState.messages[0].content.Contains('Keep all scripts ASCII')) 'memory append did not sync <memory> block in active system prompt.'
 
     # view memory
     $memViewCall = @{
@@ -841,6 +863,8 @@ try {
     }
     $memClearRes = Invoke-AgentTool -Root $workspacePath -Call $memClearCall | ConvertFrom-Json
     Assert-True ($memClearRes.success -and $memClearRes.action -eq 'clear' -and -not $memClearRes.memory) 'memory clear failed.'
+    Assert-True (-not $memSyncState.messages[0].content.Contains('Keep all scripts ASCII')) 'memory clear did not remove <memory> block from active system prompt.'
+    $script:ActiveState = $null
 
     # ReadOnly blocks memory append
     $script:AgentPermission = 'ReadOnly'

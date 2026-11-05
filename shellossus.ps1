@@ -4367,10 +4367,21 @@ function Invoke-AgentAskUser {
     $plan = if ($Arguments.plan) { [string]$Arguments.plan } else { '' }
     $allowCustom = if ($null -ne $Arguments.allow_custom) { [bool]$Arguments.allow_custom } else { $true }
 
-    if ($script:OutputMode -ne 'json') {
-        if ($intent -eq 'plan-review' -and $plan) {
-            Write-PlanReviewCard -Question $q -Plan $plan
-        }
+    if ($script:OutputMode -eq 'json') {
+        return (@{
+            status    = 'cancelled'
+            question  = $q
+            intent    = $intent
+            answer    = $null
+            custom    = $null
+            approved  = $false
+            cancelled = $true
+            message   = 'Interactive user questions are disabled in JSON mode.'
+        } | ConvertTo-Json -Depth 5 -Compress)
+    }
+
+    if ($intent -eq 'plan-review' -and $plan) {
+        Write-PlanReviewCard -Question $q -Plan $plan
     }
 
     $selectorItems = @()
@@ -4411,92 +4422,41 @@ function Invoke-AgentAskUser {
     $isCancelled = $false
     $isApproved = $false
 
-    if ($script:OutputMode -eq 'json') {
-        $mocked = Read-Host
-        if ($mocked -and $mocked.Trim()) {
-            $trimmedMock = $mocked.Trim()
-            if ($trimmedMock -match '^\d+$') {
-                $idx = [int]$trimmedMock - 1
-                if ($idx -ge 0 -and $idx -lt $selectorItems.Count) {
-                    $chosenAnswer = $selectorItems[$idx].value
-                }
-                else {
-                    $chosenAnswer = $trimmedMock
-                }
-            }
-            elseif ($trimmedMock -ieq 'other' -or $trimmedMock -ieq 'custom' -or $trimmedMock -ieq 'o') {
-                $chosenAnswer = '__custom__'
-            }
-            else {
-                $matchedItem = $selectorItems | Where-Object { $_.value -ieq $trimmedMock -or $_.label -ieq $trimmedMock } | Select-Object -First 1
-                if ($matchedItem) {
-                    $chosenAnswer = $matchedItem.value
-                }
-                else {
-                    $chosenAnswer = $trimmedMock
-                    $customChoice = $trimmedMock
-                }
-            }
-        }
-        else {
-            if ($selectorItems.Count -gt 0) {
-                $chosenAnswer = $selectorItems[0].value
-            }
-            else {
-                $isCancelled = $true
-            }
-        }
+    $title = if ($intent -eq 'plan-review') { "Plan Review: $q" } else { "Question: $q" }
+    $prompt = if ($allowCustom) { 'Select number or type response (Enter cancels)' } else { 'Select number (Enter cancels)' }
+    $picked = Invoke-TuiSelector -Title $title -Items $selectorItems -PromptText $prompt -AllowFreeText:$allowCustom
+    if ($null -eq $picked -or -not [string]$picked.Trim()) {
+        $isCancelled = $true
     }
     else {
-        $title = if ($intent -eq 'plan-review') { "Plan Review: $q" } else { "Question: $q" }
-        $prompt = if ($allowCustom) { 'Select number or type response (Enter cancels)' } else { 'Select number (Enter cancels)' }
-        $picked = Invoke-TuiSelector -Title $title -Items $selectorItems -PromptText $prompt -AllowFreeText:$allowCustom
-        if ($null -eq $picked -or -not [string]$picked.Trim()) {
-            $isCancelled = $true
+        $pickedStr = [string]$picked.Trim()
+        if ($pickedStr -ieq 'other' -or $pickedStr -ieq 'custom' -or $pickedStr -ieq 'o') {
+            $chosenAnswer = '__custom__'
         }
         else {
-            $pickedStr = [string]$picked.Trim()
-            if ($pickedStr -ieq 'other' -or $pickedStr -ieq 'custom' -or $pickedStr -ieq 'o') {
-                $chosenAnswer = '__custom__'
+            $matchedItem = $selectorItems | Where-Object { $_.value -ieq $pickedStr -or $_.label -ieq $pickedStr } | Select-Object -First 1
+            if ($matchedItem) {
+                $chosenAnswer = $matchedItem.value
             }
             else {
-                $matchedItem = $selectorItems | Where-Object { $_.value -ieq $pickedStr -or $_.label -ieq $pickedStr } | Select-Object -First 1
-                if ($matchedItem) {
-                    $chosenAnswer = $matchedItem.value
-                }
-                else {
-                    $chosenAnswer = $pickedStr
-                    $customChoice = $pickedStr
-                }
+                $chosenAnswer = $pickedStr
+                $customChoice = $pickedStr
             }
         }
     }
 
     if (-not $isCancelled -and $chosenAnswer -eq '__custom__') {
-        if ($script:OutputMode -eq 'json') {
-            $custRaw = Read-Host
-            if ($null -ne $custRaw -and $custRaw.Trim()) {
-                $chosenAnswer = $custRaw.Trim()
-                $customChoice = $chosenAnswer
-            }
-            else {
-                $chosenAnswer = 'custom'
-                $customChoice = 'custom'
-            }
+        $promptLabel = if ($intent -eq 'plan-review') { 'Enter custom feedback: ' } else { 'Enter custom response: ' }
+        Write-Host ('  ' + $script:Gm.BoldYellow + $promptLabel + $script:Gm.Fg) -NoNewline
+        $custRaw = Read-Host
+        Write-Host $script:Gm.Reset -NoNewline
+        if ($null -ne $custRaw -and $custRaw.Trim()) {
+            $chosenAnswer = $custRaw.Trim()
+            $customChoice = $chosenAnswer
         }
         else {
-            $promptLabel = if ($intent -eq 'plan-review') { 'Enter custom feedback: ' } else { 'Enter custom response: ' }
-            Write-Host ('  ' + $script:Gm.BoldYellow + $promptLabel + $script:Gm.Fg) -NoNewline
-            $custRaw = Read-Host
-            Write-Host $script:Gm.Reset -NoNewline
-            if ($null -ne $custRaw -and $custRaw.Trim()) {
-                $chosenAnswer = $custRaw.Trim()
-                $customChoice = $chosenAnswer
-            }
-            else {
-                $isCancelled = $true
-                $chosenAnswer = $null
-            }
+            $isCancelled = $true
+            $chosenAnswer = $null
         }
     }
 
@@ -4622,6 +4582,10 @@ function Invoke-AgentMemory {
         $existing = ''
         $summaryText = "cleared $displayRel"
         $cardContent = '(memory cleared)'
+    }
+
+    if ($action -in @('append', 'set', 'clear')) {
+        Sync-AgentMemoryContext -State $script:ActiveState -Root $Root -ConfigDir $configDir | Out-Null
     }
 
     $elapsedMs = [int](((Get-Date) - $toolStart).TotalMilliseconds)
@@ -5216,6 +5180,56 @@ function Get-MemoryContext {
         }
     }
     return ($parts -join "`n`n")
+}
+
+function Sync-AgentMemoryContext {
+    param($State = $null, [string]$Root = '', [string]$ConfigDir = '')
+    $effState = if ($null -ne $State) { $State } else { $script:ActiveState }
+    if (-not $effState -or -not $effState.messages -or @($effState.messages).Count -eq 0) { return $false }
+    if ($effState.messages[0].role -ne 'system') { return $false }
+    $effRoot = if ($Root) { $Root } elseif ($effState.workspace) { [string]$effState.workspace } elseif ($script:ActiveWorkspace) { $script:ActiveWorkspace } else { '' }
+    $effConfigDir = if ($ConfigDir) {
+        $ConfigDir
+    }
+    elseif ($script:AgentConfigPath) {
+        Split-Path $script:AgentConfigPath -Parent
+    }
+    else {
+        Join-Path (if ($env:USERPROFILE) { $env:USERPROFILE } else { $HOME }) '.shellossus'
+    }
+    $newMem = Get-MemoryContext -Root $effRoot -ConfigDir $effConfigDir
+    $sysContent = [string]$effState.messages[0].content
+    $memPattern = '(?s)<memory source="[^"]*">.*?</memory>(\r?\n\r?\n<memory source="[^"]*">.*?</memory>)*'
+    if ($sysContent -match $memPattern) {
+        $oldMem = [string]$Matches[0]
+        if ($newMem) {
+            if ($oldMem -cne $newMem) {
+                $effState.messages[0].content = $sysContent.Replace($oldMem, $newMem)
+                return $true
+            }
+        }
+        else {
+            $updatedSys = ($sysContent.Replace($oldMem, '') -replace '(\r?\n){3,}', "`n`n").Trim()
+            $effState.messages[0].content = $updatedSys
+            return $true
+        }
+        return $false
+    }
+    elseif ($newMem) {
+        if ($sysContent -match '(?s)</soul>') {
+            $idx = $sysContent.LastIndexOf('</soul>') + 7
+            $effState.messages[0].content = $sysContent.Substring(0, $idx) + "`n`n" + $newMem + $sysContent.Substring($idx)
+        }
+        elseif ($sysContent -match '(?s)</capabilities>') {
+            $idx = $sysContent.IndexOf('</capabilities>') + 15
+            $effState.messages[0].content = $sysContent.Substring(0, $idx) + "`n`n" + $newMem + $sysContent.Substring($idx)
+        }
+        else {
+            $effState.messages[0].content = if ($sysContent) { $sysContent.TrimEnd() + "`n`n" + $newMem } else { $newMem }
+        }
+        return $true
+    }
+    return $false
 }
 
 function Get-AgentsContext {
@@ -7732,6 +7746,16 @@ function Invoke-AgentTurn {
                 }
                 catch {}
             }
+            elseif ($canonToolName -eq 'memory') {
+                try {
+                    $parsedOut = $output | ConvertFrom-Json -ErrorAction Stop
+                    if ($parsedOut.success -and $parsedOut.action -in @('append', 'set', 'clear')) {
+                        $mutationEpoch++
+                        Sync-AgentMemoryContext -State $State -Root $Root | Out-Null
+                    }
+                }
+                catch {}
+            }
         }
         if ($loopAborted) {
             if ($script:OutputMode -ne 'json') {
@@ -8237,7 +8261,15 @@ if (-not $LibraryOnly) {
         $inputKey = Read-Host 'API key'
         if (-not $inputKey) { $inputKey = $config.SHELLOSSUS_API_KEY }
         if (-not $inputKey) { throw 'API key is required.' }
-        $inputWorkspace = Read-Host 'Default workspace (Enter = current folder at each launch)'
+        $defaultWorkspace = ''
+        if ($PSBoundParameters.Keys -contains 'Workspace') { $defaultWorkspace = $Workspace }
+        elseif ($env:SHELLOSSUS_WORKSPACE) { $defaultWorkspace = $env:SHELLOSSUS_WORKSPACE }
+        elseif ($env:H_AGENT_WORKSPACE) { $defaultWorkspace = $env:H_AGENT_WORKSPACE }
+        elseif ($config.SHELLOSSUS_WORKSPACE) { $defaultWorkspace = $config.SHELLOSSUS_WORKSPACE }
+        $wsPrompt = if ($defaultWorkspace) { "Default workspace [$defaultWorkspace] (Enter keeps saved, '-' clears)" } else { 'Default workspace (Enter = current folder at each launch)' }
+        $inputWorkspace = Read-Host $wsPrompt
+        if (-not $inputWorkspace) { $inputWorkspace = $defaultWorkspace }
+        elseif ($inputWorkspace.Trim() -eq '-') { $inputWorkspace = '' }
         $newCfg = @{
             SHELLOSSUS_BASE_URL = $inputUrl
             SHELLOSSUS_MODEL = $inputModel
@@ -8247,7 +8279,9 @@ if (-not $LibraryOnly) {
         foreach ($optK in @('SHELLOSSUS_CONTEXT_WINDOW', 'SHELLOSSUS_COMPACT_THRESHOLD', 'SHELLOSSUS_THEME')) {
             if ($config.ContainsKey($optK) -and $config[$optK]) { $newCfg[$optK] = $config[$optK] }
         }
-        if ($Theme -and $script:ActiveTheme) { $newCfg['SHELLOSSUS_THEME'] = $script:ActiveTheme }
+        if (($PSBoundParameters.Keys -contains 'ContextWindow') -and $ContextWindow) { $newCfg['SHELLOSSUS_CONTEXT_WINDOW'] = $ContextWindow }
+        if (($PSBoundParameters.Keys -contains 'CompactThreshold') -and $CompactThreshold) { $newCfg['SHELLOSSUS_COMPACT_THRESHOLD'] = $CompactThreshold }
+        if (($PSBoundParameters.Keys -contains 'Theme') -and $Theme -and $script:ActiveTheme) { $newCfg['SHELLOSSUS_THEME'] = $script:ActiveTheme }
         Save-AgentConfig -Path $ConfigPath -Config $newCfg
         Remove-Variable inputKey -ErrorAction SilentlyContinue
         Write-Host ($script:Gm.BoldGreen + 'Settings saved. Run shellossus -Doctor to check them, then start shellossus from your working folder.' + $script:Gm.Reset)
@@ -8457,11 +8491,13 @@ if (-not $LibraryOnly) {
                 if ($memSub -eq 'clear') {
                     $callArg = @{ action = 'clear'; scope = 'workspace' }
                     $null = Invoke-AgentMemory -Root $rootPath -Arguments $callArg
+                    Sync-AgentMemoryContext -State $state -Root $rootPath -ConfigDir $configDir | Out-Null
                     Write-Host ($script:Gm.Grey1 + '  Cleared workspace memory.' + $script:Gm.Reset)
                 }
                 elseif ($memSub -match '^add\s+(.+)$') {
                     $callArg = @{ action = 'append'; scope = 'workspace'; content = $Matches[1].Trim() }
                     $null = Invoke-AgentMemory -Root $rootPath -Arguments $callArg
+                    Sync-AgentMemoryContext -State $state -Root $rootPath -ConfigDir $configDir | Out-Null
                     Write-Host ($script:Gm.Green + '  Added memory entry.' + $script:Gm.Reset)
                 }
                 else {
