@@ -21,6 +21,60 @@ function Convert-IgnorePatternToRule {
     $anchored = $pat.StartsWith('/')
     if ($anchored) { $pat = $pat.TrimStart('/') }
     if ($pat.Contains('/')) { $anchored = $true }
+    $charClasses = @()
+    if ($pat.Contains('[')) {
+        $sb = ''
+        $i = 0
+        while ($i -lt $pat.Length) {
+            $ch = [string]$pat[$i]
+            if ($ch -eq '[' -and ($i -eq 0 -or ([string]$pat[$i - 1]) -ne '\')) {
+                $j = $i + 1
+                if ($j -lt $pat.Length -and (([string]$pat[$j]) -eq '!' -or ([string]$pat[$j]) -eq '^')) { $j++ }
+                if ($j -lt $pat.Length -and ([string]$pat[$j]) -eq ']') { $j++ }
+                $closeIdx = -1
+                while ($j -lt $pat.Length) {
+                    $c = [string]$pat[$j]
+                    if ($c -eq '/') { break }
+                    if ($c -eq '\' -and ($j + 1) -lt $pat.Length) {
+                        $j += 2
+                        continue
+                    }
+                    if ($c -eq ']') {
+                        $closeIdx = $j
+                        break
+                    }
+                    $j++
+                }
+                if ($closeIdx -gt ($i + 1)) {
+                    $inner = $pat.Substring($i + 1, $closeIdx - $i - 1)
+                    $negClass = $false
+                    if ($inner.StartsWith('!') -or $inner.StartsWith('^')) {
+                        $negClass = $true
+                        $inner = $inner.Substring(1)
+                    }
+                    $candidateRx = if ($negClass) { '[^/' + $inner + ']' } else { '[' + $inner + ']' }
+                    $validClass = $false
+                    try {
+                        $null = '' -match $candidateRx
+                        $validClass = $true
+                    }
+                    catch {
+                        $validClass = $false
+                    }
+                    if ($validClass) {
+                        $ccIdx = $charClasses.Count
+                        $charClasses += $candidateRx
+                        $sb += "__CC_${ccIdx}__"
+                        $i = $closeIdx + 1
+                        continue
+                    }
+                }
+            }
+            $sb += $ch
+            $i++
+        }
+        $pat = $sb
+    }
     $rx = $pat -replace '([.+^$()\[\]{}|\\])', '\$1'
     $rx = $rx -replace '/\*\*/', '__DBLSTAR_SLASH__'
     $rx = $rx -replace '^\*\*/', '__LEAD_DBLSTAR__'
@@ -32,6 +86,9 @@ function Convert-IgnorePatternToRule {
     $rx = $rx.Replace('__LEAD_DBLSTAR__', '(?:.+/)?')
     $rx = $rx.Replace('__TRAIL_DBLSTAR__', '(?:/.*)?')
     $rx = $rx.Replace('__ANY__', '.*')
+    for ($ccIdx = 0; $ccIdx -lt $charClasses.Count; $ccIdx++) {
+        $rx = $rx.Replace("__CC_${ccIdx}__", [string]$charClasses[$ccIdx])
+    }
     $prefRx = if ($DirPrefix) { ($DirPrefix -replace '([.+^$()\[\]{}|\\*?\-])', '\$1') } else { '' }
     $tailRx = if ($dirOnly) { '/.*$' } else { '(?:/.*)?$' }
     $finalRx = if ($anchored) {

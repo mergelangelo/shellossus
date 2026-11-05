@@ -162,6 +162,31 @@ function Get-WorkspaceRelativePath {
     return $FullPath
 }
 
+function Test-PathHasReparsePoint {
+    param([string]$Path, [string]$StopAt = '')
+    if (-not $Path) { return $false }
+    $stopNorm = ''
+    if ($StopAt -and (Test-Path -LiteralPath $StopAt)) {
+        $stopItem = Get-Item -LiteralPath $StopAt -Force -ErrorAction SilentlyContinue
+        if ($stopItem) { $stopNorm = $stopItem.FullName.TrimEnd('\').TrimEnd('/') }
+    }
+    $curr = $Path
+    for ($depth = 0; $depth -lt 64; $depth++) {
+        if (-not $curr) { break }
+        if (Test-Path -LiteralPath $curr) {
+            $item = Get-Item -LiteralPath $curr -Force -ErrorAction SilentlyContinue
+            if ($item) {
+                if (($item.Attributes -band 1024) -ne 0) { return $true }
+                if ($stopNorm -and ($item.FullName.TrimEnd('\').TrimEnd('/') -ieq $stopNorm)) { break }
+            }
+        }
+        $parent = Split-Path $curr -Parent
+        if (-not $parent -or ($parent -ieq $curr)) { break }
+        $curr = $parent
+    }
+    return $false
+}
+
 function Resolve-AgentPath {
     param([string]$Root, [string]$RelativePath, [switch]$AllowRegisteredSkill)
     if (-not $RelativePath) { $RelativePath = '.' }

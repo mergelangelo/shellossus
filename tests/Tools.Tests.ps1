@@ -727,9 +727,92 @@ try {
         Assert-True ($largeFetch.error -like '*exceeds*') 'fetch_url accepted an oversized response.'
         $largeSearch = Invoke-AgentTool -Root $workspacePath -Call @{ id = 's-large'; function = @{ name = 'web_search'; arguments = '{"query":"large"}' } } | ConvertFrom-Json
         Assert-True ($largeSearch.error -like '*exceeds*') 'web_search accepted an oversized response.'
+
+        # Regression (Item 12a): Invoke-AgentWebDownload propagates HTTP/network failure reason instead of blind 'Web request failed.'
+        function Invoke-WebRequest {
+            param($Uri, $Method, $Headers, $ContentType, $Body, $TimeoutSec, $ErrorAction, [switch]$UseBasicParsing, $OutFile)
+            throw 'Response status code does not indicate success: 404 (Not Found).'
+        }
+        $errFetch = Invoke-AgentTool -Root $workspacePath -Call @{ id = 'w-404'; function = @{ name = 'fetch_url'; arguments = '{"url":"https://example.com/missing"}' } } | ConvertFrom-Json
+        Assert-True ($errFetch.error -like '*404*' -and $errFetch.error -like '*Not Found*') 'fetch_url did not surface HTTP 404 failure details.'
+
+        # Regression (Item 12b): ConvertFrom-UrlEncodedString decodes multi-byte UTF-8 (Cyrillic and 4-byte UTF-8) in URLs and web_search results.
+        $expectedCyrillicWord = ([string][char]0x0447) + ([string][char]0x0442) + ([string][char]0x043E) + '?'
+        $decodedCyrUrl = ConvertFrom-UrlEncodedString -Text 'https%3A%2F%2Fru.wikipedia.org%2Fwiki%2F%D1%87%D1%82%D0%BE%3F'
+        Assert-True ($decodedCyrUrl -eq ('https://ru.wikipedia.org/wiki/' + $expectedCyrillicWord)) 'ConvertFrom-UrlEncodedString failed to decode Cyrillic UTF-8 percent-encoded URL.'
+        $expectedEmoji = ([string][char]0xD83D) + ([string][char]0xDE00)
+        $decodedEmoji = ConvertFrom-UrlEncodedString -Text 'https://example.com/%F0%9F%98%80'
+        Assert-True ($decodedEmoji -eq ('https://example.com/' + $expectedEmoji)) 'ConvertFrom-UrlEncodedString failed to decode 4-byte UTF-8 sequence into surrogate pair.'
+
+        function Invoke-WebRequest {
+            param($Uri, $Method, $Headers, $ContentType, $Body, $TimeoutSec, $ErrorAction, [switch]$UseBasicParsing, $OutFile)
+            $ddgUtf8Html = '<div class="result"><a class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fru.wikipedia.org%2Fwiki%2F%D1%87%D1%82%D0%BE%3F">Wiki Article</a><a class="result__snippet">UTF-8 snippet.</a></div>'
+            Set-Content -LiteralPath $OutFile -Value $ddgUtf8Html -Encoding UTF8 -NoNewline
+        }
+        $utf8SearchRes = Invoke-AgentTool -Root $workspacePath -Call @{ id = 'w-search-utf8'; function = @{ name = 'web_search'; arguments = '{"query":"utf8 test","limit":5}' } } | ConvertFrom-Json
+        Assert-True ($utf8SearchRes.count -eq 1 -and $utf8SearchRes.results[0].url -eq ('https://ru.wikipedia.org/wiki/' + $expectedCyrillicWord)) 'web_search corrupted multi-byte UTF-8 URL in DuckDuckGo redirect.'
     }
     finally {
         Remove-Item Function:\Invoke-WebRequest -ErrorAction SilentlyContinue
+    }
+
+    # Regression (Item 12c): SSRF protection blocks localhost, loopback, link-local metadata, private IPv4/IPv6, and obfuscated numeric IPs.
+    foreach ($unsafeUrl in @(
+        'http://localhost/admin',
+        'http://localhost:8080/api',
+        'http://sub.localhost/test',
+        'http://127.0.0.1:9000/health',
+        'http://169.254.169.254/latest/meta-data/',
+        'http://10.0.0.1/internal',
+        'http://172.16.0.1/secret',
+        'http://172.31.255.254/secret',
+        'http://192.168.1.1/router',
+        'http://[::1]:8080/loopback',
+        'http://[fe80::1]/linklocal',
+        'http://[fd00::1]/ula',
+        'http://2130706433/decimal-loopback',
+        'http://0x7f000001/hex-loopback',
+        'http://0177.0.0.1/octal-loopback',
+        'http://metadata.google.internal/computeMetadata/v1/'
+    )) {
+        $ssrfThrew = $false
+        try {
+            $null = Test-SafeWebUrl -Url $unsafeUrl
+        }
+        catch {
+            $ssrfThrew = $true
+        }
+        Assert-True $ssrfThrew "Test-SafeWebUrl failed to block unsafe SSRF URL: $unsafeUrl"
+        $ssrfFetch = Invoke-AgentTool -Root $workspacePath -Call @{ id = 'w-ssrf'; function = @{ name = 'fetch_url'; arguments = (@{ url = $unsafeUrl } | ConvertTo-Json -Compress) } } | ConvertFrom-Json
+        Assert-True ($null -ne $ssrfFetch.error -and $ssrfFetch.error.Length -gt 0) "fetch_url did not block unsafe SSRF URL: $unsafeUrl"
+    }
+
+    # Regression (Item 12d): fetch_url and web_search require confirmation in Ask and ReadOnly modes, and cancel in non-interactive JSON mode.
+    $savedApprovalWeb = $script:approval
+    $savedPermWeb = $script:AgentPermission
+    $savedModeWeb = $script:OutputMode
+    try {
+        $script:approval = 'n'
+        $script:AgentPermission = 'Ask'
+        $askCancelFetch = Invoke-AgentTool -Root $workspacePath -Call @{ id = 'w-ask-no'; function = @{ name = 'fetch_url'; arguments = '{"url":"https://example.com/docs"}' } } | ConvertFrom-Json
+        Assert-True ($askCancelFetch.status -eq 'cancelled') 'fetch_url in Ask mode did not cancel when declined.'
+        $askCancelSearch = Invoke-AgentTool -Root $workspacePath -Call @{ id = 's-ask-no'; function = @{ name = 'web_search'; arguments = '{"query":"powershell"}' } } | ConvertFrom-Json
+        Assert-True ($askCancelSearch.status -eq 'cancelled') 'web_search in Ask mode did not cancel when declined.'
+
+        $script:AgentPermission = 'ReadOnly'
+        $roCancelFetch = Invoke-AgentTool -Root $workspacePath -Call @{ id = 'w-ro-no'; function = @{ name = 'fetch_url'; arguments = '{"url":"https://example.com/docs"}' } } | ConvertFrom-Json
+        Assert-True ($roCancelFetch.status -eq 'cancelled') 'fetch_url in ReadOnly mode did not require confirmation.'
+
+        $script:AgentPermission = 'Ask'
+        $script:OutputMode = 'json'
+        $script:approval = $null
+        $jsonCancelFetch = Invoke-AgentTool -Root $workspacePath -Call @{ id = 'w-json-no'; function = @{ name = 'fetch_url'; arguments = '{"url":"https://example.com/docs"}' } } | ConvertFrom-Json
+        Assert-True ($jsonCancelFetch.status -eq 'cancelled') 'fetch_url in JSON mode under Ask permission did not cancel immediately.'
+    }
+    finally {
+        $script:approval = $savedApprovalWeb
+        $script:AgentPermission = $savedPermWeb
+        $script:OutputMode = $savedModeWeb
     }
 
     # Todo tool: aliases, argument normalization, validation, and checklist execution.
@@ -861,6 +944,7 @@ try {
     Assert-True ($memNorm.action -eq 'append' -and $memNorm.scope -eq 'workspace' -and $memNorm.content -eq 'Use UTF-8') 'Format-MemoryArguments normalization failed.'
 
     # append memory (also verify live Sync-AgentMemoryContext updates active system prompt)
+    $script:approval = 'WRITE'
     $memSyncState = @{
         workspace = $workspacePath
         messages = @(
@@ -908,6 +992,77 @@ try {
     $roMemRes = Invoke-AgentTool -Root $workspacePath -Call $memAppendCall | ConvertFrom-Json
     Assert-True ($roMemRes.error -like '*ReadOnly*') 'ReadOnly mode did not block memory modification.'
     $script:AgentPermission = 'Ask'
+
+    # Regression (Item 13a): memory mutations require confirmation in Ask mode and cancel in JSON mode.
+    $script:approval = 'n'
+    $declinedMemRes = Invoke-AgentTool -Root $workspacePath -Call $memAppendCall | ConvertFrom-Json
+    Assert-True ($declinedMemRes.status -eq 'cancelled' -and (-not $declinedMemRes.success)) 'memory append in Ask mode did not cancel when declined.'
+    $prevModeMem = $script:OutputMode
+    $script:OutputMode = 'json'
+    $script:approval = $null
+    try {
+        $jsonMemRes = Invoke-AgentTool -Root $workspacePath -Call $memAppendCall | ConvertFrom-Json
+        Assert-True ($jsonMemRes.status -eq 'cancelled' -and (-not $jsonMemRes.success)) 'memory append in JSON mode under Ask permission did not cancel immediately.'
+    }
+    finally {
+        $script:OutputMode = $prevModeMem
+        $script:approval = 'WRITE'
+    }
+
+    # Regression (Item 13b): memory checks parent directory (.shellossus) for symlink/reparse-point traversal via Test-PathHasReparsePoint.
+    $memSymlinkWs = Join-Path $testRoot 'mem-symlink-ws'
+    $memOutsideDir = Join-Path $testRoot 'mem-outside-dir'
+    New-Item -ItemType Directory -Path $memSymlinkWs -Force | Out-Null
+    New-Item -ItemType Directory -Path $memOutsideDir -Force | Out-Null
+    $dotShellLink = Join-Path $memSymlinkWs '.shellossus'
+    $createdDirLink = $false
+    try {
+        New-Item -ItemType SymbolicLink -Path $dotShellLink -Target $memOutsideDir -ErrorAction Stop | Out-Null
+        $createdDirLink = $true
+    }
+    catch {
+        $createdDirLink = $false
+    }
+    if ($createdDirLink) {
+        Assert-True (Test-PathHasReparsePoint -Path (Join-Path $dotShellLink 'MEMORY.md') -StopAt $memSymlinkWs) 'Test-PathHasReparsePoint failed to detect symlinked .shellossus parent directory.'
+        $symlinkMemRes = Invoke-AgentTool -Root $memSymlinkWs -Call $memAppendCall | ConvertFrom-Json
+        Assert-True ($symlinkMemRes.error -like '*Symlink*' -or $symlinkMemRes.error -like '*reparse*') 'memory append did not block symlinked .shellossus directory.'
+    }
+
+    # Regression (Item 14): Convert-IgnorePatternToRule supports character classes [...] in .gitignore.
+    $ccRules = @(
+        (Convert-IgnorePatternToRule -Line '*.[ch]'),
+        (Convert-IgnorePatternToRule -Line '[Bb]uild/'),
+        (Convert-IgnorePatternToRule -Line 'file[0-9].log'),
+        (Convert-IgnorePatternToRule -Line '[!a-z].tmp')
+    )
+    Assert-True (Test-PathIgnored -RelativePath 'src/main.c' -IsDir $false -Rules $ccRules) 'Character class *.[ch] failed to match src/main.c.'
+    Assert-True (Test-PathIgnored -RelativePath 'include/util.h' -IsDir $false -Rules $ccRules) 'Character class *.[ch] failed to match include/util.h.'
+    Assert-True (-not (Test-PathIgnored -RelativePath 'src/main.cpp' -IsDir $false -Rules $ccRules)) 'Character class *.[ch] falsely matched src/main.cpp.'
+    Assert-True (Test-PathIgnored -RelativePath 'Build' -IsDir $true -Rules $ccRules) 'Character class [Bb]uild/ failed to match Build/ directory.'
+    Assert-True (Test-PathIgnored -RelativePath 'build' -IsDir $true -Rules $ccRules) 'Character class [Bb]uild/ failed to match build/ directory.'
+    Assert-True (-not (Test-PathIgnored -RelativePath 'rebuild' -IsDir $true -Rules $ccRules)) 'Character class [Bb]uild/ falsely matched rebuild/ directory.'
+    Assert-True (Test-PathIgnored -RelativePath 'logs/file7.log' -IsDir $false -Rules $ccRules) 'Character class file[0-9].log failed to match logs/file7.log.'
+    Assert-True (Test-PathIgnored -RelativePath '9.tmp' -IsDir $false -Rules $ccRules) 'Negated character class [!a-z].tmp failed to match 9.tmp.'
+    Assert-True (-not (Test-PathIgnored -RelativePath 'a.tmp' -IsDir $false -Rules $ccRules)) 'Negated character class [!a-z].tmp falsely matched a.tmp.'
+
+    # Regression (Item 15): build.ps1 rejects non-ASCII characters in source/test .ps1 files instead of silently replacing them with '?'.
+    $badBuildDir = Join-Path $testRoot 'bad-ascii-build'
+    $badSrcDir = Join-Path $badBuildDir 'src'
+    New-Item -ItemType Directory -Path $badSrcDir -Force | Out-Null
+    Copy-Item -LiteralPath (Join-Path (Split-Path $PSScriptRoot -Parent) 'build.ps1') -Destination (Join-Path $badBuildDir 'build.ps1') -Force
+    $nonAsciiChar = [string][char]0x0410
+    Set-Content -LiteralPath (Join-Path $badSrcDir 'Config.ps1') -Value ("# Non-ASCII: " + $nonAsciiChar) -Encoding UTF8
+    $buildThrew = $false
+    $buildErrText = ''
+    try {
+        & (Join-Path $badBuildDir 'build.ps1')
+    }
+    catch {
+        $buildThrew = $true
+        $buildErrText = [string]$_.Exception.Message
+    }
+    Assert-True ($buildThrew -and $buildErrText -like '*Non-ASCII character U+0410*' -and $buildErrText -like '*7-bit ASCII*') "build.ps1 did not fail on non-ASCII source file. Error: $buildErrText"
 }
 finally {
     Remove-TestEnvironment -Env $envData

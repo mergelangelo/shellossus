@@ -3,6 +3,27 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+
+$repoRoot = Split-Path $PSScriptRoot -Parent
+$asciiTargets = @(
+    (Join-Path $repoRoot 'build.ps1'),
+    (Join-Path $repoRoot 'shellossus.ps1')
+)
+foreach ($scanDir in @((Join-Path $repoRoot 'src'), $PSScriptRoot)) {
+    if (Test-Path -LiteralPath $scanDir) {
+        foreach ($f in @(Get-ChildItem -LiteralPath $scanDir -Filter '*.ps1' -Recurse -File)) {
+            $asciiTargets += $f.FullName
+        }
+    }
+}
+foreach ($targetFile in $asciiTargets) {
+    if (-not (Test-Path -LiteralPath $targetFile)) { continue }
+    $rawContent = Get-Content -LiteralPath $targetFile -Raw -Encoding UTF8 -ErrorAction Stop
+    if ($null -ne $rawContent -and ([string]$rawContent -match '[^\x00-\x7F]')) {
+        throw "Non-ASCII character detected in $targetFile. All .ps1 files must be strictly 7-bit ASCII."
+    }
+}
+
 & "$PSScriptRoot\..\build.ps1" -Check
 
 $suiteOrder = @(
