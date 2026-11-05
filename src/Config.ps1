@@ -218,14 +218,9 @@ function Test-AgentPathWithinRoot {
     $isWin = ($env:OS -eq 'Windows_NT')
     $prefix = if ($isWin) { $RootPath.TrimEnd('\').TrimEnd('/') } else { $RootPath.TrimEnd('/') }
     $targetNorm = if ($isWin) { $TargetPath.TrimEnd('\').TrimEnd('/') } else { $TargetPath.TrimEnd('/') }
-    if ($isWin) {
-        if ($targetNorm -ieq $prefix) { return $true }
-        if ($TargetPath.StartsWith($prefix + '/', [StringComparison]::OrdinalIgnoreCase)) { return $true }
-        if ($TargetPath.StartsWith($prefix + '\', [StringComparison]::OrdinalIgnoreCase)) { return $true }
-        return $false
-    }
     if ($targetNorm -ceq $prefix) { return $true }
     if ($TargetPath.StartsWith($prefix + '/', [StringComparison]::Ordinal)) { return $true }
+    if ($isWin -and $TargetPath.StartsWith($prefix + '\', [StringComparison]::Ordinal)) { return $true }
     return $false
 }
 
