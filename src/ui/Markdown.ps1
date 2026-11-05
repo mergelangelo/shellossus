@@ -2,8 +2,9 @@
 
 function Get-VisibleLength {
     param([string]$Text)
+    $cleanText = Strip-AnsiCodes -Text $Text
     $plain = ''
-    foreach ($part in @($Text -split '(`[^`]+`)')) {
+    foreach ($part in @($cleanText -split '(`[^`]+`)')) {
         if (-not $part) { continue }
         if ($part.StartsWith('`') -and $part.EndsWith('`') -and $part.Length -ge 2) {
             $plain += $part.Substring(1, $part.Length - 2)
@@ -11,7 +12,7 @@ function Get-VisibleLength {
         else {
             $s = $part -replace '\[([^\]]+)\]\(([^)]+)\)', '$1 ($2)'
             $s = $s -replace '\*\*([^*]+)\*\*', '$1'
-            $s = $s -replace '(?<!\*)\*([^*\s][^*]*?)\*(?!\*)', '$1'
+            $s = $s -replace '(?<![\*\w/\\])\*([^*\s](?:[^*]*?[^*\s])?)\*(?![\*\w])', '$1'
             $plain += $s
         }
     }
@@ -30,7 +31,7 @@ function Format-MarkdownInline {
         else {
             $s = $part -replace '\[([^\]]+)\]\(([^)]+)\)', ($script:Gm.Blue + '$1' + $script:Gm.Reset + $BaseColor + ' (' + $script:Gm.Aqua + '$2' + $script:Gm.Reset + $BaseColor + ')')
             $s = $s -replace '\*\*([^*]+)\*\*', ($script:Gm.BoldOrange + '$1' + $script:Gm.Reset + $BaseColor)
-            $s = $s -replace '(?<!\*)\*([^*\s][^*]*?)\*(?!\*)', ($script:Gm.Purple + '$1' + $script:Gm.Reset + $BaseColor)
+            $s = $s -replace '(?<![\*\w/\\])\*([^*\s](?:[^*]*?[^*\s])?)\*(?![\*\w])', ($script:Gm.Purple + '$1' + $script:Gm.Reset + $BaseColor)
             $out += $s
         }
     }
@@ -44,11 +45,38 @@ function Format-MarkdownTable {
     foreach ($raw in @($Lines)) {
         $trimmed = $raw.Trim()
         if ($trimmed.StartsWith('|')) { $trimmed = $trimmed.Substring(1) }
-        if ($trimmed.EndsWith('|')) { $trimmed = $trimmed.Substring(0, $trimmed.Length - 1) }
-        $cells = @($trimmed -split '\|' | ForEach-Object { $_.Trim() })
-        $isSep = $true
+        if ($trimmed.EndsWith('|') -and (-not $trimmed.EndsWith('\|'))) { $trimmed = $trimmed.Substring(0, $trimmed.Length - 1) }
+        $cells = @()
+        $cellBuf = ''
+        $inTick = $false
+        for ($cIdx = 0; $cIdx -lt $trimmed.Length; $cIdx++) {
+            $ch = $trimmed[$cIdx]
+            if ($ch -eq '\' -and ($cIdx + 1) -lt $trimmed.Length -and $trimmed[$cIdx + 1] -eq '|') {
+                $cellBuf += '|'
+                $cIdx++
+                continue
+            }
+            if ($ch -eq '`') {
+                if ($inTick) {
+                    $inTick = $false
+                }
+                elseif ($trimmed.IndexOf('`', $cIdx + 1) -ge 0) {
+                    $inTick = $true
+                }
+                $cellBuf += $ch
+                continue
+            }
+            if ($ch -eq '|' -and (-not $inTick)) {
+                $cells += $cellBuf.Trim()
+                $cellBuf = ''
+                continue
+            }
+            $cellBuf += $ch
+        }
+        $cells += $cellBuf.Trim()
+        $isSep = ($cells.Count -gt 0)
         foreach ($c in $cells) {
-            if ($c -notmatch '^:?-{2,}:?$') { $isSep = $false; break }
+            if ($c -notmatch '^:?-+:?$') { $isSep = $false; break }
         }
         if ($cells.Count -gt $colCount) { $colCount = $cells.Count }
         $rows += @{ cells = $cells; isSep = $isSep }
@@ -93,10 +121,13 @@ function Write-AgentReply {
     $barV = $script:Gm.Grey0 + '  ' + $script:Box.V + ' ' + $script:Gm.Reset
     Write-Host ("`n  " + $script:Gm.Grey0 + $script:Box.TL + $script:Box.H + ' ' + $script:Gm.BoldGreen + $script:Box.Dot + ' Shellossus' + $script:Gm.Reset)
     $inCode = $false
+    $codeFenceChar = ''
+    $codeFenceLen = 0
     $tableBuf = @()
     $lines = @($Content -split "`r?`n")
     for ($idx = 0; $idx -lt $lines.Count; $idx++) {
-        $line = $lines[$idx]
+        $rawLine = $lines[$idx]
+        $line = (Format-PreviewText -Text ([string]$rawLine)).Replace("`r", '')
         $isTableLine = (-not $inCode) -and ($line -match '^\s*\|.*\|\s*$')
         if ($isTableLine) {
             $tableBuf += $line
@@ -109,16 +140,20 @@ function Write-AgentReply {
             $tableBuf = @()
         }
         $trimmedStart = $line.TrimStart()
-        if ($trimmedStart.StartsWith('```')) {
-            if (-not $inCode) {
-                $lang = $trimmedStart.Substring(3).Trim()
-                $label = if ($lang) { " $lang " } else { ' code ' }
-                Write-Host ($barV + $script:Gm.Grey0 + $script:Box.TL + $script:Box.H + $script:Gm.Aqua + $label + $script:Gm.Grey0 + ($script:Box.H * 24) + $script:Gm.Reset)
-            }
-            else {
-                Write-Host ($barV + $script:Gm.Grey0 + $script:Box.BL + ($script:Box.H * 30) + $script:Gm.Reset)
-            }
-            $inCode = -not $inCode
+        if (-not $inCode -and $trimmedStart -match '^(`{3,}|~{3,})(.*)$') {
+            $fenceSeq = $Matches[1]
+            $codeFenceChar = [string]$fenceSeq[0]
+            $codeFenceLen = $fenceSeq.Length
+            $lang = $Matches[2].Trim()
+            $label = if ($lang) { " $lang " } else { ' code ' }
+            Write-Host ($barV + $script:Gm.Grey0 + $script:Box.TL + $script:Box.H + $script:Gm.Aqua + $label + $script:Gm.Grey0 + ($script:Box.H * 24) + $script:Gm.Reset)
+            $inCode = $true
+        }
+        elseif ($inCode -and $trimmedStart -match ('^' + ($codeFenceChar * $codeFenceLen) + $codeFenceChar + '*\s*$')) {
+            Write-Host ($barV + $script:Gm.Grey0 + $script:Box.BL + ($script:Box.H * 30) + $script:Gm.Reset)
+            $inCode = $false
+            $codeFenceChar = ''
+            $codeFenceLen = 0
         }
         elseif ($inCode) {
             Write-Host ($barV + $script:Gm.Grey0 + $script:Box.V + $script:Gm.Bg1 + $script:Gm.Yellow + '  ' + $line + '  ' + $script:Gm.Reset)
@@ -150,6 +185,9 @@ function Write-AgentReply {
         foreach ($tLine in @(Format-MarkdownTable -Lines $tableBuf -Indent '')) {
             Write-Host ($barV + $tLine)
         }
+    }
+    if ($inCode) {
+        Write-Host ($barV + $script:Gm.Grey0 + $script:Box.BL + ($script:Box.H * 30) + $script:Gm.Reset)
     }
     Write-Host ('  ' + $script:Gm.Grey0 + $script:Box.BL + ($script:Box.H * 16) + $script:Gm.Reset)
 }
