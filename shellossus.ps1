@@ -159,6 +159,15 @@ function Test-IsSecretFile {
     return ($Item.Name -eq '.env' -or ($Item.Name -like '.env.*' -and $Item.Name -ne '.env.example') -or $Item.FullName -eq $script:AgentConfigPath -or ($script:LegacyAgentConfigPath -and $Item.FullName -eq $script:LegacyAgentConfigPath))
 }
 
+function Test-AgentPathWithinRoot {
+    param([string]$RootPath, [string]$TargetPath)
+    $prefix = if ($env:OS -eq 'Windows_NT') { $RootPath.TrimEnd('\').TrimEnd('/') } else { $RootPath.TrimEnd('/') }
+    if ($TargetPath -ceq $RootPath) { return $true }
+    if ($TargetPath.StartsWith($prefix + '/', [StringComparison]::Ordinal)) { return $true }
+    if ($env:OS -eq 'Windows_NT' -and $TargetPath.StartsWith($prefix + '\', [StringComparison]::Ordinal)) { return $true }
+    return $false
+}
+
 function Get-WorkspaceRelativePath {
     param([string]$Root, [string]$FullPath)
     $rootNorm = (Get-Item -LiteralPath $Root -Force).FullName.TrimEnd('\').TrimEnd('/')
@@ -209,10 +218,7 @@ function Resolve-AgentPath {
     if (Test-IsSecretFile $item) {
         throw 'Agent tools cannot access credential configuration files.'
     }
-    $prefix = $rootItem.FullName.TrimEnd('\').TrimEnd('/')
-    if (($item.FullName -ne $rootItem.FullName) -and
-        (-not $item.FullName.StartsWith($prefix + '\', [StringComparison]::OrdinalIgnoreCase)) -and
-        (-not $item.FullName.StartsWith($prefix + '/', [StringComparison]::OrdinalIgnoreCase))) {
+    if (-not (Test-AgentPathWithinRoot -RootPath $rootItem.FullName -TargetPath $item.FullName)) {
         throw 'Path is outside the workspace.'
     }
     # Reject junctions/symlinks, including those in workspace ancestors.
@@ -2783,6 +2789,7 @@ function Invoke-AgentWrite {
         $allowOverwrite = ($Arguments.overwrite -eq $true)
         if (Test-Path -LiteralPath $path) {
             if (-not $allowOverwrite) { throw 'File already exists. Use edit_file or set overwrite=true.' }
+            $path = Resolve-AgentPath -Root $Root -RelativePath $Arguments.path
             $existingItem = Get-Item -LiteralPath $path -Force
             if ($existingItem.PSIsContainer -or $existingItem.Length -gt 1MB) { throw 'Expected a text file up to 1 MiB.' }
             $before = Get-Content -LiteralPath $path -Raw -Encoding UTF8 -ErrorAction Stop
@@ -2912,6 +2919,7 @@ function Invoke-AgentWrite {
             }
             $script:CurrentTurnWrites += @{
                 action = 'modified'
+                root = $Root
                 full_path = $path
                 rel_path = $Arguments.path
                 backup = $backupPath
@@ -2926,6 +2934,7 @@ function Invoke-AgentWrite {
             if (Test-Path -LiteralPath $path) { throw 'File was created during confirmation. No write performed.' }
             $script:CurrentTurnWrites += @{
                 action = 'created'
+                root = $Root
                 full_path = $path
                 rel_path = $Arguments.path
                 after_content = $after
@@ -3239,6 +3248,17 @@ function Invoke-AgentCommand {
 # --- src/tools/Undo.ps1 ---
 # Disk undo and multi-step turn rollback.
 
+function Assert-AgentUndoPath {
+    param($Write)
+    if (-not $Write.root -or -not $Write.full_path) { throw 'Undo entry has no workspace path.' }
+    $parent = Split-Path -Path $Write.full_path -Parent
+    $null = Resolve-AgentPath -Root $Write.root -RelativePath $parent
+    $target = Get-Item -LiteralPath $Write.full_path -Force -ErrorAction SilentlyContinue
+    if ($null -ne $target) {
+        $null = Resolve-AgentPath -Root $Write.root -RelativePath $Write.full_path
+    }
+}
+
 function Invoke-AgentUndo {
     param($State, $UndoEntry)
     if (-not $UndoEntry) { return }
@@ -3248,6 +3268,13 @@ function Invoke-AgentUndo {
     for ($i = $writes.Count - 1; $i -ge 0; $i--) {
         $w = $writes[$i]
         if (-not $w -or $w.undone) { continue }
+        try {
+            Assert-AgentUndoPath -Write $w
+        }
+        catch {
+            $preflightErrors += "Unsafe undo path for $($w.rel_path): $($_.Exception.Message)"
+            continue
+        }
         $fullKey = [string]$w.full_path
         $isLatestForPath = (-not $expectedByPath.ContainsKey($fullKey))
         if ($w.action -eq 'modified') {
@@ -3328,6 +3355,7 @@ function Invoke-AgentUndo {
         $w = $writes[$i]
         if (-not $w -or $w.undone) { continue }
         try {
+            Assert-AgentUndoPath -Write $w
             if ($w.action -eq 'modified') {
                 $expectedOrig = [string]$w.before_content
                 $backupNow = Get-Content -LiteralPath $w.backup -Raw -Encoding UTF8 -ErrorAction Stop

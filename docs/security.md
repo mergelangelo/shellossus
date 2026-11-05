@@ -24,7 +24,7 @@ The table describes the model's `write_file`, `edit_file`, and `run_command` too
 ## Workspace Isolation & Path Safety
 
 1. **Workspace Boundary Enforcement:**
-   - `list_files`, `read_file`, `find_files`, `grep_files`, `write_file`, `edit_file`, and `@file` attachments use workspace path validation. Paths resolving outside the workspace directory are rejected (`Path is outside the workspace.`).
+   - `list_files`, `read_file`, `find_files`, `grep_files`, `write_file`, `edit_file`, and `@file` attachments use workspace path validation. Paths resolving outside the workspace directory are rejected (`Path is outside the workspace.`). Boundary checks use case-sensitive path comparison on all platforms; absolute paths with different capitalization from the workspace may therefore be rejected even on case-insensitive filesystems.
    - The read-only exception for these file tools is `read_file` access to global `SKILL.md` files explicitly registered by `Get-SkillsCatalog` from the global configuration directory (normally `%USERPROFILE%\.shellossus\skills`).
    - Shell commands start with the workspace as their working directory, but retain the user's OS permissions. They can change directory, read/write other paths (including configuration files), invoke programs, and use the network. Permission prompts approve execution; they do not sandbox it.
    - `memory` is a separate fixed-path tool: workspace scope uses an existing root `MEMORY.md`, otherwise `.shellossus/MEMORY.md`; global scope uses `MEMORY.md` beside the active configuration file. It does not use `Resolve-AgentPath`. It checks the final file for reparse points but does not enforce the file tools' ancestor checks.
@@ -44,6 +44,7 @@ The table describes the model's `write_file`, `edit_file`, and `run_command` too
 - **Conflict-Aware `/undo`:**
   - `write_file` and `edit_file` record created/modified paths and their content. Modified files also have verified pre-edit backups. In-process subagent file edits join the parent's recorded turn.
   - Before changing any file, undo verifies every pending backup against its recorded `before_content`, including intermediate backups from repeated edits to the same file. Missing, unreadable, or corrupted backups stop the entire preflight; files, backups, and conversation state are preserved for a retry.
+  - Undo checks each recorded target and its parent path for workspace boundaries and reparse points during preflight and again before each restoration or deletion. As with the file tools, these application-level checks do not eliminate filesystem races.
   - When `/undo` is invoked, `Invoke-AgentUndo` checks whether the file on disk was modified manually after the agent's write. If manual edits are detected, `/undo` refuses to overwrite the file and preserves the backup path.
   - Backup files are only deleted after restoration succeeds and the restored content is verified against the recorded original content.
 
