@@ -73,14 +73,20 @@ try {
     }
     catch { Write-Warning 'Symbolic link creation unavailable; undo-link security check skipped.' }
     if ($dirLinkAvailable) {
-        $undoRejected = $false
-        try { Invoke-AgentUndo -State @{ messages = @() } -UndoEntry $undoSecurityEntry }
-        catch { $undoRejected = $_.Exception.Message -like '*Unsafe undo path*' }
-        Assert-True $undoRejected 'Undo accepted a substituted parent symlink.'
-        Assert-True ((Get-Content -LiteralPath (Join-Path $outsideDir 'target.txt') -Raw -Encoding UTF8) -ceq 'after') 'Undo modified an external file.'
-        Assert-True (Test-Path -LiteralPath (Join-Path $workspacePath 'undo-safe.txt')) 'Undo preflight modified a different file.'
-        Assert-True (Test-Path -LiteralPath $undoSecurityEntry.writes[1].backup) 'Undo discarded the backup after rejecting a symlink.'
-        Remove-Item -LiteralPath $undoDir -Force
+        try {
+            $undoRejected = $false
+            try { Invoke-AgentUndo -State @{ messages = @() } -UndoEntry $undoSecurityEntry }
+            catch { $undoRejected = $_.Exception.Message -like '*Unsafe undo path*' }
+            Assert-True $undoRejected 'Undo accepted a substituted parent symlink.'
+            Assert-True ((Get-Content -LiteralPath (Join-Path $outsideDir 'target.txt') -Raw -Encoding UTF8) -ceq 'after') 'Undo modified an external file.'
+            Assert-True (Test-Path -LiteralPath (Join-Path $workspacePath 'undo-safe.txt')) 'Undo preflight modified a different file.'
+            Assert-True (Test-Path -LiteralPath $undoSecurityEntry.writes[1].backup) 'Undo discarded the backup after rejecting a symlink.'
+        }
+        finally {
+            if (Test-Path -LiteralPath $undoDir) {
+                (Get-Item -LiteralPath $undoDir -Force).Delete()
+            }
+        }
     }
     Move-Item -LiteralPath $savedUndoDir -Destination $undoDir -ErrorAction Stop
     Invoke-AgentUndo -State @{ messages = @() } -UndoEntry $undoSecurityEntry
