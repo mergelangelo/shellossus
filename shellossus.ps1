@@ -261,14 +261,9 @@ function Test-AgentPathWithinRoot {
     $isWin = ($env:OS -eq 'Windows_NT')
     $prefix = if ($isWin) { $RootPath.TrimEnd('\').TrimEnd('/') } else { $RootPath.TrimEnd('/') }
     $targetNorm = if ($isWin) { $TargetPath.TrimEnd('\').TrimEnd('/') } else { $TargetPath.TrimEnd('/') }
-    if ($isWin) {
-        if ($targetNorm -ieq $prefix) { return $true }
-        if ($TargetPath.StartsWith($prefix + '/', [StringComparison]::OrdinalIgnoreCase)) { return $true }
-        if ($TargetPath.StartsWith($prefix + '\', [StringComparison]::OrdinalIgnoreCase)) { return $true }
-        return $false
-    }
     if ($targetNorm -ceq $prefix) { return $true }
     if ($TargetPath.StartsWith($prefix + '/', [StringComparison]::Ordinal)) { return $true }
+    if ($isWin -and $TargetPath.StartsWith($prefix + '\', [StringComparison]::Ordinal)) { return $true }
     return $false
 }
 
@@ -6657,11 +6652,10 @@ function Get-ScopedAgentInstructions {
     }
     $current = Resolve-AgentPath -Root $rootPath -RelativePath $(if ($currRel) { $currRel } else { '.' })
     $dirs = @()
-    $isWin = ($env:OS -eq 'Windows_NT')
-    while ($(if ($isWin) { $current -ine $rootPath } else { $current -cne $rootPath })) {
+    while ($current -cne $rootPath) {
         $dirs = @($current) + $dirs
         $next = Split-Path -Path $current -Parent
-        if (-not $next -or $(if ($isWin) { $next -ieq $current } else { $next -ceq $current })) { throw 'Could not locate workspace instruction ancestors.' }
+        if (-not $next -or $next -ceq $current) { throw 'Could not locate workspace instruction ancestors.' }
         $current = $next
     }
     $parts = @()
