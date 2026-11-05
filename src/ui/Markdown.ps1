@@ -178,75 +178,70 @@ function Get-TuiMascotLines {
     param([string]$Mode = 'compact')
     $topChar = [string][char]0x2580
     $botChar = [string][char]0x2584
-    $fullChar = [string][char]0x2588
-    $cBodyFg = "$script:Esc[38;2;168;153;132m"
-    $cEyeFg  = "$script:Esc[1;38;2;250;189;47m"
-    $cBodyBg = "$script:Esc[48;2;168;153;132m"
-    $cEyeBg  = "$script:Esc[48;2;250;189;47m"
-    $rst     = $script:Gm.Reset
-
+    $rst = $script:Gm.Reset
+    # Variant 4: symmetric 8x8 shell, light eyes and muted cheeks.
     $sprite = @(
-        '    ###       ',
-        '  #######     ',
-        ' #########    ',
-        ' ##E#E####    ',
-        '###########   ',
-        ' ############ ',
-        '  ##########  ',
-        '##  ## #   ###',
-        '    ##     #  ',
-        '              '
+        '..ssss..',
+        '.ssssss.',
+        'ssssssss',
+        's#ssss#s',
+        's#p##p#s',
+        'sq####qs',
+        'ss#ss#ss',
+        'ssssssss'
     )
+    $fg = @{
+        's' = "$script:Esc[38;2;110;91;75m"
+        '#' = "$script:Esc[38;2;18;18;18m"
+        'p' = "$script:Esc[38;2;247;211;138m"
+        'q' = "$script:Esc[38;2;158;111;105m"
+    }
+    $bg = @{
+        's' = "$script:Esc[48;2;110;91;75m"
+        '#' = "$script:Esc[48;2;18;18;18m"
+        'p' = "$script:Esc[48;2;247;211;138m"
+        'q' = "$script:Esc[48;2;158;111;105m"
+    }
 
     if ($Mode -eq 'full') {
         $lines = @()
-        for ($y = 0; $y -lt 9; $y++) {
-            $row = $sprite[$y]
-            $sb = ''
-            for ($x = 0; $x -lt $row.Length; $x++) {
-                $ch = $row[$x]
-                if ($ch -eq '#') {
-                    $sb += ($cBodyFg + $cBodyBg + $fullChar + $fullChar)
-                }
-                elseif ($ch -eq 'E') {
-                    $sb += ($cEyeFg + $cEyeBg + $fullChar + $fullChar)
-                }
-                else {
-                    $sb += ($rst + '  ')
-                }
+        foreach ($row in $sprite) {
+            $line = ''
+            foreach ($pixel in [char[]]$row) {
+                if ($pixel -eq '.') { $line += ($rst + '  ') }
+                else { $line += ($bg[[string]$pixel] + '  ') }
             }
-            $lines += ($sb + $rst)
+            $lines += ($line + $rst)
         }
         return $lines
     }
 
+    # Two pixel rows per terminal row. Transparent cells use the active theme's
+    # terminal background; padding preserves the existing startup card width.
     $lines = @()
-    for ($y = 0; $y -lt 10; $y += 2) {
+    for ($y = 0; $y -lt 8; $y += 2) {
         $rTop = $sprite[$y]
         $rBot = $sprite[$y + 1]
-        $sb = ''
-        for ($x = 0; $x -lt 14; $x++) {
-            $t = $rTop[$x]
-            $b = $rBot[$x]
-            if ($t -eq ' ' -and $b -eq ' ') {
-                $sb += ($rst + ' ')
+        $line = '   '
+        for ($x = 0; $x -lt 8; $x++) {
+            $top = [string]$rTop[$x]
+            $bottom = [string]$rBot[$x]
+            if ($top -eq '.' -and $bottom -eq '.') {
+                $line += ($rst + ' ')
             }
-            elseif ($t -ne ' ' -and $b -eq ' ') {
-                $fg = if ($t -eq 'E') { $cEyeFg } else { $cBodyFg }
-                $sb += ($rst + $fg + $topChar)
+            elseif ($top -ne '.' -and $bottom -eq '.') {
+                $line += ($rst + $fg[$top] + $topChar)
             }
-            elseif ($t -eq ' ' -and $b -ne ' ') {
-                $fg = if ($b -eq 'E') { $cEyeFg } else { $cBodyFg }
-                $sb += ($rst + $fg + $botChar)
+            elseif ($top -eq '.' -and $bottom -ne '.') {
+                $line += ($rst + $fg[$bottom] + $botChar)
             }
             else {
-                $fg = if ($t -eq 'E') { $cEyeFg } else { $cBodyFg }
-                $bg = if ($b -eq 'E') { $cEyeBg } else { $cBodyBg }
-                $sb += ($bg + $fg + $topChar)
+                $line += ($bg[$bottom] + $fg[$top] + $topChar)
             }
         }
-        $lines += ($sb + $rst)
+        $lines += ($line + $rst + '   ')
     }
+    $lines += (' ' * 14)
     return $lines
 }
 

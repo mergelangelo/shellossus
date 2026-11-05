@@ -68,6 +68,7 @@ Common launch flags:
 shellossus -Continue                        # Resume latest session for current workspace
 shellossus -Permission AutoEdit             # Edit files without prompting; ask before shell commands
 shellossus -Prompt "Explain @src/tools/Files.ps1" # Single-shot non-interactive mode
+shellossus -Mascot                          # Display the 8x8 mascot without starting a chat
 ```
 
 ## Interactive Commands
@@ -77,6 +78,7 @@ shellossus -Prompt "Explain @src/tools/Files.ps1" # Single-shot non-interactive 
 | `/help` | List available interactive commands |
 | `/status` | Show active model, permission mode, token estimate, and session path |
 | `/doctor` | Check the current runtime, settings, endpoint/model catalog, and session storage |
+| `/mascot` | Display the 8×8 mascot |
 | `/permission <mode>` | Switch mode: `ReadOnly`, `Ask`, `AutoEdit`, `Auto` |
 | `/diagnostics [on\|off]` | Show or toggle pre-request capability and tool diagnostics |
 | `/reasoning <opt>` | Display: `compact`, `full`, `hide`; Effort: `low`, `medium`, `high`, `default` |
