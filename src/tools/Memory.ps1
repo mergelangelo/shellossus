@@ -11,7 +11,15 @@ function Invoke-AgentMemory {
         throw 'Permission mode ReadOnly does not allow memory modifications.'
     }
 
-    $configDir = if ($script:AgentConfigPath) { Split-Path $script:AgentConfigPath -Parent } else { Join-Path (if ($env:USERPROFILE) { $env:USERPROFILE } else { $HOME }) '.shellossus' }
+    $configDir = if ($Arguments.config_dir) {
+        [string]$Arguments.config_dir
+    }
+    elseif ($script:AgentConfigPath) {
+        Split-Path $script:AgentConfigPath -Parent
+    }
+    else {
+        Join-Path (if ($env:USERPROFILE) { $env:USERPROFILE } else { $HOME }) '.shellossus'
+    }
 
     $targetPath = $null
     $displayRel = $null

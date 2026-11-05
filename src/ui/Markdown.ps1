@@ -250,15 +250,12 @@ function Write-TuiMascotCard {
     if ($script:OutputMode -eq 'json') { return }
     $w = Get-TerminalWidth
     $hdr = ' ' + $script:Gm.BoldGreen + $script:Box.Dot + ' Shellossus Mascot ' + $script:Gm.Reset + ' '
-    $hdrVis = (Strip-AnsiCodes -Text $hdr).Length
-    $dashes = $w - 5 - $hdrVis
-    if ($dashes -lt 2) { $dashes = 2 }
-    $barV = '  ' + $script:Gm.Grey0 + $script:Box.V + ' ' + $script:Gm.Reset
-    Write-Host ('  ' + $script:Gm.Grey0 + $script:Box.TL + $script:Box.H + $script:Gm.Reset + $hdr + $script:Gm.Grey0 + ($script:Box.H * $dashes) + $script:Box.TR + $script:Gm.Reset)
-    $lines = @(Get-TuiMascotLines -Mode $Mode)
-    foreach ($line in $lines) {
-        Write-Host ($barV + '  ' + $line)
+    $body = @()
+    foreach ($line in @(Get-TuiMascotLines -Mode $Mode)) {
+        $body += ('  ' + $line)
     }
-    Write-Host ($barV + '  ' + $script:Gm.BoldYellow + 'The Armored Colossus' + $script:Gm.Reset)
-    Write-Host ('  ' + $script:Gm.Grey0 + $script:Box.BL + ($script:Box.H * ($w - 4)) + $script:Box.BR + $script:Gm.Reset)
+    $body += ('  ' + $script:Gm.BoldYellow + 'The Armored Colossus' + $script:Gm.Reset)
+    foreach ($ln in @(Format-TuiCardBox -Header $hdr -BodyLines $body -Width $w)) {
+        Write-Host $ln
+    }
 }

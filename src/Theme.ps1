@@ -354,6 +354,46 @@ function Get-TerminalWidth {
     return 90
 }
 
+function Format-TuiCardBox {
+    param(
+        [string]$Header,
+        $BodyLines = @(),
+        [string]$Indent = '  ',
+        [int]$Width = 0
+    )
+    $w = if ($Width -ge 50) { $Width } else { Get-TerminalWidth }
+    $indLen = $Indent.Length
+    $hdrVis = (Strip-AnsiCodes -Text $Header).Length
+    $boxW = $w
+    if (($indLen + 5 + $hdrVis) -gt $boxW) {
+        $boxW = $indLen + 5 + $hdrVis
+    }
+    $rowMeta = @()
+    if ($null -ne $BodyLines) {
+        foreach ($ln in @($BodyLines)) {
+            $s = if ($null -ne $ln) { [string]$ln } else { '' }
+            $vLen = (Strip-AnsiCodes -Text $s).Length
+            if (($indLen + 4 + $vLen) -gt $boxW) {
+                $boxW = $indLen + 4 + $vLen
+            }
+            $rowMeta += @{ text = $s; vis = $vLen }
+        }
+    }
+    $dashes = $boxW - $indLen - 3 - $hdrVis
+    if ($dashes -lt 2) { $dashes = 2 }
+    $innerW = $boxW - $indLen - 4
+    $out = @(
+        ($Indent + $script:Gm.Grey0 + $script:Box.TL + $script:Box.H + $script:Gm.Reset + $Header + $script:Gm.Grey0 + ($script:Box.H * $dashes) + $script:Box.TR + $script:Gm.Reset)
+    )
+    foreach ($rm in $rowMeta) {
+        $padLen = $innerW - $rm.vis
+        $pad = if ($padLen -gt 0) { ' ' * $padLen } else { '' }
+        $out += ($Indent + $script:Gm.Grey0 + $script:Box.V + $script:Gm.Reset + ' ' + $rm.text + $pad + ' ' + $script:Gm.Grey0 + $script:Box.V + $script:Gm.Reset)
+    }
+    $out += ($Indent + $script:Gm.Grey0 + $script:Box.BL + ($script:Box.H * ($boxW - $indLen - 2)) + $script:Box.BR + $script:Gm.Reset)
+    return $out
+}
+
 function Format-TokenCount {
     param([int]$Tokens)
     if ($Tokens -lt 1000) { return [string]$Tokens }

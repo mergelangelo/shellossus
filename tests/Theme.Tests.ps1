@@ -65,6 +65,16 @@ try {
     $plainDiff = ($diffCard | ForEach-Object { Strip-AnsiCodes -Text $_ }) -join "`n"
     Assert-True ($plainDiff.Contains('src/App.ps1') -and $plainDiff.Contains('+1 -2') -and $plainDiff.Contains('- old_a') -and $plainDiff.Contains('+ new_a')) "Format-UnifiedDiff output unexpected: $plainDiff"
 
+    # Regression (Item 9): Format-UnifiedDiff splits distant batch edits into separate hunks instead of collapsing the unchanged middle.
+    $batchBeforeLines = @(1..20 | ForEach-Object { ('line{0:D2}' -f $_) })
+    $batchAfterLines = @($batchBeforeLines)
+    $batchAfterLines[1] = 'line02_updated'
+    $batchAfterLines[18] = 'line19_updated'
+    $batchDiffCard = @(Format-UnifiedDiff -Path 'src/Batch.ps1' -ToolName 'edit_file' -Before ($batchBeforeLines -join "`n") -After ($batchAfterLines -join "`n") -ContextLines 2)
+    $plainBatchDiff = ($batchDiffCard | ForEach-Object { Strip-AnsiCodes -Text $_ }) -join "`n"
+    $hunkMatches = [regex]::Matches($plainBatchDiff, '@@ -')
+    Assert-True ($plainBatchDiff.Contains('+2 -2') -and $plainBatchDiff.Contains('- line02') -and $plainBatchDiff.Contains('+ line02_updated') -and $plainBatchDiff.Contains('- line19') -and $plainBatchDiff.Contains('+ line19_updated') -and (-not $plainBatchDiff.Contains('line10')) -and ($hunkMatches.Count -eq 2)) "Format-UnifiedDiff failed to separate distant edits into hunks: $plainBatchDiff"
+
     $cardLines = @(Format-ToolCallCard -Name 'read_file' -Target 'src/Theme.ps1' -Detail 'lines 1-50' -Status 'ok' -Summary '50 lines (1.8k chars)' -ElapsedMs 12)
     $plainCard = ($cardLines | ForEach-Object { Strip-AnsiCodes -Text $_ }) -join "`n"
     Assert-True ($plainCard.Contains('read_file') -and $plainCard.Contains('src/Theme.ps1') -and $plainCard.Contains('50 lines') -and $plainCard.Contains('12ms')) "Format-ToolCallCard output unexpected: $plainCard"
@@ -108,6 +118,33 @@ try {
     $plainMem = ($memCard | ForEach-Object { Strip-AnsiCodes -Text $_ }) -join "`n"
     Assert-True ($plainMem.Contains('MEMORY (WORKSPACE)') -and $plainMem.Contains('+ Invariant note')) 'Format-MemoryCard failed.'
     Assert-True ($memCard[0].Contains($script:Gm.BoldPurple)) 'Format-MemoryCard header missing BoldPurple color sequence.'
+
+    # Regression (Item 10): All TUI boxed cards have aligned right walls on every line.
+    Ensure-SessionTree -State $statusState
+    $statusCardAligned = @(Format-TuiStatusCard -State $statusState -Model 'glm-5' -MaxSteps 50 -SessionFile 'test.jsonl' -UndoCount 2)
+    $treeCardAligned = @(Format-TuiTreeCard -State $statusState)
+    $helpCardAligned = @(Format-TuiHelpCard)
+    foreach ($cardEntry in @(
+        @{ name = 'Format-TodoCard'; lines = $todoCard },
+        @{ name = 'Format-PlanReviewCard'; lines = $planCard },
+        @{ name = 'Format-MemoryCard'; lines = $memCard },
+        @{ name = 'Format-UnifiedDiff'; lines = $batchDiffCard },
+        @{ name = 'Format-TuiStatusCard'; lines = $statusCardAligned },
+        @{ name = 'Format-TuiTreeCard'; lines = $treeCardAligned },
+        @{ name = 'Format-TuiHelpCard'; lines = $helpCardAligned }
+    )) {
+        $cLines = @($cardEntry.lines)
+        Assert-True ($cLines.Count -ge 3) "$($cardEntry.name) should have at least 3 lines."
+        $firstPlain = Strip-AnsiCodes -Text $cLines[0]
+        $expectedW = $firstPlain.Length
+        Assert-True ($firstPlain.EndsWith($script:Box.TR)) "$($cardEntry.name) top border does not end with TR corner."
+        $lastPlain = Strip-AnsiCodes -Text $cLines[$cLines.Count - 1]
+        Assert-True ($lastPlain.Length -eq $expectedW -and $lastPlain.EndsWith($script:Box.BR)) "$($cardEntry.name) bottom border misaligned."
+        for ($rIdx = 1; $rIdx -lt ($cLines.Count - 1); $rIdx++) {
+            $rowPlain = Strip-AnsiCodes -Text $cLines[$rIdx]
+            Assert-True ($rowPlain.Length -eq $expectedW -and $rowPlain.EndsWith($script:Box.V)) "$($cardEntry.name) row $rIdx right border misaligned (len=$($rowPlain.Length), expected=$expectedW): $rowPlain"
+        }
+    }
 
     # Read-TuiConfirmation tests via mock Read-Host
     $script:mlQueue = @('y')

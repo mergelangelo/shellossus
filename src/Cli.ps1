@@ -275,22 +275,7 @@ if (-not $LibraryOnly) {
             }
             if ($trimmedQ -match '^/(?:memory|mem)(?:\s+(.+))?$') {
                 $memSub = if ($Matches[1]) { $Matches[1].Trim() } else { '' }
-                if ($memSub -eq 'clear') {
-                    $callArg = @{ action = 'clear'; scope = 'workspace' }
-                    $null = Invoke-AgentMemory -Root $rootPath -Arguments $callArg
-                    Sync-AgentMemoryContext -State $state -Root $rootPath -ConfigDir $configDir | Out-Null
-                    Write-Host ($script:Gm.Grey1 + '  Cleared workspace memory.' + $script:Gm.Reset)
-                }
-                elseif ($memSub -match '^add\s+(.+)$') {
-                    $callArg = @{ action = 'append'; scope = 'workspace'; content = $Matches[1].Trim() }
-                    $null = Invoke-AgentMemory -Root $rootPath -Arguments $callArg
-                    Sync-AgentMemoryContext -State $state -Root $rootPath -ConfigDir $configDir | Out-Null
-                    Write-Host ($script:Gm.Green + '  Added memory entry.' + $script:Gm.Reset)
-                }
-                else {
-                    $callArg = @{ action = 'view'; scope = 'workspace' }
-                    $null = Invoke-AgentMemory -Root $rootPath -Arguments $callArg
-                }
+                Invoke-ReplMemoryCommand -State $state -RootPath $rootPath -ConfigDir $configDir -MemArg $memSub
                 continue
             }
             if ($trimmedQ -eq '/help' -or $trimmedQ -eq '/hotkeys') {
