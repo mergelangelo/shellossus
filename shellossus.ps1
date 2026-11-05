@@ -3136,20 +3136,48 @@ function Compress-IgnoreRules {
     return $segments
 }
 
+$script:IgnoreRulesCache = @{}
+
 function Read-DirectoryIgnoreRules {
     param([string]$RootFull, [string]$DirFull)
-    $relDir = Get-WorkspaceRelativePath -Root $RootFull -FullPath $DirFull
-    $dirPrefix = if ($DirFull -ieq $RootFull -or -not $relDir -or $relDir -eq '.') { '' } else { $relDir.Replace('\', '/').Trim('/') + '/' }
-    $localRules = @(foreach ($igName in @('.gitignore', '.ignore', '.fdignore')) {
+    if ($null -eq $script:IgnoreRulesCache) { $script:IgnoreRulesCache = @{} }
+    $cacheKey = "$RootFull|$DirFull"
+    $igCandidates = @()
+    $fpParts = @()
+    foreach ($igName in @('.gitignore', '.ignore', '.fdignore')) {
         $igFile = Join-Path $DirFull $igName
         if (-not (Test-Path -LiteralPath $igFile)) { continue }
         $igItem = Get-Item -LiteralPath $igFile -Force -ErrorAction SilentlyContinue
         if (-not $igItem -or $igItem.PSIsContainer -or (($igItem.Attributes -band 1024) -ne 0) -or $igItem.Length -gt 256KB) { continue }
-        foreach ($line in @(Get-Content -LiteralPath $igFile -Encoding UTF8 -ErrorAction SilentlyContinue)) {
+        $ticks = try { $igItem.LastWriteTimeUtc.Ticks } catch { 0 }
+        $fpParts += "${igName}:$($igItem.Length):$ticks"
+        $igCandidates += $igItem.FullName
+    }
+    if ($igCandidates.Count -eq 0) {
+        if ($script:IgnoreRulesCache.ContainsKey($cacheKey)) {
+            $script:IgnoreRulesCache.Remove($cacheKey)
+        }
+        return @()
+    }
+    $fingerprint = $fpParts -join '|'
+    if ($script:IgnoreRulesCache.ContainsKey($cacheKey)) {
+        $cached = $script:IgnoreRulesCache[$cacheKey]
+        if ($cached.fingerprint -ceq $fingerprint) {
+            return @($cached.rules)
+        }
+    }
+    $relDir = Get-WorkspaceRelativePath -Root $RootFull -FullPath $DirFull
+    $dirPrefix = if ($DirFull -ieq $RootFull -or -not $relDir -or $relDir -eq '.') { '' } else { $relDir.Replace('\', '/').Trim('/') + '/' }
+    $localRules = @(foreach ($candPath in $igCandidates) {
+        foreach ($line in @(Get-Content -LiteralPath $candPath -Encoding UTF8 -ErrorAction SilentlyContinue)) {
             $r = Convert-IgnorePatternToRule -Line ([string]$line) -DirPrefix $dirPrefix
             if ($null -ne $r) { $r }
         }
     })
+    $script:IgnoreRulesCache[$cacheKey] = @{
+        fingerprint = $fingerprint
+        rules = $localRules
+    }
     return $localRules
 }
 
@@ -3811,8 +3839,26 @@ function Invoke-AgentReadFile {
         $maxLines = [int]$Arguments.limit
         if ($maxLines -lt 1 -or $maxLines -gt 300) { throw 'limit must be between 1 and 300.' }
     }
-    $allLines = @(Get-Content -LiteralPath $Path -Encoding UTF8 -ErrorAction Stop)
-    $totalLines = $allLines.Count
+    $reqStartIdx = $startLine - 1
+    $reqEndIdx = $reqStartIdx + $maxLines - 1
+    $windowLines = @()
+    $totalLines = 0
+    Get-Content -LiteralPath $Path -ReadCount 500 -Encoding UTF8 -ErrorAction Stop | ForEach-Object {
+        $batch = @($_)
+        $batchCount = $batch.Count
+        if ($batchCount -gt 0) {
+            $batchStart = $totalLines
+            $batchEnd = $totalLines + $batchCount - 1
+            if ($batchEnd -ge $reqStartIdx -and $batchStart -le $reqEndIdx) {
+                $sliceFrom = if ($reqStartIdx -gt $batchStart) { $reqStartIdx - $batchStart } else { 0 }
+                $sliceTo = if ($reqEndIdx -lt $batchEnd) { $reqEndIdx - $batchStart } else { $batchCount - 1 }
+                for ($k = $sliceFrom; $k -le $sliceTo; $k++) {
+                    $windowLines += [string]$batch[$k]
+                }
+            }
+            $totalLines += $batchCount
+        }
+    }
     $charBudget = 20000
     if ($totalLines -eq 0 -or $startLine -gt $totalLines) {
         $elapsedMs = [int](((Get-Date) - $ToolStart).TotalMilliseconds)
@@ -3829,16 +3875,15 @@ function Invoke-AgentReadFile {
             notice = $null
         } | ConvertTo-Json -Compress)
     }
-    $limitIdx = $startLine - 1 + $maxLines - 1
-    if ($limitIdx -ge $totalLines) { $limitIdx = $totalLines - 1 }
     $pageLines = @()
     $currentLen = 0
     $endLine = $startLine - 1
     $truncated = $false
     $nextStartLine = $null
     $nextStartChar = $null
-    for ($i = $startLine - 1; $i -le $limitIdx; $i++) {
-        $lineStr = [string]$allLines[$i]
+    for ($idx = 0; $idx -lt $windowLines.Count; $idx++) {
+        $i = $reqStartIdx + $idx
+        $lineStr = [string]$windowLines[$idx]
         if ($i -eq ($startLine - 1) -and $startChar -gt 1) {
             if ($startChar -gt ($lineStr.Length + 1)) {
                 $lineStr = ''

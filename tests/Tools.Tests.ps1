@@ -1074,6 +1074,36 @@ try {
         $buildErrText = [string]$_.Exception.Message
     }
     Assert-True ($buildThrew -and $buildErrText -like '*Non-ASCII character U+0410*' -and $buildErrText -like '*7-bit ASCII*') "build.ps1 did not fail on non-ASCII source file. Error: $buildErrText"
+
+    # Regression (Item 16): read_file streams files in batches (-ReadCount) and accurately slices across batch boundaries.
+    $batchedFile = Join-Path $workspacePath 'batched1250.txt'
+    $batchedLines = 1..1250 | ForEach-Object { "row-$_" }
+    Set-Content -LiteralPath $batchedFile -Value ($batchedLines -join "`n") -Encoding UTF8 -NoNewline
+    $call = @{ id = 'rf-batch'; function = @{ name = 'read_file'; arguments = '{"path":"batched1250.txt","start_line":498,"max_lines":6}' } }
+    $batchReadRes = Invoke-AgentTool -Root $workspacePath -Call $call | ConvertFrom-Json
+    $batchReturnedLines = @($batchReadRes.text -split "`n")
+    Assert-True ($batchReadRes.total_lines -eq 1250 -and $batchReadRes.start_line -eq 498 -and $batchReadRes.end_line -eq 503 -and $batchReadRes.truncated -and $batchReadRes.next_start_line -eq 504) 'read_file across 500-line batch boundary returned wrong pagination metadata.'
+    Assert-True ($batchReturnedLines.Count -eq 6 -and $batchReturnedLines[0] -eq 'row-498' -and $batchReturnedLines[2] -eq 'row-500' -and $batchReturnedLines[3] -eq 'row-501' -and $batchReturnedLines[5] -eq 'row-503') 'read_file across 500-line batch boundary returned wrong lines.'
+    $fnReadDef = [string](Get-Command -Name 'Invoke-AgentReadFile').Definition
+    Assert-True ($fnReadDef -match '-ReadCount\s+500') 'Invoke-AgentReadFile should stream lines using Get-Content -ReadCount 500.'
+
+    # Regression (Item 17): Read-DirectoryIgnoreRules caches compiled rules by file fingerprint and invalidates on modification/deletion.
+    $cacheIgDir = Join-Path $workspacePath 'igcache-test'
+    New-Item -ItemType Directory -Path $cacheIgDir -Force | Out-Null
+    $cacheIgFile = Join-Path $cacheIgDir '.gitignore'
+    Set-Content -LiteralPath $cacheIgFile -Value '*.cached1' -Encoding UTF8
+    $rulesV1 = @(Read-DirectoryIgnoreRules -RootFull $workspacePath -DirFull $cacheIgDir)
+    Assert-True ($rulesV1.Count -eq 1 -and $rulesV1[0].pattern -eq '*.cached1') 'Read-DirectoryIgnoreRules failed initial read.'
+    Assert-True ($null -ne $script:IgnoreRulesCache -and $script:IgnoreRulesCache.Count -ge 1) 'Read-DirectoryIgnoreRules did not populate $script:IgnoreRulesCache.'
+    $rulesV1Cached = @(Read-DirectoryIgnoreRules -RootFull $workspacePath -DirFull $cacheIgDir)
+    Assert-True ($rulesV1Cached.Count -eq 1 -and $rulesV1Cached[0].regex -ceq $rulesV1[0].regex) 'Read-DirectoryIgnoreRules cache hit returned different rules.'
+    Set-Content -LiteralPath $cacheIgFile -Value @('*.cached1', '*.cached2') -Encoding UTF8
+    $rulesV2 = @(Read-DirectoryIgnoreRules -RootFull $workspacePath -DirFull $cacheIgDir)
+    Assert-True ($rulesV2.Count -eq 2 -and $rulesV2[1].pattern -eq '*.cached2') 'Read-DirectoryIgnoreRules did not invalidate cache when .gitignore changed.'
+    Remove-Item -LiteralPath $cacheIgFile -Force
+    $rulesV3 = @(Read-DirectoryIgnoreRules -RootFull $workspacePath -DirFull $cacheIgDir)
+    Assert-True ($rulesV3.Count -eq 0) 'Read-DirectoryIgnoreRules did not invalidate cache when .gitignore was deleted.'
+    Remove-Item -LiteralPath $cacheIgDir -Recurse -Force
 }
 finally {
     Remove-TestEnvironment -Env $envData

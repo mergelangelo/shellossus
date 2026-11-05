@@ -153,20 +153,48 @@ function Compress-IgnoreRules {
     return $segments
 }
 
+$script:IgnoreRulesCache = @{}
+
 function Read-DirectoryIgnoreRules {
     param([string]$RootFull, [string]$DirFull)
-    $relDir = Get-WorkspaceRelativePath -Root $RootFull -FullPath $DirFull
-    $dirPrefix = if ($DirFull -ieq $RootFull -or -not $relDir -or $relDir -eq '.') { '' } else { $relDir.Replace('\', '/').Trim('/') + '/' }
-    $localRules = @(foreach ($igName in @('.gitignore', '.ignore', '.fdignore')) {
+    if ($null -eq $script:IgnoreRulesCache) { $script:IgnoreRulesCache = @{} }
+    $cacheKey = "$RootFull|$DirFull"
+    $igCandidates = @()
+    $fpParts = @()
+    foreach ($igName in @('.gitignore', '.ignore', '.fdignore')) {
         $igFile = Join-Path $DirFull $igName
         if (-not (Test-Path -LiteralPath $igFile)) { continue }
         $igItem = Get-Item -LiteralPath $igFile -Force -ErrorAction SilentlyContinue
         if (-not $igItem -or $igItem.PSIsContainer -or (($igItem.Attributes -band 1024) -ne 0) -or $igItem.Length -gt 256KB) { continue }
-        foreach ($line in @(Get-Content -LiteralPath $igFile -Encoding UTF8 -ErrorAction SilentlyContinue)) {
+        $ticks = try { $igItem.LastWriteTimeUtc.Ticks } catch { 0 }
+        $fpParts += "${igName}:$($igItem.Length):$ticks"
+        $igCandidates += $igItem.FullName
+    }
+    if ($igCandidates.Count -eq 0) {
+        if ($script:IgnoreRulesCache.ContainsKey($cacheKey)) {
+            $script:IgnoreRulesCache.Remove($cacheKey)
+        }
+        return @()
+    }
+    $fingerprint = $fpParts -join '|'
+    if ($script:IgnoreRulesCache.ContainsKey($cacheKey)) {
+        $cached = $script:IgnoreRulesCache[$cacheKey]
+        if ($cached.fingerprint -ceq $fingerprint) {
+            return @($cached.rules)
+        }
+    }
+    $relDir = Get-WorkspaceRelativePath -Root $RootFull -FullPath $DirFull
+    $dirPrefix = if ($DirFull -ieq $RootFull -or -not $relDir -or $relDir -eq '.') { '' } else { $relDir.Replace('\', '/').Trim('/') + '/' }
+    $localRules = @(foreach ($candPath in $igCandidates) {
+        foreach ($line in @(Get-Content -LiteralPath $candPath -Encoding UTF8 -ErrorAction SilentlyContinue)) {
             $r = Convert-IgnorePatternToRule -Line ([string]$line) -DirPrefix $dirPrefix
             if ($null -ne $r) { $r }
         }
     })
+    $script:IgnoreRulesCache[$cacheKey] = @{
+        fingerprint = $fingerprint
+        rules = $localRules
+    }
     return $localRules
 }
 
