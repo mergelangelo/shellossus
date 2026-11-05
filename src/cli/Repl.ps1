@@ -32,6 +32,9 @@ function Resolve-ReplCommandAlias {
     if ($t -match '^/mem(?:\s+(.+))?$') {
         return $(if ($Matches[1]) { '/memory ' + $Matches[1] } else { '/memory' })
     }
+    if ($t -match '^/th(?:\s+(.+))?$') {
+        return $(if ($Matches[1]) { '/theme ' + $Matches[1] } else { '/theme' })
+    }
     return $t
 }
 
@@ -56,7 +59,7 @@ function Format-TuiStatusCard {
     $lines = @(
         ('  ' + $script:Gm.Grey0 + $script:Box.TL + $script:Box.H + $script:Gm.Reset + $hdr + $script:Gm.Grey0 + ($script:Box.H * $dashes) + $script:Box.TR + $script:Gm.Reset),
         ($barV + $script:Gm.Grey1 + 'Model:       ' + $script:Gm.Fg1 + $Model + $script:Gm.Grey1 + " (reasoning: view=$($script:ShowReasoning), effort=$effLabel)" + $script:Gm.Reset),
-        ($barV + $script:Gm.Grey1 + 'Permission:  ' + (Format-PermissionBadge -Permission $script:AgentPermission) + $script:Gm.Grey1 + " | MaxSteps: $MaxSteps | Undo stack: $UndoCount" + $script:Gm.Reset),
+        ($barV + $script:Gm.Grey1 + 'Permission:  ' + (Format-PermissionBadge -Permission $script:AgentPermission) + $script:Gm.Grey1 + " | Theme: $($script:ActiveTheme) | MaxSteps: $MaxSteps | Undo stack: $UndoCount" + $script:Gm.Reset),
         ($barV + $script:Gm.Grey1 + 'Context:     ' + (Format-ContextGauge -Tokens $st.est_tokens -MaxTokens $st.context_window_tokens -CompactTokens $st.compact_threshold_tokens -Width 12) + $script:Gm.Grey1 + " | Auto-compact: $compLabel | Msgs: $($st.messages)" + $script:Gm.Reset),
         ($barV + $script:Gm.Grey1 + 'API Tokens:  ' + $script:Gm.Aqua + "in=$inTok out=$outTok" + $script:Gm.Grey1 + " (total=$(Format-TokenCount -Tokens ($inTok + $outTok)))" + $script:Gm.Reset),
         ($barV + $script:Gm.Grey1 + 'Session:     ' + $script:Gm.Fg + "$($State.session_id) " + $script:Gm.Grey1 + "| Name: $nmInfo | Leaf: $leafInfo" + $script:Gm.Reset),
@@ -111,6 +114,7 @@ function Write-TuiHelpCard {
     Write-Host ($barV + $script:Gm.BoldYellow + 'Mode & Model (call without args for interactive picker)' + $script:Gm.Reset)
     Write-Host ($barV + $script:Gm.Aqua + '  /permission (/p) [mode]      ' + $script:Gm.Fg + 'Pick or set: ReadOnly | Ask | AutoEdit | Auto' + $script:Gm.Reset)
     Write-Host ($barV + $script:Gm.Aqua + '  /model (/m) [id]             ' + $script:Gm.Fg + 'Pick or switch active model ID' + $script:Gm.Reset)
+    Write-Host ($barV + $script:Gm.Aqua + '  /theme (/th) [name]          ' + $script:Gm.Fg + 'Pick or switch color theme (gruvbox-material, catppuccin-mocha, tokyo-night, dracula, nord, ...)' + $script:Gm.Reset)
     Write-Host ($barV + $script:Gm.Aqua + '  /context (/ctx) [win] [comp] ' + $script:Gm.Fg + 'Pick or set context window & auto-compact threshold (default 128k / 96k)' + $script:Gm.Reset)
     Write-Host ($barV + $script:Gm.Aqua + '  /reasoning [arg]             ' + $script:Gm.Fg + 'Pick view (compact|full|hide) or effort (low|medium|high|off)' + $script:Gm.Reset)
     Write-Host ($barV + $script:Gm.Aqua + '  /status (/s, /tokens)        ' + $script:Gm.Fg + 'Show TUI dashboard (context gauge, tokens, tools, session)' + $script:Gm.Reset)
@@ -382,4 +386,37 @@ function Select-ReplModelId {
         }
     }
     return $NewModel
+}
+
+function Invoke-ReplThemeCommand {
+    param([string]$ThemeArg = '')
+    if (-not $ThemeArg) {
+        $catalog = @(Get-AgentThemesCatalog)
+        $tItems = @()
+        foreach ($th in $catalog) {
+            $tItems += @{
+                label       = "$($th.id) ($($th.label))"
+                value       = $th.id
+                description = $th.description
+                active      = ($th.id -eq $script:ActiveTheme)
+            }
+        }
+        $pickedTheme = Invoke-TuiSelector -Title "Color Theme (current: $($script:ActiveTheme))" -Items $tItems
+        if ($pickedTheme) { $ThemeArg = [string]$pickedTheme }
+    }
+    if ($ThemeArg) {
+        try {
+            $applied = Set-AgentTheme -Name $ThemeArg
+            if ($script:OutputMode -ne 'json') {
+                Write-Host $script:Gm.OscInit -NoNewline
+            }
+            if ($script:AgentConfigPath) {
+                $null = Update-AgentConfigOptionalKey -Path $script:AgentConfigPath -Key 'SHELLOSSUS_THEME' -Value $applied.id
+            }
+            Write-Host ($script:Gm.Green + "  Theme set to: $($applied.id) ($($applied.label))" + $script:Gm.Reset)
+        }
+        catch {
+            Write-Host ($script:Gm.Red + '  ' + $_.Exception.Message + $script:Gm.Reset)
+        }
+    }
 }
