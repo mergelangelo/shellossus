@@ -123,6 +123,12 @@ try {
     $argsDoctor.ModelId = ''
     $report = Get-AgentDoctorReport @argsDoctor -NoSession -ConfigState missing
     Assert-True ($global:ShellossusDoctorFixture.requests -eq $requestCount -and (Get-DoctorCheck $report 'api_key').status -eq 'fail' -and (Get-DoctorCheck $report 'model').status -eq 'fail') 'Missing first-run settings triggered a network request or were not reported.'
+    foreach ($loopbackUrl in @('http://localhost:11434/v1', 'http://127.0.0.1:8000/v1', 'http://[::1]:11434/v1')) {
+        $argsDoctor.BaseUrl = $loopbackUrl
+        $loopbackReport = Get-AgentDoctorReport @argsDoctor -NoSession -ConfigState missing
+        Assert-True ((Get-DoctorCheck $loopbackReport 'endpoint').status -eq 'info') "Doctor rejected valid loopback HTTP base URL: $loopbackUrl"
+    }
+    $argsDoctor.BaseUrl = 'https://example.invalid/v1'
 
     $blockedPath = Join-Path $envData.TestRoot 'not-a-directory'
     Set-Content -LiteralPath $blockedPath -Value 'keep' -Encoding Ascii
@@ -174,6 +180,7 @@ try {
         $replOutput = (& $entryPoint -ConfigPath $cliConfig -Workspace $workspacePath -NoSession -NoContextFiles -NoSkills -NoPromptTemplates 6>&1 | Out-String)
         Assert-True ($global:ShellossusDoctorFixture.inputIndex -eq 3 -and $global:ShellossusDoctorFixture.requests -eq $beforeRequestCount + 1) '/doctor did not route to a single diagnostic request.'
         Assert-True ($replOutput -like '*Shellossus doctor*' -and $replOutput -like '*Configured model is not in /models: active-model*') '/doctor did not inspect the active model.'
+        Assert-True ((Read-AgentConfig -Path $cliConfig).SHELLOSSUS_MODEL -eq 'active-model') '/model in REPL did not persist SHELLOSSUS_MODEL to ConfigPath.'
         $global:ShellossusDoctorFixture.inputs = @()
         Set-Content -LiteralPath $cliConfig -Value 'INVALID_CONFIG=doctor-secret-key' -Encoding Ascii
         $cliOutput = & $entryPoint -Doctor -ConfigPath $cliConfig -Workspace $blockedPath -NoSession -Mode json

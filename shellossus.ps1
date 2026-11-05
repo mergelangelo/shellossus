@@ -121,6 +121,31 @@ function Save-AgentConfig {
     Set-Content -LiteralPath $Path -Value $lines -Encoding UTF8 -ErrorAction Stop
 }
 
+function Test-ValidAgentBaseUrl {
+    param([string]$Url)
+    if (-not $Url -or ($Url -notmatch '^https?://[^\s]+$')) { return $false }
+    try {
+        $uri = [uri]$Url
+        if (-not $uri.IsAbsoluteUri -or -not $uri.Host -or $uri.UserInfo -or $uri.Query -or $uri.Fragment) {
+            return $false
+        }
+        if ($uri.AbsolutePath -match '/(?:chat/completions|models)/?$') {
+            return $false
+        }
+        if ($uri.Scheme -ieq 'https') {
+            return $true
+        }
+        if ($uri.Scheme -ieq 'http') {
+            $h = $uri.Host.ToLower().Trim('[', ']')
+            if ($h -eq 'localhost' -or $h -eq '127.0.0.1' -or $h -eq '::1' -or $h -eq '0:0:0:0:0:0:0:1') {
+                return $true
+            }
+        }
+    }
+    catch {}
+    return $false
+}
+
 function Update-AgentConfigOptionalKey {
     param([string]$Path, [string]$Key, [string]$Value)
     if (-not $Path -or -not $Key) { return $false }
@@ -128,10 +153,10 @@ function Update-AgentConfigOptionalKey {
     if (-not $effectivePath -or -not (Test-Path -LiteralPath $effectivePath)) { return $false }
     $cfg = @{}
     try {
-        $cfg = Read-AgentConfig -Path $effectivePath
+        $cfg = Read-AgentConfig -Path $Path
         if (-not $cfg -or $cfg.Count -eq 0) { return $false }
         $cfg[$Key] = $Value
-        Save-AgentConfig -Path $effectivePath -Config $cfg
+        Save-AgentConfig -Path $Path -Config $cfg
         return $true
     }
     catch {
@@ -8235,14 +8260,9 @@ function Get-AgentDoctorReport {
     $hasModel = [bool]($ModelId -and $ModelId.Trim())
     $modelCheck = @{ name = 'model'; status = $(if ($hasModel) { 'pass' } else { 'fail' }); message = $(if ($hasModel) { "Configured model: $ModelId. Availability has not been verified." } else { 'Model ID is missing. Run shellossus -Setup or pass -Model with the provider model ID.' }) }
     $checks += $modelCheck
-    $validUrl = $false
-    try {
-        $uri = [uri]$BaseUrl
-        $validUrl = ($BaseUrl -match '^https://[^\s]+$' -and $uri.IsAbsoluteUri -and $uri.Host -and -not $uri.UserInfo -and -not $uri.Query -and -not $uri.Fragment -and $uri.AbsolutePath -notmatch '/(?:chat/completions|models)/?$')
-    }
-    catch { }
+    $validUrl = Test-ValidAgentBaseUrl -Url $BaseUrl
     if (-not $validUrl) {
-        $checks += @{ name = 'endpoint'; status = 'fail'; message = 'Set an HTTPS API base URL (usually ending in /v1), without credentials, query, fragment, or /chat/completions. Configure -BaseUrl or run shellossus -Setup.' }
+        $checks += @{ name = 'endpoint'; status = 'fail'; message = 'Set an HTTPS API base URL (or http://localhost for local servers, usually ending in /v1), without credentials, query, fragment, or /chat/completions. Configure -BaseUrl or run shellossus -Setup.' }
     }
     elseif (-not $hasKey) {
         $checks += @{ name = 'endpoint'; status = 'info'; message = "Network check skipped until an API key is configured. Base URL: $BaseUrl" }
@@ -9586,6 +9606,10 @@ function Invoke-ReplContextCommand {
             else {
                 Set-AgentContextLimits -WindowSpec $tokensParts[0]
             }
+            if ($script:AgentConfigPath) {
+                $null = Update-AgentConfigOptionalKey -Path $script:AgentConfigPath -Key 'SHELLOSSUS_CONTEXT_WINDOW' -Value "$($limRes.context_window_tokens)"
+                $null = Update-AgentConfigOptionalKey -Path $script:AgentConfigPath -Key 'SHELLOSSUS_COMPACT_THRESHOLD' -Value "$($limRes.compact_threshold_tokens)"
+            }
             $wFmt = Format-TokenCount -Tokens $limRes.context_window_tokens
             $cFmt = Format-TokenCount -Tokens $limRes.compact_threshold_tokens
             Write-Host ($script:Gm.Green + "  Context window set to $wFmt tokens | Auto-compact threshold: $cFmt ($($limRes.compact_pct)%)" + $script:Gm.Reset)
@@ -9700,7 +9724,7 @@ if (-not $LibraryOnly) {
         if (-not $defaultUrl) { $defaultUrl = $config.SHELLOSSUS_BASE_URL }
         $inputUrl = Read-Host "API base URL including /v1 [$defaultUrl]"
         if (-not $inputUrl) { $inputUrl = $defaultUrl }
-        if ($inputUrl -notmatch '^https://[^\s]+$') { throw 'Use an HTTPS API base URL.' }
+        if (-not (Test-ValidAgentBaseUrl -Url $inputUrl)) { throw 'An HTTPS base URL (or http://localhost / http://127.0.0.1 for local servers) is required. Run: shellossus -Setup' }
         $defaultModel = $Model
         if (-not $defaultModel) { $defaultModel = $env:H_AGENT_MODEL }
         if (-not $defaultModel) { $defaultModel = $config.SHELLOSSUS_MODEL }
@@ -9784,7 +9808,7 @@ if (-not $LibraryOnly) {
         return
     }
     if (-not $BaseUrl) { $BaseUrl = Read-Host 'API base URL (including /v1)' }
-    if ($BaseUrl -notmatch '^https://[^\s]+$') { throw 'Use an HTTPS API base URL.' }
+    if (-not (Test-ValidAgentBaseUrl -Url $BaseUrl)) { throw 'An HTTPS base URL (or http://localhost / http://127.0.0.1 for local servers) is required. Run: shellossus -Setup' }
     if (-not $Model) { $Model = Read-Host 'Model ID' }
     if (-not $Model) { throw 'Model ID is required.' }
     if ($MaxSteps -lt 1 -or $MaxSteps -gt 500) { throw 'MaxSteps must be between 1 and 500.' }
@@ -10152,6 +10176,9 @@ if (-not $LibraryOnly) {
                     $Model = $newModel
                     $state.model = $Model
                     $script:ActiveModelId = $Model
+                    if ($script:AgentConfigPath) {
+                        $null = Update-AgentConfigOptionalKey -Path $script:AgentConfigPath -Key 'SHELLOSSUS_MODEL' -Value $Model
+                    }
                     Write-Host ($script:Gm.Green + "  Model switched to: $Model" + $script:Gm.Reset)
                 }
                 continue

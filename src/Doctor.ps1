@@ -116,14 +116,9 @@ function Get-AgentDoctorReport {
     $hasModel = [bool]($ModelId -and $ModelId.Trim())
     $modelCheck = @{ name = 'model'; status = $(if ($hasModel) { 'pass' } else { 'fail' }); message = $(if ($hasModel) { "Configured model: $ModelId. Availability has not been verified." } else { 'Model ID is missing. Run shellossus -Setup or pass -Model with the provider model ID.' }) }
     $checks += $modelCheck
-    $validUrl = $false
-    try {
-        $uri = [uri]$BaseUrl
-        $validUrl = ($BaseUrl -match '^https://[^\s]+$' -and $uri.IsAbsoluteUri -and $uri.Host -and -not $uri.UserInfo -and -not $uri.Query -and -not $uri.Fragment -and $uri.AbsolutePath -notmatch '/(?:chat/completions|models)/?$')
-    }
-    catch { }
+    $validUrl = Test-ValidAgentBaseUrl -Url $BaseUrl
     if (-not $validUrl) {
-        $checks += @{ name = 'endpoint'; status = 'fail'; message = 'Set an HTTPS API base URL (usually ending in /v1), without credentials, query, fragment, or /chat/completions. Configure -BaseUrl or run shellossus -Setup.' }
+        $checks += @{ name = 'endpoint'; status = 'fail'; message = 'Set an HTTPS API base URL (or http://localhost for local servers, usually ending in /v1), without credentials, query, fragment, or /chat/completions. Configure -BaseUrl or run shellossus -Setup.' }
     }
     elseif (-not $hasKey) {
         $checks += @{ name = 'endpoint'; status = 'info'; message = "Network check skipped until an API key is configured. Base URL: $BaseUrl" }

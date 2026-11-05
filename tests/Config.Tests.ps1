@@ -96,6 +96,48 @@ try {
         $adsPathRejected = ($_.Exception.Message -like '*Invalid path syntax*')
     }
     Assert-True $adsPathRejected 'Resolve-AgentPath did not reject NTFS Alternate Data Stream path syntax.'
+
+    # Task 5: Test-ValidAgentBaseUrl allows HTTPS and loopback HTTP (localhost, 127.0.0.1, ::1), rejects remote HTTP and malformed URLs.
+    foreach ($validUrl in @(
+        'https://api.openai.com/v1',
+        'https://gateway.corp.internal:8443/v1',
+        'http://localhost:11434/v1',
+        'http://LOCALHOST:11434/v1',
+        'http://127.0.0.1:8000/v1',
+        'http://[::1]:11434/v1',
+        'http://[0:0:0:0:0:0:0:1]:8080/v1'
+    )) {
+        Assert-True (Test-ValidAgentBaseUrl -Url $validUrl) "Test-ValidAgentBaseUrl rejected valid base URL: $validUrl"
+    }
+    foreach ($invalidUrl in @(
+        '',
+        'ftp://localhost:11434/v1',
+        'http://example.invalid/v1',
+        'http://192.168.1.10:11434/v1',
+        'http://10.0.0.1:8000/v1',
+        'http://user:pass@localhost:11434/v1',
+        'http://localhost:11434/v1?key=secret',
+        'http://localhost:11434/v1#frag',
+        'http://localhost:11434/v1/chat/completions',
+        'http://localhost:11434/v1/models',
+        'https://example.invalid/v1/chat/completions',
+        'https://example.invalid/v1/models'
+    )) {
+        Assert-True (-not (Test-ValidAgentBaseUrl -Url $invalidUrl)) "Test-ValidAgentBaseUrl accepted invalid base URL: $invalidUrl"
+    }
+
+    # Task 5: Update-AgentConfigOptionalKey persists SHELLOSSUS_MODEL, SHELLOSSUS_CONTEXT_WINDOW, SHELLOSSUS_COMPACT_THRESHOLD, and SHELLOSSUS_THEME,
+    # and Invoke-ReplContextCommand persists context limits to $script:AgentConfigPath.
+    Assert-True (-not (Update-AgentConfigOptionalKey -Path (Join-Path $testRoot 'nonexistent-dir\missing.env') -Key 'SHELLOSSUS_MODEL' -Value 'x')) 'Update-AgentConfigOptionalKey should return false when config file does not exist.'
+    Assert-True (Update-AgentConfigOptionalKey -Path $configPath -Key 'SHELLOSSUS_MODEL' -Value 'persisted-model') 'Update-AgentConfigOptionalKey failed for SHELLOSSUS_MODEL.'
+    Assert-True (Update-AgentConfigOptionalKey -Path $configPath -Key 'SHELLOSSUS_THEME' -Value 'nord') 'Update-AgentConfigOptionalKey failed for SHELLOSSUS_THEME.'
+    $script:AgentConfigPath = $configPath
+    Invoke-ReplContextCommand -State @{ messages = @() } -CtxArg '64k 48k'
+    $null = Set-AgentContextLimits -WindowSpec '128k' -CompactSpec '75%'
+    $reloadedAfterUpdates = Read-AgentConfig -Path $configPath
+    Assert-True ($reloadedAfterUpdates.SHELLOSSUS_MODEL -eq 'persisted-model') 'SHELLOSSUS_MODEL was not persisted by Update-AgentConfigOptionalKey.'
+    Assert-True ($reloadedAfterUpdates.SHELLOSSUS_THEME -eq 'nord') 'SHELLOSSUS_THEME was not persisted by Update-AgentConfigOptionalKey.'
+    Assert-True ($reloadedAfterUpdates.SHELLOSSUS_CONTEXT_WINDOW -eq '64000' -and $reloadedAfterUpdates.SHELLOSSUS_COMPACT_THRESHOLD -eq '48000') 'Invoke-ReplContextCommand did not persist SHELLOSSUS_CONTEXT_WINDOW and SHELLOSSUS_COMPACT_THRESHOLD.'
 }
 finally {
     Remove-TestEnvironment -Env $envData
