@@ -299,6 +299,40 @@ try {
     Assert-True ($sysWithSoul.Contains('<soul source=') -and $sysWithSoul.Contains('Be precise and helpful.') -and $sysWithSoul.Contains('</soul>')) 'SOUL.md not injected into Build-SystemPrompt.'
     Assert-True ($sysWithSoul.Contains('<memory source=') -and $sysWithSoul.Contains('Use ASCII everywhere') -and $sysWithSoul.Contains('</memory>')) 'MEMORY.md not injected into Build-SystemPrompt.'
     Assert-True ($sysWithSoul.Contains('Persistent project memory: call memory tool')) 'memory capability guidance not found in Build-SystemPrompt.'
+
+    # Regression: Get-AgentSessionMeta returns both name and session_name, and resuming a session without todos clears previous session todos.
+    $sessWithTodosFile = Join-Path $testRoot 'sess-with-todos.jsonl'
+    $sessNoTodosFile = Join-Path $testRoot 'sess-no-todos.jsonl'
+    $script:ActiveSessionTodos = @(@{ content = 'Task from session A'; status = 'in_progress' })
+    $stateWithTodos = @{
+        session_id = 'sess-a'
+        session_name = 'Named Session A'
+        workspace = $workspacePath
+        model = 'model-a'
+        messages = @(@{ role = 'system'; content = 'sys' }, @{ role = 'user'; content = 'hello a' })
+        todos = $script:ActiveSessionTodos
+    }
+    Save-AgentSession -SessionFile $sessWithTodosFile -State $stateWithTodos -Workspace $workspacePath -Model 'model-a'
+    $metaA = Get-AgentSessionMeta -SessionFile $sessWithTodosFile
+    Assert-True ($metaA.name -eq 'Named Session A' -and $metaA.session_name -eq 'Named Session A') 'Get-AgentSessionMeta must expose both name and session_name.'
+
+    $script:ActiveSessionTodos = @()
+    $stateNoTodos = @{
+        session_id = 'sess-b'
+        session_name = ''
+        workspace = $workspacePath
+        model = 'model-b'
+        messages = @(@{ role = 'system'; content = 'sys' }, @{ role = 'user'; content = 'hello b' })
+        todos = @()
+    }
+    Save-AgentSession -SessionFile $sessNoTodosFile -State $stateNoTodos -Workspace $workspacePath -Model 'model-b'
+
+    # Load session A (populates ActiveSessionTodos and State.todos), then resume session B (must clear both).
+    $switchState = @{ session_id = ''; workspace = $workspacePath; model = 'model-a'; messages = @() }
+    Invoke-SessionResume -SessionFile $sessWithTodosFile -State $switchState -CurrentWorkspace $workspacePath | Out-Null
+    Assert-True ($switchState.todos.Count -eq 1 -and $script:ActiveSessionTodos.Count -eq 1 -and $switchState.session_name -eq 'Named Session A') 'Session A todos or name failed to load.'
+    Invoke-SessionResume -SessionFile $sessNoTodosFile -State $switchState -CurrentWorkspace $workspacePath | Out-Null
+    Assert-True ($switchState.todos.Count -eq 0 -and $script:ActiveSessionTodos.Count -eq 0 -and $switchState.session_name -eq '') 'Resuming session without todos leaked todos or session_name from previous session.'
 }
 finally {
     Remove-TestEnvironment -Env $envData
