@@ -7,8 +7,16 @@ $ErrorActionPreference = 'Stop'
 $modules = @(
     'Config.ps1',
     'Theme.ps1',
+    'ui/Cards.ps1',
+    'ui/Input.ps1',
+    'ui/Markdown.ps1',
     'tools/Common.ps1',
+    'tools/Schemas.ps1',
+    'tools/Normalizers.ps1',
+    'tools/Validation.ps1',
+    'tools/Ignore.ps1',
     'tools/Files.ps1',
+    'tools/Search.ps1',
     'tools/Shell.ps1',
     'tools/Undo.ps1',
     'tools/Web.ps1',
@@ -18,10 +26,16 @@ $modules = @(
     'tools/Agents.ps1',
     'tools/Dispatch.ps1',
     'context/Prompt.ps1',
+    'context/Catalog.ps1',
     'context/Templates.ps1',
+    'context/SessionTree.ps1',
     'context/Session.ps1',
     'context/Compaction.ps1',
     'Doctor.ps1',
+    'cli/Install.ps1',
+    'cli/Http.ps1',
+    'cli/Turn.ps1',
+    'cli/Repl.ps1',
     'Cli.ps1'
 )
 
@@ -57,6 +71,10 @@ param(
     [switch]$Mascot,
     [switch]$Continue,
     [switch]$Setup,
+    [switch]$Install,
+    [string]$ProfilePath = $PROFILE,
+    [string]$Shortcut = '',
+    [switch]$NoShortcut,
     [switch]$LibraryOnly
 )
 
