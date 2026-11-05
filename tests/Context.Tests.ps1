@@ -330,9 +330,9 @@ try {
     # Load session A (populates ActiveSessionTodos and State.todos), then resume session B (must clear both).
     $switchState = @{ session_id = ''; workspace = $workspacePath; model = 'model-a'; messages = @() }
     Invoke-SessionResume -SessionFile $sessWithTodosFile -State $switchState -CurrentWorkspace $workspacePath | Out-Null
-    Assert-True ($switchState.todos.Count -eq 1 -and $script:ActiveSessionTodos.Count -eq 1 -and $switchState.session_name -eq 'Named Session A') 'Session A todos or name failed to load.'
+    Assert-True (@($switchState.todos).Count -eq 1 -and @($script:ActiveSessionTodos).Count -eq 1 -and $switchState.session_name -eq 'Named Session A') 'Session A todos or name failed to load.'
     Invoke-SessionResume -SessionFile $sessNoTodosFile -State $switchState -CurrentWorkspace $workspacePath | Out-Null
-    Assert-True ($switchState.todos.Count -eq 0 -and $script:ActiveSessionTodos.Count -eq 0 -and $switchState.session_name -eq '') 'Resuming session without todos leaked todos or session_name from previous session.'
+    Assert-True (@($switchState.todos).Count -eq 0 -and @($script:ActiveSessionTodos).Count -eq 0 -and $switchState.session_name -eq '') 'Resuming session without todos leaked todos or session_name from previous session.'
 }
 finally {
     Remove-TestEnvironment -Env $envData

@@ -66,7 +66,7 @@ function Format-TuiStatusCard {
         ($barV + $script:Gm.Grey1 + 'File:        ' + $script:Gm.Grey2 + $sessFileStr + $script:Gm.Reset),
         ($barV + $script:Gm.Grey1 + 'Tools:       ' + $script:Gm.Aqua + $toolsStr + $script:Gm.Reset)
     )
-    $tdList = if ($script:ActiveSessionTodos -and $script:ActiveSessionTodos.Count -gt 0) { $script:ActiveSessionTodos } elseif ($State -and $State.todos -and $State.todos.Count -gt 0) { $State.todos } else { @() }
+    $tdList = @(if ($script:ActiveSessionTodos -and @($script:ActiveSessionTodos).Count -gt 0) { @($script:ActiveSessionTodos) } elseif ($State -and $State.todos -and @($State.todos).Count -gt 0) { @($State.todos) })
     if ($tdList.Count -gt 0) {
         $tDone = @($tdList | Where-Object { $_.status -eq 'completed' }).Count
         $tTot = $tdList.Count
