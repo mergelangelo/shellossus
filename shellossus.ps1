@@ -9040,6 +9040,7 @@ function Invoke-AgentTurn {
     $repeatLimit = if ($MaxRepeatCalls -gt 0) { $MaxRepeatCalls } elseif ($script:MaxRepeatToolCalls -gt 0) { [int]$script:MaxRepeatToolCalls } else { 3 }
     $mutationEpoch = 0
     $toolCallCounts = @{}
+    $scopedInstrCache = @{}
     for ($step = 0; $step -lt $Steps; $step++) {
         if ($step -gt 0) {
             $stStep = Get-ContextStats -State $State
@@ -9267,7 +9268,11 @@ function Invoke-AgentTurn {
                                 foreach ($priorPath in $priorScopedPaths) {
                                     if (-not $priorPath) { continue }
                                     try {
-                                        $priorInstr = Get-ScopedAgentInstructions -Root $Root -TargetPath ([string]$priorPath) -AllowRegisteredSkill
+                                        $priorKey = [string]$priorPath
+                                        if (-not $scopedInstrCache.ContainsKey($priorKey)) {
+                                            $scopedInstrCache[$priorKey] = Get-ScopedAgentInstructions -Root $Root -TargetPath $priorKey -AllowRegisteredSkill
+                                        }
+                                        $priorInstr = $scopedInstrCache[$priorKey]
                                         if ($priorInstr -and ($priorInstr -ceq $instructions -or $priorInstr.Contains($instructions))) {
                                             $seen = $true
                                             break
@@ -9276,7 +9281,10 @@ function Invoke-AgentTurn {
                                     catch {}
                                 }
                             }
-                            if (-not $seen) { $output = $notice }
+                            if (-not $seen) {
+                                $output = $notice
+                                $toolCallCounts[$sig] = $prevCount
+                            }
                         }
                     }
                 }
