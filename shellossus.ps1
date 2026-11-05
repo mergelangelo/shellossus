@@ -3864,8 +3864,35 @@ function Invoke-AgentWrite {
     $firstChangedLine = 1
     if ($Name -eq 'write_file') {
         if ($Arguments.path -match '[/\\]$') { throw 'Invalid file name.' }
-        $parent = Resolve-AgentPath -Root $Root -RelativePath (Split-Path $Arguments.path -Parent)
-        if (-not (Get-Item -LiteralPath $parent -Force).PSIsContainer) { throw 'Parent must be a directory.' }
+        if (($Arguments.path -replace '^[a-zA-Z]:', '').Contains(':')) { throw 'Invalid path syntax.' }
+        $rawParent = Split-Path $Arguments.path -Parent
+        $missingDirNames = @()
+        $currRel = $rawParent
+        while ($currRel) {
+            $probeCand = if ($currRel -match '^([a-zA-Z]:[/\\]|[/\\])') { $currRel } else { Join-Path $Root $currRel }
+            if (Test-Path -LiteralPath $probeCand) {
+                break
+            }
+            $seg = Split-Path $currRel -Leaf
+            if (-not $seg -or $seg -eq '.' -or $seg -eq '..' -or $seg -match '[<>:"/\\|?*\x00-\x1f]' -or $seg -match '[. ]$' -or $seg -match '^(?i:CON|PRN|AUX|NUL|COM[0-9]|LPT[0-9])(?:\.|$)') {
+                throw 'Invalid directory name.'
+            }
+            $missingDirNames = @($seg) + $missingDirNames
+            $nextParent = Split-Path $currRel -Parent
+            if ($nextParent -eq $currRel) {
+                $currRel = ''
+                break
+            }
+            $currRel = $nextParent
+        }
+        $existingBase = Resolve-AgentPath -Root $Root -RelativePath $(if ($currRel) { $currRel } else { '.' })
+        if (-not (Get-Item -LiteralPath $existingBase -Force).PSIsContainer) { throw 'Parent must be a directory.' }
+        $parent = $existingBase
+        $dirsToCreate = @()
+        foreach ($dirName in $missingDirNames) {
+            $parent = Join-Path $parent $dirName
+            $dirsToCreate += $parent
+        }
         $leaf = Split-Path $Arguments.path -Leaf
         if (-not $leaf -or $leaf -match '[<>:"/\\|?*\x00-\x1f]' -or $leaf -match '[. ]$') { throw 'Invalid file name.' }
         if ($leaf -match '^(?i:CON|PRN|AUX|NUL|COM[0-9]|LPT[0-9])(?:\.|$)') { throw 'Reserved file name.' }
@@ -4016,6 +4043,15 @@ function Invoke-AgentWrite {
             Move-Item -LiteralPath $stageFile.FullName -Destination $path -Force -ErrorAction Stop
         }
         else {
+            $existingBase = Resolve-AgentPath -Root $Root -RelativePath $(if ($currRel) { $currRel } else { '.' })
+            if (-not (Get-Item -LiteralPath $existingBase -Force).PSIsContainer) { throw 'Parent must be a directory.' }
+            $createdDirs = @()
+            foreach ($dirPath in $dirsToCreate) {
+                if (-not (Test-Path -LiteralPath $dirPath)) {
+                    New-Item -ItemType Directory -Path $dirPath -ErrorAction Stop | Out-Null
+                    $createdDirs = @($dirPath) + $createdDirs
+                }
+            }
             $parent = Resolve-AgentPath -Root $Root -RelativePath (Split-Path $Arguments.path -Parent)
             $path = Join-Path $parent $leaf
             if (Test-Path -LiteralPath $path) { throw 'File was created during confirmation. No write performed.' }
@@ -4025,6 +4061,7 @@ function Invoke-AgentWrite {
                 full_path = $path
                 rel_path = $Arguments.path
                 after_content = $after
+                created_dirs = $createdDirs
             }
             Move-Item -LiteralPath $stageFile.FullName -Destination $path -Force -ErrorAction Stop
         }
@@ -4675,7 +4712,13 @@ function Assert-AgentUndoPath {
     param($Write)
     if (-not $Write.root -or -not $Write.full_path) { throw 'Undo entry has no workspace path.' }
     $parent = Split-Path -Path $Write.full_path -Parent
-    $null = Resolve-AgentPath -Root $Write.root -RelativePath $parent
+    $anc = $parent
+    while ($anc -and -not (Test-Path -LiteralPath $anc)) {
+        $nextAnc = Split-Path -Path $anc -Parent
+        if ($nextAnc -eq $anc) { break }
+        $anc = $nextAnc
+    }
+    $null = Resolve-AgentPath -Root $Write.root -RelativePath $anc
     $target = Get-Item -LiteralPath $Write.full_path -Force -ErrorAction SilentlyContinue
     if ($null -ne $target) {
         $null = Resolve-AgentPath -Root $Write.root -RelativePath $Write.full_path
@@ -4801,6 +4844,20 @@ function Invoke-AgentUndo {
                     Remove-Item -LiteralPath $w.full_path -Force -ErrorAction Stop
                     if ($script:OutputMode -ne 'json') {
                         Write-Host ($script:Gm.Aqua + '  [undo] Removed created file ' + $w.rel_path + $script:Gm.Reset)
+                    }
+                }
+                if ($w.created_dirs) {
+                    foreach ($dirPath in @($w.created_dirs)) {
+                        if ($dirPath -and (Test-Path -LiteralPath $dirPath)) {
+                            $resolvedDir = Resolve-AgentPath -Root $w.root -RelativePath $dirPath
+                            $dirItem = Get-Item -LiteralPath $resolvedDir -Force -ErrorAction SilentlyContinue
+                            if ($dirItem -and $dirItem.PSIsContainer) {
+                                $remaining = @(Get-ChildItem -LiteralPath $resolvedDir -Force -ErrorAction SilentlyContinue)
+                                if ($remaining.Count -eq 0) {
+                                    Remove-Item -LiteralPath $resolvedDir -Force -ErrorAction Stop
+                                }
+                            }
+                        }
                     }
                 }
                 $w.undone = $true

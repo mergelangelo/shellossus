@@ -148,13 +148,13 @@ try {
     Remove-Item -LiteralPath $clBatch.backup -Force
 
     $script:CurrentTurnWrites = @()
-    $call = @{ id = 'cl-u1'; function = @{ name = 'write_file'; arguments = '{"path":"cl-undo-chain.txt","content":"a"}' } }
+    $call = @{ id = 'cl-u1'; function = @{ name = 'write_file'; arguments = '{"path":"cl_new_dir/cl_sub/cl-undo-chain.txt","content":"a"}' } }
     $null = Invoke-AgentTool -Root $workspacePath -Call $call | ConvertFrom-Json
-    $call = @{ id = 'cl-u2'; function = @{ name = 'edit_file'; arguments = '{"path":"cl-undo-chain.txt","old_text":"a","new_text":"b"}' } }
+    $call = @{ id = 'cl-u2'; function = @{ name = 'edit_file'; arguments = '{"path":"cl_new_dir/cl_sub/cl-undo-chain.txt","old_text":"a","new_text":"b"}' } }
     $null = Invoke-AgentTool -Root $workspacePath -Call $call | ConvertFrom-Json
     $clUndoState = @{ messages = @(@{ role = 'user'; content = 'u' }) }
     Invoke-AgentUndo -State $clUndoState -UndoEntry @{ messages = @(); writes = @($script:CurrentTurnWrites) }
-    Assert-True (-not (Test-Path -LiteralPath (Join-Path $workspacePath 'cl-undo-chain.txt'))) 'ConstrainedLanguage multi-step Invoke-AgentUndo failed.'
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $workspacePath 'cl_new_dir'))) 'ConstrainedLanguage multi-step Invoke-AgentUndo with nested directory cleanup failed.'
 
     $call = @{ id = 'cl-ll'; function = @{ name = 'read_file'; arguments = '{"path":"longline25k.txt","start_line":1,"start_char":20001}' } }
     $clLl = Invoke-AgentTool -Root $workspacePath -Call $call | ConvertFrom-Json

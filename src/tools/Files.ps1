@@ -100,8 +100,35 @@ function Invoke-AgentWrite {
     $firstChangedLine = 1
     if ($Name -eq 'write_file') {
         if ($Arguments.path -match '[/\\]$') { throw 'Invalid file name.' }
-        $parent = Resolve-AgentPath -Root $Root -RelativePath (Split-Path $Arguments.path -Parent)
-        if (-not (Get-Item -LiteralPath $parent -Force).PSIsContainer) { throw 'Parent must be a directory.' }
+        if (($Arguments.path -replace '^[a-zA-Z]:', '').Contains(':')) { throw 'Invalid path syntax.' }
+        $rawParent = Split-Path $Arguments.path -Parent
+        $missingDirNames = @()
+        $currRel = $rawParent
+        while ($currRel) {
+            $probeCand = if ($currRel -match '^([a-zA-Z]:[/\\]|[/\\])') { $currRel } else { Join-Path $Root $currRel }
+            if (Test-Path -LiteralPath $probeCand) {
+                break
+            }
+            $seg = Split-Path $currRel -Leaf
+            if (-not $seg -or $seg -eq '.' -or $seg -eq '..' -or $seg -match '[<>:"/\\|?*\x00-\x1f]' -or $seg -match '[. ]$' -or $seg -match '^(?i:CON|PRN|AUX|NUL|COM[0-9]|LPT[0-9])(?:\.|$)') {
+                throw 'Invalid directory name.'
+            }
+            $missingDirNames = @($seg) + $missingDirNames
+            $nextParent = Split-Path $currRel -Parent
+            if ($nextParent -eq $currRel) {
+                $currRel = ''
+                break
+            }
+            $currRel = $nextParent
+        }
+        $existingBase = Resolve-AgentPath -Root $Root -RelativePath $(if ($currRel) { $currRel } else { '.' })
+        if (-not (Get-Item -LiteralPath $existingBase -Force).PSIsContainer) { throw 'Parent must be a directory.' }
+        $parent = $existingBase
+        $dirsToCreate = @()
+        foreach ($dirName in $missingDirNames) {
+            $parent = Join-Path $parent $dirName
+            $dirsToCreate += $parent
+        }
         $leaf = Split-Path $Arguments.path -Leaf
         if (-not $leaf -or $leaf -match '[<>:"/\\|?*\x00-\x1f]' -or $leaf -match '[. ]$') { throw 'Invalid file name.' }
         if ($leaf -match '^(?i:CON|PRN|AUX|NUL|COM[0-9]|LPT[0-9])(?:\.|$)') { throw 'Reserved file name.' }
@@ -252,6 +279,15 @@ function Invoke-AgentWrite {
             Move-Item -LiteralPath $stageFile.FullName -Destination $path -Force -ErrorAction Stop
         }
         else {
+            $existingBase = Resolve-AgentPath -Root $Root -RelativePath $(if ($currRel) { $currRel } else { '.' })
+            if (-not (Get-Item -LiteralPath $existingBase -Force).PSIsContainer) { throw 'Parent must be a directory.' }
+            $createdDirs = @()
+            foreach ($dirPath in $dirsToCreate) {
+                if (-not (Test-Path -LiteralPath $dirPath)) {
+                    New-Item -ItemType Directory -Path $dirPath -ErrorAction Stop | Out-Null
+                    $createdDirs = @($dirPath) + $createdDirs
+                }
+            }
             $parent = Resolve-AgentPath -Root $Root -RelativePath (Split-Path $Arguments.path -Parent)
             $path = Join-Path $parent $leaf
             if (Test-Path -LiteralPath $path) { throw 'File was created during confirmation. No write performed.' }
@@ -261,6 +297,7 @@ function Invoke-AgentWrite {
                 full_path = $path
                 rel_path = $Arguments.path
                 after_content = $after
+                created_dirs = $createdDirs
             }
             Move-Item -LiteralPath $stageFile.FullName -Destination $path -Force -ErrorAction Stop
         }

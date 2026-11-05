@@ -4,7 +4,13 @@ function Assert-AgentUndoPath {
     param($Write)
     if (-not $Write.root -or -not $Write.full_path) { throw 'Undo entry has no workspace path.' }
     $parent = Split-Path -Path $Write.full_path -Parent
-    $null = Resolve-AgentPath -Root $Write.root -RelativePath $parent
+    $anc = $parent
+    while ($anc -and -not (Test-Path -LiteralPath $anc)) {
+        $nextAnc = Split-Path -Path $anc -Parent
+        if ($nextAnc -eq $anc) { break }
+        $anc = $nextAnc
+    }
+    $null = Resolve-AgentPath -Root $Write.root -RelativePath $anc
     $target = Get-Item -LiteralPath $Write.full_path -Force -ErrorAction SilentlyContinue
     if ($null -ne $target) {
         $null = Resolve-AgentPath -Root $Write.root -RelativePath $Write.full_path
@@ -130,6 +136,20 @@ function Invoke-AgentUndo {
                     Remove-Item -LiteralPath $w.full_path -Force -ErrorAction Stop
                     if ($script:OutputMode -ne 'json') {
                         Write-Host ($script:Gm.Aqua + '  [undo] Removed created file ' + $w.rel_path + $script:Gm.Reset)
+                    }
+                }
+                if ($w.created_dirs) {
+                    foreach ($dirPath in @($w.created_dirs)) {
+                        if ($dirPath -and (Test-Path -LiteralPath $dirPath)) {
+                            $resolvedDir = Resolve-AgentPath -Root $w.root -RelativePath $dirPath
+                            $dirItem = Get-Item -LiteralPath $resolvedDir -Force -ErrorAction SilentlyContinue
+                            if ($dirItem -and $dirItem.PSIsContainer) {
+                                $remaining = @(Get-ChildItem -LiteralPath $resolvedDir -Force -ErrorAction SilentlyContinue)
+                                if ($remaining.Count -eq 0) {
+                                    Remove-Item -LiteralPath $resolvedDir -Force -ErrorAction Stop
+                                }
+                            }
+                        }
                     }
                 }
                 $w.undone = $true
