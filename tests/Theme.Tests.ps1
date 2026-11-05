@@ -75,6 +75,11 @@ try {
     $hunkMatches = [regex]::Matches($plainBatchDiff, '@@ -')
     Assert-True ($plainBatchDiff.Contains('+2 -2') -and $plainBatchDiff.Contains('- line02') -and $plainBatchDiff.Contains('+ line02_updated') -and $plainBatchDiff.Contains('- line19') -and $plainBatchDiff.Contains('+ line19_updated') -and (-not $plainBatchDiff.Contains('line10')) -and ($hunkMatches.Count -eq 2)) "Format-UnifiedDiff failed to separate distant edits into hunks: $plainBatchDiff"
 
+    $bigAfterText = (1..120 | ForEach-Object { "line$_" }) -join "`n"
+    $bigDiffOut = @(Write-UnifiedDiffCard -Path 'src/Big.ps1' -ToolName 'write_file' -Before $null -After $bigAfterText -ContextLines 2 -MaxLines 500 6>&1)
+    $plainBigDiff = ($bigDiffOut | ForEach-Object { Strip-AnsiCodes -Text ([string]$_) }) -join "`n"
+    Assert-True ($plainBigDiff.Contains('line120') -and (-not $plainBigDiff.Contains('more lines')) -and (-not $plainBigDiff.Contains('more changed lines'))) "Write-UnifiedDiffCard failed to forward -ContextLines and -MaxLines: $plainBigDiff"
+
     $cardLines = @(Format-ToolCallCard -Name 'read_file' -Target 'src/Theme.ps1' -Detail 'lines 1-50' -Status 'ok' -Summary '50 lines (1.8k chars)' -ElapsedMs 12)
     $plainCard = ($cardLines | ForEach-Object { Strip-AnsiCodes -Text $_ }) -join "`n"
     Assert-True ($plainCard.Contains('read_file') -and $plainCard.Contains('src/Theme.ps1') -and $plainCard.Contains('50 lines') -and $plainCard.Contains('12ms')) "Format-ToolCallCard output unexpected: $plainCard"
@@ -93,6 +98,12 @@ try {
     Assert-True ((Read-TuiMultilineInput) -eq "SELECT * `nFROM users `nWHERE active = 1") 'Backslash continuation Read-TuiMultilineInput failed.'
     $script:mlQueue = @('"""first line', 'second line', 'third line"""')
     Assert-True ((Read-TuiMultilineInput) -eq "first line`nsecond line`nthird line") 'Triple-quote fenced Read-TuiMultilineInput failed.'
+    $script:mlQueue = @('"""', 'alpha', 'beta', '"""   ')
+    Assert-True ((Read-TuiMultilineInput) -eq "alpha`nbeta") 'Standalone closing fence with trailing spaces should not append empty line.'
+    $script:mlQueue = @('<<<inline fenced>>>   ')
+    Assert-True ((Read-TuiMultilineInput) -eq 'inline fenced') 'Inline closing fence with trailing spaces failed.'
+    $script:mlQueue = @($null)
+    Assert-True ($null -eq (Read-TuiMultilineInput)) 'Read-TuiMultilineInput should return $null on EOF.'
 
     # Interactive selector helper: numbered pick and Enter cancel.
     $items = @(
@@ -106,9 +117,23 @@ try {
     $script:mlQueue = @('Custom choice')
     $customPicked = Invoke-TuiSelector -Title 'Select Permission' -Items $items -AllowFreeText
     Assert-True ($customPicked -eq 'Custom choice') 'Invoke-TuiSelector -AllowFreeText failed.'
+    $script:mlQueue = @('99999999999999999999')
+    $largeNumPicked = Invoke-TuiSelector -Title 'Select Permission' -Items $items -AllowFreeText
+    Assert-True ($largeNumPicked -eq '99999999999999999999') 'Invoke-TuiSelector -AllowFreeText overflowed on large numeric string.'
     $script:mlQueue = @('')
     $cancelled = Invoke-TuiSelector -Title 'Select Permission' -Items $items
     Assert-True ($null -eq $cancelled) 'Invoke-TuiSelector should return $null on empty input.'
+    $savedModeForInput = $script:OutputMode
+    try {
+        $script:OutputMode = 'json'
+        $script:mlQueue = @('1')
+        Assert-True ($null -eq (Invoke-TuiSelector -Title 'Select Permission' -Items $items)) 'Invoke-TuiSelector must return $null in json mode without reading input.'
+        Assert-True ((Read-TuiConfirmation -PromptText 'prompt: ' -ActionType 'write') -eq 'n') 'Read-TuiConfirmation must return n in json mode without reading input.'
+        Assert-True ($script:mlQueue.Count -eq 1) 'JSON mode input helpers must not consume Read-Host queue.'
+    }
+    finally {
+        $script:OutputMode = $savedModeForInput
+    }
 
     $planCard = @(Format-PlanReviewCard -Question 'Review migration plan' -Plan "# Plan`n1. Step A`n2. Step B")
     $plainPlan = ($planCard | ForEach-Object { Strip-AnsiCodes -Text $_ }) -join "`n"

@@ -2,13 +2,14 @@
 
 function Read-TuiMultilineInput {
     $first = Read-Host
-    if ($null -eq $first) { return '' }
+    if ($null -eq $first) { return $null }
     if ($first.StartsWith('"""') -or $first.StartsWith('<<<')) {
         $fence = if ($first.StartsWith('"""')) { '"""' } else { '>>>' }
         $altFence = $first.Substring(0, 3)
         $rest = $first.Substring(3)
-        if ($rest.Length -ge 3 -and ($rest.EndsWith($fence) -or $rest.EndsWith($altFence))) {
-            return $rest.Substring(0, $rest.Length - 3)
+        $restTrimmed = $rest.TrimEnd(' ', "`t")
+        if ($restTrimmed.Length -ge 3 -and ($restTrimmed.EndsWith($fence) -or $restTrimmed.EndsWith($altFence))) {
+            return $restTrimmed.Substring(0, $restTrimmed.Length - 3)
         }
         $lines = @()
         if ($rest) { $lines += $rest }
@@ -21,9 +22,10 @@ function Read-TuiMultilineInput {
                 Write-Host $script:Gm.Reset -NoNewline
             }
             if ($null -eq $next) { break }
-            if ($next.EndsWith($fence) -or $next.EndsWith($altFence)) {
-                $beforeClose = $next.Substring(0, $next.Length - 3)
-                if ($beforeClose -or $lines.Count -gt 0) { $lines += $beforeClose }
+            $nextTrimmed = $next.TrimEnd(' ', "`t")
+            if ($nextTrimmed.EndsWith($fence) -or $nextTrimmed.EndsWith($altFence)) {
+                $beforeClose = $nextTrimmed.Substring(0, $nextTrimmed.Length - 3)
+                if ($beforeClose.Length -gt 0) { $lines += $beforeClose }
                 break
             }
             $lines += $next
@@ -61,6 +63,7 @@ function Invoke-TuiSelector {
         [switch]$AllowFreeText
     )
     if (-not $Items -or $Items.Count -eq 0) { return $null }
+    if ($script:OutputMode -eq 'json') { return $null }
     if ($script:OutputMode -ne 'json') {
         $w = Get-TerminalWidth
         $hdr = ' ' + $script:Gm.BoldOrange + $Title + $script:Gm.Reset + ' '
@@ -84,7 +87,7 @@ function Invoke-TuiSelector {
     }
     if (-not $rawChoice -or -not $rawChoice.Trim()) { return $null }
     $trimmed = $rawChoice.Trim()
-    if ($trimmed -match '^\d+$') {
+    if ($trimmed -match '^\d{1,6}$') {
         $idx = [int]$trimmed - 1
         if ($idx -ge 0 -and $idx -lt $Items.Count) {
             $picked = $Items[$idx]
@@ -109,6 +112,7 @@ function Read-TuiConfirmation {
         [switch]$AllowDiff,
         [string]$ActionType = 'write'
     )
+    if ($script:OutputMode -eq 'json') { return 'n' }
     while ($true) {
         Write-Host $PromptText -NoNewline
         $raw = Read-Host

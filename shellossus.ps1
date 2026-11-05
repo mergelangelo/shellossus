@@ -1414,9 +1414,9 @@ function Format-UnifiedDiff {
 }
 
 function Write-UnifiedDiffCard {
-    param([string]$Path, [string]$ToolName = 'edit_file', $Before = $null, [string]$After = '')
+    param([string]$Path, [string]$ToolName = 'edit_file', $Before = $null, [string]$After = '', [int]$ContextLines = 3, [int]$MaxLines = 80)
     if ($script:OutputMode -eq 'json') { return }
-    foreach ($ln in @(Format-UnifiedDiff -Path $Path -ToolName $ToolName -Before $Before -After $After)) {
+    foreach ($ln in @(Format-UnifiedDiff -Path $Path -ToolName $ToolName -Before $Before -After $After -ContextLines $ContextLines -MaxLines $MaxLines)) {
         Write-Host $ln
     }
 }
@@ -1426,13 +1426,14 @@ function Write-UnifiedDiffCard {
 
 function Read-TuiMultilineInput {
     $first = Read-Host
-    if ($null -eq $first) { return '' }
+    if ($null -eq $first) { return $null }
     if ($first.StartsWith('"""') -or $first.StartsWith('<<<')) {
         $fence = if ($first.StartsWith('"""')) { '"""' } else { '>>>' }
         $altFence = $first.Substring(0, 3)
         $rest = $first.Substring(3)
-        if ($rest.Length -ge 3 -and ($rest.EndsWith($fence) -or $rest.EndsWith($altFence))) {
-            return $rest.Substring(0, $rest.Length - 3)
+        $restTrimmed = $rest.TrimEnd(' ', "`t")
+        if ($restTrimmed.Length -ge 3 -and ($restTrimmed.EndsWith($fence) -or $restTrimmed.EndsWith($altFence))) {
+            return $restTrimmed.Substring(0, $restTrimmed.Length - 3)
         }
         $lines = @()
         if ($rest) { $lines += $rest }
@@ -1445,9 +1446,10 @@ function Read-TuiMultilineInput {
                 Write-Host $script:Gm.Reset -NoNewline
             }
             if ($null -eq $next) { break }
-            if ($next.EndsWith($fence) -or $next.EndsWith($altFence)) {
-                $beforeClose = $next.Substring(0, $next.Length - 3)
-                if ($beforeClose -or $lines.Count -gt 0) { $lines += $beforeClose }
+            $nextTrimmed = $next.TrimEnd(' ', "`t")
+            if ($nextTrimmed.EndsWith($fence) -or $nextTrimmed.EndsWith($altFence)) {
+                $beforeClose = $nextTrimmed.Substring(0, $nextTrimmed.Length - 3)
+                if ($beforeClose.Length -gt 0) { $lines += $beforeClose }
                 break
             }
             $lines += $next
@@ -1485,6 +1487,7 @@ function Invoke-TuiSelector {
         [switch]$AllowFreeText
     )
     if (-not $Items -or $Items.Count -eq 0) { return $null }
+    if ($script:OutputMode -eq 'json') { return $null }
     if ($script:OutputMode -ne 'json') {
         $w = Get-TerminalWidth
         $hdr = ' ' + $script:Gm.BoldOrange + $Title + $script:Gm.Reset + ' '
@@ -1508,7 +1511,7 @@ function Invoke-TuiSelector {
     }
     if (-not $rawChoice -or -not $rawChoice.Trim()) { return $null }
     $trimmed = $rawChoice.Trim()
-    if ($trimmed -match '^\d+$') {
+    if ($trimmed -match '^\d{1,6}$') {
         $idx = [int]$trimmed - 1
         if ($idx -ge 0 -and $idx -lt $Items.Count) {
             $picked = $Items[$idx]
@@ -1533,6 +1536,7 @@ function Read-TuiConfirmation {
         [switch]$AllowDiff,
         [string]$ActionType = 'write'
     )
+    if ($script:OutputMode -eq 'json') { return 'n' }
     while ($true) {
         Write-Host $PromptText -NoNewline
         $raw = Read-Host
@@ -7903,7 +7907,15 @@ function Invoke-DoctorModelsRequest {
     }
     catch {
         $code = 0
-        if ($_.Exception.Response -and $_.Exception.Response.StatusCode) { $code = [int]$_.Exception.Response.StatusCode }
+        if ($_.Exception.Response -and $_.Exception.Response.StatusCode) {
+            $code = [int]$_.Exception.Response.StatusCode
+        }
+        elseif ($_.Exception.InnerException -and $_.Exception.InnerException.Response -and $_.Exception.InnerException.Response.StatusCode) {
+            $code = [int]$_.Exception.InnerException.Response.StatusCode
+        }
+        if ($code -eq 0 -and ($_.Exception.Message -match 'redirection' -or $_.FullyQualifiedErrorId -match 'WebCmdletWebResponseException|MaximumRedirect')) {
+            $code = 302
+        }
         return @{ code = $code; valid_catalog = $false; ids = @() }
     }
     finally {
@@ -7998,8 +8010,14 @@ function Get-AgentDoctorReport {
         $checks += @{ name = 'endpoint'; status = $status; message = ($message + " Base URL: $BaseUrl") }
     }
     # Never include server bodies, headers, or raw exceptions in a shareable report.
+    $trimmedKey = if ($hasKey) { $ApiKey.Trim() } else { '' }
     foreach ($check in $checks) {
-        if ($ApiKey) { $check.message = $check.message.Replace($ApiKey, '[redacted]') }
+        if ($hasKey) {
+            $check.message = $check.message.Replace($ApiKey, '[redacted]')
+            if ($trimmedKey -and $trimmedKey -ne $ApiKey) {
+                $check.message = $check.message.Replace($trimmedKey, '[redacted]')
+            }
+        }
         $check.message = (Format-PreviewText -Text $check.message) -replace '[\r\n\t]', ' '
     }
     $failed = @($checks | Where-Object { $_.status -eq 'fail' }).Count
@@ -8014,9 +8032,16 @@ function Write-AgentDoctorReport {
         Write-Output (ConvertTo-AsciiJson -Json ($event | ConvertTo-Json -Depth 6 -Compress))
         return
     }
-    Write-Host 'Shellossus doctor'
+    Write-Host ($script:Gm.BoldGreen + 'Shellossus doctor' + $script:Gm.Reset)
     foreach ($check in $Report.checks) {
-        Write-Host ('[{0}] {1}: {2}' -f $check.status.ToUpper(), $check.name, $check.message)
+        $stUpper = $check.status.ToUpper()
+        $stColor = switch ($stUpper) {
+            'PASS' { $script:Gm.BoldGreen }
+            'WARN' { $script:Gm.BoldYellow }
+            'FAIL' { $script:Gm.BoldRed }
+            default { $script:Gm.BoldAqua }
+        }
+        Write-Host ('{0}[{1}]{2} {3}: {4}' -f $stColor, $stUpper, $script:Gm.Reset, $check.name, $check.message)
     }
     Write-Host ("Checks complete: $($Report.failures) failure(s), $($Report.warnings) warning(s). No chat request was sent.")
 }
@@ -9589,6 +9614,7 @@ if (-not $LibraryOnly) {
             Write-Host ('  ' + $script:Gm.BoldBlue + $script:Box.Arrow + ' You: ' + $script:Gm.Fg) -NoNewline
             $question = Read-TuiMultilineInput
             Write-Host $script:Gm.Reset -NoNewline
+            if ($null -eq $question) { break }
             if (-not $question) { continue }
             $rawTrimmed = $question.Trim()
             $trimmedQ = Resolve-ReplCommandAlias -InputText $rawTrimmed

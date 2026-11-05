@@ -10,6 +10,9 @@ $savedDoctorFixture = $global:ShellossusDoctorFixture
 $global:ShellossusDoctorFixture = @{}
 $global:ShellossusDoctorFixture.httpError = New-Object System.Exception 'Private response body: doctor-secret-key'
 $global:ShellossusDoctorFixture.httpError | Add-Member -NotePropertyName Response -NotePropertyValue @{ StatusCode = 401 }
+$innerEx = New-Object System.Exception 'Inner HTTP failure'
+$innerEx | Add-Member -NotePropertyName Response -NotePropertyValue @{ StatusCode = 403 }
+$global:ShellossusDoctorFixture.innerHttpError = New-Object System.Exception ('Outer wrapper', $innerEx)
 if ($ConstrainedLanguage) {
     $ExecutionContext.SessionState.LanguageMode = 'ConstrainedLanguage'
     . "$PSScriptRoot\..\shellossus.ps1" -LibraryOnly
@@ -24,6 +27,8 @@ $global:ShellossusDoctorFixture.httpCode = 200
 $global:ShellossusDoctorFixture.body = '{"data":[{"id":"test-model"}]}'
 $global:ShellossusDoctorFixture.requests = 0
 $global:ShellossusDoctorFixture.throwNetwork = $false
+$global:ShellossusDoctorFixture.throwRedirectNoResponse = $false
+$global:ShellossusDoctorFixture.throwInnerResponseCode = 0
 $global:ShellossusDoctorFixture.responsePath = ''
 function Invoke-WebRequest {
     param($Uri, $Method, $Headers, $OutFile, $MaximumRedirection, $TimeoutSec, $ErrorAction, [switch]$UseBasicParsing, [switch]$PassThru)
@@ -33,6 +38,11 @@ function Invoke-WebRequest {
     Assert-True ($Headers.Authorization -ceq 'Bearer doctor-secret-key' -and $MaximumRedirection -eq 0 -and $TimeoutSec -eq 10) 'Doctor request authentication/redirect/timeout settings changed.'
     Assert-True (-not $PassThru -and $UseBasicParsing) 'Doctor must use file-backed responses without -PassThru on Windows PowerShell 5.1.'
     if ($global:ShellossusDoctorFixture.throwNetwork) { throw 'Network failure includes doctor-secret-key and server-private-body.' }
+    if ($global:ShellossusDoctorFixture.throwRedirectNoResponse) { throw 'Maximum redirection count exceeded.' }
+    if ($global:ShellossusDoctorFixture.throwInnerResponseCode -gt 0) {
+        $global:ShellossusDoctorFixture.innerHttpError.InnerException.Response.StatusCode = $global:ShellossusDoctorFixture.throwInnerResponseCode
+        throw $global:ShellossusDoctorFixture.innerHttpError
+    }
     if ($global:ShellossusDoctorFixture.httpCode -ne 200) {
         $global:ShellossusDoctorFixture.httpError.Response.StatusCode = $global:ShellossusDoctorFixture.httpCode
         throw $global:ShellossusDoctorFixture.httpError
@@ -66,6 +76,20 @@ try {
         Assert-True ($endpointCheck.status -eq $case.status -and $endpointCheck.message -like $case.text) "Misleading doctor result for HTTP $($case.code)."
     }
     $global:ShellossusDoctorFixture.httpCode = 200
+    $global:ShellossusDoctorFixture.throwRedirectNoResponse = $true
+    $redirectReport = Get-AgentDoctorReport @argsDoctor -NoSession
+    $redirectCheck = Get-DoctorCheck $redirectReport 'endpoint'
+    Assert-True ($redirectCheck.status -eq 'fail' -and $redirectCheck.message -like '*not forwarded*') 'PS 5.1 redirection exception without Response was not reported as redirect.'
+    $global:ShellossusDoctorFixture.throwRedirectNoResponse = $false
+
+    $global:ShellossusDoctorFixture.throwInnerResponseCode = 403
+    $innerReport = Get-AgentDoctorReport @argsDoctor -NoSession
+    $innerCheck = Get-DoctorCheck $innerReport 'endpoint'
+    Assert-True ($innerCheck.status -eq 'fail' -and $innerCheck.message -like '*account access*') 'InnerException.Response.StatusCode was not extracted.'
+    $global:ShellossusDoctorFixture.throwInnerResponseCode = 0
+
+    $textOut = @(Write-AgentDoctorReport -Report $report -Mode text 6>&1 | ForEach-Object { [string]$_ }) -join "`n"
+    Assert-True ($textOut.Contains($script:Gm.BoldGreen) -and $textOut.Contains('[PASS]') -and $textOut.Contains('Shellossus doctor')) 'Write-AgentDoctorReport text mode missing ANSI status colors.'
     foreach ($body in @('<html>proxy login</html>', '{"unexpected":"shape"}', '{"data":[{}]}')) {
         $global:ShellossusDoctorFixture.body = $body
         $report = Get-AgentDoctorReport @argsDoctor -NoSession
@@ -92,6 +116,9 @@ try {
     }
     Assert-True ($global:ShellossusDoctorFixture.requests -eq $requestCount) 'Doctor made a request to an invalid URL.'
     $argsDoctor.BaseUrl = 'https://example.invalid/v1'
+    $argsDoctor.ApiKey = ' '
+    $wsKeyReport = Get-AgentDoctorReport @argsDoctor -NoSession
+    Assert-True (((Get-DoctorCheck $wsKeyReport 'api_key').status -eq 'fail') -and (-not (Get-DoctorCheck $wsKeyReport 'api_key').message.Contains('[redacted]'))) 'Whitespace-only ApiKey corrupted doctor check messages.'
     $argsDoctor.ApiKey = ''
     $argsDoctor.ModelId = ''
     $report = Get-AgentDoctorReport @argsDoctor -NoSession -ConfigState missing

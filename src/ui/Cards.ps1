@@ -414,9 +414,9 @@ function Format-UnifiedDiff {
 }
 
 function Write-UnifiedDiffCard {
-    param([string]$Path, [string]$ToolName = 'edit_file', $Before = $null, [string]$After = '')
+    param([string]$Path, [string]$ToolName = 'edit_file', $Before = $null, [string]$After = '', [int]$ContextLines = 3, [int]$MaxLines = 80)
     if ($script:OutputMode -eq 'json') { return }
-    foreach ($ln in @(Format-UnifiedDiff -Path $Path -ToolName $ToolName -Before $Before -After $After)) {
+    foreach ($ln in @(Format-UnifiedDiff -Path $Path -ToolName $ToolName -Before $Before -After $After -ContextLines $ContextLines -MaxLines $MaxLines)) {
         Write-Host $ln
     }
 }
