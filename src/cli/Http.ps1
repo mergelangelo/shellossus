@@ -30,13 +30,19 @@ function Wait-AgentProcessWithSpinner {
     $frameIdx = 0
     $startWait = Get-Date
     $showSpinner = ($script:OutputMode -ne 'json') -and (-not $script:HideSpinner)
+    $lastSpinVisLen = 0
     try {
         while (-not $Process.HasExited) {
             $elapsed = ((Get-Date) - $startWait).TotalSeconds
             if ($showSpinner) {
                 $spinChar = $frames[$frameIdx % $frames.Count]
                 $frameIdx++
-                $statusLine = ("`r" + $script:Gm.Grey1 + ("  [{0}] {1} ({2:0.0}s)..." -f $spinChar, $StatusLabel, $elapsed) + $script:Gm.Reset)
+                $maxSpinW = (Get-TerminalWidth) - 1
+                if ($maxSpinW -lt 20) { $maxSpinW = 20 }
+                $rawSpinLine = $script:Gm.Grey1 + ("  [{0}] {1} ({2:0.0}s)..." -f $spinChar, $StatusLabel, $elapsed) + $script:Gm.Reset
+                $clampedSpinLine = Limit-AnsiLineToWidth -Text $rawSpinLine -MaxWidth $maxSpinW
+                $lastSpinVisLen = (Strip-AnsiCodes -Text $clampedSpinLine).Length
+                $statusLine = "`r" + $clampedSpinLine
                 Write-Host $statusLine -NoNewline
             }
             if ($elapsed -ge ($TimeoutSec + 5)) {
@@ -51,7 +57,8 @@ function Wait-AgentProcessWithSpinner {
     }
     finally {
         if ($showSpinner -and $frameIdx -gt 0) {
-            $clearLine = "`r" + (' ' * ($StatusLabel.Length + 28)) + "`r"
+            $clearWidth = if ($lastSpinVisLen -gt 0) { $lastSpinVisLen } else { $StatusLabel.Length + 28 }
+            $clearLine = "`r" + (' ' * $clearWidth) + "`r"
             Write-Host $clearLine -NoNewline
         }
         if (-not $Process.HasExited) {

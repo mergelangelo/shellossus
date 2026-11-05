@@ -73,6 +73,29 @@ try {
     $defaultShellossusCfg = Join-Path (Join-Path $fakeUserHome '.shellossus') '.env'
     $fallbackCfg = Read-AgentConfig -Path $defaultShellossusCfg
     Assert-True ($fallbackCfg.SHELLOSSUS_MODEL -eq 'from-dot-h-agent') 'Fallback from .shellossus/.env to existing .h-agent/.env failed.'
+
+    # Regression: Format-ConfigPath resolves existing ancestor and strips .\ segments when intermediate directories do not exist.
+    $deepUncreated = Format-ConfigPath -Path (Join-Path $workspacePath '.\uncreated-dir\nested\custom.cfg')
+    $expectedDeep = Join-Path (Join-Path (Join-Path (Get-Item -LiteralPath $workspacePath -Force).FullName 'uncreated-dir') 'nested') 'custom.cfg'
+    Assert-True ($deepUncreated -eq $expectedDeep -and (-not $deepUncreated.Contains('.\')) -and (-not $deepUncreated.Contains('./'))) "Format-ConfigPath did not normalize uncreated intermediate directories: $deepUncreated"
+
+    # Regression: Test-IsSecretFile catches NTFS Alternate Data Streams (::$DATA) and trailing dots/spaces.
+    $adsEnvItem = [pscustomobject]@{ PSIsContainer = $false; Name = '.env::$DATA'; FullName = (Join-Path $workspacePath '.env::$DATA') }
+    $dotEnvItem = [pscustomobject]@{ PSIsContainer = $false; Name = '.env. '; FullName = (Join-Path $workspacePath '.env. ') }
+    $adsCfgItem = [pscustomobject]@{ PSIsContainer = $false; Name = 'custom.cfg::$DATA'; FullName = ($script:AgentConfigPath + '::$DATA') }
+    Assert-True (Test-IsSecretFile $adsEnvItem) 'Test-IsSecretFile missed .env::$DATA.'
+    Assert-True (Test-IsSecretFile $dotEnvItem) 'Test-IsSecretFile missed .env with trailing dot/space.'
+    Assert-True (Test-IsSecretFile $adsCfgItem) 'Test-IsSecretFile missed custom.cfg::$DATA.'
+
+    # Regression: Resolve-AgentPath rejects paths with colons after optional drive prefix (NTFS ADS syntax).
+    $adsPathRejected = $false
+    try {
+        $null = Resolve-AgentPath -Root $workspacePath -RelativePath '.env::$DATA'
+    }
+    catch {
+        $adsPathRejected = ($_.Exception.Message -like '*Invalid path syntax*')
+    }
+    Assert-True $adsPathRejected 'Resolve-AgentPath did not reject NTFS Alternate Data Stream path syntax.'
 }
 finally {
     Remove-TestEnvironment -Env $envData

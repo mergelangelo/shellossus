@@ -187,33 +187,46 @@ function Format-AskUserArguments {
     }
     $props = @(Get-ObjectPropertyNames -InputObject $Arguments)
     $q = ''
-    foreach ($p in @('question', 'query', 'prompt', 'title', 'message')) {
-        if ($props -contains $p -and $Arguments.$p) { $q = [string]$Arguments.$p; break }
+    foreach ($p in @('question', 'query', 'prompt', 'title', 'message', 'text')) {
+        if ($props -contains $p -and $null -ne $Arguments.$p) {
+            if ($Arguments.$p -isnot [string]) { $q = $Arguments.$p; break }
+            if ($Arguments.$p) { $q = [string]$Arguments.$p; break }
+        }
     }
 
     $intent = 'question'
-    if ($props -contains 'intent' -and $Arguments.intent) {
-        $intent = ([string]$Arguments.intent).Trim().ToLower()
+    $hasExplicitIntent = $false
+    foreach ($p in @('intent', 'mode', 'type')) {
+        if ($props -contains $p -and $null -ne $Arguments.$p) {
+            $hasExplicitIntent = $true
+            if ($Arguments.$p -isnot [string]) { $intent = $Arguments.$p; break }
+            if ($Arguments.$p) { $intent = ([string]$Arguments.$p).Trim().ToLower(); break }
+        }
     }
-    elseif ($props -contains 'plan' -or $props -contains 'plan_review' -or $props -contains 'planReview') {
+    if ((-not $hasExplicitIntent) -and ($props -contains 'plan' -or $props -contains 'plan_review' -or $props -contains 'planReview' -or $props -contains 'plan_text' -or $props -contains 'planText' -or $props -contains 'markdown' -or $props -contains 'body' -or $props -contains 'content' -or $props -contains 'details')) {
         $intent = 'plan-review'
     }
 
     $plan = ''
-    foreach ($p in @('plan', 'plan_text', 'planText', 'markdown')) {
-        if ($props -contains $p -and $Arguments.$p) { $plan = [string]$Arguments.$p; break }
+    $hasPlanVal = $false
+    foreach ($p in @('plan', 'plan_text', 'planText', 'markdown', 'body', 'content', 'details')) {
+        if ($props -contains $p -and $null -ne $Arguments.$p) {
+            if ($Arguments.$p -isnot [string]) { $plan = $Arguments.$p; $hasPlanVal = $true; break }
+            if ($Arguments.$p) { $plan = [string]$Arguments.$p; $hasPlanVal = $true; break }
+        }
     }
 
     $allowCustom = $true
-    if ($props -contains 'allow_custom' -and $null -ne $Arguments.allow_custom) {
-        $allowCustom = [bool]$Arguments.allow_custom
-    }
-    elseif ($props -contains 'allowCustom' -and $null -ne $Arguments.allowCustom) {
-        $allowCustom = [bool]$Arguments.allowCustom
+    foreach ($p in @('allow_custom', 'allowCustom', 'custom', 'free_text', 'freeText')) {
+        if ($props -contains $p -and $null -ne $Arguments.$p) {
+            if ($Arguments.$p -is [bool]) { $allowCustom = [bool]$Arguments.$p }
+            else { $allowCustom = $Arguments.$p }
+            break
+        }
     }
 
     $rawOptions = $null
-    foreach ($p in @('options', 'choices', 'answers')) {
+    foreach ($p in @('options', 'choices', 'answers', 'items')) {
         if ($props -contains $p -and $null -ne $Arguments.$p) {
             $rawOptions = $Arguments.$p
             break
@@ -276,7 +289,19 @@ function Format-AskUserArguments {
         intent = $intent
         allow_custom = $allowCustom
     }
-    if ($plan) { $out['plan'] = $plan }
+    if ($hasPlanVal) { $out['plan'] = $plan }
+    $knownProps = @(
+        'question', 'query', 'prompt', 'title', 'message', 'text',
+        'plan', 'plan_review', 'planReview', 'plan_text', 'planText', 'markdown', 'body', 'content', 'details',
+        'intent', 'mode', 'type',
+        'allow_custom', 'allowCustom', 'custom', 'free_text', 'freeText',
+        'options', 'choices', 'answers', 'items'
+    )
+    foreach ($p in $props) {
+        if ($p -notin $knownProps) {
+            $out[$p] = $Arguments.$p
+        }
+    }
     return $out
 }
 
@@ -288,8 +313,13 @@ function Format-MemoryArguments {
     }
     $props = @(Get-ObjectPropertyNames -InputObject $Arguments)
     $action = 'append'
-    if ($props -contains 'action' -and $Arguments.action) {
-        $action = ([string]$Arguments.action).Trim().ToLower()
+    if ($props -contains 'action' -and $null -ne $Arguments.action) {
+        if ($Arguments.action -is [string]) {
+            if ($Arguments.action) { $action = ([string]$Arguments.action).Trim().ToLower() }
+        }
+        else {
+            $action = $Arguments.action
+        }
     }
     elseif ($props -contains 'view' -and [bool]$Arguments.view) {
         $action = 'view'
@@ -299,15 +329,31 @@ function Format-MemoryArguments {
     }
 
     $scope = 'workspace'
-    if ($props -contains 'scope' -and $Arguments.scope) {
-        $scope = ([string]$Arguments.scope).Trim().ToLower()
+    if ($props -contains 'scope' -and $null -ne $Arguments.scope) {
+        if ($Arguments.scope -is [string]) {
+            if ($Arguments.scope) { $scope = ([string]$Arguments.scope).Trim().ToLower() }
+        }
+        else {
+            $scope = $Arguments.scope
+        }
     }
 
+    $hasContent = $false
     $content = ''
     foreach ($p in @('content', 'note', 'text', 'memory', 'value')) {
-        if ($props -contains $p -and $Arguments.$p) {
-            $content = [string]$Arguments.$p
-            break
+        if ($props -contains $p -and $null -ne $Arguments.$p) {
+            if ($Arguments.$p -is [string]) {
+                if ($Arguments.$p) {
+                    $content = [string]$Arguments.$p
+                    $hasContent = $true
+                    break
+                }
+            }
+            else {
+                $content = $Arguments.$p
+                $hasContent = $true
+                break
+            }
         }
     }
 
@@ -315,6 +361,12 @@ function Format-MemoryArguments {
         action = $action
         scope = $scope
     }
-    if ($content) { $out['content'] = $content }
+    if ($hasContent) { $out['content'] = $content }
+    $knownProps = @('action', 'view', 'clear', 'scope', 'content', 'note', 'text', 'memory', 'value', 'user_initiated')
+    foreach ($p in $props) {
+        if ($p -notin $knownProps) {
+            $out[$p] = $Arguments.$p
+        }
+    }
     return $out
 }

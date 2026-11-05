@@ -146,13 +146,44 @@ function Format-ConfigPath {
     param([string]$Path)
     if (-not $Path) { return '' }
     if (Test-Path -LiteralPath $Path) { return (Get-Item -LiteralPath $Path -Force).FullName }
-    $parent = Split-Path $Path -Parent
-    $leaf = Split-Path $Path -Leaf
-    if (-not $parent) { $parent = '.' }
-    if (Test-Path -LiteralPath $parent) {
-        return (Join-Path (Get-Item -LiteralPath $parent -Force).FullName $leaf)
+    $segments = @()
+    $curr = $Path
+    for ($depth = 0; $depth -lt 64; $depth++) {
+        if (-not $curr) { break }
+        $leaf = Split-Path $curr -Leaf
+        $parent = Split-Path $curr -Parent
+        if ($leaf -and $leaf -ne '.') {
+            $segments = @($leaf) + $segments
+        }
+        if (-not $parent) {
+            if ($curr -notmatch '^([a-zA-Z]:[/\\]?|[/\\])$') { $curr = '.' }
+            break
+        }
+        if ($parent -ieq $curr) { break }
+        $curr = $parent
+        while ((Split-Path $curr -Leaf) -eq '.') {
+            $nextParent = Split-Path $curr -Parent
+            if (-not $nextParent -or $nextParent -ieq $curr) {
+                $curr = '.'
+                break
+            }
+            $curr = $nextParent
+        }
+        if (Test-Path -LiteralPath $curr) { break }
     }
-    return $Path
+    $basePath = if ($curr -and (Test-Path -LiteralPath $curr)) {
+        (Get-Item -LiteralPath $curr -Force).FullName
+    }
+    elseif ($curr -match '^[a-zA-Z]:[/\\]?$') {
+        $curr
+    }
+    else {
+        (Get-Item -LiteralPath (Get-Location).Path -Force).FullName
+    }
+    foreach ($seg in $segments) {
+        $basePath = Join-Path $basePath $seg
+    }
+    return $basePath
 }
 
 function Format-AgentError {
@@ -182,7 +213,9 @@ function Format-PreviewText {
 function Test-IsSecretFile {
     param($Item)
     if ($Item.PSIsContainer) { return $false }
-    return ($Item.Name -eq '.env' -or ($Item.Name -like '.env.*' -and $Item.Name -ne '.env.example') -or $Item.FullName -eq $script:AgentConfigPath -or ($script:LegacyAgentConfigPath -and $Item.FullName -eq $script:LegacyAgentConfigPath))
+    $cleanName = ($Item.Name -replace ':.*$', '').TrimEnd('.', ' ')
+    $cleanFull = ($Item.FullName -replace '(?<!^[a-zA-Z]):.*$', '').TrimEnd('.', ' ')
+    return ($cleanName -eq '.env' -or ($cleanName -like '.env.*' -and $cleanName -ne '.env.example') -or $cleanFull -eq $script:AgentConfigPath -or ($script:LegacyAgentConfigPath -and $cleanFull -eq $script:LegacyAgentConfigPath))
 }
 
 function Test-AgentPathWithinRoot {
@@ -233,6 +266,7 @@ function Test-PathHasReparsePoint {
 function Resolve-AgentPath {
     param([string]$Root, [string]$RelativePath, [switch]$AllowRegisteredSkill)
     if (-not $RelativePath) { $RelativePath = '.' }
+    if (($RelativePath -replace '^[a-zA-Z]:', '').Contains(':')) { throw 'Invalid path syntax.' }
     if ($AllowRegisteredSkill -and $script:RegisteredSkills -and $script:RegisteredSkills.Count -gt 0) {
         $skillTarget = $null
         if ($script:RegisteredSkills.ContainsKey($RelativePath)) {
@@ -1929,6 +1963,7 @@ $script:ActiveState = $null
 $script:SubagentDepth = 0
 $script:MaxSubagentDepth = 1
 $script:ActiveSessionTodos = @()
+$script:AutoApproveWeb = $false
 
 function Resolve-ToolCanonicalName {
     param([string]$Name)
@@ -2814,33 +2849,46 @@ function Format-AskUserArguments {
     }
     $props = @(Get-ObjectPropertyNames -InputObject $Arguments)
     $q = ''
-    foreach ($p in @('question', 'query', 'prompt', 'title', 'message')) {
-        if ($props -contains $p -and $Arguments.$p) { $q = [string]$Arguments.$p; break }
+    foreach ($p in @('question', 'query', 'prompt', 'title', 'message', 'text')) {
+        if ($props -contains $p -and $null -ne $Arguments.$p) {
+            if ($Arguments.$p -isnot [string]) { $q = $Arguments.$p; break }
+            if ($Arguments.$p) { $q = [string]$Arguments.$p; break }
+        }
     }
 
     $intent = 'question'
-    if ($props -contains 'intent' -and $Arguments.intent) {
-        $intent = ([string]$Arguments.intent).Trim().ToLower()
+    $hasExplicitIntent = $false
+    foreach ($p in @('intent', 'mode', 'type')) {
+        if ($props -contains $p -and $null -ne $Arguments.$p) {
+            $hasExplicitIntent = $true
+            if ($Arguments.$p -isnot [string]) { $intent = $Arguments.$p; break }
+            if ($Arguments.$p) { $intent = ([string]$Arguments.$p).Trim().ToLower(); break }
+        }
     }
-    elseif ($props -contains 'plan' -or $props -contains 'plan_review' -or $props -contains 'planReview') {
+    if ((-not $hasExplicitIntent) -and ($props -contains 'plan' -or $props -contains 'plan_review' -or $props -contains 'planReview' -or $props -contains 'plan_text' -or $props -contains 'planText' -or $props -contains 'markdown' -or $props -contains 'body' -or $props -contains 'content' -or $props -contains 'details')) {
         $intent = 'plan-review'
     }
 
     $plan = ''
-    foreach ($p in @('plan', 'plan_text', 'planText', 'markdown')) {
-        if ($props -contains $p -and $Arguments.$p) { $plan = [string]$Arguments.$p; break }
+    $hasPlanVal = $false
+    foreach ($p in @('plan', 'plan_text', 'planText', 'markdown', 'body', 'content', 'details')) {
+        if ($props -contains $p -and $null -ne $Arguments.$p) {
+            if ($Arguments.$p -isnot [string]) { $plan = $Arguments.$p; $hasPlanVal = $true; break }
+            if ($Arguments.$p) { $plan = [string]$Arguments.$p; $hasPlanVal = $true; break }
+        }
     }
 
     $allowCustom = $true
-    if ($props -contains 'allow_custom' -and $null -ne $Arguments.allow_custom) {
-        $allowCustom = [bool]$Arguments.allow_custom
-    }
-    elseif ($props -contains 'allowCustom' -and $null -ne $Arguments.allowCustom) {
-        $allowCustom = [bool]$Arguments.allowCustom
+    foreach ($p in @('allow_custom', 'allowCustom', 'custom', 'free_text', 'freeText')) {
+        if ($props -contains $p -and $null -ne $Arguments.$p) {
+            if ($Arguments.$p -is [bool]) { $allowCustom = [bool]$Arguments.$p }
+            else { $allowCustom = $Arguments.$p }
+            break
+        }
     }
 
     $rawOptions = $null
-    foreach ($p in @('options', 'choices', 'answers')) {
+    foreach ($p in @('options', 'choices', 'answers', 'items')) {
         if ($props -contains $p -and $null -ne $Arguments.$p) {
             $rawOptions = $Arguments.$p
             break
@@ -2903,7 +2951,19 @@ function Format-AskUserArguments {
         intent = $intent
         allow_custom = $allowCustom
     }
-    if ($plan) { $out['plan'] = $plan }
+    if ($hasPlanVal) { $out['plan'] = $plan }
+    $knownProps = @(
+        'question', 'query', 'prompt', 'title', 'message', 'text',
+        'plan', 'plan_review', 'planReview', 'plan_text', 'planText', 'markdown', 'body', 'content', 'details',
+        'intent', 'mode', 'type',
+        'allow_custom', 'allowCustom', 'custom', 'free_text', 'freeText',
+        'options', 'choices', 'answers', 'items'
+    )
+    foreach ($p in $props) {
+        if ($p -notin $knownProps) {
+            $out[$p] = $Arguments.$p
+        }
+    }
     return $out
 }
 
@@ -2915,8 +2975,13 @@ function Format-MemoryArguments {
     }
     $props = @(Get-ObjectPropertyNames -InputObject $Arguments)
     $action = 'append'
-    if ($props -contains 'action' -and $Arguments.action) {
-        $action = ([string]$Arguments.action).Trim().ToLower()
+    if ($props -contains 'action' -and $null -ne $Arguments.action) {
+        if ($Arguments.action -is [string]) {
+            if ($Arguments.action) { $action = ([string]$Arguments.action).Trim().ToLower() }
+        }
+        else {
+            $action = $Arguments.action
+        }
     }
     elseif ($props -contains 'view' -and [bool]$Arguments.view) {
         $action = 'view'
@@ -2926,15 +2991,31 @@ function Format-MemoryArguments {
     }
 
     $scope = 'workspace'
-    if ($props -contains 'scope' -and $Arguments.scope) {
-        $scope = ([string]$Arguments.scope).Trim().ToLower()
+    if ($props -contains 'scope' -and $null -ne $Arguments.scope) {
+        if ($Arguments.scope -is [string]) {
+            if ($Arguments.scope) { $scope = ([string]$Arguments.scope).Trim().ToLower() }
+        }
+        else {
+            $scope = $Arguments.scope
+        }
     }
 
+    $hasContent = $false
     $content = ''
     foreach ($p in @('content', 'note', 'text', 'memory', 'value')) {
-        if ($props -contains $p -and $Arguments.$p) {
-            $content = [string]$Arguments.$p
-            break
+        if ($props -contains $p -and $null -ne $Arguments.$p) {
+            if ($Arguments.$p -is [string]) {
+                if ($Arguments.$p) {
+                    $content = [string]$Arguments.$p
+                    $hasContent = $true
+                    break
+                }
+            }
+            else {
+                $content = $Arguments.$p
+                $hasContent = $true
+                break
+            }
         }
     }
 
@@ -2942,7 +3023,13 @@ function Format-MemoryArguments {
         action = $action
         scope = $scope
     }
-    if ($content) { $out['content'] = $content }
+    if ($hasContent) { $out['content'] = $content }
+    $knownProps = @('action', 'view', 'clear', 'scope', 'content', 'note', 'text', 'memory', 'value', 'user_initiated')
+    foreach ($p in $props) {
+        if ($p -notin $knownProps) {
+            $out[$p] = $Arguments.$p
+        }
+    }
     return $out
 }
 
@@ -3649,7 +3736,8 @@ function Invoke-AgentWrite {
         if (-not $leaf -or $leaf -match '[<>:"/\\|?*\x00-\x1f]' -or $leaf -match '[. ]$') { throw 'Invalid file name.' }
         if ($leaf -match '^(?i:CON|PRN|AUX|NUL|COM[0-9]|LPT[0-9])(?:\.|$)') { throw 'Reserved file name.' }
         $path = Join-Path $parent $leaf
-        if ($leaf -eq '.env' -or ($leaf -like '.env.*' -and $leaf -ne '.env.example') -or $path -eq $script:AgentConfigPath) { throw 'Agent tools cannot write credential configuration files.' }
+        $cleanLeaf = ($leaf -replace ':.*$', '').TrimEnd('.', ' ')
+        if ($cleanLeaf -eq '.env' -or ($cleanLeaf -like '.env.*' -and $cleanLeaf -ne '.env.example') -or $path -eq $script:AgentConfigPath -or ($script:LegacyAgentConfigPath -and $path -eq $script:LegacyAgentConfigPath)) { throw 'Agent tools cannot write credential configuration files.' }
         if ($Arguments.content -isnot [string]) { throw 'content must be a string.' }
         $allowOverwrite = ($Arguments.overwrite -eq $true)
         if (Test-Path -LiteralPath $path) {
@@ -4772,7 +4860,10 @@ function Test-SafeWebUrl {
         if ($hostName.Contains(':')) {
             if ($hostName -match '^[0:]+0*1(?:%.*)?$' -or
                 $hostName -match '^[0:]+(?:%.*)?$' -or
-                $hostName -match '^(?:fe[89ab][0-9a-f]:|f[cd][0-9a-f]{2}:|ff[0-9a-f]{2}:|[0:]*:ffff:)') {
+                $hostName -match '^(?:fe[89ab][0-9a-f]:|f[cd][0-9a-f]{2}:|ff[0-9a-f]{2}:|[0:]*:ffff:)' -or
+                $hostName -match '^::(?:ffff:(?:0:+)?)?(?:127\.|10\.|192\.168\.|169\.254\.|172\.(?:1[6-9]|2\d|3[01])\.|0\.)' -or
+                $hostName -match '^(?:0+:){0,6}(?:::(?:ffff:(?:0:+)?)?|ffff:)?(?:7f[0-9a-f]{2}|0?a[0-9a-f]{2}|c0a8|a9fe|ac1[0-9a-f]):[0-9a-f]{1,4}$' -or
+                $hostName -match '^64:ff9b:') {
                 throw "Blocked request to local or private IPv6 address: $hostName"
             }
         }
@@ -4805,7 +4896,7 @@ function Test-SafeWebUrl {
 
 function Request-AgentWebConfirmation {
     param([string]$ToolName, [string]$Target)
-    if ($script:AgentPermission -in @('AutoEdit', 'Auto')) {
+    if ($script:AgentPermission -in @('AutoEdit', 'Auto') -or $script:AutoApproveWeb) {
         return @{ approved = $true; response = $null }
     }
     if ($script:OutputMode -eq 'json') {
@@ -4821,10 +4912,8 @@ function Request-AgentWebConfirmation {
     $promptStr = '  ' + $script:Gm.Grey0 + $script:Box.V + ' ' + $script:Gm.BoldYellow + 'Confirm outbound web request [y]es, [n]o, [a]ll: ' + $script:Gm.Fg
     $choice = Read-TuiConfirmation -PromptText $promptStr -ActionType 'web'
     if ($choice -eq 'a') {
-        if ($script:AgentPermission -eq 'Ask') {
-            $script:AgentPermission = 'AutoEdit'
-            Write-Host ('  ' + $script:Gm.Grey0 + $script:Box.V + ' ' + $script:Gm.Aqua + $script:Box.Check + ' [switched permission to AutoEdit for this session]' + $script:Gm.Reset)
-        }
+        $script:AutoApproveWeb = $true
+        Write-Host ('  ' + $script:Gm.Grey0 + $script:Box.V + ' ' + $script:Gm.Aqua + $script:Box.Check + ' [auto-approving web requests for this session]' + $script:Gm.Reset)
         return @{ approved = $true; response = $null }
     }
     if ($choice -eq 'y') {
@@ -4905,11 +4994,22 @@ function Invoke-AgentWebDownload {
     }
     $webCommand = Get-Command -Name 'Invoke-WebRequest' -ErrorAction SilentlyContinue
     if ($webCommand -and $webCommand.CommandType -eq 'Function') {
+        $savedSKey = $env:SHELLOSSUS_API_KEY
+        $savedHKey = $env:H_AGENT_API_KEY
+        $savedOKey = $env:OPENAI_API_KEY
         try {
+            $env:SHELLOSSUS_API_KEY = $null
+            $env:H_AGENT_API_KEY = $null
+            $env:OPENAI_API_KEY = $null
             Invoke-WebRequest @request
         }
         catch {
             throw (Format-WebRequestError -ErrorRecord $_)
+        }
+        finally {
+            $env:SHELLOSSUS_API_KEY = $savedSKey
+            $env:H_AGENT_API_KEY = $savedHKey
+            $env:OPENAI_API_KEY = $savedOKey
         }
     }
     else {
@@ -4918,6 +5018,9 @@ function Invoke-AgentWebDownload {
         $proc = $null
         $oldUri = $env:SHELLOSSUS_WEB_DOWNLOAD_URI
         $oldFile = $env:SHELLOSSUS_WEB_DOWNLOAD_FILE
+        $savedSKey = $env:SHELLOSSUS_API_KEY
+        $savedHKey = $env:H_AGENT_API_KEY
+        $savedOKey = $env:OPENAI_API_KEY
         try {
             $worker = @'
 $ErrorActionPreference = 'Stop'
@@ -4946,6 +5049,9 @@ try {
             }
             else { @('-NoProfile', '-NonInteractive', '-Command', $worker) }
             try {
+                $env:SHELLOSSUS_API_KEY = $null
+                $env:H_AGENT_API_KEY = $null
+                $env:OPENAI_API_KEY = $null
                 $env:SHELLOSSUS_WEB_DOWNLOAD_URI = $Uri
                 $env:SHELLOSSUS_WEB_DOWNLOAD_FILE = $OutFile
                 $proc = Start-Process -FilePath (Get-AgentEnvironment).shell_exe -ArgumentList $workerArguments -RedirectStandardOutput $stdout.FullName -RedirectStandardError $stderr.FullName -NoNewWindow -PassThru -ErrorAction Stop
@@ -4953,6 +5059,9 @@ try {
             finally {
                 $env:SHELLOSSUS_WEB_DOWNLOAD_URI = $oldUri
                 $env:SHELLOSSUS_WEB_DOWNLOAD_FILE = $oldFile
+                $env:SHELLOSSUS_API_KEY = $savedSKey
+                $env:H_AGENT_API_KEY = $savedHKey
+                $env:OPENAI_API_KEY = $savedOKey
             }
             $started = Get-Date
             while (-not $proc.HasExited) {
@@ -8443,13 +8552,19 @@ function Wait-AgentProcessWithSpinner {
     $frameIdx = 0
     $startWait = Get-Date
     $showSpinner = ($script:OutputMode -ne 'json') -and (-not $script:HideSpinner)
+    $lastSpinVisLen = 0
     try {
         while (-not $Process.HasExited) {
             $elapsed = ((Get-Date) - $startWait).TotalSeconds
             if ($showSpinner) {
                 $spinChar = $frames[$frameIdx % $frames.Count]
                 $frameIdx++
-                $statusLine = ("`r" + $script:Gm.Grey1 + ("  [{0}] {1} ({2:0.0}s)..." -f $spinChar, $StatusLabel, $elapsed) + $script:Gm.Reset)
+                $maxSpinW = (Get-TerminalWidth) - 1
+                if ($maxSpinW -lt 20) { $maxSpinW = 20 }
+                $rawSpinLine = $script:Gm.Grey1 + ("  [{0}] {1} ({2:0.0}s)..." -f $spinChar, $StatusLabel, $elapsed) + $script:Gm.Reset
+                $clampedSpinLine = Limit-AnsiLineToWidth -Text $rawSpinLine -MaxWidth $maxSpinW
+                $lastSpinVisLen = (Strip-AnsiCodes -Text $clampedSpinLine).Length
+                $statusLine = "`r" + $clampedSpinLine
                 Write-Host $statusLine -NoNewline
             }
             if ($elapsed -ge ($TimeoutSec + 5)) {
@@ -8464,7 +8579,8 @@ function Wait-AgentProcessWithSpinner {
     }
     finally {
         if ($showSpinner -and $frameIdx -gt 0) {
-            $clearLine = "`r" + (' ' * ($StatusLabel.Length + 28)) + "`r"
+            $clearWidth = if ($lastSpinVisLen -gt 0) { $lastSpinVisLen } else { $StatusLabel.Length + 28 }
+            $clearLine = "`r" + (' ' * $clearWidth) + "`r"
             Write-Host $clearLine -NoNewline
         }
         if (-not $Process.HasExited) {
