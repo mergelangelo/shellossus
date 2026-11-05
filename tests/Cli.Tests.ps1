@@ -732,6 +732,42 @@ try {
     $script:AgentPermission = 'Ask'
     Remove-Item -LiteralPath (Join-Path $workspacePath 'scoped-compact') -Recurse -Force
 
+    # Regression: Scoped AGENTS.md interception (status='instructions_required') does not consume the loop-guard repetition budget.
+    $scopedRepDir = Join-Path $workspacePath 'scoped-repeat/nested'
+    New-Item -ItemType Directory -Path $scopedRepDir -Force | Out-Null
+    Set-Content -LiteralPath (Join-Path $workspacePath 'scoped-repeat/AGENTS.md') -Value 'Scoped repeat rule.' -Encoding UTF8
+    Set-Content -LiteralPath (Join-Path $scopedRepDir 'input.txt') -Value 'scoped-input-content' -Encoding UTF8
+    $script:srStep = 0
+    function Invoke-WebRequest {
+        param($Uri, $Method, $Headers, $ContentType, $Body, $TimeoutSec, $ErrorAction, [switch]$UseBasicParsing, $OutFile)
+        $script:srStep++
+        $payload = $Body | ConvertFrom-Json
+        if ($script:srStep -eq 1) {
+            $r = @{ choices = @(@{ finish_reason = 'tool_calls'; message = @{ content = ''; tool_calls = @(@{ id = 'sr-r1'; type = 'function'; function = @{ name = 'read_file'; arguments = '{"path":"scoped-repeat/nested/input.txt"}' } }) } }) } | ConvertTo-Json -Depth 10 -Compress
+        }
+        elseif ($script:srStep -eq 2) {
+            $firstToolRes = $payload.messages[-1].content | ConvertFrom-Json
+            Assert-True ($firstToolRes.status -eq 'instructions_required') "Expected first scoped read_file to return instructions_required, got: $($payload.messages[-1].content)"
+            $r = @{ choices = @(@{ finish_reason = 'tool_calls'; message = @{ content = ''; tool_calls = @(@{ id = 'sr-r2'; type = 'function'; function = @{ name = 'read_file'; arguments = '{"path":"scoped-repeat/nested/input.txt"}' } }) } }) } | ConvertTo-Json -Depth 10 -Compress
+        }
+        else {
+            $secondToolRes = $payload.messages[-1].content | ConvertFrom-Json
+            Assert-True ($secondToolRes.status -ne 'repeated_call_warning' -and ([string]$secondToolRes.text).Contains('scoped-input-content')) "Expected immediate retry after instructions_required to succeed with MaxRepeatCalls=2, got: $($payload.messages[-1].content)"
+            $r = @{ choices = @(@{ finish_reason = 'stop'; message = @{ content = 'Scoped retry read succeeded.' } }) } | ConvertTo-Json -Depth 10 -Compress
+        }
+        Set-Content -LiteralPath $OutFile -Value $r -Encoding UTF8 -NoNewline
+    }
+    $srState = @{
+        workspace = $workspacePath
+        messages = @(
+            @{ role = 'system'; content = 'sys' },
+            @{ role = 'user'; content = 'Read scoped file with MaxRepeatCalls=2' }
+        )
+    }
+    Invoke-AgentTurn -State $srState -Endpoint 'https://example.invalid/v1/chat/completions' -ModelId 'test-model' -ApiKey 'fake' -Root $workspacePath -Steps 4 -MaxRepeatCalls 2
+    Assert-True ($script:srStep -eq 3 -and (-not $srState.loop_detected) -and $srState.messages[-1].content -eq 'Scoped retry read succeeded.') 'Scoped instructions_required interception falsely triggered loop-guard penalty on immediate retry.'
+    Remove-Item -LiteralPath (Join-Path $workspacePath 'scoped-repeat') -Recurse -Force
+
     # Regression (Item 11): REPL /memory command (Invoke-ReplMemoryCommand) supports workspace & global scopes and view/add/set/clear/all actions.
     $replMemCfgDir = Join-Path $testRoot 'repl-mem-global'
     New-Item -ItemType Directory -Path $replMemCfgDir -Force | Out-Null
