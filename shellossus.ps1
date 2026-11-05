@@ -325,8 +325,23 @@ function Set-AgentUtf8Content {
     if ($null -eq $Value -or $Value.Length -eq 0) {
         $null = New-Item -ItemType File -Path $LiteralPath -Force -ErrorAction Stop
     }
+    elseif ($Value -notmatch '[^\x00-\x7F]') {
+        Set-Content -LiteralPath $LiteralPath -Value $Value -Encoding Ascii -NoNewline -ErrorAction Stop
+    }
     else {
         Set-Content -LiteralPath $LiteralPath -Value $Value -Encoding UTF8 -NoNewline -ErrorAction Stop
+        if ($PSVersionTable.PSVersion.Major -lt 6) {
+            $rawBytes = @(Get-Content -LiteralPath $LiteralPath -Encoding Byte -ReadCount 0 -ErrorAction Stop)
+            if ($rawBytes.Count -ge 3 -and $rawBytes[0] -eq 239 -and $rawBytes[1] -eq 187 -and $rawBytes[2] -eq 191) {
+                if ($rawBytes.Count -eq 3) {
+                    $null = New-Item -ItemType File -Path $LiteralPath -Force -ErrorAction Stop
+                }
+                else {
+                    [byte[]]$stripped = @($rawBytes[3..($rawBytes.Count - 1)])
+                    Set-Content -LiteralPath $LiteralPath -Value $stripped -Encoding Byte -ErrorAction Stop
+                }
+            }
+        }
     }
 }
 

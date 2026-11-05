@@ -145,6 +145,22 @@ try {
     Assert-True (Test-IsLoopbackBaseUrl -Url 'http://[::1]:11434/v1') 'Test-IsLoopbackBaseUrl rejected http://[::1]:11434/v1.'
     Assert-True (-not (Test-IsLoopbackBaseUrl -Url 'https://api.openai.com/v1')) 'Test-IsLoopbackBaseUrl accepted non-loopback https://api.openai.com/v1.'
     Assert-True (-not (Test-IsLoopbackBaseUrl -Url 'http://example.invalid/v1')) 'Test-IsLoopbackBaseUrl accepted invalid remote HTTP URL.'
+
+    # Set-AgentUtf8Content writes BOM-less UTF-8 for empty, pure ASCII, and non-ASCII Unicode strings.
+    $utf8Path = Join-Path $testRoot 'utf8-nobom.txt'
+    Set-AgentUtf8Content -LiteralPath $utf8Path -Value ''
+    $emptyRead = Get-Content -LiteralPath $utf8Path -Raw -Encoding UTF8
+    if ($null -eq $emptyRead) { $emptyRead = '' }
+    Assert-True ($emptyRead -ceq '' -and (Get-Item -LiteralPath $utf8Path -Force).Length -eq 0) 'Set-AgentUtf8Content empty string wrote unexpected bytes.'
+
+    Set-AgentUtf8Content -LiteralPath $utf8Path -Value 'ascii-no-bom'
+    Assert-True ((Get-Content -LiteralPath $utf8Path -Raw -Encoding UTF8) -ceq 'ascii-no-bom') 'Set-AgentUtf8Content ASCII roundtrip failed.'
+    Assert-True ((Get-Item -LiteralPath $utf8Path -Force).Length -eq 12) 'Set-AgentUtf8Content ASCII string included a BOM or wrong byte length.'
+
+    $unicodeVal = ([string][char]0x0442) + ([string][char]0x0435) + ([string][char]0x0441) + ([string][char]0x0442)
+    Set-AgentUtf8Content -LiteralPath $utf8Path -Value $unicodeVal
+    Assert-True ((Get-Content -LiteralPath $utf8Path -Raw -Encoding UTF8) -ceq $unicodeVal) 'Set-AgentUtf8Content Unicode roundtrip failed.'
+    Assert-True ((Get-Item -LiteralPath $utf8Path -Force).Length -eq 8) 'Set-AgentUtf8Content Unicode string included a BOM or wrong byte length.'
 }
 finally {
     Remove-TestEnvironment -Env $envData

@@ -294,9 +294,12 @@ try {
         Set-AgentUtf8Content -LiteralPath $clTmp.FullName -Value ''
         $clEmptyRead = Get-Content -LiteralPath $clTmp.FullName -Raw -Encoding UTF8
         if ($null -eq $clEmptyRead) { $clEmptyRead = '' }
-        Assert-True ($clEmptyRead -ceq '') 'ConstrainedLanguage Set-AgentUtf8Content with empty string failed.'
-        Set-AgentUtf8Content -LiteralPath $clTmp.FullName -Value 'cl-utf8-ok'
-        Assert-True ((Get-Content -LiteralPath $clTmp.FullName -Raw -Encoding UTF8) -ceq 'cl-utf8-ok') 'ConstrainedLanguage Set-AgentUtf8Content with non-empty string failed.'
+        Assert-True ($clEmptyRead -ceq '' -and (Get-Item -LiteralPath $clTmp.FullName -Force).Length -eq 0) 'ConstrainedLanguage Set-AgentUtf8Content with empty string failed.'
+        Set-AgentUtf8Content -LiteralPath $clTmp.FullName -Value 'ascii-no-bom'
+        Assert-True ((Get-Content -LiteralPath $clTmp.FullName -Raw -Encoding UTF8) -ceq 'ascii-no-bom' -and (Get-Item -LiteralPath $clTmp.FullName -Force).Length -eq 12) 'ConstrainedLanguage Set-AgentUtf8Content with ASCII string failed or wrote BOM.'
+        $clUnicodeVal = ([string][char]0x0442) + ([string][char]0x0435) + ([string][char]0x0441) + ([string][char]0x0442)
+        Set-AgentUtf8Content -LiteralPath $clTmp.FullName -Value $clUnicodeVal
+        Assert-True ((Get-Content -LiteralPath $clTmp.FullName -Raw -Encoding UTF8) -ceq $clUnicodeVal -and (Get-Item -LiteralPath $clTmp.FullName -Force).Length -eq 8) 'ConstrainedLanguage Set-AgentUtf8Content with Unicode string failed or wrote BOM.'
     }
     finally {
         if ($clTmp -and (Test-Path -LiteralPath $clTmp.FullName)) {
