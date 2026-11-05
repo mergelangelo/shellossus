@@ -265,6 +265,14 @@ function Format-CapabilitiesPromptBlock {
     if ($cap.tool_names -contains 'memory') {
         $lines += '- Persistent project memory: call memory tool to record, view, or update long-term knowledge, user preferences, and architectural invariants across sessions.'
     }
+    if (($cap.tool_names -contains 'fetch_url') -or ($cap.tool_names -contains 'web_search')) {
+        if ($cap.permission -in @('AutoEdit', 'Auto') -or $script:AutoApproveWeb) {
+            $lines += '- Web tools (fetch_url, web_search): network requests are automatically approved without confirmation.'
+        }
+        else {
+            $lines += '- Web tools (fetch_url, web_search): network requests require explicit user confirmation before connecting.'
+        }
+    }
     $lines += '</capabilities>'
     return ($lines -join "`n")
 }

@@ -122,6 +122,19 @@ function Invoke-TuiSelector {
             return $val
         }
     }
+    if (-not $AllowFreeText) {
+        $prefixMatches = @()
+        foreach ($it in $Items) {
+            $val = if ($null -ne $it.value) { [string]$it.value } else { [string]$it.label }
+            $lbl = [string]$it.label
+            if ($val.StartsWith($trimmed, [StringComparison]::OrdinalIgnoreCase) -or $lbl.StartsWith($trimmed, [StringComparison]::OrdinalIgnoreCase)) {
+                $prefixMatches += $val
+            }
+        }
+        if ($prefixMatches.Count -eq 1) {
+            return $prefixMatches[0]
+        }
+    }
     if ($AllowFreeText) {
         return $trimmed
     }
