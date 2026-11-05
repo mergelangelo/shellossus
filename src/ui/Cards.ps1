@@ -9,6 +9,9 @@ function Format-ToolCallCard {
         [string]$Summary = '',
         [int]$ElapsedMs = -1
     )
+    if ($Target) { $Target = (Format-PreviewText -Text $Target) -replace '[\r\n\t]+', ' ' }
+    if ($Detail) { $Detail = (Format-PreviewText -Text $Detail) -replace '[\r\n\t]+', ' ' }
+    if ($Summary) { $Summary = (Format-PreviewText -Text $Summary) -replace '[\r\n\t]+', ' ' }
     $targetPart = if ($Target) { ' ' + $script:Gm.Fg1 + $Target + $script:Gm.Reset } else { '' }
     $detailPart = if ($Detail) { ' ' + $script:Gm.Grey1 + '(' + $Detail + ')' + $script:Gm.Reset } else { '' }
     $top = '  ' + $script:Gm.Grey0 + $script:Box.TL + $script:Box.H + ' ' + $script:Gm.Yellow + $script:Box.Arrow + ' ' + $Name + $script:Gm.Reset + $targetPart + $detailPart
@@ -42,7 +45,8 @@ function Write-ToolCallCard {
 
 function Format-TodoCard {
     param($Todos)
-    if ($null -eq $Todos -or $Todos.Count -eq 0) { return @() }
+    $Todos = @(if ($null -ne $Todos) { $Todos })
+    if ($Todos.Count -eq 0) { return @() }
     $w = Get-TerminalWidth
     $total = $Todos.Count
     $done = @($Todos | Where-Object { $_.status -eq 'completed' }).Count
@@ -131,7 +135,7 @@ function Write-MemoryCard {
 
 function Format-DiffLinePreview {
     param([string]$Line, [int]$MaxChars = 180)
-    $clean = Format-PreviewText $Line
+    $clean = (Format-PreviewText -Text $Line).Replace("`r", '').Replace("`t", '    ')
     if ($clean.Length -le $MaxChars) { return $clean }
     return ($clean.Substring(0, $MaxChars) + ' ...')
 }
@@ -154,7 +158,7 @@ function Get-DiffMatchingBlocks {
         if (-not $newPosByLine.ContainsKey($key)) {
             $newPosByLine[$key] = @($j)
         }
-        else {
+        elseif ($newPosByLine[$key].Count -lt 64) {
             $newPosByLine[$key] += $j
         }
     }

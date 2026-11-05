@@ -734,7 +734,7 @@ function Split-AnsiLineToWidth {
             $breakLen = $remCols
             $advanceLen = $remCols
             $lastSpace = $slice.LastIndexOf(' ')
-            if ($lastSpace -gt 0 -and ($currVis + $lastSpace) -ge [int]($MaxWidth / 2)) {
+            if ($lastSpace -ge 0 -and ($currVis + $lastSpace) -ge [int]($MaxWidth / 2)) {
                 $breakLen = $lastSpace
                 $advanceLen = $lastSpace + 1
             }
@@ -780,11 +780,15 @@ function Format-TuiCardBox {
     }
     $rowMeta = @()
     if ($null -ne $BodyLines) {
-        foreach ($ln in @($BodyLines)) {
-            $s = if ($null -ne $ln) { [string]$ln } else { '' }
-            foreach ($wrappedLn in @(Split-AnsiLineToWidth -Text $s -MaxWidth $innerW)) {
-                $vLen = (Strip-AnsiCodes -Text $wrappedLn).Length
-                $rowMeta += @{ text = $wrappedLn; vis = $vLen }
+        foreach ($rawItem in @($BodyLines)) {
+            $itemStr = if ($null -ne $rawItem) { [string]$rawItem } else { '' }
+            $subLines = @($itemStr -split "`r?`n")
+            foreach ($rawLn in $subLines) {
+                $cleanLn = $rawLn.Replace("`r", '').Replace("`t", '    ')
+                foreach ($wrappedLn in @(Split-AnsiLineToWidth -Text $cleanLn -MaxWidth $innerW)) {
+                    $vLen = (Strip-AnsiCodes -Text $wrappedLn).Length
+                    $rowMeta += @{ text = $wrappedLn; vis = $vLen }
+                }
             }
         }
     }
@@ -866,19 +870,38 @@ function Get-GitBranchLabel {
         $dotGit = Join-Path $curr '.git'
         if (Test-Path -LiteralPath $dotGit) {
             $gitItem = Get-Item -LiteralPath $dotGit -Force -ErrorAction SilentlyContinue
-            if ($gitItem -and (($gitItem.Attributes -band 1024) -eq 0) -and $gitItem.PSIsContainer) {
-                $headFile = Join-Path $dotGit 'HEAD'
-                if (Test-Path -LiteralPath $headFile) {
-                    $headItem = Get-Item -LiteralPath $headFile -Force -ErrorAction SilentlyContinue
-                    if ($headItem -and (-not $headItem.PSIsContainer) -and (($headItem.Attributes -band 1024) -eq 0) -and $headItem.Length -le 1024) {
-                        $rawHead = Get-Content -LiteralPath $headFile -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
-                        if ($rawHead) {
-                            $trimmed = $rawHead.Trim()
-                            if ($trimmed -match '^ref:\s*refs/heads/(.+)$') {
-                                return $Matches[1].Trim()
+            if ($gitItem -and (($gitItem.Attributes -band 1024) -eq 0)) {
+                $gitDirFull = ''
+                if ($gitItem.PSIsContainer) {
+                    $gitDirFull = $gitItem.FullName
+                }
+                else {
+                    $gitPtrRaw = Get-Content -LiteralPath $dotGit -TotalCount 1 -Encoding UTF8 -ErrorAction SilentlyContinue
+                    if ($gitPtrRaw -and ([string]$gitPtrRaw).Trim() -match '^gitdir:\s*(.+)$') {
+                        $ptrTarget = $Matches[1].Trim()
+                        $candDir = if ($ptrTarget -match '^([a-zA-Z]:[/\\]|[/\\])') { $ptrTarget } else { Join-Path $curr $ptrTarget }
+                        if (Test-Path -LiteralPath $candDir) {
+                            $candItem = Get-Item -LiteralPath $candDir -Force -ErrorAction SilentlyContinue
+                            if ($candItem -and $candItem.PSIsContainer -and (($candItem.Attributes -band 1024) -eq 0)) {
+                                $gitDirFull = $candItem.FullName
                             }
-                            if ($trimmed -match '^[0-9a-fA-F]{7,40}$') {
-                                return $trimmed.Substring(0, 7)
+                        }
+                    }
+                }
+                if ($gitDirFull) {
+                    $headFile = Join-Path $gitDirFull 'HEAD'
+                    if (Test-Path -LiteralPath $headFile) {
+                        $headItem = Get-Item -LiteralPath $headFile -Force -ErrorAction SilentlyContinue
+                        if ($headItem -and (-not $headItem.PSIsContainer) -and (($headItem.Attributes -band 1024) -eq 0) -and $headItem.Length -le 1024) {
+                            $rawHead = Get-Content -LiteralPath $headFile -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
+                            if ($rawHead) {
+                                $trimmed = $rawHead.Trim()
+                                if ($trimmed -match '^ref:\s*refs/heads/(.+)$') {
+                                    return $Matches[1].Trim()
+                                }
+                                if ($trimmed -match '^[0-9a-fA-F]{7,40}$') {
+                                    return $trimmed.Substring(0, 7)
+                                }
                             }
                         }
                     }
@@ -1009,6 +1032,9 @@ function Format-ToolCallCard {
         [string]$Summary = '',
         [int]$ElapsedMs = -1
     )
+    if ($Target) { $Target = (Format-PreviewText -Text $Target) -replace '[\r\n\t]+', ' ' }
+    if ($Detail) { $Detail = (Format-PreviewText -Text $Detail) -replace '[\r\n\t]+', ' ' }
+    if ($Summary) { $Summary = (Format-PreviewText -Text $Summary) -replace '[\r\n\t]+', ' ' }
     $targetPart = if ($Target) { ' ' + $script:Gm.Fg1 + $Target + $script:Gm.Reset } else { '' }
     $detailPart = if ($Detail) { ' ' + $script:Gm.Grey1 + '(' + $Detail + ')' + $script:Gm.Reset } else { '' }
     $top = '  ' + $script:Gm.Grey0 + $script:Box.TL + $script:Box.H + ' ' + $script:Gm.Yellow + $script:Box.Arrow + ' ' + $Name + $script:Gm.Reset + $targetPart + $detailPart
@@ -1042,7 +1068,8 @@ function Write-ToolCallCard {
 
 function Format-TodoCard {
     param($Todos)
-    if ($null -eq $Todos -or $Todos.Count -eq 0) { return @() }
+    $Todos = @(if ($null -ne $Todos) { $Todos })
+    if ($Todos.Count -eq 0) { return @() }
     $w = Get-TerminalWidth
     $total = $Todos.Count
     $done = @($Todos | Where-Object { $_.status -eq 'completed' }).Count
@@ -1131,7 +1158,7 @@ function Write-MemoryCard {
 
 function Format-DiffLinePreview {
     param([string]$Line, [int]$MaxChars = 180)
-    $clean = Format-PreviewText $Line
+    $clean = (Format-PreviewText -Text $Line).Replace("`r", '').Replace("`t", '    ')
     if ($clean.Length -le $MaxChars) { return $clean }
     return ($clean.Substring(0, $MaxChars) + ' ...')
 }
@@ -1154,7 +1181,7 @@ function Get-DiffMatchingBlocks {
         if (-not $newPosByLine.ContainsKey($key)) {
             $newPosByLine[$key] = @($j)
         }
-        else {
+        elseif ($newPosByLine[$key].Count -lt 64) {
             $newPosByLine[$key] += $j
         }
     }
@@ -1575,8 +1602,9 @@ function Read-TuiConfirmation {
 
 function Get-VisibleLength {
     param([string]$Text)
+    $cleanText = Strip-AnsiCodes -Text $Text
     $plain = ''
-    foreach ($part in @($Text -split '(`[^`]+`)')) {
+    foreach ($part in @($cleanText -split '(`[^`]+`)')) {
         if (-not $part) { continue }
         if ($part.StartsWith('`') -and $part.EndsWith('`') -and $part.Length -ge 2) {
             $plain += $part.Substring(1, $part.Length - 2)
@@ -1584,7 +1612,7 @@ function Get-VisibleLength {
         else {
             $s = $part -replace '\[([^\]]+)\]\(([^)]+)\)', '$1 ($2)'
             $s = $s -replace '\*\*([^*]+)\*\*', '$1'
-            $s = $s -replace '(?<!\*)\*([^*\s][^*]*?)\*(?!\*)', '$1'
+            $s = $s -replace '(?<![\*\w/\\])\*([^*\s](?:[^*]*?[^*\s])?)\*(?![\*\w])', '$1'
             $plain += $s
         }
     }
@@ -1603,7 +1631,7 @@ function Format-MarkdownInline {
         else {
             $s = $part -replace '\[([^\]]+)\]\(([^)]+)\)', ($script:Gm.Blue + '$1' + $script:Gm.Reset + $BaseColor + ' (' + $script:Gm.Aqua + '$2' + $script:Gm.Reset + $BaseColor + ')')
             $s = $s -replace '\*\*([^*]+)\*\*', ($script:Gm.BoldOrange + '$1' + $script:Gm.Reset + $BaseColor)
-            $s = $s -replace '(?<!\*)\*([^*\s][^*]*?)\*(?!\*)', ($script:Gm.Purple + '$1' + $script:Gm.Reset + $BaseColor)
+            $s = $s -replace '(?<![\*\w/\\])\*([^*\s](?:[^*]*?[^*\s])?)\*(?![\*\w])', ($script:Gm.Purple + '$1' + $script:Gm.Reset + $BaseColor)
             $out += $s
         }
     }
@@ -1617,11 +1645,38 @@ function Format-MarkdownTable {
     foreach ($raw in @($Lines)) {
         $trimmed = $raw.Trim()
         if ($trimmed.StartsWith('|')) { $trimmed = $trimmed.Substring(1) }
-        if ($trimmed.EndsWith('|')) { $trimmed = $trimmed.Substring(0, $trimmed.Length - 1) }
-        $cells = @($trimmed -split '\|' | ForEach-Object { $_.Trim() })
-        $isSep = $true
+        if ($trimmed.EndsWith('|') -and (-not $trimmed.EndsWith('\|'))) { $trimmed = $trimmed.Substring(0, $trimmed.Length - 1) }
+        $cells = @()
+        $cellBuf = ''
+        $inTick = $false
+        for ($cIdx = 0; $cIdx -lt $trimmed.Length; $cIdx++) {
+            $ch = $trimmed[$cIdx]
+            if ($ch -eq '\' -and ($cIdx + 1) -lt $trimmed.Length -and $trimmed[$cIdx + 1] -eq '|') {
+                $cellBuf += '|'
+                $cIdx++
+                continue
+            }
+            if ($ch -eq '`') {
+                if ($inTick) {
+                    $inTick = $false
+                }
+                elseif ($trimmed.IndexOf('`', $cIdx + 1) -ge 0) {
+                    $inTick = $true
+                }
+                $cellBuf += $ch
+                continue
+            }
+            if ($ch -eq '|' -and (-not $inTick)) {
+                $cells += $cellBuf.Trim()
+                $cellBuf = ''
+                continue
+            }
+            $cellBuf += $ch
+        }
+        $cells += $cellBuf.Trim()
+        $isSep = ($cells.Count -gt 0)
         foreach ($c in $cells) {
-            if ($c -notmatch '^:?-{2,}:?$') { $isSep = $false; break }
+            if ($c -notmatch '^:?-+:?$') { $isSep = $false; break }
         }
         if ($cells.Count -gt $colCount) { $colCount = $cells.Count }
         $rows += @{ cells = $cells; isSep = $isSep }
@@ -1666,10 +1721,13 @@ function Write-AgentReply {
     $barV = $script:Gm.Grey0 + '  ' + $script:Box.V + ' ' + $script:Gm.Reset
     Write-Host ("`n  " + $script:Gm.Grey0 + $script:Box.TL + $script:Box.H + ' ' + $script:Gm.BoldGreen + $script:Box.Dot + ' Shellossus' + $script:Gm.Reset)
     $inCode = $false
+    $codeFenceChar = ''
+    $codeFenceLen = 0
     $tableBuf = @()
     $lines = @($Content -split "`r?`n")
     for ($idx = 0; $idx -lt $lines.Count; $idx++) {
-        $line = $lines[$idx]
+        $rawLine = $lines[$idx]
+        $line = (Format-PreviewText -Text ([string]$rawLine)).Replace("`r", '')
         $isTableLine = (-not $inCode) -and ($line -match '^\s*\|.*\|\s*$')
         if ($isTableLine) {
             $tableBuf += $line
@@ -1682,16 +1740,20 @@ function Write-AgentReply {
             $tableBuf = @()
         }
         $trimmedStart = $line.TrimStart()
-        if ($trimmedStart.StartsWith('```')) {
-            if (-not $inCode) {
-                $lang = $trimmedStart.Substring(3).Trim()
-                $label = if ($lang) { " $lang " } else { ' code ' }
-                Write-Host ($barV + $script:Gm.Grey0 + $script:Box.TL + $script:Box.H + $script:Gm.Aqua + $label + $script:Gm.Grey0 + ($script:Box.H * 24) + $script:Gm.Reset)
-            }
-            else {
-                Write-Host ($barV + $script:Gm.Grey0 + $script:Box.BL + ($script:Box.H * 30) + $script:Gm.Reset)
-            }
-            $inCode = -not $inCode
+        if (-not $inCode -and $trimmedStart -match '^(`{3,}|~{3,})(.*)$') {
+            $fenceSeq = $Matches[1]
+            $codeFenceChar = [string]$fenceSeq[0]
+            $codeFenceLen = $fenceSeq.Length
+            $lang = $Matches[2].Trim()
+            $label = if ($lang) { " $lang " } else { ' code ' }
+            Write-Host ($barV + $script:Gm.Grey0 + $script:Box.TL + $script:Box.H + $script:Gm.Aqua + $label + $script:Gm.Grey0 + ($script:Box.H * 24) + $script:Gm.Reset)
+            $inCode = $true
+        }
+        elseif ($inCode -and $trimmedStart -match ('^' + ($codeFenceChar * $codeFenceLen) + $codeFenceChar + '*\s*$')) {
+            Write-Host ($barV + $script:Gm.Grey0 + $script:Box.BL + ($script:Box.H * 30) + $script:Gm.Reset)
+            $inCode = $false
+            $codeFenceChar = ''
+            $codeFenceLen = 0
         }
         elseif ($inCode) {
             Write-Host ($barV + $script:Gm.Grey0 + $script:Box.V + $script:Gm.Bg1 + $script:Gm.Yellow + '  ' + $line + '  ' + $script:Gm.Reset)
@@ -1723,6 +1785,9 @@ function Write-AgentReply {
         foreach ($tLine in @(Format-MarkdownTable -Lines $tableBuf -Indent '')) {
             Write-Host ($barV + $tLine)
         }
+    }
+    if ($inCode) {
+        Write-Host ($barV + $script:Gm.Grey0 + $script:Box.BL + ($script:Box.H * 30) + $script:Gm.Reset)
     }
     Write-Host ('  ' + $script:Gm.Grey0 + $script:Box.BL + ($script:Box.H * 16) + $script:Gm.Reset)
 }
@@ -8973,37 +9038,37 @@ function Format-TuiHelpCard {
     $hdr = ' ' + $script:Gm.BoldOrange + 'Shellossus TUI Commands & Shortcuts' + $script:Gm.Reset + ' '
     $body = @(
         ($script:Gm.BoldYellow + 'Mode & Model (call without args for interactive picker)' + $script:Gm.Reset),
-        ($script:Gm.Aqua + '  /permission (/p) [mode]      ' + $script:Gm.Fg + 'Pick or set: ReadOnly | Ask | AutoEdit | Auto' + $script:Gm.Reset),
+        ($script:Gm.Aqua + '  /permission (/p) [mode]      ' + $script:Gm.Fg + 'Pick or set: ReadOnly|Ask|AutoEdit|Auto' + $script:Gm.Reset),
         ($script:Gm.Aqua + '  /model (/m) [id]             ' + $script:Gm.Fg + 'Pick or switch active model ID' + $script:Gm.Reset),
-        ($script:Gm.Aqua + '  /theme (/th) [name]          ' + $script:Gm.Fg + 'Pick or switch color theme (gruvbox-material, catppuccin-mocha, tokyo-night, dracula, nord, ...)' + $script:Gm.Reset),
-        ($script:Gm.Aqua + '  /context (/ctx) [win] [comp] ' + $script:Gm.Fg + 'Pick or set context window & auto-compact threshold (default 128k / 96k)' + $script:Gm.Reset),
-        ($script:Gm.Aqua + '  /reasoning [arg]             ' + $script:Gm.Fg + 'Pick view (compact|full|hide) or effort (low|medium|high|off)' + $script:Gm.Reset),
-        ($script:Gm.Aqua + '  /status (/s, /tokens)        ' + $script:Gm.Fg + 'Show TUI dashboard (context gauge, tokens, tools, session)' + $script:Gm.Reset),
-        ($script:Gm.Aqua + '  /diagnostics [on|off]        ' + $script:Gm.Fg + 'Toggle pre-request capability/tool diagnostics' + $script:Gm.Reset),
-        ($script:Gm.Aqua + '  /doctor                      ' + $script:Gm.Fg + 'Check runtime, configuration, endpoint, model, and session storage' + $script:Gm.Reset),
+        ($script:Gm.Aqua + '  /theme (/th) [name]          ' + $script:Gm.Fg + 'Pick or switch TUI color theme' + $script:Gm.Reset),
+        ($script:Gm.Aqua + '  /context (/ctx) [win] [comp] ' + $script:Gm.Fg + 'Set context window & compact threshold' + $script:Gm.Reset),
+        ($script:Gm.Aqua + '  /reasoning [arg]             ' + $script:Gm.Fg + 'Set view (compact|full|hide) or effort' + $script:Gm.Reset),
+        ($script:Gm.Aqua + '  /status (/s, /tokens)        ' + $script:Gm.Fg + 'Show status dashboard, context & tokens' + $script:Gm.Reset),
+        ($script:Gm.Aqua + '  /diagnostics [on|off]        ' + $script:Gm.Fg + 'Toggle capability/tool diagnostics' + $script:Gm.Reset),
+        ($script:Gm.Aqua + '  /doctor                      ' + $script:Gm.Fg + 'Check runtime, config, endpoint & storage' + $script:Gm.Reset),
         ($script:Gm.Aqua + '  /mascot                      ' + $script:Gm.Fg + 'Display the Shellossus pixel mascot' + $script:Gm.Reset),
         ($script:Gm.BoldYellow + 'History, Undo & Compaction' + $script:Gm.Reset),
         ($script:Gm.Aqua + '  /todo (/td) [clear]          ' + $script:Gm.Fg + 'View or clear active task plan checklist' + $script:Gm.Reset),
-        ($script:Gm.Aqua + '  /memory (/mem) [ws|global] ..' + $script:Gm.Fg + 'View, add, set, or clear workspace/global memory' + $script:Gm.Reset),
-        ($script:Gm.Aqua + '  /undo (/u)                   ' + $script:Gm.Fg + 'Revert last tracked turn and its write_file/edit_file changes' + $script:Gm.Reset),
+        ($script:Gm.Aqua + '  /memory (/mem) [ws|global] ..' + $script:Gm.Fg + 'View, add, set, or clear agent memory' + $script:Gm.Reset),
+        ($script:Gm.Aqua + '  /undo (/u)                   ' + $script:Gm.Fg + 'Revert last turn and its file changes' + $script:Gm.Reset),
         ($script:Gm.Aqua + '  /retry                       ' + $script:Gm.Fg + 'Retry the last failed user request' + $script:Gm.Reset),
-        ($script:Gm.Aqua + '  /continue [steps]            ' + $script:Gm.Fg + 'Continue after hitting step limit (or continue last response)' + $script:Gm.Reset),
-        ($script:Gm.Aqua + '  /compact (/c) [focus]        ' + $script:Gm.Fg + 'Summarize older turns into a structured context handoff' + $script:Gm.Reset),
-        ($script:Gm.Aqua + '  /copy                        ' + $script:Gm.Fg + 'Copy the last assistant response to clipboard' + $script:Gm.Reset),
+        ($script:Gm.Aqua + '  /continue [steps]            ' + $script:Gm.Fg + 'Continue after step limit or last reply' + $script:Gm.Reset),
+        ($script:Gm.Aqua + '  /compact (/c) [focus]        ' + $script:Gm.Fg + 'Summarize older turns into a handoff' + $script:Gm.Reset),
+        ($script:Gm.Aqua + '  /copy                        ' + $script:Gm.Fg + 'Copy last assistant response to clipboard' + $script:Gm.Reset),
         ($script:Gm.BoldYellow + 'Sessions & Branch Tree' + $script:Gm.Reset),
-        ($script:Gm.Aqua + '  /sessions                    ' + $script:Gm.Fg + 'Browse and interactively resume saved workspace sessions' + $script:Gm.Reset),
-        ($script:Gm.Aqua + '  /resume (/r) [num|name]      ' + $script:Gm.Fg + 'Resume a saved session (interactive picker when no arg)' + $script:Gm.Reset),
-        ($script:Gm.Aqua + '  /tree (/t) [entry-id]        ' + $script:Gm.Fg + 'View conversation tree or switch active branch' + $script:Gm.Reset),
-        ($script:Gm.Aqua + '  /fork [entry-id] (/clone)    ' + $script:Gm.Fg + 'Fork current branch into a new session file' + $script:Gm.Reset),
+        ($script:Gm.Aqua + '  /sessions                    ' + $script:Gm.Fg + 'Browse and resume workspace sessions' + $script:Gm.Reset),
+        ($script:Gm.Aqua + '  /resume (/r) [num|name]      ' + $script:Gm.Fg + 'Resume saved session (picker when no arg)' + $script:Gm.Reset),
+        ($script:Gm.Aqua + '  /tree (/t) [entry-id]        ' + $script:Gm.Fg + 'View session tree or switch active branch' + $script:Gm.Reset),
+        ($script:Gm.Aqua + '  /fork [entry-id] (/clone)    ' + $script:Gm.Fg + 'Fork current branch into a new session' + $script:Gm.Reset),
         ($script:Gm.Aqua + '  /name [name] | /save [name]  ' + $script:Gm.Fg + 'Name or save current session' + $script:Gm.Reset),
-        ($script:Gm.Aqua + '  /export [path] | /import <p> ' + $script:Gm.Fg + 'Export HTML/JSONL or import a JSONL session' + $script:Gm.Reset),
+        ($script:Gm.Aqua + '  /export [path] | /import <p> ' + $script:Gm.Fg + 'Export HTML/JSONL or import JSONL session' + $script:Gm.Reset),
         ($script:Gm.Aqua + '  /new (/clear) | /exit (/q)   ' + $script:Gm.Fg + 'Start a fresh session or exit shellossus' + $script:Gm.Reset),
         ($script:Gm.BoldYellow + 'Delegation, Skills & Input Syntax' + $script:Gm.Reset),
-        ($script:Gm.Aqua + '  /agents | /agent:<role> <q>  ' + $script:Gm.Fg + 'List or run subagent roles (recon, audit, craft, custom)' + $script:Gm.Reset),
+        ($script:Gm.Aqua + '  /agents | /agent:<role> <q>  ' + $script:Gm.Fg + 'List or run subagents (recon|audit|craft)' + $script:Gm.Reset),
         ($script:Gm.Aqua + '  /skills | /skill:<name> [a]  ' + $script:Gm.Fg + 'List or invoke a SKILL.md skill directly' + $script:Gm.Reset),
-        ($script:Gm.Aqua + '  /<template> [args] | /reload ' + $script:Gm.Fg + 'Run .shellossus/prompts/<name>.md or reload context files' + $script:Gm.Reset),
-        ($script:Gm.Aqua + '  @path/to/file                ' + $script:Gm.Fg + 'Inline-attach a workspace file into your prompt' + $script:Gm.Reset),
-        ($script:Gm.Aqua + '  !cmd / !!cmd                 ' + $script:Gm.Fg + 'Run shell command (! adds to context, !! local only)' + $script:Gm.Reset),
+        ($script:Gm.Aqua + '  /<template> [args] | /reload ' + $script:Gm.Fg + 'Run prompt template or reload context' + $script:Gm.Reset),
+        ($script:Gm.Aqua + '  @path/to/file                ' + $script:Gm.Fg + 'Inline-attach workspace file into prompt' + $script:Gm.Reset),
+        ($script:Gm.Aqua + '  !cmd / !!cmd                 ' + $script:Gm.Fg + 'Run shell cmd (! in context, !! local)' + $script:Gm.Reset),
         ($script:Gm.Aqua + '  """ ... """ or trailing \    ' + $script:Gm.Fg + 'Multi-line prompt input block' + $script:Gm.Reset)
     )
     return @(Format-TuiCardBox -Header $hdr -BodyLines $body -Width $w)

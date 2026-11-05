@@ -327,6 +327,98 @@ try {
         $script:AgentConfigPath = $prevCfgPath
         $null = Set-AgentTheme -Name 'gruvbox-material'
     }
+
+    # Regression: Split-AnsiLineToWidth breaks cleanly on a leading space at index 0 of an ANSI-colored segment.
+    $ansiWrapInput = $script:Gm.Aqua + ('A' * 12) + $script:Gm.Reset + $script:Gm.Fg + ' ' + ('B' * 10) + $script:Gm.Reset
+    $ansiWrapLines = @(Split-AnsiLineToWidth -Text $ansiWrapInput -MaxWidth 15)
+    Assert-True ($ansiWrapLines.Count -eq 2 -and (Strip-AnsiCodes -Text $ansiWrapLines[0]) -eq ('A' * 12) -and (Strip-AnsiCodes -Text $ansiWrapLines[1]) -eq ('B' * 10)) 'Split-AnsiLineToWidth failed to word-wrap at space at index 0 of an ANSI token.'
+
+    # Regression: Format-TuiCardBox splits embedded newlines and expands tabs to 4 spaces so borders remain aligned.
+    $multiBodyBox = @(Format-TuiCardBox -Header ' Multi ' -BodyLines @("row1`r`nrow2`tindented") -Width 40)
+    Assert-True ($multiBodyBox.Count -eq 4) "Format-TuiCardBox should split embedded newline into 2 body rows (4 lines total), got $($multiBodyBox.Count)."
+    foreach ($mbLn in $multiBodyBox) {
+        $mbPlain = Strip-AnsiCodes -Text $mbLn
+        Assert-True ($mbPlain.Length -eq 40 -and (-not $mbPlain.Contains("`t")) -and (-not $mbPlain.Contains("`r"))) "Format-TuiCardBox row misaligned or contained raw tab/CR: $mbPlain"
+    }
+
+    # Regression: Get-GitBranchLabel supports .git file pointer (worktree / submodule gitdir:).
+    $wtWs = Join-Path $envData.TestRoot 'wt-workspace'
+    $wtGitDir = Join-Path $envData.TestRoot 'wt-gitdir'
+    New-Item -ItemType Directory -Path $wtWs -Force | Out-Null
+    New-Item -ItemType Directory -Path $wtGitDir -Force | Out-Null
+    Set-Content -LiteralPath (Join-Path $wtGitDir 'HEAD') -Value "ref: refs/heads/worktree-branch`n" -Encoding UTF8 -NoNewline
+    Set-Content -LiteralPath (Join-Path $wtWs '.git') -Value "gitdir: ../wt-gitdir`n" -Encoding UTF8 -NoNewline
+    Assert-True ((Get-GitBranchLabel -Root $wtWs) -eq 'worktree-branch') 'Get-GitBranchLabel failed to resolve relative gitdir pointer from .git file.'
+
+    # Regression: Format-ToolCallCard collapses embedded newlines/tabs in Target, Detail, and Summary.
+    $dirtyToolCard = @(Format-ToolCallCard -Name 'run_command' -Target "line1`r`nline2" -Detail "a`tb" -Status 'ok' -Summary "done`nnow" -ElapsedMs 5)
+    Assert-True ($dirtyToolCard.Count -eq 2) 'Format-ToolCallCard must return 2 lines.'
+    foreach ($dtcLn in $dirtyToolCard) {
+        Assert-True ((-not $dtcLn.Contains("`n")) -and (-not $dtcLn.Contains("`r")) -and (-not $dtcLn.Contains("`t"))) 'Format-ToolCallCard left raw newline or tab in card line.'
+    }
+
+    # Regression: Format-TodoCard accepts a single todo hashtable without treating key count as todo count.
+    $singleTodoCard = @(Format-TodoCard -Todos @{ content = 'Solo task'; status = 'in_progress' })
+    $plainSingleTodo = ($singleTodoCard | ForEach-Object { Strip-AnsiCodes -Text $_ }) -join "`n"
+    Assert-True ($plainSingleTodo.Contains('(0/1 completed)') -and $plainSingleTodo.Contains('[>] Solo task')) "Format-TodoCard failed on single hashtable input: $plainSingleTodo"
+
+    # Regression: Format-DiffLinePreview expands tabs to 4 spaces and strips CR; Get-DiffMatchingBlocks caps per-line positions at 64.
+    $tabPreview = Format-DiffLinePreview -Line "`t`treturn 1;`r" -MaxChars 50
+    Assert-True ($tabPreview -eq '        return 1;') "Format-DiffLinePreview did not expand tabs or strip CR: '$tabPreview'"
+    $manySameOld = @(1..80 | ForEach-Object { '}' })
+    $manySameNew = @(1..80 | ForEach-Object { '}' })
+    $manyBlocks = @(Get-DiffMatchingBlocks -OldLines $manySameOld -NewLines $manySameNew -OldLow 0 -OldHigh 80 -NewLow 0 -NewHigh 80)
+    Assert-True ($manyBlocks.Count -ge 1) 'Get-DiffMatchingBlocks failed on repeated identical lines.'
+
+    # Regression: Get-VisibleLength strips ANSI codes and preserves file globs; Format-MarkdownInline preserves file globs while formatting real italics.
+    $globText = 'Edit src/*.ps1 and tests/*.ps1 files'
+    Assert-True ((Get-VisibleLength -Text ($script:Gm.Aqua + $globText + $script:Gm.Reset)) -eq $globText.Length) 'Get-VisibleLength failed to strip ANSI or stripped glob asterisks.'
+    $globInline = Strip-AnsiCodes -Text (Format-MarkdownInline -Text $globText)
+    Assert-True ($globInline -eq $globText) "Format-MarkdownInline corrupted file globs: $globInline"
+    $italicInline = Format-MarkdownInline -Text 'Hello *italic* and *two words*!'
+    Assert-True ($italicInline.Contains($script:Gm.Purple + 'italic') -and $italicInline.Contains($script:Gm.Purple + 'two words') -and ((Strip-AnsiCodes -Text $italicInline) -eq 'Hello italic and two words!')) 'Format-MarkdownInline failed on valid single-asterisk italics.'
+
+    # Regression: Format-MarkdownTable supports single-dash separator rows, pipes inside inline code backticks, and escaped \| pipes.
+    $advTable = @(Format-MarkdownTable -Lines @(
+        '| Expr | Notes |',
+        '| - | :-: |',
+        '| `a | b` | x \| y |'
+    ) -Indent '')
+    $plainAdvTable = @($advTable | ForEach-Object { Strip-AnsiCodes -Text $_ })
+    Assert-True ($plainAdvTable.Count -eq 3) 'Format-MarkdownTable row count mismatch.'
+    Assert-True ($plainAdvTable[1] -eq '|-------+-------|') "Format-MarkdownTable single-dash separator failed: $($plainAdvTable[1])"
+    Assert-True ($plainAdvTable[2] -eq '| a | b | x | y |') "Format-MarkdownTable backtick pipe or escaped pipe failed: $($plainAdvTable[2])"
+
+    # Regression: Write-AgentReply supports 4-backtick / tilde code fences containing 3-backtick lines and closes unclosed fences at EOF.
+    $capturedReplyLines = @()
+    function Write-Host {
+        param([Parameter(Position = 0, ValueFromRemainingArguments = $true)]$Object, [switch]$NoNewline, $ForegroundColor, $BackgroundColor)
+        $script:capturedReplyLines += (($Object | ForEach-Object { [string]$_ }) -join ' ')
+    }
+    try {
+        $script:capturedReplyLines = @()
+        $nestedFenceMd = @(
+            '````markdown',
+            '```powershell',
+            'Write-Host "inside"',
+            '```',
+            '````',
+            '~~~sh',
+            'echo unclosed'
+        ) -join "`n"
+        Write-AgentReply -Content $nestedFenceMd
+    }
+    finally {
+        Remove-Item Function:\Write-Host -ErrorAction SilentlyContinue
+    }
+    $plainReplyLines = @($script:capturedReplyLines | ForEach-Object { Strip-AnsiCodes -Text $_ })
+    $codeCloseBorders = @($plainReplyLines | Where-Object { $_.Contains($script:Box.BL + ($script:Box.H * 30)) })
+    $innerFenceCodeLines = @($plainReplyLines | Where-Object { $_.Contains('```powershell') -or $_.Contains('  ```  ') })
+    Assert-True ($codeCloseBorders.Count -eq 2 -and $innerFenceCodeLines.Count -eq 2) "Write-AgentReply failed nested fence handling or EOF unclosed fence closure: $($plainReplyLines -join ' || ')"
+
+    # Regression: Format-TuiHelpCard fits 80-column card box without line wrapping (33 body lines + 2 borders = 35 lines).
+    $helpLinesCheck = @(Format-TuiHelpCard)
+    Assert-True ($helpLinesCheck.Count -eq 35) "Expected Format-TuiHelpCard to have 35 lines without wrapping, got $($helpLinesCheck.Count)."
 }
 finally {
     Remove-Item Function:\Read-Host -ErrorAction SilentlyContinue

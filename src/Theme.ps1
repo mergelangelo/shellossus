@@ -449,7 +449,7 @@ function Split-AnsiLineToWidth {
             $breakLen = $remCols
             $advanceLen = $remCols
             $lastSpace = $slice.LastIndexOf(' ')
-            if ($lastSpace -gt 0 -and ($currVis + $lastSpace) -ge [int]($MaxWidth / 2)) {
+            if ($lastSpace -ge 0 -and ($currVis + $lastSpace) -ge [int]($MaxWidth / 2)) {
                 $breakLen = $lastSpace
                 $advanceLen = $lastSpace + 1
             }
@@ -495,11 +495,15 @@ function Format-TuiCardBox {
     }
     $rowMeta = @()
     if ($null -ne $BodyLines) {
-        foreach ($ln in @($BodyLines)) {
-            $s = if ($null -ne $ln) { [string]$ln } else { '' }
-            foreach ($wrappedLn in @(Split-AnsiLineToWidth -Text $s -MaxWidth $innerW)) {
-                $vLen = (Strip-AnsiCodes -Text $wrappedLn).Length
-                $rowMeta += @{ text = $wrappedLn; vis = $vLen }
+        foreach ($rawItem in @($BodyLines)) {
+            $itemStr = if ($null -ne $rawItem) { [string]$rawItem } else { '' }
+            $subLines = @($itemStr -split "`r?`n")
+            foreach ($rawLn in $subLines) {
+                $cleanLn = $rawLn.Replace("`r", '').Replace("`t", '    ')
+                foreach ($wrappedLn in @(Split-AnsiLineToWidth -Text $cleanLn -MaxWidth $innerW)) {
+                    $vLen = (Strip-AnsiCodes -Text $wrappedLn).Length
+                    $rowMeta += @{ text = $wrappedLn; vis = $vLen }
+                }
             }
         }
     }
@@ -581,19 +585,38 @@ function Get-GitBranchLabel {
         $dotGit = Join-Path $curr '.git'
         if (Test-Path -LiteralPath $dotGit) {
             $gitItem = Get-Item -LiteralPath $dotGit -Force -ErrorAction SilentlyContinue
-            if ($gitItem -and (($gitItem.Attributes -band 1024) -eq 0) -and $gitItem.PSIsContainer) {
-                $headFile = Join-Path $dotGit 'HEAD'
-                if (Test-Path -LiteralPath $headFile) {
-                    $headItem = Get-Item -LiteralPath $headFile -Force -ErrorAction SilentlyContinue
-                    if ($headItem -and (-not $headItem.PSIsContainer) -and (($headItem.Attributes -band 1024) -eq 0) -and $headItem.Length -le 1024) {
-                        $rawHead = Get-Content -LiteralPath $headFile -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
-                        if ($rawHead) {
-                            $trimmed = $rawHead.Trim()
-                            if ($trimmed -match '^ref:\s*refs/heads/(.+)$') {
-                                return $Matches[1].Trim()
+            if ($gitItem -and (($gitItem.Attributes -band 1024) -eq 0)) {
+                $gitDirFull = ''
+                if ($gitItem.PSIsContainer) {
+                    $gitDirFull = $gitItem.FullName
+                }
+                else {
+                    $gitPtrRaw = Get-Content -LiteralPath $dotGit -TotalCount 1 -Encoding UTF8 -ErrorAction SilentlyContinue
+                    if ($gitPtrRaw -and ([string]$gitPtrRaw).Trim() -match '^gitdir:\s*(.+)$') {
+                        $ptrTarget = $Matches[1].Trim()
+                        $candDir = if ($ptrTarget -match '^([a-zA-Z]:[/\\]|[/\\])') { $ptrTarget } else { Join-Path $curr $ptrTarget }
+                        if (Test-Path -LiteralPath $candDir) {
+                            $candItem = Get-Item -LiteralPath $candDir -Force -ErrorAction SilentlyContinue
+                            if ($candItem -and $candItem.PSIsContainer -and (($candItem.Attributes -band 1024) -eq 0)) {
+                                $gitDirFull = $candItem.FullName
                             }
-                            if ($trimmed -match '^[0-9a-fA-F]{7,40}$') {
-                                return $trimmed.Substring(0, 7)
+                        }
+                    }
+                }
+                if ($gitDirFull) {
+                    $headFile = Join-Path $gitDirFull 'HEAD'
+                    if (Test-Path -LiteralPath $headFile) {
+                        $headItem = Get-Item -LiteralPath $headFile -Force -ErrorAction SilentlyContinue
+                        if ($headItem -and (-not $headItem.PSIsContainer) -and (($headItem.Attributes -band 1024) -eq 0) -and $headItem.Length -le 1024) {
+                            $rawHead = Get-Content -LiteralPath $headFile -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
+                            if ($rawHead) {
+                                $trimmed = $rawHead.Trim()
+                                if ($trimmed -match '^ref:\s*refs/heads/(.+)$') {
+                                    return $Matches[1].Trim()
+                                }
+                                if ($trimmed -match '^[0-9a-fA-F]{7,40}$') {
+                                    return $trimmed.Substring(0, 7)
+                                }
                             }
                         }
                     }
