@@ -3401,8 +3401,27 @@ function Invoke-AgentUndo {
 function ConvertTo-UrlEncodedString {
     param([string]$Text)
     if (-not $Text) { return '' }
-    $out = foreach ($ch in [char[]]$Text) {
+    $chars = [char[]]$Text
+    $out = for ($i = 0; $i -lt $chars.Count; $i++) {
+        $ch = $chars[$i]
         $cp = [int][char]$ch
+        if ($cp -ge 0xD800 -and $cp -le 0xDBFF -and ($i + 1) -lt $chars.Count) {
+            $low = [int][char]$chars[$i + 1]
+            if ($low -ge 0xDC00 -and $low -le 0xDFFF) {
+                $point = 0x10000 + (($cp - 0xD800) * 1024) + ($low - 0xDC00)
+                $b4 = 0x80 + ($point % 64)
+                $point = [int](($point - ($point % 64)) / 64)
+                $b3 = 0x80 + ($point % 64)
+                $point = [int](($point - ($point % 64)) / 64)
+                $b2 = 0x80 + ($point % 64)
+                $point = [int](($point - ($point % 64)) / 64)
+                $b1 = 0xF0 + $point
+                '%{0:X2}%{1:X2}%{2:X2}%{3:X2}' -f $b1, $b2, $b3, $b4
+                $i++
+                continue
+            }
+        }
+        if ($cp -ge 0xD800 -and $cp -le 0xDFFF) { throw 'Search query contains an invalid Unicode surrogate.' }
         if (($cp -ge 0x30 -and $cp -le 0x39) -or ($cp -ge 0x41 -and $cp -le 0x5A) -or ($cp -ge 0x61 -and $cp -le 0x7A) -or $cp -in @(0x2D, 0x5F, 0x2E, 0x7E)) {
             [string]$ch
         }
@@ -3464,6 +3483,69 @@ function ConvertFrom-HtmlToText {
     return $joined.Trim()
 }
 
+function Invoke-AgentWebDownload {
+    param([string]$Uri, [string]$OutFile, [int]$MaxBytes = 2097152)
+    $request = @{
+        Uri = $Uri
+        Method = 'Get'
+        Headers = @{ 'User-Agent' = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Shellossus/1.0' }
+        TimeoutSec = 30
+        UseBasicParsing = $true
+        OutFile = $OutFile
+        ErrorAction = 'Stop'
+    }
+    $webCommand = Get-Command -Name 'Invoke-WebRequest' -ErrorAction SilentlyContinue
+    if ($webCommand -and $webCommand.CommandType -eq 'Function') {
+        Invoke-WebRequest @request
+    }
+    else {
+        $stdout = New-TemporaryFile -ErrorAction Stop
+        $stderr = New-TemporaryFile -ErrorAction Stop
+        $proc = $null
+        $oldUri = $env:SHELLOSSUS_WEB_DOWNLOAD_URI
+        $oldFile = $env:SHELLOSSUS_WEB_DOWNLOAD_FILE
+        try {
+            $worker = @'
+$ErrorActionPreference = 'Stop'
+try {
+    Invoke-WebRequest -Uri $env:SHELLOSSUS_WEB_DOWNLOAD_URI -Method Get -Headers @{ 'User-Agent' = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Shellossus/1.0' } -TimeoutSec 30 -UseBasicParsing -OutFile $env:SHELLOSSUS_WEB_DOWNLOAD_FILE -ErrorAction Stop
+} catch { exit 1 }
+'@
+            $workerArguments = if ($env:OS -eq 'Windows_NT') {
+                $escaped = ($worker -replace '(\\*)"', '$1$1\"') -replace '(\\*)$', '$1$1'
+                "-NoProfile -NonInteractive -Command `"$escaped`""
+            }
+            else { @('-NoProfile', '-NonInteractive', '-Command', $worker) }
+            try {
+                $env:SHELLOSSUS_WEB_DOWNLOAD_URI = $Uri
+                $env:SHELLOSSUS_WEB_DOWNLOAD_FILE = $OutFile
+                $proc = Start-Process -FilePath (Get-AgentEnvironment).shell_exe -ArgumentList $workerArguments -RedirectStandardOutput $stdout.FullName -RedirectStandardError $stderr.FullName -NoNewWindow -PassThru -ErrorAction Stop
+            }
+            finally {
+                $env:SHELLOSSUS_WEB_DOWNLOAD_URI = $oldUri
+                $env:SHELLOSSUS_WEB_DOWNLOAD_FILE = $oldFile
+            }
+            $started = Get-Date
+            while (-not $proc.HasExited) {
+                $file = Get-Item -LiteralPath $OutFile -Force -ErrorAction Stop
+                if ($file.Length -gt $MaxBytes) { throw "Web response exceeds $MaxBytes bytes." }
+                if (((Get-Date) - $started).TotalSeconds -gt 35) { throw 'Web request timed out.' }
+                Start-Sleep -Milliseconds 100
+            }
+            if ($null -ne $proc.ExitCode -and $proc.ExitCode -ne 0) { throw 'Web request failed.' }
+        }
+        finally {
+            if ($proc -and -not $proc.HasExited) {
+                Stop-Process -InputObject $proc -Force -ErrorAction SilentlyContinue
+                Wait-Process -InputObject $proc -Timeout 2 -ErrorAction SilentlyContinue
+            }
+            Remove-Item -LiteralPath $stdout.FullName, $stderr.FullName -Force -ErrorAction SilentlyContinue
+        }
+    }
+    $resultFile = Get-Item -LiteralPath $OutFile -Force -ErrorAction Stop
+    if ($resultFile.Length -gt $MaxBytes) { throw "Web response exceeds $MaxBytes bytes." }
+}
+
 function Invoke-AgentFetchUrl {
     param($Arguments)
     $toolStart = Get-Date
@@ -3479,16 +3561,7 @@ function Invoke-AgentFetchUrl {
     $rawMode = ($Arguments.raw -eq $true)
     $tempOut = New-TemporaryFile -ErrorAction Stop
     try {
-        $reqParams = @{
-            Uri = $url
-            Method = 'Get'
-            Headers = @{ 'User-Agent' = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Shellossus/1.0' }
-            TimeoutSec = 30
-            UseBasicParsing = $true
-            OutFile = $tempOut.FullName
-            ErrorAction = 'Stop'
-        }
-        Invoke-WebRequest @reqParams
+        Invoke-AgentWebDownload -Uri $url -OutFile $tempOut.FullName
         $rawText = Get-Content -LiteralPath $tempOut.FullName -Raw -Encoding UTF8 -ErrorAction Stop
         if ($null -eq $rawText) { $rawText = '' }
         $isHtml = ($rawText -match '(?is)<\s*(!doctype\s+html|html|body|div|p|article|main|section|table|h1)\b')
@@ -3534,16 +3607,7 @@ function Invoke-AgentWebSearch {
     $searchUri = $baseSearchUrl + $encodedQ
     $tempOut = New-TemporaryFile -ErrorAction Stop
     try {
-        $reqParams = @{
-            Uri = $searchUri
-            Method = 'Get'
-            Headers = @{ 'User-Agent' = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Shellossus/1.0' }
-            TimeoutSec = 30
-            UseBasicParsing = $true
-            OutFile = $tempOut.FullName
-            ErrorAction = 'Stop'
-        }
-        Invoke-WebRequest @reqParams
+        Invoke-AgentWebDownload -Uri $searchUri -OutFile $tempOut.FullName
         $html = Get-Content -LiteralPath $tempOut.FullName -Raw -Encoding UTF8 -ErrorAction Stop
         if ($null -eq $html) { $html = '' }
         $results = @()
@@ -4714,7 +4778,7 @@ function Invoke-AgentTool {
 }
 
 # --- src/context/Prompt.ps1 ---
-# System prompt assembly (AGENTS.md, CLAUDE.md, SYSTEM.md, skills), prompt templates, @file attachments, tree sessions, HTML export, and compaction.
+# System prompt assembly (AGENTS.md, SYSTEM.md, skills), prompt templates, @file attachments, tree sessions, HTML export, and compaction.
 
 $script:NoContextFiles = $false
 $script:NoSkills = $false
@@ -4804,11 +4868,9 @@ function Get-AgentsContext {
     $candidates = @()
     if ($ConfigDir) {
         $candidates += (Join-Path $ConfigDir 'AGENTS.md')
-        $candidates += (Join-Path $ConfigDir 'CLAUDE.md')
     }
     if ($Root) {
         $candidates += (Join-Path $Root 'AGENTS.md')
-        $candidates += (Join-Path $Root 'CLAUDE.md')
     }
     foreach ($cand in $candidates) {
         if ($cand -and (Test-Path -LiteralPath $cand)) {
@@ -4824,6 +4886,36 @@ function Get-AgentsContext {
                 }
             }
         }
+    }
+    return ($parts -join "`n`n")
+}
+
+function Get-ScopedAgentInstructions {
+    param([string]$Root, [string]$TargetPath, [switch]$AllowRegisteredSkill)
+    if ($script:NoContextFiles -or -not $Root -or -not $TargetPath) { return '' }
+    $rootPath = Resolve-AgentPath -Root $Root -RelativePath '.'
+    if ($AllowRegisteredSkill) {
+        $resolvedTarget = Resolve-AgentPath -Root $rootPath -RelativePath $TargetPath -AllowRegisteredSkill
+        if (-not (Test-AgentPathWithinRoot -RootPath $rootPath -TargetPath $resolvedTarget)) { return '' }
+    }
+    $parentPath = Split-Path -Path $TargetPath -Parent
+    $current = Resolve-AgentPath -Root $rootPath -RelativePath $parentPath
+    $dirs = @()
+    while ($current -cne $rootPath) {
+        $dirs = @($current) + $dirs
+        $next = Split-Path -Path $current -Parent
+        if (-not $next -or $next -ceq $current) { throw 'Could not locate workspace instruction ancestors.' }
+        $current = $next
+    }
+    $parts = @()
+    foreach ($dir in $dirs) {
+        $candidate = Join-Path $dir 'AGENTS.md'
+        $item = Get-Item -LiteralPath $candidate -Force -ErrorAction SilentlyContinue
+        if (-not $item) { continue }
+        $safePath = Resolve-AgentPath -Root $rootPath -RelativePath $candidate
+        if ($item.PSIsContainer -or $item.Length -gt 65536) { throw "Invalid or oversized instruction file: $candidate" }
+        $contents = Get-Content -LiteralPath $safePath -Raw -Encoding UTF8 -ErrorAction Stop
+        $parts += "Instructions for files under $(Get-WorkspaceRelativePath -Root $rootPath -FullPath $dir):`n$contents"
     }
     return ($parts -join "`n`n")
 }
@@ -5134,6 +5226,7 @@ function Format-CapabilitiesPromptBlock {
     $lines += '- If a task combines allowed and disallowed actions, complete the allowed parts and clearly state which parts are blocked by the current mode.'
     $lines += '- When write_file or edit_file is available and requested, call the tool so the user receives the diff preview; never claim a file was written or a command was executed until the tool result reports status=written or status=executed.'
     $lines += '- Never retry a cancelled write or command unless the user asks again.'
+    $lines += '- Project AGENTS.md instructions in parent directories apply to files below them. If a file tool returns instructions_required, follow those instructions and retry the tool call.'
     $lines += '- Session memory: conversation history is saved to disk (.jsonl) and can be resumed across launches via -Continue or /resume.'
     if ($cap.tool_names -contains 'todo') {
         $lines += '- Multi-step task tracking: call todo tool to record, update, and track task plan progress on multi-step work.'
@@ -6886,6 +6979,8 @@ function Invoke-AgentTurn {
             return
         }
         $loopAborted = $false
+        # Only instructions visible before this model response count as received.
+        $scopedMessages = @($State.messages)
         foreach ($call in $message.tool_calls) {
             $canonToolName = Resolve-ToolCanonicalName -Name ([string]$call.function.name)
             $sig = Get-ToolCallSignature -Call $call -Epoch $mutationEpoch
@@ -6923,7 +7018,27 @@ function Invoke-AgentTurn {
                 Ensure-SessionTree -State $State
                 continue
             }
-            $output = Invoke-AgentTool -Root $Root -Call $call
+            $output = $null
+            if ($canonToolName -in @('read_file', 'write_file', 'edit_file') -and ($canonToolName -eq 'read_file' -or $script:AgentPermission -ne 'ReadOnly') -and (Test-IsToolEnabled -Name $canonToolName) -and -not $script:NoContextFiles) {
+                try {
+                    $scopeArgs = $call.function.arguments | ConvertFrom-Json -ErrorAction Stop
+                    if ($scopeArgs.path -is [string] -and $scopeArgs.path) {
+                        $instructions = Get-ScopedAgentInstructions -Root $Root -TargetPath $scopeArgs.path -AllowRegisteredSkill:($canonToolName -eq 'read_file')
+                        if ($instructions) {
+                            $notice = (@{ status = 'instructions_required'; instructions = $instructions; message = 'Apply these scoped AGENTS.md instructions, then retry the file tool call.' } | ConvertTo-Json -Compress)
+                            $seen = $false
+                            foreach ($prior in $scopedMessages) {
+                                if ($prior.role -eq 'tool' -and [string]$prior.content -ceq $notice) { $seen = $true; break }
+                            }
+                            if (-not $seen) { $output = $notice }
+                        }
+                    }
+                }
+                catch {
+                    $output = (@{ error = ('Cannot verify scoped AGENTS.md instructions: ' + $_.Exception.Message) } | ConvertTo-Json -Compress)
+                }
+            }
+            if ($null -eq $output) { $output = Invoke-AgentTool -Root $Root -Call $call }
             Write-AgentJsonEvent -EventType 'tool_execution_end' -Payload @{ id = [string]$call.id; name = [string]$call.function.name; result = $output }
             $State.messages += @{ role = 'tool'; tool_call_id = $call.id; content = $output }
             Ensure-SessionTree -State $State
@@ -7321,7 +7436,7 @@ if (-not $LibraryOnly) {
         $ctxLoaded = @()
         if (Get-SoulContext -Root $rootPath -ConfigDir $configDir) { $ctxLoaded += 'SOUL.md' }
         if (Get-MemoryContext -Root $rootPath -ConfigDir $configDir) { $ctxLoaded += 'MEMORY.md' }
-        if (Get-AgentsContext -Root $rootPath -ConfigDir $configDir) { $ctxLoaded += 'AGENTS.md/CLAUDE.md' }
+        if (Get-AgentsContext -Root $rootPath -ConfigDir $configDir) { $ctxLoaded += 'AGENTS.md' }
         if (Get-SkillsCatalog -Root $rootPath -ConfigDir $configDir) { $ctxLoaded += "skills ($($script:SkillsByName.Count))" }
         $null = Get-AgentRolesCatalog -Root $rootPath -ConfigDir $configDir
         if ($script:AgentRolesByName -and $script:AgentRolesByName.Count -gt 0) { $ctxLoaded += "agents ($($script:AgentRolesByName.Count))" }

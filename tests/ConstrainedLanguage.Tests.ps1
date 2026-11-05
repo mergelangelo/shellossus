@@ -271,6 +271,13 @@ try {
     Assert-True ($clLim.context_window_tokens -eq 128000 -and $clLim.compact_threshold_tokens -eq 80000) 'ConstrainedLanguage Set-AgentContextLimits failed.'
     $null = Set-AgentContextLimits -WindowSpec '128k' -CompactSpec '75%'
     Assert-True ((ConvertTo-UrlEncodedString -Text $clCyr) -eq '%D1%87%D1%82%D0%BE%3F') 'ConstrainedLanguage ConvertTo-UrlEncodedString failed.'
+    $clEmoji = ([string][char]0xD83D) + ([string][char]0xDE00)
+    Assert-True ((ConvertTo-UrlEncodedString -Text $clEmoji) -eq '%F0%9F%98%80') 'ConstrainedLanguage supplementary Unicode encoding failed.'
+    $clScopedDir = Join-Path $workspacePath 'cl-scoped'
+    New-Item -ItemType Directory -Path $clScopedDir -Force | Out-Null
+    Set-Content -LiteralPath (Join-Path $clScopedDir 'AGENTS.md') -Value 'Constrained scoped rule.' -Encoding UTF8
+    $clScoped = Get-ScopedAgentInstructions -Root $workspacePath -TargetPath 'cl-scoped/file.txt'
+    Assert-True ($clScoped.Contains('Constrained scoped rule.')) 'ConstrainedLanguage scoped AGENTS.md lookup failed.'
     Assert-True ((ConvertFrom-HtmlToText -Html '<p>Hi &amp; bye</p>').Contains('Hi & bye')) 'ConstrainedLanguage ConvertFrom-HtmlToText failed.'
 }
 finally {

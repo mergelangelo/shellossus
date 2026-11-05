@@ -1,4 +1,4 @@
-# System prompt assembly (AGENTS.md, CLAUDE.md, SYSTEM.md, skills), prompt templates, @file attachments, tree sessions, HTML export, and compaction.
+# System prompt assembly (AGENTS.md, SYSTEM.md, skills), prompt templates, @file attachments, tree sessions, HTML export, and compaction.
 
 $script:NoContextFiles = $false
 $script:NoSkills = $false
@@ -88,11 +88,9 @@ function Get-AgentsContext {
     $candidates = @()
     if ($ConfigDir) {
         $candidates += (Join-Path $ConfigDir 'AGENTS.md')
-        $candidates += (Join-Path $ConfigDir 'CLAUDE.md')
     }
     if ($Root) {
         $candidates += (Join-Path $Root 'AGENTS.md')
-        $candidates += (Join-Path $Root 'CLAUDE.md')
     }
     foreach ($cand in $candidates) {
         if ($cand -and (Test-Path -LiteralPath $cand)) {
@@ -108,6 +106,36 @@ function Get-AgentsContext {
                 }
             }
         }
+    }
+    return ($parts -join "`n`n")
+}
+
+function Get-ScopedAgentInstructions {
+    param([string]$Root, [string]$TargetPath, [switch]$AllowRegisteredSkill)
+    if ($script:NoContextFiles -or -not $Root -or -not $TargetPath) { return '' }
+    $rootPath = Resolve-AgentPath -Root $Root -RelativePath '.'
+    if ($AllowRegisteredSkill) {
+        $resolvedTarget = Resolve-AgentPath -Root $rootPath -RelativePath $TargetPath -AllowRegisteredSkill
+        if (-not (Test-AgentPathWithinRoot -RootPath $rootPath -TargetPath $resolvedTarget)) { return '' }
+    }
+    $parentPath = Split-Path -Path $TargetPath -Parent
+    $current = Resolve-AgentPath -Root $rootPath -RelativePath $parentPath
+    $dirs = @()
+    while ($current -cne $rootPath) {
+        $dirs = @($current) + $dirs
+        $next = Split-Path -Path $current -Parent
+        if (-not $next -or $next -ceq $current) { throw 'Could not locate workspace instruction ancestors.' }
+        $current = $next
+    }
+    $parts = @()
+    foreach ($dir in $dirs) {
+        $candidate = Join-Path $dir 'AGENTS.md'
+        $item = Get-Item -LiteralPath $candidate -Force -ErrorAction SilentlyContinue
+        if (-not $item) { continue }
+        $safePath = Resolve-AgentPath -Root $rootPath -RelativePath $candidate
+        if ($item.PSIsContainer -or $item.Length -gt 65536) { throw "Invalid or oversized instruction file: $candidate" }
+        $contents = Get-Content -LiteralPath $safePath -Raw -Encoding UTF8 -ErrorAction Stop
+        $parts += "Instructions for files under $(Get-WorkspaceRelativePath -Root $rootPath -FullPath $dir):`n$contents"
     }
     return ($parts -join "`n`n")
 }
@@ -418,6 +446,7 @@ function Format-CapabilitiesPromptBlock {
     $lines += '- If a task combines allowed and disallowed actions, complete the allowed parts and clearly state which parts are blocked by the current mode.'
     $lines += '- When write_file or edit_file is available and requested, call the tool so the user receives the diff preview; never claim a file was written or a command was executed until the tool result reports status=written or status=executed.'
     $lines += '- Never retry a cancelled write or command unless the user asks again.'
+    $lines += '- Project AGENTS.md instructions in parent directories apply to files below them. If a file tool returns instructions_required, follow those instructions and retry the tool call.'
     $lines += '- Session memory: conversation history is saved to disk (.jsonl) and can be resumed across launches via -Continue or /resume.'
     if ($cap.tool_names -contains 'todo') {
         $lines += '- Multi-step task tracking: call todo tool to record, update, and track task plan progress on multi-step work.'
