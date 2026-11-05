@@ -244,6 +244,11 @@ try {
     $clBar = @(Format-TuiStatusBar -State $reloadedTreeState -Root $workspacePath -Model 'test-model' -UndoCount 1 -Width 85)
     $clBarPlain = ($clBar | ForEach-Object { Strip-AnsiCodes -Text $_ }) -join "`n"
     Assert-True ($clBarPlain.Contains('cl-tui') -and $clBarPlain.Contains('test-model') -and $clBarPlain.Contains('undo:1')) 'ConstrainedLanguage Format-TuiStatusBar failed.'
+    $clMascotFull = @(Get-TuiMascotLines -Mode 'full')
+    $clMascotCompact = @(Get-TuiMascotLines -Mode 'compact')
+    Assert-True ($clMascotFull.Count -eq 8 -and (Strip-AnsiCodes -Text $clMascotFull[0]).Length -eq 16) 'ConstrainedLanguage full mascot rendering failed.'
+    Assert-True ($clMascotCompact.Count -eq 5 -and (Strip-AnsiCodes -Text $clMascotCompact[0]).Length -eq 14) 'ConstrainedLanguage compact mascot rendering failed.'
+    Assert-True ($clMascotFull[4].Contains("$script:Esc[48;2;247;211;138m") -and $clMascotCompact[2].Contains("$script:Esc[38;2;247;211;138m")) 'ConstrainedLanguage mascot eye colors are missing.'
     Write-TuiPromptFrame -State $reloadedTreeState -Root $workspacePath -Model 'test-model' -UndoCount 1
     $clDiff = @(Format-UnifiedDiff -Path 'a.txt' -ToolName 'edit_file' -Before "x`ny" -After "x`nz")
     $clDiffPlain = ($clDiff | ForEach-Object { Strip-AnsiCodes -Text $_ }) -join "`n"

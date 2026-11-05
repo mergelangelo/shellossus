@@ -75,7 +75,7 @@ if (-not $LibraryOnly) {
         return
     }
     if ($Mascot) {
-        Write-TuiMascotCard -Mode 'full'
+        if ($Mode -ine 'json') { Write-TuiMascotCard -Mode 'full' }
         return
     }
     if (-not $BaseUrl) { $BaseUrl = $env:H_AGENT_BASE_URL }

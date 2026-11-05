@@ -131,17 +131,48 @@ try {
     $script:mlQueue = @('')
     Assert-True ((Read-TuiConfirmation -PromptText 'prompt: ' -ActionType 'write') -eq 'n') 'Read-TuiConfirmation empty cancel failed.'
 
-    # Mascot tests: compact (5 lines) and full (9 lines)
+    # The approved 8x8 artwork is retained in full and compact renderings.
     $compactMascot = @(Get-TuiMascotLines -Mode 'compact')
     Assert-True ($compactMascot.Count -eq 5) 'Compact mascot must have 5 lines.'
-    Assert-True ((Strip-AnsiCodes -Text $compactMascot[0]).Length -eq 14) 'Compact mascot line width must be 14 chars.'
+    foreach ($line in $compactMascot) {
+        Assert-True ((Strip-AnsiCodes -Text $line).Length -eq 14) 'Compact mascot line width must be 14 chars.'
+    }
+    $eyeFg = "$script:Esc[38;2;247;211;138m"
+    $cheekBg = "$script:Esc[48;2;158;111;105m"
+    Assert-True (([regex]::Matches($compactMascot[2], [regex]::Escape($eyeFg))).Count -eq 2) 'Compact mascot must show both light eyes.'
+    Assert-True (([regex]::Matches($compactMascot[2], [regex]::Escape($cheekBg))).Count -eq 2) 'Compact mascot must show both muted cheeks.'
 
     $fullMascot = @(Get-TuiMascotLines -Mode 'full')
-    Assert-True ($fullMascot.Count -eq 9) 'Full mascot must have 9 lines.'
-    Assert-True ((Strip-AnsiCodes -Text $fullMascot[0]).Length -eq 28) 'Full mascot line width must be 28 chars.'
+    Assert-True ($fullMascot.Count -eq 8) 'Full mascot must have 8 lines.'
+    $expectedPixels = @('..ssss..', '.ssssss.', 'ssssssss', 's#ssss#s', 's#p##p#s', 'sq####qs', 'ss#ss#ss', 'ssssssss')
+    $expectedColors = @{
+        '.' = $script:Gm.Reset
+        's' = "$script:Esc[48;2;110;91;75m"
+        '#' = "$script:Esc[48;2;18;18;18m"
+        'p' = "$script:Esc[48;2;247;211;138m"
+        'q' = "$script:Esc[48;2;158;111;105m"
+    }
+    for ($y = 0; $y -lt 8; $y++) {
+        Assert-True ((Strip-AnsiCodes -Text $fullMascot[$y]).Length -eq 16) 'Full mascot line width must be 16 chars.'
+        $pixels = [regex]::Matches($fullMascot[$y], '\x1b\[(?:0|48;2;[0-9;]+)m  ')
+        Assert-True ($pixels.Count -eq 8) "Full mascot row $y must have 8 colored cells."
+        for ($x = 0; $x -lt 8; $x++) {
+            $expectedColor = $expectedColors[[string]$expectedPixels[$y][$x]]
+            Assert-True ($pixels[$x].Value -ceq ($expectedColor + '  ')) "Full mascot pixel $x,$y differs from the approved design."
+        }
+    }
 
     Write-TuiMascotCard -Mode 'compact'
     Write-TuiMascotCard -Mode 'full'
+    $savedOutputMode = $script:OutputMode
+    try {
+        $script:OutputMode = 'json'
+        $jsonCard = @(Write-TuiMascotCard -Mode 'full' 6>&1)
+        Assert-True ($jsonCard.Count -eq 0) 'Mascot card must not emit text in JSON mode.'
+    }
+    finally { $script:OutputMode = $savedOutputMode }
+    $standaloneJson = @(& "$PSScriptRoot\..\shellossus.ps1" -Mascot -Mode json -ConfigPath (Join-Path $envData.TestRoot 'missing-config.env') 6>&1)
+    Assert-True ($standaloneJson.Count -eq 0) '-Mascot -Mode json must not emit a text card.'
 
     # Theme catalog, alias resolution, palette switching, config persistence, and HTML export theme integration.
     $themesCatalog = @(Get-AgentThemesCatalog)
