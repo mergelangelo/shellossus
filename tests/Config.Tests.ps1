@@ -161,6 +161,23 @@ try {
     Set-AgentUtf8Content -LiteralPath $utf8Path -Value $unicodeVal
     Assert-True ((Get-Content -LiteralPath $utf8Path -Raw -Encoding UTF8) -ceq $unicodeVal) 'Set-AgentUtf8Content Unicode roundtrip failed.'
     Assert-True ((Get-Item -LiteralPath $utf8Path -Force).Length -eq 8) 'Set-AgentUtf8Content Unicode string included a BOM or wrong byte length.'
+
+    # Regression: Test-AgentPathWithinRoot is case-insensitive on Windows_NT and case-sensitive on Unix.
+    $savedOs = $env:OS
+    try {
+        $env:OS = 'Windows_NT'
+        Assert-True (Test-AgentPathWithinRoot -RootPath 'C:\Workspace\Project' -TargetPath 'c:\workspace\project') 'Test-AgentPathWithinRoot failed for case-differing root path on Windows.'
+        Assert-True (Test-AgentPathWithinRoot -RootPath 'C:\Workspace\Project\' -TargetPath 'c:\workspace\project\sub\file.txt') 'Test-AgentPathWithinRoot failed for case-differing child path on Windows.'
+        Assert-True (Test-AgentPathWithinRoot -RootPath 'C:\Workspace\Project' -TargetPath 'c:\workspace\project/sub/file.txt') 'Test-AgentPathWithinRoot failed for forward-slash child path on Windows.'
+        Assert-True (-not (Test-AgentPathWithinRoot -RootPath 'C:\Workspace\Project' -TargetPath 'c:\workspace\project_other\file.txt')) 'Test-AgentPathWithinRoot accepted sibling prefix path on Windows.'
+
+        $env:OS = ''
+        Assert-True (Test-AgentPathWithinRoot -RootPath '/workspace/Project' -TargetPath '/workspace/Project/sub/file.txt') 'Test-AgentPathWithinRoot failed for exact-case child path on Unix.'
+        Assert-True (-not (Test-AgentPathWithinRoot -RootPath '/workspace/Project' -TargetPath '/workspace/project/sub/file.txt')) 'Test-AgentPathWithinRoot accepted wrong-case path on Unix.'
+    }
+    finally {
+        $env:OS = $savedOs
+    }
 }
 finally {
     Remove-TestEnvironment -Env $envData

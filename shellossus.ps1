@@ -258,10 +258,17 @@ function Test-IsSecretFile {
 
 function Test-AgentPathWithinRoot {
     param([string]$RootPath, [string]$TargetPath)
-    $prefix = if ($env:OS -eq 'Windows_NT') { $RootPath.TrimEnd('\').TrimEnd('/') } else { $RootPath.TrimEnd('/') }
-    if ($TargetPath -ceq $RootPath) { return $true }
+    $isWin = ($env:OS -eq 'Windows_NT')
+    $prefix = if ($isWin) { $RootPath.TrimEnd('\').TrimEnd('/') } else { $RootPath.TrimEnd('/') }
+    $targetNorm = if ($isWin) { $TargetPath.TrimEnd('\').TrimEnd('/') } else { $TargetPath.TrimEnd('/') }
+    if ($isWin) {
+        if ($targetNorm -ieq $prefix) { return $true }
+        if ($TargetPath.StartsWith($prefix + '/', [StringComparison]::OrdinalIgnoreCase)) { return $true }
+        if ($TargetPath.StartsWith($prefix + '\', [StringComparison]::OrdinalIgnoreCase)) { return $true }
+        return $false
+    }
+    if ($targetNorm -ceq $prefix) { return $true }
     if ($TargetPath.StartsWith($prefix + '/', [StringComparison]::Ordinal)) { return $true }
-    if ($env:OS -eq 'Windows_NT' -and $TargetPath.StartsWith($prefix + '\', [StringComparison]::Ordinal)) { return $true }
     return $false
 }
 
@@ -6631,13 +6638,30 @@ function Get-ScopedAgentInstructions {
         $resolvedTarget = Resolve-AgentPath -Root $rootPath -RelativePath $TargetPath -AllowRegisteredSkill
         if (-not (Test-AgentPathWithinRoot -RootPath $rootPath -TargetPath $resolvedTarget)) { return '' }
     }
-    $parentPath = Split-Path -Path $TargetPath -Parent
-    $current = Resolve-AgentPath -Root $rootPath -RelativePath $parentPath
+    $currRel = Split-Path -Path $TargetPath -Parent
+    while ($currRel) {
+        $probeCand = if ($currRel -match '^([a-zA-Z]:[/\\]|[/\\])') { $currRel } else { Join-Path $rootPath $currRel }
+        if (Test-Path -LiteralPath $probeCand) {
+            break
+        }
+        $seg = Split-Path $currRel -Leaf
+        if (-not $seg -or $seg -eq '.' -or $seg -eq '..' -or $seg -match '[<>:"/\\|?*\x00-\x1f]' -or $seg -match '[. ]$' -or $seg -match '^(?i:CON|PRN|AUX|NUL|COM[0-9]|LPT[0-9])(?:\.|$)') {
+            throw 'Invalid directory name.'
+        }
+        $nextParent = Split-Path $currRel -Parent
+        if ($nextParent -eq $currRel) {
+            $currRel = ''
+            break
+        }
+        $currRel = $nextParent
+    }
+    $current = Resolve-AgentPath -Root $rootPath -RelativePath $(if ($currRel) { $currRel } else { '.' })
     $dirs = @()
-    while ($current -cne $rootPath) {
+    $isWin = ($env:OS -eq 'Windows_NT')
+    while ($(if ($isWin) { $current -ine $rootPath } else { $current -cne $rootPath })) {
         $dirs = @($current) + $dirs
         $next = Split-Path -Path $current -Parent
-        if (-not $next -or $next -ceq $current) { throw 'Could not locate workspace instruction ancestors.' }
+        if (-not $next -or $(if ($isWin) { $next -ieq $current } else { $next -ceq $current })) { throw 'Could not locate workspace instruction ancestors.' }
         $current = $next
     }
     $parts = @()
