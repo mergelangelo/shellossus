@@ -121,13 +121,18 @@ function Test-SafeWebUrl {
     if (-not $Url -or $Url -notmatch '^https?://[^\s]+$') {
         throw 'url must be a valid http:// or https:// URL.'
     }
-    $rawHostPart = ''
+    $rawHostOnly = ''
     if ($Url -match '^https?://([^/?#]+)') {
         $rawHostPart = $Matches[1]
         if ($rawHostPart -match '@') {
             throw 'URLs with embedded credentials are not allowed.'
         }
-        $rawHostOnly = ($rawHostPart -replace ':\d+$', '').Trim('[', ']').ToLower().TrimEnd('.')
+        if ($rawHostPart -match '^\[([^\]]+)\](?::\d+)?$') {
+            $rawHostOnly = $Matches[1].Trim().ToLower()
+        }
+        else {
+            $rawHostOnly = (($rawHostPart -replace ':\d+$', '') -replace '^\[|\]$', '').Trim().ToLower().TrimEnd('.')
+        }
         if ($rawHostOnly -match '^(?:0x[0-9a-f]+|\d+)$' -or $rawHostOnly -match '^(?:0x[0-9a-f]+|\d+)(?:\.(?:0x[0-9a-f]+|\d+)){1,2}$') {
             throw "Blocked request to local or private network address: $rawHostOnly"
         }
@@ -152,39 +157,48 @@ function Test-SafeWebUrl {
     if ($uri.UserInfo) {
         throw 'URLs with embedded credentials are not allowed.'
     }
-    $hostName = $uri.DnsSafeHost.Trim().ToLower().TrimEnd('.')
-    if (-not $hostName) {
-        $hostName = $uri.Host.Trim('[', ']').ToLower().TrimEnd('.')
-    }
-    if ($hostName -in @('localhost', 'local', 'internal', 'metadata', 'metadata.google.internal', 'instance-data', '0.0.0.0') -or
-        $hostName -like '*.localhost' -or $hostName -like '*.local' -or $hostName -like '*.internal') {
-        throw "Blocked request to local or private host: $hostName"
-    }
-    if ($hostName -in @('::1', '::', '0:0:0:0:0:0:0:1', '0:0:0:0:0:0:0:0') -or
-        $hostName -match '^(?:fe[89ab][0-9a-f]:|fc[0-9a-f]{2}:|fd[0-9a-f]{2}:|::ffff:)') {
-        throw "Blocked request to local or private IPv6 address: $hostName"
-    }
-    if ($hostName -match '^(?:0x[0-9a-f]+|\d+)$' -or $hostName -match '^\d+(?:\.\d+){1,2}$') {
-        throw "Blocked request to local or private network address: $hostName"
-    }
-    if ($hostName -match '^(\d+)\.(\d+)\.(\d+)\.(\d+)$') {
-        $o1 = [int]$Matches[1]
-        $o2 = [int]$Matches[2]
-        $o3 = [int]$Matches[3]
-        $o4 = [int]$Matches[4]
-        if ($o1 -gt 255 -or $o2 -gt 255 -or $o3 -gt 255 -or $o4 -gt 255) {
-            throw "Invalid IPv4 address in URL: $hostName"
+    $dnsHost = (($uri.DnsSafeHost -replace '^\[|\]$', '')).Trim().ToLower().TrimEnd('.')
+    $uriHost = (($uri.Host -replace '^\[|\]$', '')).Trim().ToLower().TrimEnd('.')
+    $hostsToCheck = @()
+    foreach ($candHost in @($rawHostOnly, $dnsHost, $uriHost)) {
+        if ($candHost -and ($candHost -notin $hostsToCheck)) {
+            $hostsToCheck += $candHost
         }
-        $isPrivate = ($o1 -eq 0) -or
-            ($o1 -eq 10) -or
-            ($o1 -eq 127) -or
-            ($o1 -eq 169 -and $o2 -eq 254) -or
-            ($o1 -eq 172 -and $o2 -ge 16 -and $o2 -le 31) -or
-            ($o1 -eq 192 -and $o2 -eq 168) -or
-            ($o1 -eq 100 -and $o2 -ge 64 -and $o2 -le 127) -or
-            ($o1 -ge 224)
-        if ($isPrivate) {
-            throw "Blocked request to local or private IPv4 address: $hostName"
+    }
+    foreach ($hostName in $hostsToCheck) {
+        if ($hostName -in @('localhost', 'local', 'internal', 'metadata', 'metadata.google.internal', 'instance-data', '0.0.0.0') -or
+            $hostName -like '*.localhost' -or $hostName -like '*.local' -or $hostName -like '*.internal') {
+            throw "Blocked request to local or private host: $hostName"
+        }
+        if ($hostName.Contains(':')) {
+            if ($hostName -match '^[0:]+0*1(?:%.*)?$' -or
+                $hostName -match '^[0:]+(?:%.*)?$' -or
+                $hostName -match '^(?:fe[89ab][0-9a-f]:|f[cd][0-9a-f]{2}:|ff[0-9a-f]{2}:|[0:]*:ffff:)') {
+                throw "Blocked request to local or private IPv6 address: $hostName"
+            }
+        }
+        if ($hostName -match '^(?:0x[0-9a-f]+|\d+)$' -or $hostName -match '^\d+(?:\.\d+){1,2}$') {
+            throw "Blocked request to local or private network address: $hostName"
+        }
+        if ($hostName -match '^(\d+)\.(\d+)\.(\d+)\.(\d+)$') {
+            $o1 = [int]$Matches[1]
+            $o2 = [int]$Matches[2]
+            $o3 = [int]$Matches[3]
+            $o4 = [int]$Matches[4]
+            if ($o1 -gt 255 -or $o2 -gt 255 -or $o3 -gt 255 -or $o4 -gt 255) {
+                throw "Invalid IPv4 address in URL: $hostName"
+            }
+            $isPrivate = ($o1 -eq 0) -or
+                ($o1 -eq 10) -or
+                ($o1 -eq 127) -or
+                ($o1 -eq 169 -and $o2 -eq 254) -or
+                ($o1 -eq 172 -and $o2 -ge 16 -and $o2 -le 31) -or
+                ($o1 -eq 192 -and $o2 -eq 168) -or
+                ($o1 -eq 100 -and $o2 -ge 64 -and $o2 -le 127) -or
+                ($o1 -ge 224)
+            if ($isPrivate) {
+                throw "Blocked request to local or private IPv4 address: $hostName"
+            }
         }
     }
     return $true
