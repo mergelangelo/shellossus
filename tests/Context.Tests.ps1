@@ -21,6 +21,16 @@ try {
     Set-Content -LiteralPath (Join-Path $promptFolder 'review.md') -Value 'Review carefully: $ARGUMENTS' -Encoding UTF8
     $fullSys = Build-SystemPrompt -Root $workspacePath -ConfigDir ''
     Assert-True ($fullSys.Contains('Always use snake_case.') -and $fullSys.Contains('Prefer CTEs over subqueries.') -and $fullSys.Contains('sql-tuning')) 'Build-SystemPrompt missed AGENTS.md, APPEND_SYSTEM.md, or skills.'
+    Set-Content -LiteralPath (Join-Path $workspacePath 'CLAUDE.md') -Value 'Do not load this legacy instruction.' -Encoding UTF8
+    $withoutLegacy = Build-SystemPrompt -Root $workspacePath -ConfigDir ''
+    Assert-True (-not $withoutLegacy.Contains('Do not load this legacy instruction.')) 'CLAUDE.md was loaded as an instruction file.'
+    $nestedDir = Join-Path $workspacePath 'scope/nested'
+    New-Item -ItemType Directory -Path $nestedDir -Force | Out-Null
+    Set-Content -LiteralPath (Join-Path $workspacePath 'scope/AGENTS.md') -Value 'Parent scoped rule.' -Encoding UTF8
+    Set-Content -LiteralPath (Join-Path $nestedDir 'AGENTS.md') -Value 'Child scoped rule.' -Encoding UTF8
+    $scoped = Get-ScopedAgentInstructions -Root $workspacePath -TargetPath 'scope/nested/file.txt'
+    Assert-True ($scoped.Contains('Parent scoped rule.') -and $scoped.Contains('Child scoped rule.') -and $scoped.IndexOf('Parent scoped rule.') -lt $scoped.IndexOf('Child scoped rule.')) 'Nested instructions were not loaded in parent-first order.'
+    Assert-True (-not (Get-ScopedAgentInstructions -Root $workspacePath -TargetPath 'hello.txt')) 'Nested instructions leaked to the workspace root.'
     $tpl = Resolve-PromptTemplate -Root $workspacePath -ConfigDir '' -InputText '/review @hello.txt'
     Assert-True ($tpl -eq 'Review carefully: @hello.txt') 'Prompt template expansion failed.'
     $expanded = Expand-UserPrompt -Root $workspacePath -Prompt 'Check @hello.txt and @.env'

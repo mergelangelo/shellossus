@@ -16,7 +16,7 @@ Drop [`shellossus.ps1`](shellossus.ps1) onto any machine and connect to any Open
 | **First-Run Diagnostics** | `-Doctor` / `/doctor` explains runtime, configuration, endpoint, model catalog, and session storage problems without generating a model response |
 | **Session Tree, Fork & Export** | Workspace-scoped `.jsonl` sessions (`-Continue`, `/sessions`, `/resume`), branch navigation (`/tree`), session forking (`/fork`), and standalone HTML export (`/export`) |
 | **Smart Context Compaction** | Iterative structured handoffs (`/compact [focus]`) with cumulative `<read-files>` / `<modified-files>` tracking and automatic context-overflow recovery |
-| **Context & Extensibility** | Auto-loads `AGENTS.md`, `CLAUDE.md`, `SOUL.md` (ethos/persona), `MEMORY.md` (cross-session memory), `SYSTEM.md`, `APPEND_SYSTEM.md`, `skills/*/SKILL.md` (`/skill:name`), `/<template>` prompts (`$1`, `$@`, `${1:-default}`), `@file` attachments, and `!cmd` / `!!cmd` |
+| **Context & Extensibility** | Auto-loads `AGENTS.md`, `SOUL.md` (ethos/persona), `MEMORY.md` (cross-session memory), `SYSTEM.md`, `APPEND_SYSTEM.md`, `skills/*/SKILL.md` (`/skill:name`), `/<template>` prompts (`$1`, `$@`, `${1:-default}`), `@file` attachments, and `!cmd` / `!!cmd` |
 | **TrueColor Terminal UI** | `sainnhe/gruvbox-material` (dark medium) palette with Markdown headings, lists, code blocks, auto-aligned tables, collapsible `reasoning` blocks, and `-Mode json` event streaming |
 | **Enterprise & Lockdown Ready** | Pure ASCII single-script distribution (`shellossus.ps1`), NTFS junction/symlink boundary protection, `.env` secret blocking, and full `ConstrainedLanguage` mode compatibility |
 

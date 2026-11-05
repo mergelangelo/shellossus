@@ -39,6 +39,44 @@ try {
     Assert-True ($script:requests -eq 2) 'Expected two API calls.'
     Assert-True ($state.messages[-1].content -eq 'Files inspected.') 'Missing final answer.'
 
+    # Scoped instructions must reach the model before any parallel writes execute.
+    $scopedDir = Join-Path $workspacePath 'scoped/nested'
+    New-Item -ItemType Directory -Path $scopedDir -Force | Out-Null
+    Set-Content -LiteralPath (Join-Path $workspacePath 'scoped/AGENTS.md') -Value 'Scoped parent rule.' -Encoding UTF8
+    Set-Content -LiteralPath (Join-Path $scopedDir 'AGENTS.md') -Value 'Scoped child rule.' -Encoding UTF8
+    Set-Content -LiteralPath (Join-Path $scopedDir 'input.txt') -Value 'input' -Encoding UTF8
+    $script:scopeStep = 0
+    function Invoke-WebRequest {
+        param($Uri, $Method, $Headers, $ContentType, $Body, $TimeoutSec, $ErrorAction, [switch]$UseBasicParsing, $OutFile)
+        $script:scopeStep++
+        $payload = $Body | ConvertFrom-Json
+        if ($script:scopeStep -eq 2) {
+            Assert-True (-not (Test-Path -LiteralPath (Join-Path $scopedDir 'a.txt'))) 'First scoped write happened before instructions were delivered.'
+            Assert-True (-not (Test-Path -LiteralPath (Join-Path $scopedDir 'b.txt'))) 'Second scoped write happened before instructions were delivered.'
+            $notice1 = $payload.messages[-2].content | ConvertFrom-Json
+            $notice2 = $payload.messages[-1].content | ConvertFrom-Json
+            $notice3 = $payload.messages[-3].content | ConvertFrom-Json
+            Assert-True ($notice1.status -eq 'instructions_required' -and $notice2.status -eq 'instructions_required' -and $notice3.status -eq 'instructions_required' -and $notice1.instructions.Contains('Scoped parent rule.') -and $notice1.instructions.Contains('Scoped child rule.')) 'Scoped instructions were not delivered before file reads and writes.'
+        }
+        $message = if ($script:scopeStep -lt 3) {
+            @{ content = $null; tool_calls = @(
+                @{ id = "scope-read-$script:scopeStep"; type = 'function'; function = @{ name = 'read_file'; arguments = '{"path":"scoped/nested/input.txt"}' } },
+                @{ id = "scope-a-$script:scopeStep"; type = 'function'; function = @{ name = 'write_file'; arguments = '{"path":"scoped/nested/a.txt","content":"a"}' } },
+                @{ id = "scope-b-$script:scopeStep"; type = 'function'; function = @{ name = 'write_file'; arguments = '{"path":"scoped/nested/b.txt","content":"b"}' } }
+            ) }
+        } else { @{ content = 'Scoped writes complete.' } }
+        $reason = if ($script:scopeStep -lt 3) { 'tool_calls' } else { 'stop' }
+        @{ choices = @(@{ finish_reason = $reason; message = $message }) } | ConvertTo-Json -Depth 15 -Compress | Set-Content -LiteralPath $OutFile -Encoding UTF8 -NoNewline
+    }
+    $script:AgentPermission = 'AutoEdit'
+    $script:OutputMode = 'json'
+    $scopeState = @{ messages = @(@{ role = 'system'; content = 'sys' }, @{ role = 'user'; content = 'Write files.' }) }
+    Invoke-AgentTurn -State $scopeState -Endpoint 'https://example.invalid' -ModelId 'test-model' -ApiKey 'fake' -Root $workspacePath -Steps 4
+    Assert-True ($script:scopeStep -eq 3 -and (Test-Path -LiteralPath (Join-Path $scopedDir 'a.txt')) -and (Test-Path -LiteralPath (Join-Path $scopedDir 'b.txt'))) 'Scoped writes did not complete after instructions.'
+    $script:AgentPermission = 'Ask'
+    $script:OutputMode = 'text'
+    Remove-Item -LiteralPath (Join-Path $workspacePath 'scoped') -Recurse -Force
+
     # JSON mode (-Mode json) emits only pure JSONL without plain-text tool logs or Read-Host prompts.
     $capturedHostLines = @()
     function Write-Host {

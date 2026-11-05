@@ -34,7 +34,7 @@
 - **Dispatcher (`Dispatch.ps1`):** Master tool caller (`Invoke-AgentTool`) routing calls and executing file queries (`list_files`, `find_files`, `grep_files`).
 
 ### 4. [`src/context/`](../src/context/)
-- **Prompt Assembly (`Prompt.ps1`):** System prompt builder (`Build-SystemPrompt`), loading `AGENTS.md`, `CLAUDE.md`, `SOUL.md`, `MEMORY.md`, skills, and subagent roles.
+- **Prompt Assembly (`Prompt.ps1`):** System prompt builder (`Build-SystemPrompt`), loading `AGENTS.md`, `SOUL.md`, `MEMORY.md`, skills, and subagent roles.
 - **Templates & Expansion (`Templates.ps1`):** Reusable slash prompt templates (`.shellossus/prompts/`) and inline `@file` / `!cmd` prompt attachments.
 - **Session Trees (`Session.ps1`):** Multi-branch conversation trees, atomic JSONL session storage, and standalone HTML export.
 - **Context Compaction (`Compaction.ps1`):** Token budgeting, token estimation, semantic compaction boundaries, and structured handoffs (`Invoke-AgentCompact`).

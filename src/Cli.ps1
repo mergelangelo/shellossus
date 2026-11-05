@@ -344,6 +344,8 @@ function Invoke-AgentTurn {
             return
         }
         $loopAborted = $false
+        # Only instructions visible before this model response count as received.
+        $scopedMessages = @($State.messages)
         foreach ($call in $message.tool_calls) {
             $canonToolName = Resolve-ToolCanonicalName -Name ([string]$call.function.name)
             $sig = Get-ToolCallSignature -Call $call -Epoch $mutationEpoch
@@ -381,7 +383,27 @@ function Invoke-AgentTurn {
                 Ensure-SessionTree -State $State
                 continue
             }
-            $output = Invoke-AgentTool -Root $Root -Call $call
+            $output = $null
+            if ($canonToolName -in @('read_file', 'write_file', 'edit_file') -and ($canonToolName -eq 'read_file' -or $script:AgentPermission -ne 'ReadOnly') -and (Test-IsToolEnabled -Name $canonToolName) -and -not $script:NoContextFiles) {
+                try {
+                    $scopeArgs = $call.function.arguments | ConvertFrom-Json -ErrorAction Stop
+                    if ($scopeArgs.path -is [string] -and $scopeArgs.path) {
+                        $instructions = Get-ScopedAgentInstructions -Root $Root -TargetPath $scopeArgs.path -AllowRegisteredSkill:($canonToolName -eq 'read_file')
+                        if ($instructions) {
+                            $notice = (@{ status = 'instructions_required'; instructions = $instructions; message = 'Apply these scoped AGENTS.md instructions, then retry the file tool call.' } | ConvertTo-Json -Compress)
+                            $seen = $false
+                            foreach ($prior in $scopedMessages) {
+                                if ($prior.role -eq 'tool' -and [string]$prior.content -ceq $notice) { $seen = $true; break }
+                            }
+                            if (-not $seen) { $output = $notice }
+                        }
+                    }
+                }
+                catch {
+                    $output = (@{ error = ('Cannot verify scoped AGENTS.md instructions: ' + $_.Exception.Message) } | ConvertTo-Json -Compress)
+                }
+            }
+            if ($null -eq $output) { $output = Invoke-AgentTool -Root $Root -Call $call }
             Write-AgentJsonEvent -EventType 'tool_execution_end' -Payload @{ id = [string]$call.id; name = [string]$call.function.name; result = $output }
             $State.messages += @{ role = 'tool'; tool_call_id = $call.id; content = $output }
             Ensure-SessionTree -State $State
@@ -779,7 +801,7 @@ if (-not $LibraryOnly) {
         $ctxLoaded = @()
         if (Get-SoulContext -Root $rootPath -ConfigDir $configDir) { $ctxLoaded += 'SOUL.md' }
         if (Get-MemoryContext -Root $rootPath -ConfigDir $configDir) { $ctxLoaded += 'MEMORY.md' }
-        if (Get-AgentsContext -Root $rootPath -ConfigDir $configDir) { $ctxLoaded += 'AGENTS.md/CLAUDE.md' }
+        if (Get-AgentsContext -Root $rootPath -ConfigDir $configDir) { $ctxLoaded += 'AGENTS.md' }
         if (Get-SkillsCatalog -Root $rootPath -ConfigDir $configDir) { $ctxLoaded += "skills ($($script:SkillsByName.Count))" }
         $null = Get-AgentRolesCatalog -Root $rootPath -ConfigDir $configDir
         if ($script:AgentRolesByName -and $script:AgentRolesByName.Count -gt 0) { $ctxLoaded += "agents ($($script:AgentRolesByName.Count))" }

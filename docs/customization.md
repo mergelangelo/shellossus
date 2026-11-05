@@ -1,6 +1,6 @@
 # Customization Guide
 
-`shellossus` supports project-level and user-level customization: project instructions (`AGENTS.md`, `CLAUDE.md`), persona and ethos (`SOUL.md`), persistent cross-session memory (`MEMORY.md`), system prompt overrides (`SYSTEM.md` / `APPEND_SYSTEM.md`), domain skills (`SKILL.md`), and reusable prompt templates (`/template`).
+`shellossus` supports project-level and user-level customization: project instructions (`AGENTS.md`), persona and ethos (`SOUL.md`), persistent cross-session memory (`MEMORY.md`), system prompt overrides (`SYSTEM.md` / `APPEND_SYSTEM.md`), domain skills (`SKILL.md`), and reusable prompt templates (`/template`).
 
 ---
 
@@ -11,6 +11,7 @@
 2. `<workspace>\.shellossus\SOUL.md` or `<workspace>\SOUL.md` (project persona and tone)
 3. `<workspace>\AGENTS.md` (project-specific rules)
 
+- Nested `AGENTS.md` files along a file's path are provided to the agent parent-first before `read_file`, `write_file`, or `edit_file` proceeds. The tool call is retried after the model receives the rules. `-NoContextFiles` disables this behavior. Commands and search tools do not automatically load path-specific rules.
 - Use `AGENTS.md` to document coding conventions, build/test commands, database dialects, or architecture constraints.
 - Use `SOUL.md` (or `ETHOS.md` / `SHELLOSSUS.md`) to define the agent's persona, communication principles, craftsmanship philosophy, and core behavioral invariants.
 

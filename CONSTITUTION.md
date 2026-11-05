@@ -128,7 +128,7 @@ In interactive and text modes, output uses the 24-bit TrueColor `sainnhe/gruvbox
 `shellossus` builds its context locally from:
 1. Default system instructions or `.shellossus/SYSTEM.md` replacement;
 2. `APPEND_SYSTEM.md` additions;
-3. Hierarchical `AGENTS.md` and `CLAUDE.md` files from the workspace root;
+3. Hierarchical `AGENTS.md` files from the workspace root;
 4. Local and global skills (`SKILL.md`) listed in an `<available_skills>` XML catalog and invocable via `/skill:<name>` or `read_file`;
 5. Built-in (`recon`, `audit`, `craft`) and custom subagent role profiles (`.shellossus/agents/*.md` and `~/.shellossus/agents/*.md`) listed in an `<available_agents>` XML catalog and invocable via `run_agent`, `/agents`, or `/agent:<role>`;
 6. Prompt templates (`.shellossus/prompts/*.md`) supporting positional, slice, and default arguments (`$1`, `$@`, `$ARGUMENTS`, `${1:-default}`, `${@:2}`) without recursive re-evaluation.

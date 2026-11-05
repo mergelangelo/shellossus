@@ -647,6 +647,11 @@ try {
 
     # Web tools: fetch_url (HTML stripping, entity decoding, scheme guard) and web_search.
     Assert-True ((ConvertTo-UrlEncodedString -Text 'a b?') -eq 'a+b%3F') 'ConvertTo-UrlEncodedString failed.'
+    $supplementary = ([string][char]0xD83D) + ([string][char]0xDE00)
+    Assert-True ((ConvertTo-UrlEncodedString -Text $supplementary) -eq '%F0%9F%98%80') 'Search Unicode surrogate encoding failed.'
+    $badSurrogateRejected = $false
+    try { $null = ConvertTo-UrlEncodedString -Text ([string][char]0xD83D) } catch { $badSurrogateRejected = $true }
+    Assert-True $badSurrogateRejected 'An invalid Unicode surrogate was accepted.'
     $cleanHtml = ConvertFrom-HtmlToText -Html '<html><head><style>body{}</style><script>alert(1)</script></head><body><h1>Title</h1><p>Hello &amp; world</p></body></html>'
     Assert-True ($cleanHtml.Contains('Title') -and $cleanHtml.Contains('Hello & world') -and (-not $cleanHtml.Contains('alert(1)'))) "ConvertFrom-HtmlToText unexpected: $cleanHtml"
 
@@ -670,6 +675,15 @@ try {
 
         $searchRes = Invoke-AgentTool -Root $workspacePath -Call @{ id = 'w-search'; function = @{ name = 'web_search'; arguments = '{"query":"powershell 5.1","limit":5}' } } | ConvertFrom-Json
         Assert-True ($searchRes.count -eq 1 -and $searchRes.results[0].title -eq 'Example Docs' -and $searchRes.results[0].url -eq 'https://example.com/docs') 'web_search failed to parse search results.'
+
+        function Invoke-WebRequest {
+            param($Uri, $Method, $Headers, $ContentType, $Body, $TimeoutSec, $ErrorAction, [switch]$UseBasicParsing, $OutFile)
+            Set-Content -LiteralPath $OutFile -Value ('a' * 2100000) -Encoding UTF8 -NoNewline
+        }
+        $largeFetch = Invoke-AgentTool -Root $workspacePath -Call @{ id = 'w-large'; function = @{ name = 'fetch_url'; arguments = '{"url":"https://example.com/large"}' } } | ConvertFrom-Json
+        Assert-True ($largeFetch.error -like '*exceeds*') 'fetch_url accepted an oversized response.'
+        $largeSearch = Invoke-AgentTool -Root $workspacePath -Call @{ id = 's-large'; function = @{ name = 'web_search'; arguments = '{"query":"large"}' } } | ConvertFrom-Json
+        Assert-True ($largeSearch.error -like '*exceeds*') 'web_search accepted an oversized response.'
     }
     finally {
         Remove-Item Function:\Invoke-WebRequest -ErrorAction SilentlyContinue
