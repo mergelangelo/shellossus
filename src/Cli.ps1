@@ -37,7 +37,7 @@ if (-not $LibraryOnly) {
         if (-not $defaultUrl) { $defaultUrl = $config.SHELLOSSUS_BASE_URL }
         $inputUrl = Read-Host "API base URL including /v1 [$defaultUrl]"
         if (-not $inputUrl) { $inputUrl = $defaultUrl }
-        if ($inputUrl -notmatch '^https://[^\s]+$') { throw 'Use an HTTPS API base URL.' }
+        if (-not (Test-ValidAgentBaseUrl -Url $inputUrl)) { throw 'An HTTPS base URL (or http://localhost / http://127.0.0.1 for local servers) is required. Run: shellossus -Setup' }
         $defaultModel = $Model
         if (-not $defaultModel) { $defaultModel = $env:H_AGENT_MODEL }
         if (-not $defaultModel) { $defaultModel = $config.SHELLOSSUS_MODEL }
@@ -121,7 +121,7 @@ if (-not $LibraryOnly) {
         return
     }
     if (-not $BaseUrl) { $BaseUrl = Read-Host 'API base URL (including /v1)' }
-    if ($BaseUrl -notmatch '^https://[^\s]+$') { throw 'Use an HTTPS API base URL.' }
+    if (-not (Test-ValidAgentBaseUrl -Url $BaseUrl)) { throw 'An HTTPS base URL (or http://localhost / http://127.0.0.1 for local servers) is required. Run: shellossus -Setup' }
     if (-not $Model) { $Model = Read-Host 'Model ID' }
     if (-not $Model) { throw 'Model ID is required.' }
     if ($MaxSteps -lt 1 -or $MaxSteps -gt 500) { throw 'MaxSteps must be between 1 and 500.' }
@@ -489,6 +489,9 @@ if (-not $LibraryOnly) {
                     $Model = $newModel
                     $state.model = $Model
                     $script:ActiveModelId = $Model
+                    if ($script:AgentConfigPath) {
+                        $null = Update-AgentConfigOptionalKey -Path $script:AgentConfigPath -Key 'SHELLOSSUS_MODEL' -Value $Model
+                    }
                     Write-Host ($script:Gm.Green + "  Model switched to: $Model" + $script:Gm.Reset)
                 }
                 continue

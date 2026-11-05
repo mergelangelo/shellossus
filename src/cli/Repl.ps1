@@ -431,6 +431,10 @@ function Invoke-ReplContextCommand {
             else {
                 Set-AgentContextLimits -WindowSpec $tokensParts[0]
             }
+            if ($script:AgentConfigPath) {
+                $null = Update-AgentConfigOptionalKey -Path $script:AgentConfigPath -Key 'SHELLOSSUS_CONTEXT_WINDOW' -Value "$($limRes.context_window_tokens)"
+                $null = Update-AgentConfigOptionalKey -Path $script:AgentConfigPath -Key 'SHELLOSSUS_COMPACT_THRESHOLD' -Value "$($limRes.compact_threshold_tokens)"
+            }
             $wFmt = Format-TokenCount -Tokens $limRes.context_window_tokens
             $cFmt = Format-TokenCount -Tokens $limRes.compact_threshold_tokens
             Write-Host ($script:Gm.Green + "  Context window set to $wFmt tokens | Auto-compact threshold: $cFmt ($($limRes.compact_pct)%)" + $script:Gm.Reset)

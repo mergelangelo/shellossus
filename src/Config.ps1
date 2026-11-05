@@ -78,6 +78,31 @@ function Save-AgentConfig {
     Set-Content -LiteralPath $Path -Value $lines -Encoding UTF8 -ErrorAction Stop
 }
 
+function Test-ValidAgentBaseUrl {
+    param([string]$Url)
+    if (-not $Url -or ($Url -notmatch '^https?://[^\s]+$')) { return $false }
+    try {
+        $uri = [uri]$Url
+        if (-not $uri.IsAbsoluteUri -or -not $uri.Host -or $uri.UserInfo -or $uri.Query -or $uri.Fragment) {
+            return $false
+        }
+        if ($uri.AbsolutePath -match '/(?:chat/completions|models)/?$') {
+            return $false
+        }
+        if ($uri.Scheme -ieq 'https') {
+            return $true
+        }
+        if ($uri.Scheme -ieq 'http') {
+            $h = $uri.Host.ToLower().Trim('[', ']')
+            if ($h -eq 'localhost' -or $h -eq '127.0.0.1' -or $h -eq '::1' -or $h -eq '0:0:0:0:0:0:0:1') {
+                return $true
+            }
+        }
+    }
+    catch {}
+    return $false
+}
+
 function Update-AgentConfigOptionalKey {
     param([string]$Path, [string]$Key, [string]$Value)
     if (-not $Path -or -not $Key) { return $false }
@@ -85,10 +110,10 @@ function Update-AgentConfigOptionalKey {
     if (-not $effectivePath -or -not (Test-Path -LiteralPath $effectivePath)) { return $false }
     $cfg = @{}
     try {
-        $cfg = Read-AgentConfig -Path $effectivePath
+        $cfg = Read-AgentConfig -Path $Path
         if (-not $cfg -or $cfg.Count -eq 0) { return $false }
         $cfg[$Key] = $Value
-        Save-AgentConfig -Path $effectivePath -Config $cfg
+        Save-AgentConfig -Path $Path -Config $cfg
         return $true
     }
     catch {
