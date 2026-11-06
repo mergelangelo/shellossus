@@ -80,7 +80,10 @@ function Resolve-SkillCommand {
     if (-not $raw) { return $null }
     $body = $raw -replace '(?s)^---\r?\n.*?\r?\n---\r?\n?', ''
     $expanded = Expand-TemplateArgs -Content $body.Trim() -ArgsString $skillArgs
-    $outXml = "<skill name=`"$skillName`" path=`"$($skillInfo.rel_path)`">`n" + $expanded + "`n</skill>"
+    $rawSkillName = if ($skillInfo.name) { [string]$skillInfo.name } else { $skillName }
+    $escapedSkillName = Escape-XmlText -Text $rawSkillName
+    $escapedSkillPath = Escape-XmlText -Text $skillInfo.rel_path
+    $outXml = "<skill name=`"$escapedSkillName`" path=`"$escapedSkillPath`">`n" + $expanded + "`n</skill>"
     if ($skillArgs -and ($body -notmatch '\$(?:\d+|@|ARGUMENTS|\{)')) {
         $outXml += "`n`nUser: $skillArgs"
     }
@@ -253,7 +256,9 @@ function Resolve-AgentRoleCommand {
     if (-not $script:AgentRolesByName.ContainsKey($canonRole)) { return $null }
     $roleInfo = $script:AgentRolesByName[$canonRole]
     $expanded = Expand-TemplateArgs -Content $roleInfo.system_prompt -ArgsString $roleArgs
-    $outXml = "<agent_role name=`"$($roleInfo.name)`" permission=`"$($roleInfo.permission)`">`n" + $expanded + "`n</agent_role>"
+    $escapedRoleName = Escape-XmlText -Text $roleInfo.name
+    $escapedRolePerm = Escape-XmlText -Text $roleInfo.permission
+    $outXml = "<agent_role name=`"$escapedRoleName`" permission=`"$escapedRolePerm`">`n" + $expanded + "`n</agent_role>"
     if ($roleArgs) {
         $outXml += "`n`nDelegate this task using run_agent with role=`"$($roleInfo.name)`": $roleArgs"
     }
