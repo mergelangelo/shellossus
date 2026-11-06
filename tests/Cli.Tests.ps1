@@ -1301,6 +1301,36 @@ try {
             Remove-Item -LiteralPath $httpOutFile -Force -ErrorAction SilentlyContinue
         }
     }
+
+    # Regression (Task 11): /resume with -NoSession loads the chosen session messages
+    # but returns an empty session_file. Save-AgentSession already no-ops on an empty path.
+    $resumeNoSessDir = Join-Path $testRoot 'resume-nosession'
+    New-Item -ItemType Directory -Path $resumeNoSessDir -Force | Out-Null
+    $resumeNoSessFile = Join-Path $resumeNoSessDir 'kept-session.jsonl'
+    $resumeNoSessSource = @{
+        messages = @(
+            @{ role = 'system'; content = 'sys' },
+            @{ role = 'user'; content = 'Resumed user text for NoSession' }
+        )
+    }
+    Save-AgentSession -SessionFile $resumeNoSessFile -State $resumeNoSessSource -Workspace $workspacePath -Model 'resume-model' -SessionId 'sess-resume-nosession'
+    $resumeNoSessState = @{
+        messages = @(
+            @{ role = 'system'; content = 'live-system' },
+            @{ role = 'user'; content = 'live-user-not-resumed' }
+        )
+        model = 'live-model'
+    }
+    $resumeNoSessResult = Invoke-ReplSessionsCommand -State $resumeNoSessState -SessionDir $resumeNoSessDir -SessionFile '' -RootPath $workspacePath -Model 'live-model' -UndoStack @() -LastFailedQuestion 'stale' -ResumeArg 'kept-session.jsonl' -NoSession
+    Assert-True ([string]$resumeNoSessResult.session_file -eq '') "Expected empty session_file after resume -NoSession, got '$($resumeNoSessResult.session_file)'."
+    $resumeNoSessUsers = @($resumeNoSessResult.state.messages | Where-Object { $_.role -eq 'user' -and [string]$_.content -eq 'Resumed user text for NoSession' })
+    Assert-True ($resumeNoSessUsers.Count -eq 1) 'Resumed messages did not contain the saved user text.'
+    $resumeNoSessBytesBefore = Get-Content -LiteralPath $resumeNoSessFile -Raw
+    $resumeNoSessStampBefore = (Get-Item -LiteralPath $resumeNoSessFile).LastWriteTimeUtc
+    Save-AgentSession -SessionFile '' -State $resumeNoSessResult.state -Workspace $workspacePath -Model 'resume-model'
+    $resumeNoSessBytesAfter = Get-Content -LiteralPath $resumeNoSessFile -Raw
+    $resumeNoSessStampAfter = (Get-Item -LiteralPath $resumeNoSessFile).LastWriteTimeUtc
+    Assert-True (($resumeNoSessStampBefore -eq $resumeNoSessStampAfter) -and ($resumeNoSessBytesBefore -eq $resumeNoSessBytesAfter)) "Save-AgentSession -SessionFile '' rewrote the resumed JSONL."
 }
 finally {
     Remove-TestEnvironment -Env $envData
