@@ -3092,7 +3092,7 @@ function Format-AskUserArguments {
 
     $plan = ''
     $hasPlanVal = $false
-    foreach ($p in @('plan', 'plan_text', 'planText', 'markdown', 'body', 'content', 'details')) {
+    foreach ($p in @('plan', 'plan_review', 'planReview', 'plan_text', 'planText', 'markdown', 'body', 'content', 'details')) {
         if ($props -contains $p -and $null -ne $Arguments.$p) {
             if ($Arguments.$p -isnot [string]) { $plan = $Arguments.$p; $hasPlanVal = $true; break }
             if ($Arguments.$p) { $plan = [string]$Arguments.$p; $hasPlanVal = $true; break }
