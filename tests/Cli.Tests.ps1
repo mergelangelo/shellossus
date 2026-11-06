@@ -979,6 +979,99 @@ try {
         Remove-Item Function:\global:Read-Host -ErrorAction SilentlyContinue
         Remove-Item Function:\Write-Host -ErrorAction SilentlyContinue
     }
+
+    # Regression (Task 4): Single-shot -Prompt and REPL (/new and /exit) clean up .tmp undo backup files when /undo is not called.
+    $bakTargetFile = Join-Path $workspacePath 'backup-cleanup-target.txt'
+    Set-Content -LiteralPath $bakTargetFile -Value 'line-v0' -Encoding UTF8 -NoNewline
+    $global:bakStep = 0
+    $global:ssBackupPath = ''
+    $global:ssBackupExistedDuringTurn = $false
+    $global:replBackup1Path = ''
+    $global:replBackup1ExistedDuringTurn1 = $false
+    $global:replBackup1ExistedAfterNew = $true
+    $global:replBackup2Path = ''
+    $global:replBackup2ExistedDuringTurn2 = $false
+    function Invoke-WebRequest {
+        param($Uri, $Method, $Headers, $ContentType, $Body, $TimeoutSec, $ErrorAction, [switch]$UseBasicParsing, $OutFile)
+        $global:bakStep++
+        $payload = $Body | ConvertFrom-Json
+        if ($global:bakStep -eq 1) {
+            $r = @{ choices = @(@{ finish_reason = 'tool_calls'; message = @{
+                content = ''
+                tool_calls = @(@{ id = 'bk-ss-1'; type = 'function'; function = @{ name = 'edit_file'; arguments = '{"path":"backup-cleanup-target.txt","old_text":"line-v0","new_text":"line-v1"}' } })
+            } }) } | ConvertTo-Json -Depth 10 -Compress
+        }
+        elseif ($global:bakStep -eq 2) {
+            $toolRes = $payload.messages[-1].content | ConvertFrom-Json
+            $global:ssBackupPath = [string]$toolRes.backup
+            if ($global:ssBackupPath -and (Test-Path -LiteralPath $global:ssBackupPath)) {
+                $global:ssBackupExistedDuringTurn = $true
+            }
+            $r = @{ choices = @(@{ finish_reason = 'stop'; message = @{ content = 'Single-shot edit complete.' } }) } | ConvertTo-Json -Depth 10 -Compress
+        }
+        elseif ($global:bakStep -eq 3) {
+            $r = @{ choices = @(@{ finish_reason = 'tool_calls'; message = @{
+                content = ''
+                tool_calls = @(@{ id = 'bk-rp-1'; type = 'function'; function = @{ name = 'edit_file'; arguments = '{"path":"backup-cleanup-target.txt","old_text":"line-v1","new_text":"line-v2"}' } })
+            } }) } | ConvertTo-Json -Depth 10 -Compress
+        }
+        elseif ($global:bakStep -eq 4) {
+            $toolRes = $payload.messages[-1].content | ConvertFrom-Json
+            $global:replBackup1Path = [string]$toolRes.backup
+            if ($global:replBackup1Path -and (Test-Path -LiteralPath $global:replBackup1Path)) {
+                $global:replBackup1ExistedDuringTurn1 = $true
+            }
+            $r = @{ choices = @(@{ finish_reason = 'stop'; message = @{ content = 'REPL turn 1 edit complete.' } }) } | ConvertTo-Json -Depth 10 -Compress
+        }
+        elseif ($global:bakStep -eq 5) {
+            $global:replBackup1ExistedAfterNew = [bool]($global:replBackup1Path -and (Test-Path -LiteralPath $global:replBackup1Path))
+            $r = @{ choices = @(@{ finish_reason = 'tool_calls'; message = @{
+                content = ''
+                tool_calls = @(@{ id = 'bk-rp-2'; type = 'function'; function = @{ name = 'edit_file'; arguments = '{"path":"backup-cleanup-target.txt","old_text":"line-v2","new_text":"line-v3"}' } })
+            } }) } | ConvertTo-Json -Depth 10 -Compress
+        }
+        else {
+            $toolRes = $payload.messages[-1].content | ConvertFrom-Json
+            $global:replBackup2Path = [string]$toolRes.backup
+            if ($global:replBackup2Path -and (Test-Path -LiteralPath $global:replBackup2Path)) {
+                $global:replBackup2ExistedDuringTurn2 = $true
+            }
+            $r = @{ choices = @(@{ finish_reason = 'stop'; message = @{ content = 'REPL turn 2 edit complete.' } }) } | ConvertTo-Json -Depth 10 -Compress
+        }
+        Set-Content -LiteralPath $OutFile -Value $r -Encoding UTF8 -NoNewline
+    }
+    function Write-Host {
+        param([Parameter(Position = 0, ValueFromRemainingArguments = $true)]$Object, [switch]$NoNewline, $ForegroundColor, $BackgroundColor)
+    }
+    try {
+        & "$PSScriptRoot\..\shellossus.ps1" -Workspace $workspacePath -BaseUrl 'https://example.invalid/v1' -Model 'test-model' -Prompt 'Edit file in single-shot mode' -Permission AutoEdit -NoSession -ConfigPath $setupCfgFile
+        Assert-True ([bool]$global:ssBackupPath -and $global:ssBackupExistedDuringTurn) 'Single-shot edit_file did not create a backup temp file during the turn.'
+        Assert-True (-not (Test-Path -LiteralPath $global:ssBackupPath)) "Single-shot -Prompt leaked undo backup file after exit: $($global:ssBackupPath)"
+
+        $global:replBakQueue = @('Edit in turn 1', '/new', 'Edit in turn 2 after /new', '/exit')
+        function global:Read-Host {
+            param($Prompt)
+            if (-not $global:replBakQueue -or $global:replBakQueue.Count -eq 0) { return '/exit' }
+            $next = $global:replBakQueue[0]
+            if ($global:replBakQueue.Count -eq 1) { $global:replBakQueue = @() }
+            else { $global:replBakQueue = @($global:replBakQueue[1..($global:replBakQueue.Count - 1)]) }
+            return $next
+        }
+        & "$PSScriptRoot\..\shellossus.ps1" -Workspace $workspacePath -BaseUrl 'https://example.invalid/v1' -Model 'test-model' -Permission AutoEdit -NoSession -ConfigPath $setupCfgFile
+        Assert-True ([bool]$global:replBackup1Path -and $global:replBackup1ExistedDuringTurn1) 'REPL turn 1 edit_file did not create a backup temp file.'
+        Assert-True (-not $global:replBackup1ExistedAfterNew) "REPL /new did not clean up turn 1 undo backup file: $($global:replBackup1Path)"
+        Assert-True ([bool]$global:replBackup2Path -and $global:replBackup2ExistedDuringTurn2) 'REPL turn 2 edit_file did not create a backup temp file.'
+        Assert-True (-not (Test-Path -LiteralPath $global:replBackup2Path)) "REPL /exit leaked turn 2 undo backup file: $($global:replBackup2Path)"
+    }
+    finally {
+        Remove-Item Function:\Invoke-WebRequest -ErrorAction SilentlyContinue
+        Remove-Item Function:\global:Read-Host -ErrorAction SilentlyContinue
+        Remove-Item Function:\Write-Host -ErrorAction SilentlyContinue
+        if ($global:ssBackupPath -and (Test-Path -LiteralPath $global:ssBackupPath)) { Remove-Item -LiteralPath $global:ssBackupPath -Force -ErrorAction SilentlyContinue }
+        if ($global:replBackup1Path -and (Test-Path -LiteralPath $global:replBackup1Path)) { Remove-Item -LiteralPath $global:replBackup1Path -Force -ErrorAction SilentlyContinue }
+        if ($global:replBackup2Path -and (Test-Path -LiteralPath $global:replBackup2Path)) { Remove-Item -LiteralPath $global:replBackup2Path -Force -ErrorAction SilentlyContinue }
+        Remove-Variable -Name bakStep, ssBackupPath, ssBackupExistedDuringTurn, replBackup1Path, replBackup1ExistedDuringTurn1, replBackup1ExistedAfterNew, replBackup2Path, replBackup2ExistedDuringTurn2, replBakQueue -Scope Global -ErrorAction SilentlyContinue
+    }
 }
 finally {
     Remove-TestEnvironment -Env $envData

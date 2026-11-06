@@ -4030,7 +4030,9 @@ function Invoke-AgentWrite {
         }
     }
     $stageFile = New-AgentTempFile
+    $backup = $null
     $backupPath = $null
+    $backupRecorded = $false
     try {
         Set-AgentUtf8Content -LiteralPath $stageFile.FullName -Value $after
         $stagedCheck = Get-Content -LiteralPath $stageFile.FullName -Raw -Encoding UTF8 -ErrorAction Stop
@@ -4062,6 +4064,7 @@ function Invoke-AgentWrite {
                 before_content = $before
                 after_content = $after
             }
+            $backupRecorded = $true
             Move-Item -LiteralPath $stageFile.FullName -Destination $path -Force -ErrorAction Stop
         }
         else {
@@ -4094,6 +4097,9 @@ function Invoke-AgentWrite {
     finally {
         if (Test-Path -LiteralPath $stageFile.FullName) {
             Remove-Item -LiteralPath $stageFile.FullName -Force -ErrorAction SilentlyContinue
+        }
+        if ($backup -and (-not $backupRecorded) -and (Test-Path -LiteralPath $backup.FullName)) {
+            Remove-Item -LiteralPath $backup.FullName -Force -ErrorAction SilentlyContinue
         }
     }
     return (@{ status = 'written'; path = $Arguments.path; backup = $backupPath; edits_applied = $editsApplied; first_changed_line = $firstChangedLine } | ConvertTo-Json -Compress)
@@ -4738,6 +4744,23 @@ function Invoke-AgentCommand {
 
 # --- src/tools/Undo.ps1 ---
 # Disk undo and multi-step turn rollback.
+
+function Clear-AgentUndoBackups {
+    param($UndoEntries, $Writes)
+    foreach ($entry in @($UndoEntries)) {
+        if ($null -eq $entry) { continue }
+        foreach ($w in @($entry.writes)) {
+            if ($w -and $w.backup -and (Test-Path -LiteralPath $w.backup)) {
+                Remove-Item -LiteralPath $w.backup -Force -ErrorAction SilentlyContinue
+            }
+        }
+    }
+    foreach ($w in @($Writes)) {
+        if ($w -and $w.backup -and (Test-Path -LiteralPath $w.backup)) {
+            Remove-Item -LiteralPath $w.backup -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
 
 function Assert-AgentUndoPath {
     param($Write)
@@ -10271,6 +10294,7 @@ if (-not $LibraryOnly) {
                 $state.todos = @()
                 $script:ActiveSessionTodos = @()
                 Sync-AgentCapabilities -State $state | Out-Null
+                Clear-AgentUndoBackups -UndoEntries $undoStack
                 $undoStack = @()
                 $sessionFile = if ($NoSession) { '' } else { Join-Path $sessionDir ($newId + '.jsonl') }
                 $script:ActiveSessionId = $newId
@@ -10355,6 +10379,7 @@ if (-not $LibraryOnly) {
                     $targetEntryId = $Matches[1].Trim()
                     try {
                         Switch-SessionBranch -State $state -TargetId $targetEntryId | Out-Null
+                        Clear-AgentUndoBackups -UndoEntries $undoStack
                         $undoStack = @()
                         Save-AgentSession -SessionFile $sessionFile -State $state -Workspace $rootPath -Model $Model
                         Write-Host ($script:Gm.Green + "  Switched active branch to entry $targetEntryId ($($state.messages.Count) messages in active path)." + $script:Gm.Reset)
@@ -10376,6 +10401,7 @@ if (-not $LibraryOnly) {
                     $forkRes = Invoke-SessionFork -State $state -SessionDir $sessionDir -EntryId $forkEntryId
                     $state = $forkRes.state
                     $sessionFile = if ($NoSession) { '' } else { $forkRes.session_file }
+                    Clear-AgentUndoBackups -UndoEntries $undoStack
                     $undoStack = @()
                     Write-Host ($script:Gm.Green + "  Forked session to: $($forkRes.session_file) (id=$($forkRes.session_id))" + $script:Gm.Reset)
                 }
@@ -10423,6 +10449,7 @@ if (-not $LibraryOnly) {
                 try {
                     Invoke-SessionResume -SessionFile $impPath -State $state -CurrentWorkspace $rootPath | Out-Null
                     $sessionFile = if ($NoSession) { '' } else { $impPath }
+                    Clear-AgentUndoBackups -UndoEntries $undoStack
                     $undoStack = @()
                     $lastFailedQuestion = ''
                     if ($state.model) { $Model = $state.model }
@@ -10592,6 +10619,7 @@ if (-not $LibraryOnly) {
                     try {
                         Invoke-SessionResume -SessionFile $chosen -State $state -CurrentWorkspace $rootPath | Out-Null
                         $sessionFile = $chosen
+                        Clear-AgentUndoBackups -UndoEntries $undoStack
                         $undoStack = @()
                         $lastFailedQuestion = ''
                         if ($state.model) { $Model = $state.model }
@@ -10724,5 +10752,9 @@ if (-not $LibraryOnly) {
             }
         }
     }
-    finally { Remove-Variable agentKey -ErrorAction SilentlyContinue }
+    finally {
+        Clear-AgentUndoBackups -UndoEntries $undoStack -Writes $script:CurrentTurnWrites
+        $script:CurrentTurnWrites = @()
+        Remove-Variable agentKey -ErrorAction SilentlyContinue
+    }
 }

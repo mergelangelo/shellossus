@@ -244,7 +244,9 @@ function Invoke-AgentWrite {
         }
     }
     $stageFile = New-AgentTempFile
+    $backup = $null
     $backupPath = $null
+    $backupRecorded = $false
     try {
         Set-AgentUtf8Content -LiteralPath $stageFile.FullName -Value $after
         $stagedCheck = Get-Content -LiteralPath $stageFile.FullName -Raw -Encoding UTF8 -ErrorAction Stop
@@ -276,6 +278,7 @@ function Invoke-AgentWrite {
                 before_content = $before
                 after_content = $after
             }
+            $backupRecorded = $true
             Move-Item -LiteralPath $stageFile.FullName -Destination $path -Force -ErrorAction Stop
         }
         else {
@@ -308,6 +311,9 @@ function Invoke-AgentWrite {
     finally {
         if (Test-Path -LiteralPath $stageFile.FullName) {
             Remove-Item -LiteralPath $stageFile.FullName -Force -ErrorAction SilentlyContinue
+        }
+        if ($backup -and (-not $backupRecorded) -and (Test-Path -LiteralPath $backup.FullName)) {
+            Remove-Item -LiteralPath $backup.FullName -Force -ErrorAction SilentlyContinue
         }
     }
     return (@{ status = 'written'; path = $Arguments.path; backup = $backupPath; edits_applied = $editsApplied; first_changed_line = $firstChangedLine } | ConvertTo-Json -Compress)
