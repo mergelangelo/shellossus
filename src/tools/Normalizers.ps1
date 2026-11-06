@@ -16,8 +16,11 @@ function Format-EditArguments {
     $props = @(Get-ObjectPropertyNames -InputObject $Arguments)
     $out = @{}
     foreach ($p in $props) {
-        if ($p -eq 'oldText') { $out['old_text'] = $Arguments.$p }
-        elseif ($p -eq 'newText') { $out['new_text'] = $Arguments.$p }
+        if ($p -eq 'oldText' -and ($props -notcontains 'old_text')) { $out['old_text'] = $Arguments.$p }
+        elseif ($p -eq 'newText' -and ($props -notcontains 'new_text')) { $out['new_text'] = $Arguments.$p }
+        elseif ($p -eq 'oldText' -or $p -eq 'newText') {
+            # Canonical name is already present. Drop the alias so validation does not see it.
+        }
         elseif ($p -in @('file_path', 'filepath', 'filePath') -and ($props -notcontains 'path') -and (-not $out.ContainsKey('path'))) { $out['path'] = $Arguments.$p }
         else { $out[$p] = $Arguments.$p }
     }
@@ -44,8 +47,11 @@ function Format-EditArguments {
                     $ip = @(Get-ObjectPropertyNames -InputObject $item)
                     $normItem = @{}
                     foreach ($k in $ip) {
-                        if ($k -eq 'oldText') { $normItem['old_text'] = $item.$k }
-                        elseif ($k -eq 'newText') { $normItem['new_text'] = $item.$k }
+                        if ($k -eq 'oldText' -and ($ip -notcontains 'old_text')) { $normItem['old_text'] = $item.$k }
+                        elseif ($k -eq 'newText' -and ($ip -notcontains 'new_text')) { $normItem['new_text'] = $item.$k }
+                        elseif ($k -eq 'oldText' -or $k -eq 'newText') {
+                            # Canonical name is already present. Drop the alias so validation does not see it.
+                        }
                         else { $normItem[$k] = $item.$k }
                     }
                     $normArr += $normItem
