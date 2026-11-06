@@ -9157,6 +9157,26 @@ catch {
             @('-NoProfile', '-NonInteractive', '-Command', $workerCmd)
         }
         $proc = $null
+        $httpEnvNames = @(
+            'SHELLOSSUS_HTTP_URI',
+            'SHELLOSSUS_HTTP_KEY',
+            'SHELLOSSUS_HTTP_IN',
+            'SHELLOSSUS_HTTP_OUT',
+            'SHELLOSSUS_HTTP_ERR',
+            'SHELLOSSUS_HTTP_TIMEOUT'
+        )
+        $httpEnvPresent = @{}
+        $httpEnvPrior = @{}
+        foreach ($httpEnvName in $httpEnvNames) {
+            $httpEnvItem = Get-Item -LiteralPath ('Env:' + $httpEnvName) -ErrorAction SilentlyContinue
+            if ($null -eq $httpEnvItem) {
+                $httpEnvPresent[$httpEnvName] = $false
+            }
+            else {
+                $httpEnvPresent[$httpEnvName] = $true
+                $httpEnvPrior[$httpEnvName] = [string]$httpEnvItem.Value
+            }
+        }
         try {
             $env:SHELLOSSUS_HTTP_URI = $Uri
             $env:SHELLOSSUS_HTTP_KEY = $ApiKey
@@ -9167,12 +9187,14 @@ catch {
             $proc = Start-Process -FilePath $shellExe -ArgumentList $argList -RedirectStandardOutput $stdoutTemp.FullName -RedirectStandardError $stderrTemp.FullName -NoNewWindow -PassThru -ErrorAction Stop
         }
         finally {
-            $env:SHELLOSSUS_HTTP_URI = $null
-            $env:SHELLOSSUS_HTTP_KEY = $null
-            $env:SHELLOSSUS_HTTP_IN = $null
-            $env:SHELLOSSUS_HTTP_OUT = $null
-            $env:SHELLOSSUS_HTTP_ERR = $null
-            $env:SHELLOSSUS_HTTP_TIMEOUT = $null
+            foreach ($httpEnvName in $httpEnvNames) {
+                if ($httpEnvPresent[$httpEnvName]) {
+                    Set-Item -LiteralPath ('Env:' + $httpEnvName) -Value $httpEnvPrior[$httpEnvName]
+                }
+                else {
+                    Remove-Item -LiteralPath ('Env:' + $httpEnvName) -ErrorAction SilentlyContinue
+                }
+            }
         }
         Wait-AgentProcessWithSpinner -Process $proc -StatusLabel $StatusLabel -TimeoutSec $TimeoutSec
         $errItem = Get-Item -LiteralPath $errTemp.FullName -Force -ErrorAction SilentlyContinue
