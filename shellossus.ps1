@@ -3986,16 +3986,6 @@ function Find-EditMatch {
     throw 'old_text was not found. Read the file again.'
 }
 
-function Format-DiffSnippet {
-    param([string]$Text, [int]$MaxChars = 4000, [switch]$KeepTail)
-    if (-not $Text) { return '' }
-    if ($Text.Length -le $MaxChars) { return (Format-PreviewText $Text) }
-    if ($KeepTail) {
-        return ('... ' + (Format-PreviewText $Text.Substring($Text.Length - $MaxChars)))
-    }
-    return ((Format-PreviewText $Text.Substring(0, $MaxChars)) + ' ...')
-}
-
 function ConvertTo-ExistingLineEndings {
     param([string]$Content, [string]$Original)
     if ($Original.Contains("`r`n")) {
@@ -4009,8 +3999,6 @@ function ConvertTo-ExistingLineEndings {
 function Invoke-AgentWrite {
     param([string]$Root, [string]$Name, $Arguments)
     $before = $null
-    $prefixText = ''
-    $suffixText = ''
     $editsApplied = 1
     $firstChangedLine = 1
     if ($Name -eq 'write_file') {
@@ -4028,8 +4016,6 @@ function Invoke-AgentWrite {
             if ($existingItem.PSIsContainer -or $existingItem.Length -gt 1MB) { throw 'Expected a text file up to 1 MiB.' }
             $before = Get-Content -LiteralPath $path -Raw -Encoding UTF8 -ErrorAction Stop
             if ($null -eq $before) { $before = '' }
-            $oldText = $before
-            $newText = $Arguments.content
         }
         $after = if ($null -ne $before) {
             ConvertTo-ExistingLineEndings -Content $Arguments.content -Original $before
@@ -4066,8 +4052,6 @@ function Invoke-AgentWrite {
         }
         $sortedAsc = @($resolvedEdits | Sort-Object { $_.index })
         $minIdx = $sortedAsc[0].index
-        $lastEd = $sortedAsc[$sortedAsc.Count - 1]
-        $maxEndIdx = $lastEd.index + $lastEd.length
         $firstChangedLine = (@($before.Substring(0, $minIdx) -split "`n")).Count
         $editsApplied = $resolvedEdits.Count
         $after = $before
@@ -4075,19 +4059,6 @@ function Invoke-AgentWrite {
             $after = $after.Substring(0, $ed.index) + $ed.new_text + $after.Substring($ed.index + $ed.length)
         }
         if ($after -ceq $before) { return (@{ status = 'unchanged' } | ConvertTo-Json -Compress) }
-        $prefixText = $before.Substring(0, $minIdx)
-        $suffixText = $before.Substring($maxEndIdx)
-        if ($resolvedEdits.Count -eq 1) {
-            $only = $resolvedEdits[0]
-            $oldText = $only.matched_text
-            $newText = $only.new_text
-        }
-        else {
-            $oldSpanLen = $maxEndIdx - $minIdx
-            $newSpanLen = $after.Length - $prefixText.Length - $suffixText.Length
-            $oldText = $before.Substring($minIdx, $oldSpanLen)
-            $newText = $after.Substring($minIdx, $newSpanLen)
-        }
     }
     if ($after.Length -gt 1MB -or ($null -ne $before -and $before.Length -gt 1MB)) { throw 'File content exceeds 1 MiB limit.' }
     if ($after -match '\x00' -or ($null -ne $before -and $before -match '\x00')) { throw 'Binary content is not supported.' }
