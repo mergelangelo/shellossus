@@ -447,8 +447,12 @@ function Resolve-AgentPath {
     if (($RelativePath -replace '^[a-zA-Z]:', '').Contains(':')) { throw 'Invalid path syntax.' }
     if ($AllowRegisteredSkill -and $script:RegisteredSkills -and $script:RegisteredSkills.Count -gt 0) {
         $skillTarget = $null
+        $slash = $RelativePath.Replace('\', '/')
         if ($script:RegisteredSkills.ContainsKey($RelativePath)) {
             $skillTarget = $script:RegisteredSkills[$RelativePath]
+        }
+        elseif ($script:RegisteredSkills.ContainsKey($slash)) {
+            $skillTarget = $script:RegisteredSkills[$slash]
         }
         elseif (Test-Path -LiteralPath $RelativePath) {
             $candFull = (Get-Item -LiteralPath $RelativePath -Force -ErrorAction SilentlyContinue).FullName
