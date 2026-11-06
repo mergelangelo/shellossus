@@ -1123,6 +1123,122 @@ try {
         Remove-Item Function:\Write-Host -ErrorAction SilentlyContinue
         Remove-Variable -Name bangNoSessQueue, bangNoSessAfterBangLeaf, bangNoSessAfterBangTreeCount, bangNoSessFinalState, bangNoSessHostLines -Scope Global -ErrorAction SilentlyContinue
     }
+
+    # Regression (Task 7): Scoped AGENTS.md pre-check normalizes file_path aliases, delegates invalid/outside-workspace tool calls
+    # to Invoke-AgentTool (rendering TUI error cards without wrapping as 'Cannot verify scoped AGENTS.md instructions'),
+    # and still reports genuine instruction-file errors with a TUI error card.
+    $t7ScopedDir = Join-Path $workspacePath 'scoped-t7/sub'
+    New-Item -ItemType Directory -Path $t7ScopedDir -Force | Out-Null
+    Set-Content -LiteralPath (Join-Path $testRoot 'outside.txt') -Value 'outside-secret' -Encoding UTF8
+    Set-Content -LiteralPath (Join-Path $workspacePath 'scoped-t7/AGENTS.md') -Value 'Scoped T7 rule.' -Encoding UTF8
+    Set-Content -LiteralPath (Join-Path $t7ScopedDir 'existing.txt') -Value 't7-data' -Encoding UTF8
+    $script:t7HostLines = @()
+    $script:t7Step = 0
+    function Write-Host {
+        param([Parameter(Position = 0, ValueFromRemainingArguments = $true)]$Object, [switch]$NoNewline, $ForegroundColor, $BackgroundColor)
+        $text = ($Object | ForEach-Object { [string]$_ }) -join ' '
+        if ($text) { $script:t7HostLines += (Strip-AnsiCodes -Text $text) }
+    }
+    function Invoke-WebRequest {
+        param($Uri, $Method, $Headers, $ContentType, $Body, $TimeoutSec, $ErrorAction, [switch]$UseBasicParsing, $OutFile)
+        $script:t7Step++
+        $payload = $Body | ConvertFrom-Json
+        if ($script:t7Step -eq 1) {
+            $r = @{ choices = @(@{ finish_reason = 'tool_calls'; message = @{
+                content = ''
+                tool_calls = @(
+                    @{ id = 't7-out-r'; type = 'function'; function = @{ name = 'read_file'; arguments = '{"path":"../outside.txt"}' } },
+                    @{ id = 't7-out-w'; type = 'function'; function = @{ name = 'write_file'; arguments = '{"path":"../outside-w.txt","content":"x"}' } },
+                    @{ id = 't7-bad-json'; type = 'function'; function = @{ name = 'read_file'; arguments = '{bad' } },
+                    @{ id = 't7-missing-arg'; type = 'function'; function = @{ name = 'write_file'; arguments = '{"path":"scoped-t7/sub/no-content.txt"}' } }
+                )
+            } }) } | ConvertTo-Json -Depth 10 -Compress
+        }
+        elseif ($script:t7Step -eq 2) {
+            $resOutR = $payload.messages[-4].content | ConvertFrom-Json
+            $resOutW = $payload.messages[-3].content | ConvertFrom-Json
+            $resBadJ = $payload.messages[-2].content | ConvertFrom-Json
+            $resMiss = $payload.messages[-1].content | ConvertFrom-Json
+            Assert-True ($resOutR.error -eq 'Path is outside the workspace.' -and (-not ([string]$resOutR.error).Contains('Cannot verify scoped AGENTS.md'))) "Expected standard outside-workspace error for read_file, got: $($resOutR.error)"
+            Assert-True ($resOutW.error -eq 'Path is outside the workspace.' -and (-not ([string]$resOutW.error).Contains('Cannot verify scoped AGENTS.md'))) "Expected standard outside-workspace error for write_file, got: $($resOutW.error)"
+            Assert-True ([bool]$resBadJ.error -and (-not ([string]$resBadJ.error).Contains('Cannot verify scoped AGENTS.md'))) "Expected standard JSON parse error for read_file, got: $($resBadJ.error)"
+            Assert-True ($resMiss.error -like "*Missing required argument 'content'*" -and (-not ([string]$resMiss.error).Contains('Cannot verify scoped AGENTS.md'))) "Expected standard missing-parameter error for write_file, got: $($resMiss.error)"
+            $r = @{ choices = @(@{ finish_reason = 'tool_calls'; message = @{
+                content = ''
+                tool_calls = @(
+                    @{ id = 't7-fp-r1'; type = 'function'; function = @{ name = 'read_file'; arguments = '{"file_path":"scoped-t7/sub/existing.txt"}' } },
+                    @{ id = 't7-fp-w1'; type = 'function'; function = @{ name = 'write_file'; arguments = '{"file_path":"scoped-t7/sub/created.txt","content":"via-file-path"}' } }
+                )
+            } }) } | ConvertTo-Json -Depth 10 -Compress
+        }
+        elseif ($script:t7Step -eq 3) {
+            $resFpR1 = $payload.messages[-2].content | ConvertFrom-Json
+            $resFpW1 = $payload.messages[-1].content | ConvertFrom-Json
+            Assert-True ($resFpR1.status -eq 'instructions_required' -and $resFpW1.status -eq 'instructions_required' -and $resFpR1.instructions.Contains('Scoped T7 rule.')) 'file_path alias bypassed scoped AGENTS.md interception.'
+            Assert-True (-not (Test-Path -LiteralPath (Join-Path $t7ScopedDir 'created.txt'))) 'write_file with file_path wrote file before scoped instructions were acknowledged.'
+            $r = @{ choices = @(@{ finish_reason = 'tool_calls'; message = @{
+                content = ''
+                tool_calls = @(
+                    @{ id = 't7-fp-r2'; type = 'function'; function = @{ name = 'read_file'; arguments = '{"file_path":"scoped-t7/sub/existing.txt"}' } },
+                    @{ id = 't7-fp-w2'; type = 'function'; function = @{ name = 'write_file'; arguments = '{"file_path":"scoped-t7/sub/created.txt","content":"via-file-path"}' } }
+                )
+            } }) } | ConvertTo-Json -Depth 10 -Compress
+        }
+        else {
+            $resFpR2 = $payload.messages[-2].content | ConvertFrom-Json
+            $resFpW2 = $payload.messages[-1].content | ConvertFrom-Json
+            Assert-True (([string]$resFpR2.text).Contains('t7-data') -and $resFpW2.status -eq 'written') 'Retry with file_path alias failed after scoped instructions were delivered.'
+            $r = @{ choices = @(@{ finish_reason = 'stop'; message = @{ content = 'T7 turn complete.' } }) } | ConvertTo-Json -Depth 10 -Compress
+        }
+        Set-Content -LiteralPath $OutFile -Value $r -Encoding UTF8 -NoNewline
+    }
+    $script:AgentPermission = 'AutoEdit'
+    $script:OutputMode = 'text'
+    try {
+        $t7State = @{ messages = @(@{ role = 'system'; content = 'sys' }, @{ role = 'user'; content = 'Run T7 checks' }) }
+        Invoke-AgentTurn -State $t7State -Endpoint 'https://example.invalid/v1/chat/completions' -ModelId 'test-model' -ApiKey 'fake' -Root $workspacePath -Steps 6
+        Assert-True ($script:t7Step -eq 4 -and (Test-Path -LiteralPath (Join-Path $t7ScopedDir 'created.txt'))) 'T7 turn did not complete all expected steps.'
+        $joinedT7Host = $script:t7HostLines -join "`n"
+        Assert-True ($joinedT7Host.Contains('read_file ../outside.txt') -and $joinedT7Host.Contains('write_file ../outside-w.txt') -and $joinedT7Host.Contains('Path is outside the workspace.')) "Expected TUI error cards for failed tool calls in text mode, got:`n$joinedT7Host"
+
+        # Genuine oversized scoped AGENTS.md instruction file error still returns 'Cannot verify scoped AGENTS.md instructions' and renders error card.
+        Set-Content -LiteralPath (Join-Path $workspacePath 'scoped-t7/AGENTS.md') -Value ('A' * 70000) -Encoding UTF8 -NoNewline
+        $script:t7HostLines = @()
+        $script:t7OversizedStep = 0
+        function Invoke-WebRequest {
+            param($Uri, $Method, $Headers, $ContentType, $Body, $TimeoutSec, $ErrorAction, [switch]$UseBasicParsing, $OutFile)
+            $script:t7OversizedStep++
+            $payload = $Body | ConvertFrom-Json
+            if ($script:t7OversizedStep -eq 1) {
+                $r = @{ choices = @(@{ finish_reason = 'tool_calls'; message = @{
+                    content = ''
+                    tool_calls = @(@{ id = 't7-ov-1'; type = 'function'; function = @{ name = 'read_file'; arguments = '{"path":"scoped-t7/sub/existing.txt"}' } })
+                } }) } | ConvertTo-Json -Depth 10 -Compress
+            }
+            else {
+                $ovRes = $payload.messages[-1].content | ConvertFrom-Json
+                Assert-True ($ovRes.error -like 'Cannot verify scoped AGENTS.md instructions:*Invalid or oversized instruction file*') "Expected oversized scoped AGENTS.md error, got: $($ovRes.error)"
+                $r = @{ choices = @(@{ finish_reason = 'stop'; message = @{ content = 'Handled oversized instruction error.' } }) } | ConvertTo-Json -Depth 10 -Compress
+            }
+            Set-Content -LiteralPath $OutFile -Value $r -Encoding UTF8 -NoNewline
+        }
+        $t7OvState = @{ messages = @(@{ role = 'system'; content = 'sys' }, @{ role = 'user'; content = 'Read with oversized AGENTS.md' }) }
+        Invoke-AgentTurn -State $t7OvState -Endpoint 'https://example.invalid/v1/chat/completions' -ModelId 'test-model' -ApiKey 'fake' -Root $workspacePath -Steps 4
+        $joinedOvHost = $script:t7HostLines -join "`n"
+        Assert-True ($joinedOvHost.Contains('read_file scoped-t7/sub/existing.txt') -and $joinedOvHost.Contains('Cannot verify scoped AGENTS.md instructions:')) "Expected TUI error card for oversized scoped AGENTS.md error, got:`n$joinedOvHost"
+    }
+    finally {
+        $script:AgentPermission = 'Ask'
+        $script:OutputMode = 'text'
+        Remove-Item Function:\Invoke-WebRequest -ErrorAction SilentlyContinue
+        Remove-Item Function:\Write-Host -ErrorAction SilentlyContinue
+        if (Test-Path -LiteralPath (Join-Path $testRoot 'outside.txt')) {
+            Remove-Item -LiteralPath (Join-Path $testRoot 'outside.txt') -Force -ErrorAction SilentlyContinue
+        }
+        if (Test-Path -LiteralPath (Join-Path $workspacePath 'scoped-t7')) {
+            Remove-Item -LiteralPath (Join-Path $workspacePath 'scoped-t7') -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
 }
 finally {
     Remove-TestEnvironment -Env $envData

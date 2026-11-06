@@ -2,9 +2,13 @@
 
 function Invoke-AgentTool {
     param([string]$Root, $Call)
+    $cardName = 'tool'
+    $cardTarget = ''
     try {
-        $rawName = [string]$Call.function.name
+        $rawName = if ($Call -and $Call.function -and $Call.function.name) { [string]$Call.function.name } else { '' }
+        if ($rawName) { $cardName = $rawName }
         $name = Resolve-ToolCanonicalName -Name $rawName
+        if ($name) { $cardName = $name }
         if ($name -notin @('list_files', 'read_file', 'find_files', 'grep_files', 'fetch_url', 'web_search', 'write_file', 'edit_file', 'run_command', 'run_agent', 'todo', 'ask_user', 'memory')) { throw 'Unknown tool.' }
         if ($script:AgentPermission -eq 'ReadOnly' -and $name -in @('write_file', 'edit_file', 'run_command')) {
             throw 'Permission mode ReadOnly does not allow file modifications or commands.'
@@ -13,20 +17,15 @@ function Invoke-AgentTool {
             throw "Tool '$name' is disabled by current tool configuration."
         }
         $arguments = $Call.function.arguments | ConvertFrom-Json -ErrorAction Stop
-        if ($name -eq 'edit_file') {
-            $arguments = Format-EditArguments -Arguments $arguments
-        }
-        elseif ($name -eq 'run_agent') {
-            $arguments = Format-RunAgentArguments -Arguments $arguments
-        }
-        elseif ($name -eq 'todo') {
-            $arguments = Format-TodoArguments -Arguments $arguments
-        }
-        elseif ($name -eq 'ask_user') {
-            $arguments = Format-AskUserArguments -Arguments $arguments
-        }
-        elseif ($name -eq 'memory') {
-            $arguments = Format-MemoryArguments -Arguments $arguments
+        $arguments = Format-AgentToolArguments -Name $name -Arguments $arguments
+        if ($null -ne $arguments -and $arguments -isnot [string] -and $arguments -isnot [ValueType] -and $arguments -isnot [array]) {
+            $argProps = @(Get-ObjectPropertyNames -InputObject $arguments)
+            foreach ($tk in @('path', 'command', 'url', 'query', 'question', 'action', 'role')) {
+                if ($argProps -contains $tk -and $arguments.$tk -is [string] -and $arguments.$tk) {
+                    $cardTarget = [string]$arguments.$tk
+                    break
+                }
+            }
         }
         Test-AgentToolArguments -Name $name -Arguments $arguments
         if ($name -eq 'memory') { return (Invoke-AgentMemory -Root $Root -Arguments $arguments) }
@@ -52,5 +51,8 @@ function Invoke-AgentTool {
         }
         return (Invoke-AgentReadFile -Path $path -Item $item -Arguments $arguments -ToolStart $toolStart)
     }
-    catch { return (@{ error = $_.Exception.Message } | ConvertTo-Json -Compress) }
+    catch {
+        Write-ToolCallCard -Name $cardName -Target $cardTarget -Status 'error' -Summary $_.Exception.Message
+        return (@{ error = $_.Exception.Message } | ConvertTo-Json -Compress)
+    }
 }
