@@ -2022,26 +2022,16 @@ function Get-TuiMascotLines {
     $topChar = [string][char]0x2580
     $botChar = [string][char]0x2584
     $rst = $script:Gm.Reset
-    # Reference silhouette: solid rounded black hands with soft gray shading.
-    # Shellossus mascot: 20x16 logical pixels in 20 columns x 8 terminal rows.
-    # Each half-block carries two independently colored vertical pixels.
+    # Shellossus #6: 10x8 pixels, 10 columns by 4 rows in compact mode.
     $sprite = @(
-        '......ssssssss......',
-        '....sshhhhhhhhss....',
-        '...shhhhhhhhhhhhs...',
-        '..shhhsssssssshhhs..',
-        '.shhssccccccccsshhs.',
-        '.shssccaaaaaaccsshs.',
-        'shsscca######accsshs',
-        'shscc##########ccshs',
-        'sssc##ep####pe##csss',
-        'sssc##pp####pp##csss',
-        'sssc##ff####ff##csss',
-        'ssscqq########qqcsss',
-        'sss#k#h######h#k#sss',
-        'ss#gg#hhhhhhhh#gg#ss',
-        '.ss##ssssssssss##ss.',
-        '..dddddddddddddddd..'
+        '...ssss...',
+        '.shhhhhhs.',
+        '.shcaachs.',
+        'shc####chs',
+        'sc#p##p#cs',
+        'scq####qcs',
+        's#ghhhhg#s',
+        '.dddddddd.'
     )
     $colors = @{
         's' = '159;123;85'
@@ -2051,11 +2041,8 @@ function Get-TuiMascotLines {
         'p' = '247;211;138'
         'q' = '181;124;114'
         'c' = '92;70;54'
-        'e' = '255;239;188'
-        'f' = '215;168;92'
         'a' = '38;37;34'
         'g' = '31;31;31'
-        'k' = '48;48;48'
     }
 
     if ($Mode -eq 'full' -or $Mode -eq 'large') {
@@ -9763,7 +9750,7 @@ function Write-TuiStartupBanner {
     $mascotLines = @(Get-TuiMascotLines -Mode 'compact')
     $body = @()
     if ($wInit -ge 76) {
-        $mascotVisW = if ($mascotLines.Count -gt 0) { (Strip-AnsiCodes -Text $mascotLines[0]).Length } else { 20 }
+        $mascotVisW = if ($mascotLines.Count -gt 0) { (Strip-AnsiCodes -Text $mascotLines[0]).Length } else { 10 }
         $maxBannerTextW = $wInit - $mascotVisW - 9
         for ($mIdx = 0; $mIdx -lt $mascotLines.Count; $mIdx++) {
             $mLine = $mascotLines[$mIdx]
