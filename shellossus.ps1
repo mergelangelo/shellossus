@@ -3123,8 +3123,15 @@ function Format-AskUserArguments {
         }
         catch {}
     }
+    # A value type is not an option list. Keep it so validation can reject the type.
+    # A string that parsed into an array is no longer a value type and still normalizes.
+    $keepRawOptions = $false
+    if ($rawOptions -is [ValueType]) { $keepRawOptions = $true }
     $normOptions = @()
-    if ($null -ne $rawOptions) {
+    if ($keepRawOptions) {
+        $normOptions = $rawOptions
+    }
+    elseif ($null -ne $rawOptions) {
         foreach ($opt in @($rawOptions)) {
             if ($opt -is [string]) {
                 $optStr = ([string]$opt).Trim()
@@ -3150,7 +3157,7 @@ function Format-AskUserArguments {
         }
     }
 
-    if ($normOptions.Count -eq 0) {
+    if ((-not $keepRawOptions) -and ($normOptions.Count -eq 0)) {
         if ($intent -eq 'plan-review') {
             $normOptions = @(
                 @{ label = 'Approve (Recommended)'; value = 'Approve'; description = 'Accept plan and begin implementation' },
