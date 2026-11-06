@@ -55,6 +55,7 @@ $modules = @(
     'tools/Todo.ps1',
     'tools/AskUser.ps1',
     'tools/Memory.ps1',
+    'tools/AgentWorkers.ps1',
     'tools/Agents.ps1',
     'tools/Dispatch.ps1',
     'context/Prompt.ps1',
