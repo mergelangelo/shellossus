@@ -228,13 +228,16 @@ function Invoke-ReplUndoCommand {
 }
 
 function Invoke-ReplModelCommand {
-    param($State, [string]$CurrentModel, [string]$SessionDir, [string]$NewModel = '')
+    param($State, [string]$CurrentModel, [string]$SessionDir, [string]$NewModel = '', [string]$SessionFile = '', [string]$RootPath)
     $reqModel = if ($NewModel) { $NewModel.Trim() } else { '' }
     $selectedModel = Select-ReplModelId -CurrentModel $CurrentModel -SessionDir $SessionDir -NewModel $reqModel
     if ($selectedModel) {
         $CurrentModel = $selectedModel
         $State.model = $CurrentModel
         $script:ActiveModelId = $CurrentModel
+        if ($SessionFile) {
+            Save-AgentSession -SessionFile $SessionFile -State $State -Workspace $RootPath -Model $CurrentModel
+        }
         if ($script:AgentConfigPath) {
             $null = Update-AgentConfigOptionalKey -Path $script:AgentConfigPath -Key 'SHELLOSSUS_MODEL' -Value $CurrentModel
         }

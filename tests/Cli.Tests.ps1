@@ -1331,6 +1331,65 @@ try {
     $resumeNoSessBytesAfter = Get-Content -LiteralPath $resumeNoSessFile -Raw
     $resumeNoSessStampAfter = (Get-Item -LiteralPath $resumeNoSessFile).LastWriteTimeUtc
     Assert-True (($resumeNoSessStampBefore -eq $resumeNoSessStampAfter) -and ($resumeNoSessBytesBefore -eq $resumeNoSessBytesAfter)) "Save-AgentSession -SessionFile '' rewrote the resumed JSONL."
+
+    # Regression (Task 12): /model persists the new model into the open session file.
+    # An empty session file still returns the new model and writes nothing.
+    $modelPersistDir = Join-Path $testRoot 'model-persist'
+    New-Item -ItemType Directory -Path $modelPersistDir -Force | Out-Null
+    $modelPersistFile = Join-Path $modelPersistDir 'open-session.jsonl'
+    $modelPersistState = @{
+        messages = @(
+            @{ role = 'system'; content = 'sys' },
+            @{ role = 'user'; content = 'Model persist user text' }
+        )
+        model = 'old-model'
+        session_id = 'sess-model-persist'
+    }
+    Save-AgentSession -SessionFile $modelPersistFile -State $modelPersistState -Workspace $workspacePath -Model 'old-model' -SessionId 'sess-model-persist'
+    $modelPersistMetaBefore = Get-AgentSessionMeta -SessionFile $modelPersistFile
+    Assert-True ($modelPersistMetaBefore.model -eq 'old-model') "Fixture session meta model was not old-model, got '$($modelPersistMetaBefore.model)'."
+    $modelPersistLive = @{
+        messages = @(
+            @{ role = 'system'; content = 'sys' },
+            @{ role = 'user'; content = 'Model persist user text' }
+        )
+        model = 'old-model'
+        session_id = 'sess-model-persist'
+    }
+    $modelPersistResult = Invoke-ReplModelCommand -State $modelPersistLive -CurrentModel 'old-model' -SessionDir $modelPersistDir -NewModel 'new-model' -SessionFile $modelPersistFile -RootPath $workspacePath
+    Assert-True ($modelPersistResult -eq 'new-model') "Expected Invoke-ReplModelCommand to return new-model, got '$modelPersistResult'."
+    $modelPersistMetaAfter = Get-AgentSessionMeta -SessionFile $modelPersistFile
+    Assert-True ($modelPersistMetaAfter.model -eq 'new-model') "Expected SHELLOSSUS session meta model new-model on disk, got '$($modelPersistMetaAfter.model)'."
+
+    $modelEmptyFile = Join-Path $modelPersistDir 'untouched-session.jsonl'
+    $modelEmptyState = @{
+        messages = @(
+            @{ role = 'system'; content = 'sys' },
+            @{ role = 'user'; content = 'Untouched user text' }
+        )
+        model = 'old-model'
+        session_id = 'sess-model-empty'
+    }
+    Save-AgentSession -SessionFile $modelEmptyFile -State $modelEmptyState -Workspace $workspacePath -Model 'old-model' -SessionId 'sess-model-empty'
+    $modelEmptyBytesBefore = Get-Content -LiteralPath $modelEmptyFile -Raw
+    $modelEmptyStampBefore = (Get-Item -LiteralPath $modelEmptyFile).LastWriteTimeUtc
+    $modelEmptyNamesBefore = @((Get-ChildItem -LiteralPath $modelPersistDir -File | Sort-Object Name | ForEach-Object { $_.Name }) -join '|')
+    $modelEmptyLive = @{
+        messages = @(
+            @{ role = 'system'; content = 'sys' },
+            @{ role = 'user'; content = 'Untouched user text' }
+        )
+        model = 'old-model'
+        session_id = 'sess-model-empty'
+    }
+    $modelEmptyResult = Invoke-ReplModelCommand -State $modelEmptyLive -CurrentModel 'old-model' -SessionDir $modelPersistDir -NewModel 'new-model' -SessionFile '' -RootPath $workspacePath
+    Assert-True ($modelEmptyResult -eq 'new-model') "Expected empty session file to return new-model, got '$modelEmptyResult'."
+    $modelEmptyBytesAfter = Get-Content -LiteralPath $modelEmptyFile -Raw
+    $modelEmptyStampAfter = (Get-Item -LiteralPath $modelEmptyFile).LastWriteTimeUtc
+    $modelEmptyNamesAfter = @((Get-ChildItem -LiteralPath $modelPersistDir -File | Sort-Object Name | ForEach-Object { $_.Name }) -join '|')
+    $modelEmptyMeta = Get-AgentSessionMeta -SessionFile $modelEmptyFile
+    Assert-True ($modelEmptyMeta.model -eq 'old-model') "Empty session file rewrote meta model to '$($modelEmptyMeta.model)'."
+    Assert-True (($modelEmptyStampBefore -eq $modelEmptyStampAfter) -and ($modelEmptyBytesBefore -eq $modelEmptyBytesAfter) -and ($modelEmptyNamesBefore -eq $modelEmptyNamesAfter)) "Invoke-ReplModelCommand -SessionFile '' wrote session data."
 }
 finally {
     Remove-TestEnvironment -Env $envData

@@ -10373,13 +10373,16 @@ function Invoke-ReplUndoCommand {
 }
 
 function Invoke-ReplModelCommand {
-    param($State, [string]$CurrentModel, [string]$SessionDir, [string]$NewModel = '')
+    param($State, [string]$CurrentModel, [string]$SessionDir, [string]$NewModel = '', [string]$SessionFile = '', [string]$RootPath)
     $reqModel = if ($NewModel) { $NewModel.Trim() } else { '' }
     $selectedModel = Select-ReplModelId -CurrentModel $CurrentModel -SessionDir $SessionDir -NewModel $reqModel
     if ($selectedModel) {
         $CurrentModel = $selectedModel
         $State.model = $CurrentModel
         $script:ActiveModelId = $CurrentModel
+        if ($SessionFile) {
+            Save-AgentSession -SessionFile $SessionFile -State $State -Workspace $RootPath -Model $CurrentModel
+        }
         if ($script:AgentConfigPath) {
             $null = Update-AgentConfigOptionalKey -Path $script:AgentConfigPath -Key 'SHELLOSSUS_MODEL' -Value $CurrentModel
         }
@@ -10886,7 +10889,7 @@ if (-not $LibraryOnly) {
                 continue
             }
             if ($trimmedQ -match '^/context(?:\s+(.+))?$') { Invoke-ReplContextCommand -State $state -CtxArg $(if ($Matches[1]) { $Matches[1].Trim() } else { '' }); continue }
-            if ($trimmedQ -match '^/model(?:\s+(.+))?$') { $Model = Invoke-ReplModelCommand -State $state -CurrentModel $Model -SessionDir $sessionDir -NewModel $Matches[1]; continue }
+            if ($trimmedQ -match '^/model(?:\s+(.+))?$') { $Model = Invoke-ReplModelCommand -State $state -CurrentModel $Model -SessionDir $sessionDir -NewModel $Matches[1] -SessionFile $sessionFile -RootPath $rootPath; continue }
             if ($trimmedQ -match '^/theme(?:\s+(.+))?$') { Invoke-ReplThemeCommand -ThemeArg $(if ($Matches[1]) { $Matches[1].Trim() } else { '' }); continue }
             if ($trimmedQ -match '^/compact(?:\s+(.+))?$') { Invoke-ReplCompactCommand -State $state -Endpoint $endpoint -Model $Model -ApiKey $agentKey -SessionFile $sessionFile -RootPath $rootPath -Focus $Matches[1]; continue }
             if ($trimmedQ -eq '/sessions' -or $trimmedQ -match '^/resume(?:\s+(.+))?$') {
