@@ -529,6 +529,48 @@ try {
     }
     $resolvedXmlRole = Resolve-AgentRoleCommand -Root $workspacePath -ConfigDir $globalCfgDir -InputText '/agent:xml-role'
     Assert-True ($resolvedXmlRole.Contains('<agent_role name="role&amp;&apos;name" permission="Read&amp;&apos;Only">') -and $resolvedXmlRole.Contains('Role body.')) 'Resolve-AgentRoleCommand did not escape XML special characters in name and permission attributes.'
+
+    # A skill file whose ancestor is a reparse point is omitted. The same file via its real directory still loads.
+    $reparseSkillOutside = Join-Path $testRoot 'reparse-skill-outside'
+    $reparseSkillLink = Join-Path $testRoot 'reparse-skill-link'
+    $ancestorSkillDir = Join-Path $reparseSkillOutside 'skills\ancestor-skill'
+    $ancestorRoleDir = Join-Path $reparseSkillOutside 'agents'
+    New-Item -ItemType Directory -Path $ancestorSkillDir, $ancestorRoleDir -Force | Out-Null
+    Set-Content -LiteralPath (Join-Path $ancestorSkillDir 'SKILL.md') -Value "---`nname: ancestor-skill`ndescription: Skip when an ancestor is a reparse point`n---`nDo not catalog through a junction." -Encoding UTF8
+    Set-Content -LiteralPath (Join-Path $ancestorRoleDir 'ancestor-role.md') -Value "---`nname: ancestor-role`ndescription: Skip when an ancestor is a reparse point`npermission: ReadOnly`n---`nDo not catalog through a junction." -Encoding UTF8
+    $ancestorJunctionCreated = $false
+    try {
+        New-Item -ItemType Junction -Path $reparseSkillLink -Target $reparseSkillOutside -ErrorAction Stop | Out-Null
+        $ancestorJunctionItem = Get-Item -LiteralPath $reparseSkillLink -Force -ErrorAction Stop
+        if ($ancestorJunctionItem.LinkType -eq 'Junction' -or (($ancestorJunctionItem.Attributes -band 1024) -ne 0 -and $ancestorJunctionItem.LinkType -eq 'Junction')) {
+            $ancestorJunctionCreated = $true
+        }
+    }
+    catch {
+        $ancestorJunctionCreated = $false
+    }
+    if ($ancestorJunctionCreated) {
+        try {
+            $linkedSkills = Get-SkillsCatalog -Root $reparseSkillLink -ConfigDir ''
+            Assert-True ((-not $script:SkillsByName.ContainsKey('ancestor-skill')) -and ($linkedSkills -notlike '*ancestor-skill*')) 'Get-SkillsCatalog listed a skill whose ancestor is a reparse point.'
+            $linkedRoles = Get-AgentRolesCatalog -Root $reparseSkillLink -ConfigDir ''
+            Assert-True ((-not $script:AgentRolesByName.ContainsKey('ancestor-role')) -and ($linkedRoles -notlike '*ancestor-role*')) 'Get-AgentRolesCatalog listed a role whose ancestor is a reparse point.'
+            $realSkills = Get-SkillsCatalog -Root $reparseSkillOutside -ConfigDir ''
+            Assert-True ($script:SkillsByName.ContainsKey('ancestor-skill') -and ($realSkills -like '*ancestor-skill*')) 'Get-SkillsCatalog skipped a skill with no reparse ancestor.'
+            $realRoles = Get-AgentRolesCatalog -Root $reparseSkillOutside -ConfigDir ''
+            Assert-True ($script:AgentRolesByName.ContainsKey('ancestor-role') -and ($realRoles -like '*ancestor-role*')) 'Get-AgentRolesCatalog skipped a role with no reparse ancestor.'
+        }
+        finally {
+            if (Test-Path -LiteralPath $reparseSkillLink) {
+                (Get-Item -LiteralPath $reparseSkillLink -Force).Delete()
+            }
+            $null = Get-SkillsCatalog -Root $workspacePath -ConfigDir $globalCfgDir
+            $null = Get-AgentRolesCatalog -Root $workspacePath -ConfigDir $globalCfgDir
+        }
+    }
+    elseif ($env:OS -eq 'Windows_NT') {
+        throw 'Junction creation failed on Windows. This assertion must not be skipped in the Windows CI job.'
+    }
 }
 finally {
     Remove-TestEnvironment -Env $envData

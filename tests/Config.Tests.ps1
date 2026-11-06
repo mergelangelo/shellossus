@@ -310,6 +310,18 @@ try {
     }
     if ($junctionCreated) {
         try {
+            Set-Content -LiteralPath (Join-Path $junctionOutside 'inside.txt') -Value 'inside' -Encoding UTF8 -NoNewline
+            $ancestorThrew = $false
+            $ancestorMessage = ''
+            try {
+                $null = Resolve-AgentPath -Root $workspacePath -RelativePath 'linked-parent/inside.txt'
+            }
+            catch {
+                $ancestorThrew = $true
+                $ancestorMessage = [string]$_.Exception.Message
+            }
+            Assert-True ($ancestorThrew -and $ancestorMessage -eq 'Reparse points are not allowed.') "Resolve-AgentPath reparse ancestor returned: $ancestorMessage"
+            Assert-True ((Get-Content -LiteralPath (Join-Path $junctionOutside 'inside.txt') -Raw -Encoding UTF8) -ceq 'inside') 'Resolve-AgentPath changed a file under a reparse ancestor.'
             $junctionThrew = $false
             $junctionMessage = ''
             try {
