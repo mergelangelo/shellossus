@@ -905,6 +905,33 @@ try {
     })
     Assert-True ($normPlanWins.intent -eq 'plan-review' -and $normPlanWins.plan -eq 'Original plan') 'plan lost to plan_review.'
 
+    # A non-array options value must survive so the validator can reject it.
+    $norm = Format-AskUserArguments -Arguments ([pscustomobject]@{ question = 'Q'; options = 123 })
+    $threw = $false
+    $throwText = ''
+    try { Test-AgentToolArguments -Name 'ask_user' -Arguments $norm } catch { $threw = $true; $throwText = [string]$_.Exception.Message }
+    Assert-True ($threw) 'options=123 was rewritten into Yes/No and passed validation.'
+    Assert-True ($throwText -eq "Argument 'options' must be an array.") "options=123 validation error was: $throwText"
+
+    $normFalseOpt = Format-AskUserArguments -Arguments ([pscustomobject]@{ question = 'Q'; options = $false })
+    $threwFalseOpt = $false
+    $throwTextFalse = ''
+    try { Test-AgentToolArguments -Name 'ask_user' -Arguments $normFalseOpt } catch { $threwFalseOpt = $true; $throwTextFalse = [string]$_.Exception.Message }
+    Assert-True ($threwFalseOpt) 'options=$false was rewritten into Yes/No and passed validation.'
+    Assert-True ($throwTextFalse -eq "Argument 'options' must be an array.") "options=`$false validation error was: $throwTextFalse"
+
+    $normJsonOpt = Format-AskUserArguments -Arguments ([pscustomobject]@{ question = 'Q'; options = '["A","B"]' })
+    Assert-True ($normJsonOpt.options.Count -eq 2 -and $normJsonOpt.options[0].label -eq 'A' -and $normJsonOpt.options[1].value -eq 'B') 'JSON options array string was not normalized.'
+
+    $normLabelOpt = Format-AskUserArguments -Arguments ([pscustomobject]@{ question = 'Q'; options = ([pscustomobject]@{ label = 'Ship' }) })
+    Assert-True ($normLabelOpt.options.Count -eq 1 -and $normLabelOpt.options[0].label -eq 'Ship' -and $normLabelOpt.options[0].value -eq 'Ship') 'Single labeled options object was not normalized.'
+
+    $normOmitOpt = Format-AskUserArguments -Arguments ([pscustomobject]@{ question = 'Q' })
+    Assert-True ($normOmitOpt.intent -eq 'question' -and $normOmitOpt.options.Count -eq 2 -and $normOmitOpt.options[0].value -eq 'Yes' -and $normOmitOpt.options[1].value -eq 'No') 'Omitted options did not become Yes/No.'
+
+    $normOmitPlanOpt = Format-AskUserArguments -Arguments ([pscustomobject]@{ question = 'Q'; intent = 'plan-review' })
+    Assert-True ($normOmitPlanOpt.intent -eq 'plan-review' -and $normOmitPlanOpt.options.Count -eq 3 -and $normOmitPlanOpt.options[0].value -eq 'Approve' -and $normOmitPlanOpt.options[1].value -eq 'Revise' -and $normOmitPlanOpt.options[2].value -eq 'Decline') 'Omitted plan-review options did not use the plan-review defaults.'
+
     # Test execution: plan approval by index '1'
     $script:approval = '1'
     $planCall = @{
