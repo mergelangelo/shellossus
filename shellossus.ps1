@@ -3195,6 +3195,14 @@ function Format-AskUserArguments {
     return $out
 }
 
+function Test-MemoryFlagTrue {
+    param($Value)
+    # [bool]"false" and [bool]"0" are $true. Accept only a real boolean $true or the strings true and 1.
+    if ($Value -is [bool]) { return $Value }
+    if ($Value -is [string] -and (($Value -ieq 'true') -or ($Value -eq '1'))) { return $true }
+    return $false
+}
+
 function Format-MemoryArguments {
     param($Arguments, $ArgsObj = $null)
     if ($null -eq $Arguments -and $null -ne $ArgsObj) { $Arguments = $ArgsObj }
@@ -3211,10 +3219,10 @@ function Format-MemoryArguments {
             $action = $Arguments.action
         }
     }
-    elseif ($props -contains 'view' -and [bool]$Arguments.view) {
+    elseif ($props -contains 'view' -and (Test-MemoryFlagTrue $Arguments.view)) {
         $action = 'view'
     }
-    elseif ($props -contains 'clear' -and [bool]$Arguments.clear) {
+    elseif ($props -contains 'clear' -and (Test-MemoryFlagTrue $Arguments.clear)) {
         $action = 'clear'
     }
 

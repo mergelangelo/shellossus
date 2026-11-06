@@ -1020,6 +1020,53 @@ try {
     $memNorm = Format-MemoryArguments -ArgsObj ([pscustomobject]@{ note = 'Use UTF-8'; action = 'APPEND'; scope = 'WORKSPACE' })
     Assert-True ($memNorm.action -eq 'append' -and $memNorm.scope -eq 'workspace' -and $memNorm.content -eq 'Use UTF-8') 'Format-MemoryArguments normalization failed.'
 
+    # view/clear switch the action only for $true or the strings true and 1. [bool]"false" is $true in PowerShell.
+    $onlyFalse = Format-MemoryArguments -Arguments ([pscustomobject]@{ view = 'false' })
+    Assert-True ($onlyFalse.action -eq 'append') 'view="false" became a view action.'
+    $onlyTrue = Format-MemoryArguments -Arguments ([pscustomobject]@{ view = 'true' })
+    Assert-True ($onlyTrue.action -eq 'view') 'view="true" did not select view.'
+    $withAction = Format-MemoryArguments -Arguments ([pscustomobject]@{ action = 'save'; view = 'false' })
+    Assert-True ($withAction.action -eq 'save') 'an explicit action was overwritten.'
+    $saveRejected = $false
+    $saveRejectText = ''
+    try { Test-AgentToolArguments -Name 'memory' -Arguments $withAction } catch { $saveRejected = $true; $saveRejectText = [string]$_.Exception.Message }
+    Assert-True $saveRejected 'action save became legal.'
+    Assert-True ($saveRejectText -eq "action must be 'append', 'view', 'set', or 'clear'.") "action save validation error was: $saveRejectText"
+    $viewZero = Format-MemoryArguments -Arguments ([pscustomobject]@{ view = '0' })
+    Assert-True ($viewZero.action -eq 'append') 'view="0" became a view action.'
+    $viewOne = Format-MemoryArguments -Arguments ([pscustomobject]@{ view = '1' })
+    Assert-True ($viewOne.action -eq 'view') 'view="1" did not select view.'
+    $viewFalseBool = Format-MemoryArguments -Arguments ([pscustomobject]@{ view = $false })
+    Assert-True ($viewFalseBool.action -eq 'append') 'view=$false became a view action.'
+    $viewTrueBool = Format-MemoryArguments -Arguments ([pscustomobject]@{ view = $true })
+    Assert-True ($viewTrueBool.action -eq 'view') 'view=$true did not select view.'
+    $viewIntOne = Format-MemoryArguments -Arguments ([pscustomobject]@{ view = 1 })
+    Assert-True ($viewIntOne.action -eq 'append') 'view=1 (integer) became a view action.'
+    $viewIntZero = Format-MemoryArguments -Arguments ([pscustomobject]@{ view = 0 })
+    Assert-True ($viewIntZero.action -eq 'append') 'view=0 (integer) became a view action.'
+    $viewUpper = Format-MemoryArguments -Arguments ([pscustomobject]@{ view = 'TRUE' })
+    Assert-True ($viewUpper.action -eq 'view') 'view="TRUE" did not select view.'
+    $viewMixedFalse = Format-MemoryArguments -Arguments ([pscustomobject]@{ view = 'False' })
+    Assert-True ($viewMixedFalse.action -eq 'append') 'view="False" became a view action.'
+    $clearFalse = Format-MemoryArguments -Arguments ([pscustomobject]@{ clear = 'false' })
+    Assert-True ($clearFalse.action -eq 'append') 'clear="false" became a clear action.'
+    $clearTrue = Format-MemoryArguments -Arguments ([pscustomobject]@{ clear = 'true' })
+    Assert-True ($clearTrue.action -eq 'clear') 'clear="true" did not select clear.'
+    $clearZero = Format-MemoryArguments -Arguments ([pscustomobject]@{ clear = '0' })
+    Assert-True ($clearZero.action -eq 'append') 'clear="0" became a clear action.'
+    $clearOne = Format-MemoryArguments -Arguments ([pscustomobject]@{ clear = '1' })
+    Assert-True ($clearOne.action -eq 'clear') 'clear="1" did not select clear.'
+    $clearFalseBool = Format-MemoryArguments -Arguments ([pscustomobject]@{ clear = $false })
+    Assert-True ($clearFalseBool.action -eq 'append') 'clear=$false became a clear action.'
+    $clearTrueBool = Format-MemoryArguments -Arguments ([pscustomobject]@{ clear = $true })
+    Assert-True ($clearTrueBool.action -eq 'clear') 'clear=$true did not select clear.'
+    $clearUpper = Format-MemoryArguments -Arguments ([pscustomobject]@{ clear = 'TRUE' })
+    Assert-True ($clearUpper.action -eq 'clear') 'clear="TRUE" did not select clear.'
+    $explicitOverTrue = Format-MemoryArguments -Arguments ([pscustomobject]@{ action = 'set'; view = 'true'; clear = 'true' })
+    Assert-True ($explicitOverTrue.action -eq 'set') 'an explicit action lost to a true view flag.'
+    $falseViewRealClear = Format-MemoryArguments -Arguments ([pscustomobject]@{ view = 'false'; clear = 'true' })
+    Assert-True ($falseViewRealClear.action -eq 'clear') 'view="false" blocked a real clear flag.'
+
     # append memory (also verify live Sync-AgentMemoryContext updates active system prompt)
     $script:approval = 'WRITE'
     $memSyncState = @{
