@@ -1239,6 +1239,68 @@ try {
             Remove-Item -LiteralPath (Join-Path $workspacePath 'scoped-t7') -Recurse -Force -ErrorAction SilentlyContinue
         }
     }
+
+    # Regression (Task 8): a failed HTTP worker restores previous SHELLOSSUS_HTTP_* values
+    # and removes names that were absent. Impossible local URI, no live network call.
+    $httpEnvNames = @(
+        'SHELLOSSUS_HTTP_URI',
+        'SHELLOSSUS_HTTP_KEY',
+        'SHELLOSSUS_HTTP_IN',
+        'SHELLOSSUS_HTTP_OUT',
+        'SHELLOSSUS_HTTP_ERR',
+        'SHELLOSSUS_HTTP_TIMEOUT'
+    )
+    $httpEnvPrior = @{}
+    foreach ($httpEnvName in $httpEnvNames) {
+        $httpEnvItem = Get-Item -Path ('Env:' + $httpEnvName) -ErrorAction SilentlyContinue
+        if ($null -ne $httpEnvItem) {
+            $httpEnvPrior[$httpEnvName] = [string]$httpEnvItem.Value
+        }
+    }
+    $httpOutFile = Join-Path $testRoot 'http-worker-out.json'
+    $prevHideSpinner = $script:HideSpinner
+    $script:HideSpinner = $true
+    try {
+        foreach ($httpEnvName in $httpEnvNames) {
+            Remove-Item -Path ('Env:' + $httpEnvName) -ErrorAction SilentlyContinue
+        }
+        $env:SHELLOSSUS_HTTP_URI = 'before'
+        $env:SHELLOSSUS_HTTP_KEY = 'before-key'
+        $env:SHELLOSSUS_HTTP_TIMEOUT = '12'
+        $httpEnvThrew = $false
+        $httpEnvError = ''
+        try {
+            Invoke-AgentHttpRequest -Uri 'http://127.0.0.1:1/' -ApiKey 'fake-key' -Body '{}' -OutFile $httpOutFile -TimeoutSec 1 -StatusLabel 'http-env' -ForceBackgroundWorker
+        }
+        catch {
+            $httpEnvThrew = $true
+            $httpEnvError = [string]$_.Exception.Message
+        }
+        Assert-True ($httpEnvThrew) "Expected failed Invoke-AgentHttpRequest to throw. Detail: $httpEnvError"
+        Assert-True ($env:SHELLOSSUS_HTTP_URI -eq 'before') "Expected SHELLOSSUS_HTTP_URI to survive a failed request, got '$($env:SHELLOSSUS_HTTP_URI)'."
+        Assert-True ($env:SHELLOSSUS_HTTP_KEY -eq 'before-key') "Expected SHELLOSSUS_HTTP_KEY to survive a failed request, got '$($env:SHELLOSSUS_HTTP_KEY)'."
+        Assert-True ($env:SHELLOSSUS_HTTP_TIMEOUT -eq '12') "Expected SHELLOSSUS_HTTP_TIMEOUT to survive a failed request, got '$($env:SHELLOSSUS_HTTP_TIMEOUT)'."
+        $httpInItem = Get-Item -Path 'Env:SHELLOSSUS_HTTP_IN' -ErrorAction SilentlyContinue
+        $httpOutItem = Get-Item -Path 'Env:SHELLOSSUS_HTTP_OUT' -ErrorAction SilentlyContinue
+        $httpErrItem = Get-Item -Path 'Env:SHELLOSSUS_HTTP_ERR' -ErrorAction SilentlyContinue
+        Assert-True ($null -eq $httpInItem) "SHELLOSSUS_HTTP_IN was absent and should stay absent after a failed request, got '$($env:SHELLOSSUS_HTTP_IN)'."
+        Assert-True ($null -eq $httpOutItem) "SHELLOSSUS_HTTP_OUT was absent and should stay absent after a failed request, got '$($env:SHELLOSSUS_HTTP_OUT)'."
+        Assert-True ($null -eq $httpErrItem) "SHELLOSSUS_HTTP_ERR was absent and should stay absent after a failed request, got '$($env:SHELLOSSUS_HTTP_ERR)'."
+    }
+    finally {
+        $script:HideSpinner = $prevHideSpinner
+        foreach ($httpEnvName in $httpEnvNames) {
+            if ($httpEnvPrior.ContainsKey($httpEnvName)) {
+                Set-Item -Path ('Env:' + $httpEnvName) -Value $httpEnvPrior[$httpEnvName]
+            }
+            else {
+                Remove-Item -Path ('Env:' + $httpEnvName) -ErrorAction SilentlyContinue
+            }
+        }
+        if (Test-Path -LiteralPath $httpOutFile) {
+            Remove-Item -LiteralPath $httpOutFile -Force -ErrorAction SilentlyContinue
+        }
+    }
 }
 finally {
     Remove-TestEnvironment -Env $envData
