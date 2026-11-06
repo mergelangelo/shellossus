@@ -4362,7 +4362,23 @@ function Invoke-AgentGrepFiles {
                 line = $lineText
             }
             if ($ctxLines -gt 0 -and $m.Context) {
-                $hitObj.context = @($m.Context.PreContext) + @($lineText) + @($m.Context.PostContext)
+                $preCtx = @($m.Context.PreContext)
+                for ($ctxIndex = 0; $ctxIndex -lt $preCtx.Count; $ctxIndex++) {
+                    $ctxText = [string]$preCtx[$ctxIndex]
+                    if ($ctxText.Length -gt 300) {
+                        $preCtx[$ctxIndex] = $ctxText.Substring(0, 300) + '...'
+                        $linesTruncated = $true
+                    }
+                }
+                $postCtx = @($m.Context.PostContext)
+                for ($ctxIndex = 0; $ctxIndex -lt $postCtx.Count; $ctxIndex++) {
+                    $ctxText = [string]$postCtx[$ctxIndex]
+                    if ($ctxText.Length -gt 300) {
+                        $postCtx[$ctxIndex] = $ctxText.Substring(0, 300) + '...'
+                        $linesTruncated = $true
+                    }
+                }
+                $hitObj.context = @($preCtx) + @($lineText) + @($postCtx)
             }
             $hits += $hitObj
         }

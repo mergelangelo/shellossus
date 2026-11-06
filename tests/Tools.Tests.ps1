@@ -451,6 +451,20 @@ try {
     $ctxGrep = Invoke-AgentTool -Root $workspacePath -Call $call | ConvertFrom-Json
     Assert-True ($ctxGrep.matches.Count -eq 1 -and $ctxGrep.matches[0].context.Count -ge 2) 'grep_files include/context_lines failed.'
 
+    # Context lines use the same 300-character cap as the match line.
+    $longPre = 'P' * 2000
+    $longPost = 'Q' * 2000
+    Set-Content -LiteralPath (Join-Path $workspacePath 'longctx.txt') -Value ($longPre + "`n" + 'NEEDLE_CTX' + "`n" + $longPost) -Encoding UTF8 -NoNewline
+    $call.function.arguments = '{"path":"longctx.txt","pattern":"NEEDLE_CTX","literal":true,"context_lines":1}'
+    $longCtx = Invoke-AgentTool -Root $workspacePath -Call $call | ConvertFrom-Json
+    $longCtxMatch = $longCtx.matches[0]
+    $preLen = [int]$longCtxMatch.context[0].Length
+    $postLen = [int]$longCtxMatch.context[2].Length
+    Assert-True ($longCtx.matches.Count -eq 1 -and $longCtxMatch.context.Count -eq 3 -and $longCtxMatch.context[1] -eq 'NEEDLE_CTX') 'grep_files did not return the long lines around the match.'
+    Assert-True ($preLen -eq 303 -and $postLen -eq 303 -and $longCtx.lines_truncated -eq $true) "grep context lines were not capped at 300 chars (pre=$preLen post=$postLen lines_truncated=$($longCtx.lines_truncated))."
+    Assert-True ($longCtxMatch.context[0] -eq (('P' * 300) + '...') -and $longCtxMatch.context[2] -eq (('Q' * 300) + '...')) 'grep context lines were not the first 300 characters plus an ellipsis.'
+    Remove-Item -LiteralPath (Join-Path $workspacePath 'longctx.txt') -Force
+
     $grepDir501 = Join-Path $workspacePath 'grep501'
     New-Item -ItemType Directory -Path $grepDir501 -Force | Out-Null
     1..500 | ForEach-Object {
