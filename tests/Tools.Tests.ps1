@@ -886,6 +886,25 @@ try {
     $normPlanArgs = Format-AskUserArguments -Arguments ([pscustomobject]@{ prompt = 'Review refactor'; plan = "# Plan`n1. Do refactor" })
     Assert-True ($normPlanArgs.question -eq 'Review refactor' -and $normPlanArgs.intent -eq 'plan-review' -and $normPlanArgs.options.Count -eq 3 -and $normPlanArgs.options[0].value -eq 'Approve') 'Format-AskUserArguments plan-review default options failed.'
 
+    $norm = Format-AskUserArguments -Arguments ([pscustomobject]@{
+        question = 'Ship it?'
+        plan_review = 'Do A then B'
+    })
+    Assert-True ($norm.intent -eq 'plan-review' -and $norm.plan -eq 'Do A then B') 'plan_review text was dropped.'
+
+    $normPlanReview = Format-AskUserArguments -Arguments ([pscustomobject]@{
+        question = 'Ship it?'
+        planReview = 'Do A then B'
+    })
+    Assert-True ($normPlanReview.intent -eq 'plan-review' -and $normPlanReview.plan -eq 'Do A then B') 'planReview text was dropped.'
+
+    $normPlanWins = Format-AskUserArguments -Arguments ([pscustomobject]@{
+        question = 'Ship it?'
+        plan = 'Original plan'
+        plan_review = 'Do A then B'
+    })
+    Assert-True ($normPlanWins.intent -eq 'plan-review' -and $normPlanWins.plan -eq 'Original plan') 'plan lost to plan_review.'
+
     # Test execution: plan approval by index '1'
     $script:approval = '1'
     $planCall = @{
