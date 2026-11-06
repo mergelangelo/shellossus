@@ -170,24 +170,10 @@ function Get-ScopedAgentInstructions {
         $resolvedTarget = Resolve-AgentPath -Root $rootPath -RelativePath $TargetPath -AllowRegisteredSkill
         if (-not (Test-AgentPathWithinRoot -RootPath $rootPath -TargetPath $resolvedTarget)) { return '' }
     }
-    $currRel = Split-Path -Path $TargetPath -Parent
-    while ($currRel) {
-        $probeCand = if ($currRel -match '^([a-zA-Z]:[/\\]|[/\\])') { $currRel } else { Join-Path $rootPath $currRel }
-        if (Test-Path -LiteralPath $probeCand) {
-            break
-        }
-        $seg = Split-Path $currRel -Leaf
-        if (-not $seg -or $seg -eq '.' -or $seg -eq '..' -or $seg -match '[<>:"/\\|?*\x00-\x1f]' -or $seg -match '[. ]$' -or $seg -match '^(?i:CON|PRN|AUX|NUL|COM[0-9]|LPT[0-9])(?:\.|$)') {
-            throw 'Invalid directory name.'
-        }
-        $nextParent = Split-Path $currRel -Parent
-        if ($nextParent -eq $currRel) {
-            $currRel = ''
-            break
-        }
-        $currRel = $nextParent
-    }
-    $current = Resolve-AgentPath -Root $rootPath -RelativePath $(if ($currRel) { $currRel } else { '.' })
+    $parentRel = Split-Path -Path $TargetPath -Parent
+    if (-not $parentRel) { $parentRel = '.' }
+    $ancestor = Resolve-ExistingPathAncestor -Root $rootPath -RelativePath $parentRel
+    $current = $ancestor.existing
     $dirs = @()
     $isWinDrivePath = ($env:OS -eq 'Windows_NT') -and ($rootPath -match '^[a-zA-Z]:[/\\]')
     while ($(if ($isWinDrivePath) { $current -ine $rootPath } else { $current -cne $rootPath })) {
