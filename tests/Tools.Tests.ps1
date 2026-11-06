@@ -476,6 +476,47 @@ try {
 
     $normArgs = Format-EditArguments -ArgsObj ([pscustomobject]@{ path = 'hello.txt'; oldText = 'a'; newText = 'b'; edits = '[{"oldText":"x","newText":"y"}]' })
     Assert-True ($normArgs.old_text -eq 'a' -and $normArgs.new_text -eq 'b' -and $normArgs.edits[0].old_text -eq 'x' -and $normArgs.edits[0].new_text -eq 'y') 'Format-EditArguments camelCase / JSON edits normalization failed.'
+    $norm = Format-EditArguments -Arguments ([pscustomobject]@{
+        path = 'a.txt'; old_text = 'keep'; oldText = 'drop'; new_text = 'N'; newText = 'D'
+    })
+    Assert-True ($norm.old_text -eq 'keep' -and $norm.new_text -eq 'N') 'camelCase alias clobbered canonical edit fields.'
+    Assert-True ((-not $norm.ContainsKey('oldText')) -and (-not $norm.ContainsKey('newText'))) 'camelCase alias was kept beside canonical edit fields.'
+    $normValidated = $true
+    try { Test-AgentToolArguments -Name 'edit_file' -Arguments $norm } catch { $normValidated = $false }
+    Assert-True $normValidated 'Canonical edit fields with aliases did not validate.'
+    $normEdits = Format-EditArguments -Arguments ([pscustomobject]@{
+        path = 'b.txt'
+        edits = @([pscustomobject]@{ old_text = 'keep'; oldText = 'drop'; new_text = 'N'; newText = 'D' })
+    })
+    Assert-True ($normEdits.edits[0].old_text -eq 'keep' -and $normEdits.edits[0].new_text -eq 'N') 'camelCase alias clobbered canonical edits[] fields.'
+    Assert-True ((-not $normEdits.edits[0].ContainsKey('oldText')) -and (-not $normEdits.edits[0].ContainsKey('newText'))) 'camelCase alias was kept beside canonical edits[] fields.'
+    $editsValidated = $true
+    try { Test-AgentToolArguments -Name 'edit_file' -Arguments $normEdits } catch { $editsValidated = $false }
+    Assert-True $editsValidated 'Canonical edits[] fields with aliases did not validate.'
+    # Get-Member lists oldText before old_text, so the canonical assignment used to win by accident.
+    # Reversing that list puts each alias after its canonical name, which is the order that clobbered.
+    $savedGetObjectPropertyNames = ${function:Get-ObjectPropertyNames}
+    try {
+        function Get-ObjectPropertyNames {
+            param($InputObject)
+            $names = @(& $savedGetObjectPropertyNames -InputObject $InputObject)
+            $rev = @()
+            for ($i = $names.Count - 1; $i -ge 0; $i--) { $rev += $names[$i] }
+            return $rev
+        }
+        $normReversed = Format-EditArguments -Arguments ([pscustomobject]@{
+            path = 'a.txt'; old_text = 'keep'; oldText = 'drop'; new_text = 'N'; newText = 'D'
+        })
+        Assert-True ($normReversed.old_text -eq 'keep' -and $normReversed.new_text -eq 'N') 'camelCase alias clobbered canonical edit fields.'
+        $normReversedEdits = Format-EditArguments -Arguments ([pscustomobject]@{
+            path = 'b.txt'
+            edits = @([pscustomobject]@{ old_text = 'keep'; oldText = 'drop'; new_text = 'N'; newText = 'D' })
+        })
+        Assert-True ($normReversedEdits.edits[0].old_text -eq 'keep' -and $normReversedEdits.edits[0].new_text -eq 'N') 'camelCase alias clobbered canonical edits[] fields.'
+    }
+    finally {
+        ${function:Get-ObjectPropertyNames} = $savedGetObjectPropertyNames
+    }
     $script:EnabledTools = @('read', 'grep')
     $filteredTools = @(Get-AgentTools)
     Assert-True ($filteredTools.Count -eq 2) 'Tool filtering via $script:EnabledTools failed.'
