@@ -351,6 +351,7 @@ if ($env:SHELLOSSUS_SUB_REASONING_EFFORT) { $workerArgs.ReasoningEffort = $env:S
                                         if ($fn -in @('read_file', 'read') -and $tc.function.arguments) {
                                             try {
                                                 $pa = ([string]$tc.function.arguments) | ConvertFrom-Json -ErrorAction Stop
+                                                $pa = Format-AgentToolArguments -Name 'read_file' -Arguments $pa
                                                 if ($pa.path) {
                                                     if ($tc.id) { $pendingReadsById[[string]$tc.id] = [string]$pa.path }
                                                     else { $untrackedReads += [string]$pa.path }

@@ -18,6 +18,7 @@ function Format-EditArguments {
     foreach ($p in $props) {
         if ($p -eq 'oldText') { $out['old_text'] = $Arguments.$p }
         elseif ($p -eq 'newText') { $out['new_text'] = $Arguments.$p }
+        elseif ($p -in @('file_path', 'filepath', 'filePath') -and ($props -notcontains 'path') -and (-not $out.ContainsKey('path'))) { $out['path'] = $Arguments.$p }
         else { $out[$p] = $Arguments.$p }
     }
     if ($out.ContainsKey('edits') -and $null -ne $out['edits']) {
@@ -369,4 +370,43 @@ function Format-MemoryArguments {
         }
     }
     return $out
+}
+
+function Format-AgentToolArguments {
+    param([string]$Name, $Arguments, $ArgsObj = $null)
+    if ($null -eq $Arguments -and $null -ne $ArgsObj) { $Arguments = $ArgsObj }
+    if ($null -eq $Arguments -or $Arguments -is [string] -or $Arguments -is [ValueType] -or $Arguments -is [array]) {
+        return $Arguments
+    }
+    if ($Name -eq 'edit_file') {
+        return (Format-EditArguments -Arguments $Arguments)
+    }
+    if ($Name -eq 'run_agent') {
+        return (Format-RunAgentArguments -Arguments $Arguments)
+    }
+    if ($Name -eq 'todo') {
+        return (Format-TodoArguments -Arguments $Arguments)
+    }
+    if ($Name -eq 'ask_user') {
+        return (Format-AskUserArguments -Arguments $Arguments)
+    }
+    if ($Name -eq 'memory') {
+        return (Format-MemoryArguments -Arguments $Arguments)
+    }
+    if ($Name -in @('list_files', 'read_file', 'find_files', 'grep_files', 'write_file')) {
+        $props = @(Get-ObjectPropertyNames -InputObject $Arguments)
+        if ($props -notcontains 'path' -and ($props -contains 'file_path' -or $props -contains 'filepath' -or $props -contains 'filePath')) {
+            $out = @{}
+            foreach ($p in $props) {
+                if ($p -in @('file_path', 'filepath', 'filePath') -and (-not $out.ContainsKey('path'))) {
+                    $out['path'] = $Arguments.$p
+                }
+                else {
+                    $out[$p] = $Arguments.$p
+                }
+            }
+            return $out
+        }
+    }
+    return $Arguments
 }

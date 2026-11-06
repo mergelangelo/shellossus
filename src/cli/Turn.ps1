@@ -255,9 +255,55 @@ function Invoke-AgentTurn {
             }
             $output = $null
             if ($canonToolName -in @('read_file', 'write_file', 'edit_file') -and ($canonToolName -eq 'read_file' -or $script:AgentPermission -ne 'ReadOnly') -and (Test-IsToolEnabled -Name $canonToolName) -and -not $script:NoContextFiles) {
+                $scopeArgs = $null
+                $scopeTargetValid = $false
                 try {
-                    $scopeArgs = $call.function.arguments | ConvertFrom-Json -ErrorAction Stop
+                    $rawScopeArgs = $call.function.arguments | ConvertFrom-Json -ErrorAction Stop
+                    $scopeArgs = Format-AgentToolArguments -Name $canonToolName -Arguments $rawScopeArgs
+                    Test-AgentToolArguments -Name $canonToolName -Arguments $scopeArgs
                     if ($scopeArgs.path -is [string] -and $scopeArgs.path) {
+                        $rootResolved = Resolve-AgentPath -Root $Root -RelativePath '.'
+                        if ($canonToolName -eq 'read_file') {
+                            $resolvedTarget = Resolve-AgentPath -Root $rootResolved -RelativePath $scopeArgs.path -AllowRegisteredSkill
+                            if (Test-AgentPathWithinRoot -RootPath $rootResolved -TargetPath $resolvedTarget) {
+                                $scopeTargetValid = $true
+                            }
+                        }
+                        elseif ($canonToolName -eq 'edit_file') {
+                            $null = Resolve-AgentPath -Root $rootResolved -RelativePath $scopeArgs.path
+                            $scopeTargetValid = $true
+                        }
+                        else {
+                            if ($scopeArgs.path -match '[/\\]$') { throw 'Invalid file name.' }
+                            if (($scopeArgs.path -replace '^[a-zA-Z]:', '').Contains(':')) { throw 'Invalid path syntax.' }
+                            $currRel = Split-Path -Path $scopeArgs.path -Parent
+                            while ($currRel) {
+                                $probeCand = if ($currRel -match '^([a-zA-Z]:[/\\]|[/\\])') { $currRel } else { Join-Path $rootResolved $currRel }
+                                if (Test-Path -LiteralPath $probeCand) { break }
+                                $seg = Split-Path $currRel -Leaf
+                                if (-not $seg -or $seg -eq '.' -or $seg -eq '..' -or $seg -match '[<>:"/\\|?*\x00-\x1f]' -or $seg -match '[. ]$' -or $seg -match '^(?i:CON|PRN|AUX|NUL|COM[0-9]|LPT[0-9])(?:\.|$)') {
+                                    throw 'Invalid directory name.'
+                                }
+                                $nextParent = Split-Path $currRel -Parent
+                                if ($nextParent -eq $currRel) { $currRel = ''; break }
+                                $currRel = $nextParent
+                            }
+                            $existingBase = Resolve-AgentPath -Root $rootResolved -RelativePath $(if ($currRel) { $currRel } else { '.' })
+                            if (-not (Get-Item -LiteralPath $existingBase -Force).PSIsContainer) { throw 'Parent must be a directory.' }
+                            $leaf = Split-Path $scopeArgs.path -Leaf
+                            if (-not $leaf -or $leaf -eq '.' -or $leaf -eq '..' -or $leaf -match '[<>:"/\\|?*\x00-\x1f]' -or $leaf -match '[. ]$') { throw 'Invalid file name.' }
+                            if ($leaf -match '^(?i:CON|PRN|AUX|NUL|COM[0-9]|LPT[0-9])(?:\.|$)') { throw 'Reserved file name.' }
+                            $cleanLeaf = ($leaf -replace ':.*$', '').TrimEnd('.', ' ')
+                            if ($cleanLeaf -eq '.env' -or ($cleanLeaf -like '.env.*' -and $cleanLeaf -ne '.env.example')) { throw 'Agent tools cannot write credential configuration files.' }
+                            $scopeTargetValid = $true
+                        }
+                    }
+                }
+                catch {
+                    $scopeTargetValid = $false
+                }
+                if ($scopeTargetValid) {
+                    try {
                         $instructions = Get-ScopedAgentInstructions -Root $Root -TargetPath $scopeArgs.path -AllowRegisteredSkill:($canonToolName -eq 'read_file')
                         if ($instructions) {
                             $notice = (@{ status = 'instructions_required'; instructions = $instructions; message = 'Apply these scoped AGENTS.md instructions, then retry the file tool call.' } | ConvertTo-Json -Compress)
@@ -293,9 +339,11 @@ function Invoke-AgentTurn {
                             }
                         }
                     }
-                }
-                catch {
-                    $output = (@{ error = ('Cannot verify scoped AGENTS.md instructions: ' + $_.Exception.Message) } | ConvertTo-Json -Compress)
+                    catch {
+                        $errMsg = 'Cannot verify scoped AGENTS.md instructions: ' + $_.Exception.Message
+                        Write-ToolCallCard -Name $canonToolName -Target ([string]$scopeArgs.path) -Status 'error' -Summary $errMsg
+                        $output = (@{ error = $errMsg } | ConvertTo-Json -Compress)
+                    }
                 }
             }
             if ($null -eq $output) { $output = Invoke-AgentTool -Root $Root -Call $call }

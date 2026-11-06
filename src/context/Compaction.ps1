@@ -216,6 +216,9 @@ function Get-CompactionFileOperations {
                 if (-not $fnArgsRaw) { continue }
                 try {
                     $parsedArgs = $fnArgsRaw | ConvertFrom-Json -ErrorAction Stop
+                    if (Get-Command -Name 'Format-AgentToolArguments' -ErrorAction SilentlyContinue) {
+                        $parsedArgs = Format-AgentToolArguments -Name $fnName -Arguments $parsedArgs
+                    }
                     $p = if ($parsedArgs.path) { [string]$parsedArgs.path } else { '' }
                     if ($p) {
                         if ($fnName -in @('read_file', 'read')) {
