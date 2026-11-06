@@ -1072,6 +1072,57 @@ try {
         if ($global:replBackup2Path -and (Test-Path -LiteralPath $global:replBackup2Path)) { Remove-Item -LiteralPath $global:replBackup2Path -Force -ErrorAction SilentlyContinue }
         Remove-Variable -Name bakStep, ssBackupPath, ssBackupExistedDuringTurn, replBackup1Path, replBackup1ExistedDuringTurn1, replBackup1ExistedAfterNew, replBackup2Path, replBackup2ExistedDuringTurn2, replBakQueue -Scope Global -ErrorAction SilentlyContinue
     }
+
+    # Regression (Task 5): In REPL with -NoSession, !cmd followed by a prompt turn and /undo preserves the !cmd message,
+    # keeps tree_entries and leaf_id synchronized without duplicate or orphaned entries, and /tree reflects the active branch.
+    $global:bangNoSessQueue = @('!Write-Output "tree-sync"', '/status', 'Prompt after bang', '/undo', '/tree', '/exit')
+    $global:bangNoSessAfterBangLeaf = ''
+    $global:bangNoSessAfterBangTreeCount = -1
+    $global:bangNoSessFinalState = $null
+    $global:bangNoSessHostLines = @()
+    function Invoke-WebRequest {
+        param($Uri, $Method, $Headers, $ContentType, $Body, $TimeoutSec, $ErrorAction, [switch]$UseBasicParsing, $OutFile)
+        $r = @{ choices = @(@{ finish_reason = 'stop'; message = @{ content = 'Assistant reply after bang.' } }) } | ConvertTo-Json -Depth 10 -Compress
+        Set-Content -LiteralPath $OutFile -Value $r -Encoding UTF8 -NoNewline
+    }
+    function global:Read-Host {
+        param($Prompt)
+        if (-not $global:bangNoSessQueue -or $global:bangNoSessQueue.Count -eq 0) { return '/exit' }
+        $next = $global:bangNoSessQueue[0]
+        if ($global:bangNoSessQueue.Count -eq 1) { $global:bangNoSessQueue = @() }
+        else { $global:bangNoSessQueue = @($global:bangNoSessQueue[1..($global:bangNoSessQueue.Count - 1)]) }
+        if ($next -eq 'Prompt after bang' -and $state) {
+            $global:bangNoSessAfterBangLeaf = [string]$state.leaf_id
+            $global:bangNoSessAfterBangTreeCount = @($state.tree_entries).Count
+        }
+        elseif ($next -eq '/exit' -and $state) {
+            $global:bangNoSessFinalState = $state
+        }
+        return $next
+    }
+    function Write-Host {
+        param([Parameter(Position = 0, ValueFromRemainingArguments = $true)]$Object, [switch]$NoNewline, $ForegroundColor, $BackgroundColor)
+        $text = ($Object | ForEach-Object { [string]$_ }) -join ' '
+        if ($text) { $global:bangNoSessHostLines += (Strip-AnsiCodes -Text $text) }
+    }
+    try {
+        & "$PSScriptRoot\..\shellossus.ps1" -Workspace $workspacePath -BaseUrl 'https://example.invalid/v1' -Model 'test-model' -NoSession -ConfigPath $setupCfgFile
+        Assert-True ($global:bangNoSessAfterBangLeaf -eq 'e0001' -and $global:bangNoSessAfterBangTreeCount -eq 1) "Expected !cmd under -NoSession to immediately sync tree_entries (1) and leaf_id (e0001), got count=$($global:bangNoSessAfterBangTreeCount), leaf='$($global:bangNoSessAfterBangLeaf)'."
+        Assert-True ($null -ne $global:bangNoSessFinalState) 'Failed to capture final REPL state after /undo.'
+        $finalNonSys = @($global:bangNoSessFinalState.messages | Where-Object { $_.role -ne 'system' })
+        Assert-True ($finalNonSys.Count -eq 1 -and $finalNonSys[0].id -eq 'e0001' -and ([string]$finalNonSys[0].content).Contains('tree-sync')) 'After prompt turn and /undo, !cmd message was not preserved with id e0001 in $state.messages.'
+        Assert-True ([string]$global:bangNoSessFinalState.leaf_id -eq 'e0001' -and @($global:bangNoSessFinalState.tree_entries).Count -eq 1 -and [string]$global:bangNoSessFinalState.tree_entries[0].id -eq 'e0001') "Expected 1 synchronized tree entry (e0001) and leaf_id='e0001' after /undo, got count=$(@($global:bangNoSessFinalState.tree_entries).Count), leaf_id='$($global:bangNoSessFinalState.leaf_id)'."
+        $treeNodesAfterUndo = @(Get-SessionTree -State $global:bangNoSessFinalState)
+        Assert-True ($treeNodesAfterUndo.Count -eq 1 -and $treeNodesAfterUndo[0].id -eq 'e0001' -and $treeNodesAfterUndo[0].active -and $treeNodesAfterUndo[0].is_leaf) '/tree state after /undo did not accurately reflect the single active !cmd branch leaf.'
+        $joinedTreeHost = $global:bangNoSessHostLines -join "`n"
+        Assert-True ($joinedTreeHost.Contains('[e0001] (user (root))') -and $joinedTreeHost.Contains('tree-sync') -and (-not $joinedTreeHost.Contains('Prompt after bang'))) "Rendered /tree output after /undo was not synchronized: $joinedTreeHost"
+    }
+    finally {
+        Remove-Item Function:\Invoke-WebRequest -ErrorAction SilentlyContinue
+        Remove-Item Function:\global:Read-Host -ErrorAction SilentlyContinue
+        Remove-Item Function:\Write-Host -ErrorAction SilentlyContinue
+        Remove-Variable -Name bangNoSessQueue, bangNoSessAfterBangLeaf, bangNoSessAfterBangTreeCount, bangNoSessFinalState, bangNoSessHostLines -Scope Global -ErrorAction SilentlyContinue
+    }
 }
 finally {
     Remove-TestEnvironment -Env $envData
