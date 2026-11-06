@@ -10232,6 +10232,7 @@ if (-not $LibraryOnly) {
     }
     try {
         if ($Prompt) {
+            Ensure-SessionTree -State $state
             $beforeTurn = @(Copy-SessionHashtableArray -Items $state.messages)
             $beforeLeafId = if ($state.leaf_id) { [string]$state.leaf_id } else { '' }
             $beforeTreeEntries = @(Copy-SessionHashtableArray -Items $state.tree_entries)
@@ -10655,6 +10656,7 @@ if (-not $LibraryOnly) {
                     Write-Host ($script:Gm.Grey1 + '  Nothing to continue.' + $script:Gm.Reset)
                     continue
                 }
+                Ensure-SessionTree -State $state
                 $beforeTurn = @(Copy-SessionHashtableArray -Items $state.messages)
                 $beforeLeafId = if ($state.leaf_id) { [string]$state.leaf_id } else { '' }
                 $beforeTreeEntries = @(Copy-SessionHashtableArray -Items $state.tree_entries)
@@ -10712,6 +10714,7 @@ if (-not $LibraryOnly) {
                     Write-Host ($script:Gm.Grey1 + "  [exit $($res.exit_code)]" + $script:Gm.Reset)
                     if (-not $localOnly) {
                         $state.messages += @{ role = 'user'; content = ("[Shell command $cmdStr exit=$($res.exit_code)]`n" + $res.output) }
+                        Ensure-SessionTree -State $state
                         Save-AgentSession -SessionFile $sessionFile -State $state -Workspace $rootPath -Model $Model
                         Write-Host ($script:Gm.Aqua + '  (Output added to conversation context)' + $script:Gm.Reset)
                     }
@@ -10721,6 +10724,7 @@ if (-not $LibraryOnly) {
                 }
                 continue
             }
+            Ensure-SessionTree -State $state
             $beforeTurn = @(Copy-SessionHashtableArray -Items $state.messages)
             $beforeLeafId = if ($state.leaf_id) { [string]$state.leaf_id } else { '' }
             $beforeTreeEntries = @(Copy-SessionHashtableArray -Items $state.tree_entries)
