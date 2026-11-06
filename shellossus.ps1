@@ -259,8 +259,15 @@ function Test-IsSecretFile {
 function Test-AgentPathWithinRoot {
     param([string]$RootPath, [string]$TargetPath)
     $isWin = ($env:OS -eq 'Windows_NT')
+    $isWinDrivePath = $isWin -and ($RootPath -match '^[a-zA-Z]:[/\\]')
     $prefix = if ($isWin) { $RootPath.TrimEnd('\').TrimEnd('/') } else { $RootPath.TrimEnd('/') }
     $targetNorm = if ($isWin) { $TargetPath.TrimEnd('\').TrimEnd('/') } else { $TargetPath.TrimEnd('/') }
+    if ($isWinDrivePath) {
+        if ($targetNorm -ieq $prefix) { return $true }
+        if ($TargetPath.StartsWith($prefix + '/', [StringComparison]::OrdinalIgnoreCase)) { return $true }
+        if ($TargetPath.StartsWith($prefix + '\', [StringComparison]::OrdinalIgnoreCase)) { return $true }
+        return $false
+    }
     if ($targetNorm -ceq $prefix) { return $true }
     if ($TargetPath.StartsWith($prefix + '/', [StringComparison]::Ordinal)) { return $true }
     if ($isWin -and $TargetPath.StartsWith($prefix + '\', [StringComparison]::Ordinal)) { return $true }
@@ -6685,10 +6692,11 @@ function Get-ScopedAgentInstructions {
     }
     $current = Resolve-AgentPath -Root $rootPath -RelativePath $(if ($currRel) { $currRel } else { '.' })
     $dirs = @()
-    while ($current -cne $rootPath) {
+    $isWinDrivePath = ($env:OS -eq 'Windows_NT') -and ($rootPath -match '^[a-zA-Z]:[/\\]')
+    while ($(if ($isWinDrivePath) { $current -ine $rootPath } else { $current -cne $rootPath })) {
         $dirs = @($current) + $dirs
         $next = Split-Path -Path $current -Parent
-        if (-not $next -or $next -ceq $current) { throw 'Could not locate workspace instruction ancestors.' }
+        if (-not $next -or $(if ($isWinDrivePath) { $next -ieq $current } else { $next -ceq $current })) { throw 'Could not locate workspace instruction ancestors.' }
         $current = $next
     }
     $parts = @()
@@ -9111,7 +9119,10 @@ function Invoke-AgentTurn {
     $repeatLimit = if ($MaxRepeatCalls -gt 0) { $MaxRepeatCalls } elseif ($script:MaxRepeatToolCalls -gt 0) { [int]$script:MaxRepeatToolCalls } else { 3 }
     $mutationEpoch = 0
     $toolCallCounts = @{}
-    $scopedInstrCache = @{}
+    if ($null -eq $State.scoped_instr_cache -or $State.scoped_instr_cache -isnot [hashtable]) {
+        $State.scoped_instr_cache = @{}
+    }
+    $scopedInstrCache = $State.scoped_instr_cache
     for ($step = 0; $step -lt $Steps; $step++) {
         if ($step -gt 0) {
             $stStep = Get-ContextStats -State $State
@@ -9372,6 +9383,7 @@ function Invoke-AgentTurn {
                     $parsedOut = $output | ConvertFrom-Json -ErrorAction Stop
                     if ($parsedOut.status -in @('written', 'executed', 'timed_out')) {
                         $mutationEpoch++
+                        $scopedInstrCache.Clear()
                     }
                 }
                 catch {}
@@ -9381,6 +9393,7 @@ function Invoke-AgentTurn {
                     $parsedOut = $output | ConvertFrom-Json -ErrorAction Stop
                     if ($parsedOut.modified_files -and @($parsedOut.modified_files).Count -gt 0) {
                         $mutationEpoch++
+                        $scopedInstrCache.Clear()
                     }
                 }
                 catch {}
@@ -10417,6 +10430,7 @@ if (-not $LibraryOnly) {
                 continue
             }
             if ($trimmedQ -eq '/reload') {
+                $state.scoped_instr_cache = @{}
                 $fullSystemPrompt = Build-SystemPrompt -Root $rootPath -ConfigDir $configDir
                 $system.content = $fullSystemPrompt
                 if ($state.messages.Count -gt 0 -and $state.messages[0].role -eq 'system') {

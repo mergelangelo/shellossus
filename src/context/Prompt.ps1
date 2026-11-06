@@ -189,10 +189,11 @@ function Get-ScopedAgentInstructions {
     }
     $current = Resolve-AgentPath -Root $rootPath -RelativePath $(if ($currRel) { $currRel } else { '.' })
     $dirs = @()
-    while ($current -cne $rootPath) {
+    $isWinDrivePath = ($env:OS -eq 'Windows_NT') -and ($rootPath -match '^[a-zA-Z]:[/\\]')
+    while ($(if ($isWinDrivePath) { $current -ine $rootPath } else { $current -cne $rootPath })) {
         $dirs = @($current) + $dirs
         $next = Split-Path -Path $current -Parent
-        if (-not $next -or $next -ceq $current) { throw 'Could not locate workspace instruction ancestors.' }
+        if (-not $next -or $(if ($isWinDrivePath) { $next -ieq $current } else { $next -ceq $current })) { throw 'Could not locate workspace instruction ancestors.' }
         $current = $next
     }
     $parts = @()

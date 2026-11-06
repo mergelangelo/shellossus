@@ -162,15 +162,17 @@ try {
     Assert-True ((Get-Content -LiteralPath $utf8Path -Raw -Encoding UTF8) -ceq $unicodeVal) 'Set-AgentUtf8Content Unicode roundtrip failed.'
     Assert-True ((Get-Item -LiteralPath $utf8Path -Force).Length -eq 8) 'Set-AgentUtf8Content Unicode string included a BOM or wrong byte length.'
 
-    # Regression: Test-AgentPathWithinRoot normalizes trailing slashes while keeping strict case-sensitive Ordinal boundaries.
+    # Regression: Test-AgentPathWithinRoot normalizes trailing slashes, matches Windows drive paths case-insensitively, and keeps POSIX paths case-sensitive.
     $savedOs = $env:OS
     try {
         $env:OS = 'Windows_NT'
         Assert-True (Test-AgentPathWithinRoot -RootPath 'C:\Workspace\Project\' -TargetPath 'C:\Workspace\Project') 'Test-AgentPathWithinRoot failed for trailing-slash root path on Windows.'
+        Assert-True (Test-AgentPathWithinRoot -RootPath 'C:\Workspace\Project' -TargetPath 'c:\workspace\project') 'Test-AgentPathWithinRoot failed for case-variant exact root on Windows.'
         Assert-True (Test-AgentPathWithinRoot -RootPath 'C:\Workspace\Project\' -TargetPath 'C:\Workspace\Project\sub\file.txt') 'Test-AgentPathWithinRoot failed for child path on Windows.'
-        Assert-True (Test-AgentPathWithinRoot -RootPath 'C:\Workspace\Project' -TargetPath 'C:\Workspace\Project/sub/file.txt') 'Test-AgentPathWithinRoot failed for forward-slash child path on Windows.'
-        Assert-True (-not (Test-AgentPathWithinRoot -RootPath 'C:\Workspace\Project' -TargetPath 'C:\Workspace\Project_other\file.txt')) 'Test-AgentPathWithinRoot accepted sibling prefix path on Windows.'
-        Assert-True (-not (Test-AgentPathWithinRoot -RootPath 'C:\Workspace\Project' -TargetPath 'c:\workspace\project\sub\file.txt')) 'Test-AgentPathWithinRoot accepted case-variant path on Windows.'
+        Assert-True (Test-AgentPathWithinRoot -RootPath 'C:\Workspace\Project' -TargetPath 'c:\workspace\project\sub\file.txt') 'Test-AgentPathWithinRoot failed for case-variant child path on Windows.'
+        Assert-True (Test-AgentPathWithinRoot -RootPath 'C:\Workspace\Project' -TargetPath 'c:\workspace\project/sub/file.txt') 'Test-AgentPathWithinRoot failed for case-variant forward-slash child path on Windows.'
+        Assert-True (-not (Test-AgentPathWithinRoot -RootPath 'C:\Workspace\Project' -TargetPath 'c:\workspace\project_other\file.txt')) 'Test-AgentPathWithinRoot accepted sibling prefix path on Windows.'
+        Assert-True (-not (Test-AgentPathWithinRoot -RootPath '/tmp/workspace' -TargetPath '/tmp/WORKSPACE/file.txt')) 'Test-AgentPathWithinRoot accepted case-variant POSIX path on Windows.'
 
         $env:OS = ''
         Assert-True (Test-AgentPathWithinRoot -RootPath '/workspace/Project/' -TargetPath '/workspace/Project') 'Test-AgentPathWithinRoot failed for trailing-slash root path on Unix.'
