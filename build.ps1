@@ -52,6 +52,7 @@ $modules = @(
     'tools/Shell.ps1',
     'tools/Undo.ps1',
     'tools/Web.ps1',
+    'tools/WebSearch.ps1',
     'tools/Todo.ps1',
     'tools/AskUser.ps1',
     'tools/Memory.ps1',
