@@ -193,6 +193,195 @@ try {
     finally {
         $env:OS = $savedOs
     }
+
+    # Resolve-AgentWriteTarget is the single write-target check for new files.
+    $missingTarget = Resolve-AgentWriteTarget -Root $workspacePath -RelativePath 'sub/new.txt'
+    $missingAncestor = Resolve-ExistingPathAncestor -Root $workspacePath -RelativePath 'sub'
+    $missingNames = @($missingAncestor.missing_names)
+    $dirsToCreate = @($missingTarget.dirs_to_create)
+    $lastDir = [string]$dirsToCreate[$dirsToCreate.Count - 1]
+    Assert-True ($missingTarget.exists -eq $false) 'Resolve-AgentWriteTarget reported an existing file for sub/new.txt.'
+    Assert-True ($missingTarget.leaf -eq 'new.txt') 'Resolve-AgentWriteTarget leaf was not new.txt.'
+    Assert-True ($missingNames.Count -eq 1 -and [string]$missingNames[0] -eq 'sub') 'Resolve-ExistingPathAncestor missing_names was not sub.'
+    Assert-True ($dirsToCreate.Count -eq $missingNames.Count -and (Split-Path -Path $lastDir -Leaf) -eq [string]$missingNames[0]) 'dirs_to_create was not the path equivalent of missing_names.'
+    Assert-True (Test-AgentPathWithinRoot -RootPath $workspacePath -TargetPath $lastDir) 'dirs_to_create did not end in a path under the workspace.'
+    Assert-True ((Split-Path -Path ([string]$missingTarget.full_path) -Leaf) -eq 'new.txt') 'full_path did not end with new.txt.'
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $workspacePath 'sub'))) 'Resolve-AgentWriteTarget created the missing parent directory.'
+
+    $beforeBadSegments = @((Get-ChildItem -LiteralPath $workspacePath -Force | ForEach-Object { $_.Name }) | Sort-Object)
+    foreach ($badSegment in @(
+        @{ Path = 'CON'; Message = 'Reserved file name.' },
+        @{ Path = 'foo.'; Message = 'Invalid file name.' },
+        @{ Path = 'a:b'; Message = 'Invalid file name.' }
+    )) {
+        $segmentThrew = $false
+        $segmentMessage = ''
+        try {
+            Test-ValidPathSegment -Segment ([string]$badSegment.Path) -Kind File
+        }
+        catch {
+            $segmentThrew = $true
+            $segmentMessage = [string]$_.Exception.Message
+        }
+        Assert-True ($segmentThrew -and $segmentMessage -eq [string]$badSegment.Message) "Test-ValidPathSegment file segment $($badSegment.Path) returned: $segmentMessage"
+        $writeThrew = $false
+        $writeMessage = ''
+        try {
+            $null = Resolve-AgentWriteTarget -Root $workspacePath -RelativePath ([string]$badSegment.Path)
+        }
+        catch {
+            $writeThrew = $true
+            $writeMessage = [string]$_.Exception.Message
+        }
+        Assert-True $writeThrew "Resolve-AgentWriteTarget did not throw for segment $($badSegment.Path)."
+        if ([string]$badSegment.Path -eq 'a:b') {
+            Assert-True ($writeMessage.Length -gt 0) 'Resolve-AgentWriteTarget segment a:b threw an empty error.'
+        }
+        else {
+            Assert-True ($writeMessage -eq [string]$badSegment.Message) "Resolve-AgentWriteTarget segment $($badSegment.Path) returned: $writeMessage"
+        }
+    }
+    $dirConThrew = $false
+    $dirConMessage = ''
+    try { Test-ValidPathSegment -Segment 'CON' -Kind Directory }
+    catch { $dirConThrew = $true; $dirConMessage = [string]$_.Exception.Message }
+    Assert-True ($dirConThrew -and $dirConMessage -eq 'Invalid directory name.') "Directory segment CON returned: $dirConMessage"
+    $dirDotThrew = $false
+    $dirDotMessage = ''
+    try { Test-ValidPathSegment -Segment 'foo.' -Kind Directory }
+    catch { $dirDotThrew = $true; $dirDotMessage = [string]$_.Exception.Message }
+    Assert-True ($dirDotThrew -and $dirDotMessage -eq 'Invalid directory name.') "Directory segment foo. returned: $dirDotMessage"
+    $dirColonThrew = $false
+    $dirColonMessage = ''
+    try { Test-ValidPathSegment -Segment 'a:b' -Kind Directory }
+    catch { $dirColonThrew = $true; $dirColonMessage = [string]$_.Exception.Message }
+    Assert-True ($dirColonThrew -and $dirColonMessage -eq 'Invalid directory name.') "Directory segment a:b returned: $dirColonMessage"
+    $afterBadSegments = @((Get-ChildItem -LiteralPath $workspacePath -Force | ForEach-Object { $_.Name }) | Sort-Object)
+    Assert-True (($beforeBadSegments -join '|') -ceq ($afterBadSegments -join '|')) 'A rejected path segment created a file.'
+
+    $savedSecretConfig = $script:AgentConfigPath
+    try {
+        $script:AgentConfigPath = Format-ConfigPath -Path (Join-Path $workspacePath 'secrets.txt')
+        $secretThrew = $false
+        $secretMessage = ''
+        try {
+            $null = Resolve-AgentWriteTarget -Root $workspacePath -RelativePath 'secrets.txt'
+        }
+        catch {
+            $secretThrew = $true
+            $secretMessage = [string]$_.Exception.Message
+        }
+        Assert-True ($secretThrew -and $secretMessage -eq 'Agent tools cannot write credential configuration files.') "Custom config leaf secrets.txt returned: $secretMessage"
+        Assert-True (-not (Test-Path -LiteralPath (Join-Path $workspacePath 'secrets.txt'))) 'Custom config rejection created secrets.txt.'
+    }
+    finally {
+        $script:AgentConfigPath = $savedSecretConfig
+    }
+
+    foreach ($secretName in @('.env', '.env.local')) {
+        $envThrew = $false
+        $envMessage = ''
+        try {
+            $null = Resolve-AgentWriteTarget -Root $workspacePath -RelativePath $secretName
+        }
+        catch {
+            $envThrew = $true
+            $envMessage = [string]$_.Exception.Message
+        }
+        Assert-True ($envThrew -and $envMessage -eq 'Agent tools cannot write credential configuration files.') "Secret name $secretName returned: $envMessage"
+    }
+    $exampleTarget = Resolve-AgentWriteTarget -Root $workspacePath -RelativePath '.env.example'
+    Assert-True ($exampleTarget.leaf -eq '.env.example' -and $exampleTarget.exists -eq $false) '.env.example was rejected or treated as an existing file.'
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $workspacePath '.env.example'))) '.env.example was created by the resolver.'
+
+    $junctionOutside = Join-Path $testRoot 'junction-outside'
+    $junctionLink = Join-Path $workspacePath 'linked-parent'
+    New-Item -ItemType Directory -Path $junctionOutside -Force | Out-Null
+    $junctionCreated = $false
+    try {
+        New-Item -ItemType Junction -Path $junctionLink -Target $junctionOutside -ErrorAction Stop | Out-Null
+        $junctionItem = Get-Item -LiteralPath $junctionLink -Force -ErrorAction Stop
+        if ($junctionItem.LinkType -eq 'Junction' -or (($junctionItem.Attributes -band 1024) -ne 0 -and $junctionItem.LinkType -eq 'Junction')) {
+            $junctionCreated = $true
+        }
+    }
+    catch {
+        $junctionCreated = $false
+    }
+    if ($junctionCreated) {
+        try {
+            $junctionThrew = $false
+            $junctionMessage = ''
+            try {
+                $null = Resolve-AgentWriteTarget -Root $workspacePath -RelativePath 'linked-parent/new.txt'
+            }
+            catch {
+                $junctionThrew = $true
+                $junctionMessage = [string]$_.Exception.Message
+            }
+            Assert-True ($junctionThrew -and $junctionMessage -eq 'Reparse points are not allowed.') "Junction ancestor returned: $junctionMessage"
+            Assert-True (-not (Test-Path -LiteralPath (Join-Path $junctionOutside 'new.txt'))) 'Junction ancestor rejection created a file in the link target.'
+        }
+        finally {
+            if (Test-Path -LiteralPath $junctionLink) {
+                (Get-Item -LiteralPath $junctionLink -Force).Delete()
+            }
+        }
+    }
+    elseif ($env:OS -eq 'Windows_NT') {
+        throw 'Junction creation failed on Windows. This assertion must not be skipped in the Windows CI job.'
+    }
+
+    # A custom config filename that write_file rejects must not be offered as instructions_required.
+    $savedPreviewPerm = $script:AgentPermission
+    $savedPreviewMode = $script:OutputMode
+    $savedPreviewCfg = $script:AgentConfigPath
+    $previewDir = Join-Path $workspacePath 'preview-scope'
+    New-Item -ItemType Directory -Path $previewDir -Force | Out-Null
+    Set-Content -LiteralPath (Join-Path $previewDir 'AGENTS.md') -Value 'Preview scope rule.' -Encoding UTF8
+    try {
+        $script:AgentPermission = 'AutoEdit'
+        $script:OutputMode = 'json'
+        $script:AgentConfigPath = Format-ConfigPath -Path (Join-Path $previewDir 'secrets.txt')
+        $script:previewReplied = $false
+        function Invoke-WebRequest {
+            param($Uri, $Method, $Headers, $ContentType, $Body, $TimeoutSec, $ErrorAction, [switch]$UseBasicParsing, $OutFile)
+            $reply = @{ choices = @(@{ finish_reason = 'stop'; message = @{ content = 'done' } }) }
+            if (-not $script:previewReplied) {
+                $script:previewReplied = $true
+                $reply = @{
+                    choices = @(@{
+                        finish_reason = 'tool_calls'
+                        message = @{
+                            content = ''
+                            tool_calls = @(@{
+                                id = 'cfg-write'
+                                type = 'function'
+                                function = @{ name = 'write_file'; arguments = '{"path":"preview-scope/secrets.txt","content":"nope"}' }
+                            })
+                        }
+                    })
+                }
+            }
+            $json = $reply | ConvertTo-Json -Depth 12 -Compress
+            Set-Content -LiteralPath $OutFile -Value $json -Encoding UTF8 -NoNewline
+        }
+        $previewState = @{ messages = @(@{ role = 'system'; content = 'sys' }, @{ role = 'user'; content = 'Write the config.' }) }
+        Invoke-AgentTurn -State $previewState -Endpoint 'https://example.invalid/v1/chat/completions' -ModelId 'test-model' -ApiKey 'fake' -Root $workspacePath -Steps 3
+        $toolMsgs = @($previewState.messages | Where-Object { $_.role -eq 'tool' })
+        Assert-True ($toolMsgs.Count -eq 1) 'Custom config write did not return exactly one tool result.'
+        $toolRes = $toolMsgs[0].content | ConvertFrom-Json
+        Assert-True ($toolRes.error -eq 'Agent tools cannot write credential configuration files.') "Custom config write preview returned: $($toolMsgs[0].content)"
+        Assert-True ([string]$toolMsgs[0].content -notlike '*instructions_required*') 'Custom config path received instructions_required.'
+        Assert-True (-not (Test-Path -LiteralPath (Join-Path $previewDir 'secrets.txt'))) 'Custom config preview created secrets.txt.'
+    }
+    finally {
+        Remove-Item Function:\Invoke-WebRequest -ErrorAction SilentlyContinue
+        $script:AgentPermission = $savedPreviewPerm
+        $script:OutputMode = $savedPreviewMode
+        $script:AgentConfigPath = $savedPreviewCfg
+        $script:previewReplied = $false
+    }
 }
 finally {
     Remove-TestEnvironment -Env $envData

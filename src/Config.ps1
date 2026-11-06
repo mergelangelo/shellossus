@@ -213,6 +213,78 @@ function Test-IsSecretFile {
     return ($cleanName -eq '.env' -or ($cleanName -like '.env.*' -and $cleanName -ne '.env.example') -or $cleanFull -eq $script:AgentConfigPath -or ($script:LegacyAgentConfigPath -and $cleanFull -eq $script:LegacyAgentConfigPath))
 }
 
+function Test-ValidPathSegment {
+    param([string]$Segment, [ValidateSet('Directory','File')][string]$Kind)
+    $invalid = (-not $Segment -or $Segment -eq '.' -or $Segment -eq '..' -or $Segment -match '[<>:"/\\|?*\x00-\x1f]' -or $Segment -match '[. ]$')
+    $reserved = $Segment -match '^(?i:CON|PRN|AUX|NUL|COM[0-9]|LPT[0-9])(?:\.|$)'
+    if ($Kind -eq 'Directory') {
+        if ($invalid -or $reserved) { throw 'Invalid directory name.' }
+        return
+    }
+    if ($invalid) { throw 'Invalid file name.' }
+    if ($reserved) { throw 'Reserved file name.' }
+}
+
+function Resolve-ExistingPathAncestor {
+    param([string]$Root, [string]$RelativePath)
+    $missingNames = @()
+    $currRel = $RelativePath
+    while ($currRel) {
+        $probeCand = if ($currRel -match '^([a-zA-Z]:[/\\]|[/\\])') { $currRel } else { Join-Path $Root $currRel }
+        if (Test-Path -LiteralPath $probeCand) { break }
+        $seg = Split-Path $currRel -Leaf
+        Test-ValidPathSegment -Segment $seg -Kind Directory
+        $missingNames = @($seg) + @($missingNames)
+        $nextParent = Split-Path $currRel -Parent
+        if (-not $nextParent -or $nextParent -eq $currRel) {
+            $currRel = ''
+            break
+        }
+        $currRel = $nextParent
+    }
+    $existingRel = if ($currRel) { $currRel } else { '.' }
+    $existing = Resolve-AgentPath -Root $Root -RelativePath $existingRel
+    return @{
+        existing = $existing
+        missing_names = @($missingNames)
+    }
+}
+
+function Resolve-AgentWriteTarget {
+    param([string]$Root, [string]$RelativePath)
+    if ($RelativePath -match '[/\\]$') { throw 'Invalid file name.' }
+    if (($RelativePath -replace '^[a-zA-Z]:', '').Contains(':')) { throw 'Invalid path syntax.' }
+    $rawParent = Split-Path $RelativePath -Parent
+    $parentRel = if ($rawParent) { $rawParent } else { '.' }
+    $ancestor = Resolve-ExistingPathAncestor -Root $Root -RelativePath $parentRel
+    if (-not (Get-Item -LiteralPath $ancestor.existing -Force).PSIsContainer) { throw 'Parent must be a directory.' }
+    $leaf = Split-Path $RelativePath -Leaf
+    Test-ValidPathSegment -Segment $leaf -Kind File
+    $parent = [string]$ancestor.existing
+    $dirsToCreate = @()
+    foreach ($dirName in @($ancestor.missing_names)) {
+        $parent = Join-Path $parent $dirName
+        $dirsToCreate += $parent
+    }
+    $fullPath = Join-Path $parent $leaf
+    $cleanLeaf = ($leaf -replace ':.*$', '').TrimEnd('.', ' ')
+    if ($cleanLeaf -eq '.env' -or ($cleanLeaf -like '.env.*' -and $cleanLeaf -ne '.env.example') -or $fullPath -eq $script:AgentConfigPath -or ($script:LegacyAgentConfigPath -and $fullPath -eq $script:LegacyAgentConfigPath)) {
+        throw 'Agent tools cannot write credential configuration files.'
+    }
+    $exists = $false
+    if (Test-Path -LiteralPath $fullPath) {
+        $fullPath = Resolve-AgentPath -Root $Root -RelativePath $RelativePath
+        $exists = $true
+    }
+    return @{
+        full_path = [string]$fullPath
+        parent = [string]$parent
+        leaf = [string]$leaf
+        dirs_to_create = @($dirsToCreate)
+        exists = $exists
+    }
+}
+
 function Test-AgentPathWithinRoot {
     param([string]$RootPath, [string]$TargetPath)
     $isWin = ($env:OS -eq 'Windows_NT')
