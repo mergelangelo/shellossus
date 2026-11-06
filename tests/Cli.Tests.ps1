@@ -889,6 +889,96 @@ try {
     Assert-True ($bangUserMsgs.Count -eq 1) "Expected 1 user message from !cmd in session history, got $($bangUserMsgs.Count)."
     $bangContent = [string]$bangUserMsgs[0].content
     Assert-True ($bangContent.Contains('[Shell command Write-Output "bang-check-42" exit=0]') -and (-not $bangContent.Contains('$cmdStr')) -and $bangContent.Contains('bang-check-42')) "REPL !cmd message did not interpolate command string properly: $bangContent"
+
+    # Regression (Task 2): CLI -Export works offline without BaseUrl/Model/ApiKey for -Session, -Continue, and shorthand .jsonl -> .html,
+    # supports both .html and .jsonl targets, does not hijack existing output .jsonl when -Session/-Continue is passed, and enforces -CurrentWorkspace.
+    $expSessDir = Join-Path $testRoot 'export-sessions'
+    New-Item -ItemType Directory -Path $expSessDir -Force | Out-Null
+    $expSavedJsonl = Join-Path $expSessDir 'sess-export-source.jsonl'
+    $expSourceState = @{
+        session_id = 'sess-export-source'
+        session_name = 'Offline Export Test'
+        workspace = $workspacePath
+        model = 'offline-saved-model'
+        messages = @(
+            @{ role = 'system'; content = 'sys' },
+            @{ role = 'user'; content = 'Export question 101' },
+            @{ role = 'assistant'; content = 'Export answer 202' }
+        )
+    }
+    Save-AgentSession -SessionFile $expSavedJsonl -State $expSourceState -Workspace $workspacePath -Model 'offline-saved-model' -SessionId 'sess-export-source'
+    $emptyCfgFile = Join-Path $testRoot 'empty-export.env'
+    Set-Content -LiteralPath $emptyCfgFile -Value '' -Encoding Ascii -NoNewline
+
+    $savedExpEnv = @{
+        SHELLOSSUS_BASE_URL = $env:SHELLOSSUS_BASE_URL
+        H_AGENT_BASE_URL = $env:H_AGENT_BASE_URL
+        SHELLOSSUS_MODEL = $env:SHELLOSSUS_MODEL
+        H_AGENT_MODEL = $env:H_AGENT_MODEL
+        SHELLOSSUS_API_KEY = $env:SHELLOSSUS_API_KEY
+        H_AGENT_API_KEY = $env:H_AGENT_API_KEY
+    }
+    $env:SHELLOSSUS_BASE_URL = $null
+    $env:H_AGENT_BASE_URL = $null
+    $env:SHELLOSSUS_MODEL = $null
+    $env:H_AGENT_MODEL = $null
+    $env:SHELLOSSUS_API_KEY = $null
+    $env:H_AGENT_API_KEY = $null
+    function global:Read-Host {
+        param($Prompt)
+        throw "Unexpected Read-Host prompt during offline -Export: $Prompt"
+    }
+    function Write-Host {
+        param([Parameter(Position = 0, ValueFromRemainingArguments = $true)]$Object, [switch]$NoNewline, $ForegroundColor, $BackgroundColor)
+    }
+    try {
+        # 1. -Session <saved.jsonl> -Export <out.html> without BaseUrl/Model/ApiKey produces valid HTML.
+        $outSessHtml = Join-Path $testRoot 'exported-from-session.html'
+        & "$PSScriptRoot\..\shellossus.ps1" -Workspace $workspacePath -Session $expSavedJsonl -Export $outSessHtml -ConfigPath $emptyCfgFile
+        Assert-True (Test-Path -LiteralPath $outSessHtml) '-Session -Export <out.html> did not create HTML file.'
+        $outSessHtmlText = Get-Content -LiteralPath $outSessHtml -Raw -Encoding UTF8
+        Assert-True ($outSessHtmlText.Contains('<!DOCTYPE html>') -and $outSessHtmlText.Contains('Export question 101') -and $outSessHtmlText.Contains('Export answer 202') -and $outSessHtmlText.Contains('offline-saved-model')) "-Session -Export <out.html> content invalid: $outSessHtmlText"
+
+        # 2. -Continue -Export <out.jsonl> without BaseUrl/Model/ApiKey produces valid JSONL (not HTML), even if <out.jsonl> already exists.
+        $outContJsonl = Join-Path $testRoot 'exported-from-continue.jsonl'
+        Set-Content -LiteralPath $outContJsonl -Value 'stale-placeholder' -Encoding Ascii
+        & "$PSScriptRoot\..\shellossus.ps1" -Workspace $workspacePath -Continue -SessionDir $expSessDir -Export $outContJsonl -ConfigPath $emptyCfgFile
+        Assert-True (Test-Path -LiteralPath $outContJsonl) '-Continue -Export <out.jsonl> did not write JSONL file.'
+        $outContLines = @(Get-Content -LiteralPath $outContJsonl -Encoding UTF8 | Where-Object { $_.Trim() })
+        Assert-True ($outContLines.Count -ge 3) "Expected at least 3 JSONL lines in exported session, got $($outContLines.Count)."
+        $firstMeta = $outContLines[0] | ConvertFrom-Json -ErrorAction Stop
+        $outContRaw = Get-Content -LiteralPath $outContJsonl -Raw -Encoding UTF8
+        Assert-True ($firstMeta.type -eq 'session_meta' -and $firstMeta.model -eq 'offline-saved-model' -and (-not $outContRaw.Contains('<!DOCTYPE html>')) -and $outContRaw.Contains('Export answer 202')) "-Continue -Export <out.jsonl> did not produce valid JSONL export: $outContRaw"
+
+        # 3. Shorthand -Export <existing.jsonl> converts to <existing.html> and enforces -CurrentWorkspace.
+        $shorthandHtml = $expSavedJsonl -replace '\.jsonl$', '.html'
+        if (Test-Path -LiteralPath $shorthandHtml) { Remove-Item -LiteralPath $shorthandHtml -Force }
+        & "$PSScriptRoot\..\shellossus.ps1" -Workspace $workspacePath -Export $expSavedJsonl -ConfigPath $emptyCfgFile
+        Assert-True (Test-Path -LiteralPath $shorthandHtml) 'Shorthand -Export <existing.jsonl> did not create <existing.html>.'
+        $shorthandHtmlText = Get-Content -LiteralPath $shorthandHtml -Raw -Encoding UTF8
+        Assert-True ($shorthandHtmlText.Contains('<!DOCTYPE html>') -and $shorthandHtmlText.Contains('Export answer 202')) 'Shorthand -Export <existing.jsonl> HTML content invalid.'
+
+        $otherExportWs = Join-Path $testRoot 'other-export-ws'
+        New-Item -ItemType Directory -Path $otherExportWs -Force | Out-Null
+        $wrongWsThrew = $false
+        try {
+            & "$PSScriptRoot\..\shellossus.ps1" -Workspace $otherExportWs -Export $expSavedJsonl -ConfigPath $emptyCfgFile
+        }
+        catch {
+            if ($_.Exception.Message -like '*different workspace*') { $wrongWsThrew = $true }
+        }
+        Assert-True $wrongWsThrew 'Shorthand -Export <existing.jsonl> did not enforce -CurrentWorkspace.'
+    }
+    finally {
+        $env:SHELLOSSUS_BASE_URL = $savedExpEnv.SHELLOSSUS_BASE_URL
+        $env:H_AGENT_BASE_URL = $savedExpEnv.H_AGENT_BASE_URL
+        $env:SHELLOSSUS_MODEL = $savedExpEnv.SHELLOSSUS_MODEL
+        $env:H_AGENT_MODEL = $savedExpEnv.H_AGENT_MODEL
+        $env:SHELLOSSUS_API_KEY = $savedExpEnv.SHELLOSSUS_API_KEY
+        $env:H_AGENT_API_KEY = $savedExpEnv.H_AGENT_API_KEY
+        Remove-Item Function:\global:Read-Host -ErrorAction SilentlyContinue
+        Remove-Item Function:\Write-Host -ErrorAction SilentlyContinue
+    }
 }
 finally {
     Remove-TestEnvironment -Env $envData
