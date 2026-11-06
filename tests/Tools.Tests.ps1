@@ -1343,6 +1343,23 @@ try {
         $script:ActiveState = $savedStateSubTodo
         $script:ActiveSessionTodos = $savedTodosSubTodo
     }
+
+    # Regression (Task 4): Clear-AgentUndoBackups removes temporary backup files across UndoEntries and Writes.
+    $tmpBak1 = New-AgentTempFile
+    $tmpBak2 = New-AgentTempFile
+    $tmpBak3 = New-AgentTempFile
+    Assert-True ((Test-Path -LiteralPath $tmpBak1.FullName) -and (Test-Path -LiteralPath $tmpBak2.FullName) -and (Test-Path -LiteralPath $tmpBak3.FullName)) 'New-AgentTempFile did not create temporary backup files.'
+    $mockUndoEntries = @(
+        $null,
+        @{ writes = @($null, @{ action = 'created'; backup = $null }, @{ action = 'modified'; backup = $tmpBak1.FullName }) },
+        @{ writes = @(@{ action = 'modified'; backup = $tmpBak2.FullName }) }
+    )
+    $mockWrites = @(
+        $null,
+        @{ action = 'modified'; backup = $tmpBak3.FullName }
+    )
+    Clear-AgentUndoBackups -UndoEntries $mockUndoEntries -Writes $mockWrites
+    Assert-True ((-not (Test-Path -LiteralPath $tmpBak1.FullName)) -and (-not (Test-Path -LiteralPath $tmpBak2.FullName)) -and (-not (Test-Path -LiteralPath $tmpBak3.FullName))) 'Clear-AgentUndoBackups did not remove all backup files in UndoEntries and Writes.'
 }
 finally {
     Remove-TestEnvironment -Env $envData

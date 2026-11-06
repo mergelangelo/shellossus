@@ -299,6 +299,7 @@ if (-not $LibraryOnly) {
                 $state.todos = @()
                 $script:ActiveSessionTodos = @()
                 Sync-AgentCapabilities -State $state | Out-Null
+                Clear-AgentUndoBackups -UndoEntries $undoStack
                 $undoStack = @()
                 $sessionFile = if ($NoSession) { '' } else { Join-Path $sessionDir ($newId + '.jsonl') }
                 $script:ActiveSessionId = $newId
@@ -383,6 +384,7 @@ if (-not $LibraryOnly) {
                     $targetEntryId = $Matches[1].Trim()
                     try {
                         Switch-SessionBranch -State $state -TargetId $targetEntryId | Out-Null
+                        Clear-AgentUndoBackups -UndoEntries $undoStack
                         $undoStack = @()
                         Save-AgentSession -SessionFile $sessionFile -State $state -Workspace $rootPath -Model $Model
                         Write-Host ($script:Gm.Green + "  Switched active branch to entry $targetEntryId ($($state.messages.Count) messages in active path)." + $script:Gm.Reset)
@@ -404,6 +406,7 @@ if (-not $LibraryOnly) {
                     $forkRes = Invoke-SessionFork -State $state -SessionDir $sessionDir -EntryId $forkEntryId
                     $state = $forkRes.state
                     $sessionFile = if ($NoSession) { '' } else { $forkRes.session_file }
+                    Clear-AgentUndoBackups -UndoEntries $undoStack
                     $undoStack = @()
                     Write-Host ($script:Gm.Green + "  Forked session to: $($forkRes.session_file) (id=$($forkRes.session_id))" + $script:Gm.Reset)
                 }
@@ -451,6 +454,7 @@ if (-not $LibraryOnly) {
                 try {
                     Invoke-SessionResume -SessionFile $impPath -State $state -CurrentWorkspace $rootPath | Out-Null
                     $sessionFile = if ($NoSession) { '' } else { $impPath }
+                    Clear-AgentUndoBackups -UndoEntries $undoStack
                     $undoStack = @()
                     $lastFailedQuestion = ''
                     if ($state.model) { $Model = $state.model }
@@ -620,6 +624,7 @@ if (-not $LibraryOnly) {
                     try {
                         Invoke-SessionResume -SessionFile $chosen -State $state -CurrentWorkspace $rootPath | Out-Null
                         $sessionFile = $chosen
+                        Clear-AgentUndoBackups -UndoEntries $undoStack
                         $undoStack = @()
                         $lastFailedQuestion = ''
                         if ($state.model) { $Model = $state.model }
@@ -752,5 +757,9 @@ if (-not $LibraryOnly) {
             }
         }
     }
-    finally { Remove-Variable agentKey -ErrorAction SilentlyContinue }
+    finally {
+        Clear-AgentUndoBackups -UndoEntries $undoStack -Writes $script:CurrentTurnWrites
+        $script:CurrentTurnWrites = @()
+        Remove-Variable agentKey -ErrorAction SilentlyContinue
+    }
 }

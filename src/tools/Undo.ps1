@@ -1,5 +1,22 @@
 # Disk undo and multi-step turn rollback.
 
+function Clear-AgentUndoBackups {
+    param($UndoEntries, $Writes)
+    foreach ($entry in @($UndoEntries)) {
+        if ($null -eq $entry) { continue }
+        foreach ($w in @($entry.writes)) {
+            if ($w -and $w.backup -and (Test-Path -LiteralPath $w.backup)) {
+                Remove-Item -LiteralPath $w.backup -Force -ErrorAction SilentlyContinue
+            }
+        }
+    }
+    foreach ($w in @($Writes)) {
+        if ($w -and $w.backup -and (Test-Path -LiteralPath $w.backup)) {
+            Remove-Item -LiteralPath $w.backup -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
 function Assert-AgentUndoPath {
     param($Write)
     if (-not $Write.root -or -not $Write.full_path) { throw 'Undo entry has no workspace path.' }
