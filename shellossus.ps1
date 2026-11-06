@@ -10077,18 +10077,21 @@ if (-not $LibraryOnly) {
     if (-not $rootItem.PSIsContainer) { throw 'Workspace must be a directory.' }
     $rootPath = Resolve-AgentPath -Root $rootItem.FullName -RelativePath '.'
     $script:ActiveWorkspace = $rootPath
-    if ($Export -and ($Export -match '\.jsonl$') -and (Test-Path -LiteralPath $Export)) {
+    if (-not $Session -and -not $Continue -and -not $Fork -and $Export -and ($Export -match '\.jsonl$') -and (Test-Path -LiteralPath $Export)) {
+        $config.Clear()
         $expState = @{ session_id = ''; workspace = $rootPath; model = $Model; messages = @() }
-        Invoke-SessionResume -SessionFile $Export -State $expState | Out-Null
+        Invoke-SessionResume -SessionFile $Export -State $expState -CurrentWorkspace $rootPath | Out-Null
         $outHtml = $Export -replace '\.jsonl$', '.html'
         $exported = Export-AgentSessionHtml -State $expState -OutputPath $outHtml
         Write-Host ($script:Gm.Green + "Exported session HTML: $exported" + $script:Gm.Reset)
         return
     }
-    if (-not $BaseUrl) { $BaseUrl = Read-Host 'API base URL (including /v1)' }
-    if (-not (Test-ValidAgentBaseUrl -Url $BaseUrl)) { throw 'An HTTPS base URL (or http://localhost / http://127.0.0.1 for local servers) is required. Run: shellossus -Setup' }
-    if (-not $Model) { $Model = Read-Host 'Model ID' }
-    if (-not $Model) { throw 'Model ID is required.' }
+    if (-not $Export) {
+        if (-not $BaseUrl) { $BaseUrl = Read-Host 'API base URL (including /v1)' }
+        if (-not (Test-ValidAgentBaseUrl -Url $BaseUrl)) { throw 'An HTTPS base URL (or http://localhost / http://127.0.0.1 for local servers) is required. Run: shellossus -Setup' }
+        if (-not $Model) { $Model = Read-Host 'Model ID' }
+        if (-not $Model) { throw 'Model ID is required.' }
+    }
     if ($MaxSteps -lt 1 -or $MaxSteps -gt 500) { throw 'MaxSteps must be between 1 and 500.' }
     if ($MaxRepeatCalls -lt 1 -or $MaxRepeatCalls -gt 50) { throw 'MaxRepeatCalls must be between 1 and 50.' }
     $script:MaxRepeatToolCalls = $MaxRepeatCalls
@@ -10113,19 +10116,26 @@ if (-not $LibraryOnly) {
         if ($ReasoningEffort -notin @('low', 'medium', 'high')) { throw 'ReasoningEffort must be low, medium, or high.' }
         $script:ReasoningEffort = $ReasoningEffort
     }
-    $endpoint = $BaseUrl.TrimEnd('/') + '/chat/completions'
-    $agentKey = $env:SHELLOSSUS_API_KEY
-    if (-not $agentKey) { $agentKey = $env:H_AGENT_API_KEY }
-    if (-not $agentKey) { $agentKey = $config.SHELLOSSUS_API_KEY }
-    $config.Clear()
-    if (-not $agentKey -and (Test-IsLoopbackBaseUrl -Url $BaseUrl)) {
-        $agentKey = 'local'
+    $endpoint = ''
+    $agentKey = ''
+    if (-not $Export) {
+        $endpoint = $BaseUrl.TrimEnd('/') + '/chat/completions'
+        $agentKey = $env:SHELLOSSUS_API_KEY
+        if (-not $agentKey) { $agentKey = $env:H_AGENT_API_KEY }
+        if (-not $agentKey) { $agentKey = $config.SHELLOSSUS_API_KEY }
+        $config.Clear()
+        if (-not $agentKey -and (Test-IsLoopbackBaseUrl -Url $BaseUrl)) {
+            $agentKey = 'local'
+        }
+        if (-not $agentKey) {
+            Write-Host ($script:Gm.Yellow + 'Key input is visible. Run shellossus -Setup to save settings for next time.' + $script:Gm.Reset)
+            $agentKey = Read-Host 'API key'
+        }
+        if (-not $agentKey) { throw 'API key is required.' }
     }
-    if (-not $agentKey) {
-        Write-Host ($script:Gm.Yellow + 'Key input is visible. Run shellossus -Setup to save settings for next time.' + $script:Gm.Reset)
-        $agentKey = Read-Host 'API key'
+    else {
+        $config.Clear()
     }
-    if (-not $agentKey) { throw 'API key is required.' }
     $sessionId = 'sess-' + (Get-Date -Format 'yyyyMMdd-HHmmss') + '-' + (Get-Random -Minimum 100000 -Maximum 999999)
     $sessionFile = if ($NoSession) { '' } else { Join-Path $sessionDir ($sessionId + '.jsonl') }
     $fullSystemPrompt = Build-SystemPrompt -Root $rootPath -ConfigDir $configDir
@@ -10167,6 +10177,7 @@ if (-not $LibraryOnly) {
         $forkRes = Invoke-SessionFork -State $srcState -SessionDir $sessionDir -NewName $SessionName
         $state = $forkRes.state
         $sessionFile = if ($NoSession) { '' } else { $forkRes.session_file }
+        if ($PSBoundParameters.Keys -notcontains 'Model' -and $state.model) { $Model = $state.model }
     }
     elseif ($Continue) {
         $latestProjectSession = Find-ProjectSession -SessionDir $sessionDir -Workspace $rootPath
@@ -10177,8 +10188,15 @@ if (-not $LibraryOnly) {
         }
     }
     if ($Export) {
-        $exported = Export-AgentSessionHtml -State $state -OutputPath $Export
-        Write-Host ($script:Gm.Green + "Exported session HTML: $exported" + $script:Gm.Reset)
+        if ($Export -match '\.jsonl$') {
+            Save-AgentSession -SessionFile $Export -State $state -Workspace $rootPath -Model $Model
+            Write-Host ($script:Gm.Green + "Exported session JSONL: $Export" + $script:Gm.Reset)
+        }
+        else {
+            $outHtml = if ($Export -match '\.html?$') { $Export } else { $Export + '.html' }
+            $exported = Export-AgentSessionHtml -State $state -OutputPath $outHtml
+            Write-Host ($script:Gm.Green + "Exported session HTML: $exported" + $script:Gm.Reset)
+        }
         return
     }
     try {
