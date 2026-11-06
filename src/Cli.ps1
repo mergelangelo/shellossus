@@ -466,6 +466,7 @@ if (-not $LibraryOnly) {
                 continue
             }
             if ($trimmedQ -eq '/reload') {
+                $state.scoped_instr_cache = @{}
                 $fullSystemPrompt = Build-SystemPrompt -Root $rootPath -ConfigDir $configDir
                 $system.content = $fullSystemPrompt
                 if ($state.messages.Count -gt 0 -and $state.messages[0].role -eq 'system') {

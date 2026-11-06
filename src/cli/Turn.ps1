@@ -43,7 +43,10 @@ function Invoke-AgentTurn {
     $repeatLimit = if ($MaxRepeatCalls -gt 0) { $MaxRepeatCalls } elseif ($script:MaxRepeatToolCalls -gt 0) { [int]$script:MaxRepeatToolCalls } else { 3 }
     $mutationEpoch = 0
     $toolCallCounts = @{}
-    $scopedInstrCache = @{}
+    if ($null -eq $State.scoped_instr_cache -or $State.scoped_instr_cache -isnot [hashtable]) {
+        $State.scoped_instr_cache = @{}
+    }
+    $scopedInstrCache = $State.scoped_instr_cache
     for ($step = 0; $step -lt $Steps; $step++) {
         if ($step -gt 0) {
             $stStep = Get-ContextStats -State $State
@@ -304,6 +307,7 @@ function Invoke-AgentTurn {
                     $parsedOut = $output | ConvertFrom-Json -ErrorAction Stop
                     if ($parsedOut.status -in @('written', 'executed', 'timed_out')) {
                         $mutationEpoch++
+                        $scopedInstrCache.Clear()
                     }
                 }
                 catch {}
@@ -313,6 +317,7 @@ function Invoke-AgentTurn {
                     $parsedOut = $output | ConvertFrom-Json -ErrorAction Stop
                     if ($parsedOut.modified_files -and @($parsedOut.modified_files).Count -gt 0) {
                         $mutationEpoch++
+                        $scopedInstrCache.Clear()
                     }
                 }
                 catch {}
