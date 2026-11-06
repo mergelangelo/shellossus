@@ -67,6 +67,7 @@ $modules = @(
     'cli/Http.ps1',
     'cli/Turn.ps1',
     'cli/Repl.ps1',
+    'cli/Commands.ps1',
     'Cli.ps1'
 )
 
