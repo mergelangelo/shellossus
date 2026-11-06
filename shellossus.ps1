@@ -3270,7 +3270,7 @@ function Format-MemoryArguments {
         scope = $scope
     }
     if ($hasContent) { $out['content'] = $content }
-    $knownProps = @('action', 'view', 'clear', 'scope', 'content', 'note', 'text', 'memory', 'value', 'user_initiated')
+    $knownProps = @('action', 'view', 'clear', 'scope', 'content', 'note', 'text', 'memory', 'value')
     foreach ($p in $props) {
         if ($p -notin $knownProps) {
             $out[$p] = $Arguments.$p
