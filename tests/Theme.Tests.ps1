@@ -233,42 +233,32 @@ try {
     $script:mlQueue = @('')
     Assert-True ((Read-TuiConfirmation -PromptText 'prompt: ' -ActionType 'write') -eq 'n') 'Read-TuiConfirmation empty cancel failed.'
 
-    # The approved 20x16 artwork is retained in full (40x16) and compact (20x8) renderings.
+    # The approved 10x8 Shellossus #6 artwork is retained in full (20x8) and compact (10x4) renderings.
     $compactMascot = @(Get-TuiMascotLines -Mode 'compact')
-    Assert-True ($compactMascot.Count -eq 8) 'Compact mascot must have 8 lines.'
+    Assert-True ($compactMascot.Count -eq 4) 'Compact mascot must have 4 lines.'
     foreach ($line in $compactMascot) {
-        Assert-True ((Strip-AnsiCodes -Text $line).Length -eq 20) 'Compact mascot line width must be 20 chars.'
+        Assert-True ((Strip-AnsiCodes -Text $line).Length -eq 10) 'Compact mascot line width must be 10 chars.'
     }
-    $eyeHighlightFg = "$script:Esc[38;2;255;239;188m"
-    $eyePupilBg = "$script:Esc[48;2;247;211;138m"
+    $eyeFg = "$script:Esc[38;2;247;211;138m"
     $cheekBg = "$script:Esc[48;2;181;124;114m"
-    $handHighlightFg = "$script:Esc[38;2;48;48;48m"
-    $handShadeBg = "$script:Esc[48;2;31;31;31m"
-    Assert-True (([regex]::Matches($compactMascot[4], [regex]::Escape($eyeHighlightFg))).Count -eq 2) 'Compact mascot must show both eye highlights.'
-    Assert-True (([regex]::Matches($compactMascot[4], [regex]::Escape($eyePupilBg))).Count -eq 4) 'Compact mascot must show both light eyes.'
-    Assert-True (([regex]::Matches($compactMascot[5], [regex]::Escape($cheekBg))).Count -eq 4) 'Compact mascot must show both muted cheeks.'
-    Assert-True (([regex]::Matches($compactMascot[6], [regex]::Escape($handHighlightFg))).Count -eq 2) 'Compact mascot must show both hand highlights.'
-    Assert-True (([regex]::Matches($compactMascot[6], [regex]::Escape($handShadeBg))).Count -eq 4) 'Compact mascot must show soft gray hand shading.'
+    $handShadeFg = "$script:Esc[38;2;31;31;31m"
+    $shadowBg = "$script:Esc[48;2;121;94;69m"
+    Assert-True (([regex]::Matches($compactMascot[2], [regex]::Escape($eyeFg))).Count -eq 2) 'Compact mascot must show both light eyes.'
+    Assert-True (([regex]::Matches($compactMascot[2], [regex]::Escape($cheekBg))).Count -eq 2) 'Compact mascot must show both muted cheeks.'
+    Assert-True (([regex]::Matches($compactMascot[3], [regex]::Escape($handShadeFg))).Count -eq 2) 'Compact mascot must show soft gray hand shading.'
+    Assert-True (([regex]::Matches($compactMascot[3], [regex]::Escape($shadowBg))).Count -eq 8) 'Compact mascot must show the bottom shadow row.'
 
     $fullMascot = @(Get-TuiMascotLines -Mode 'full')
-    Assert-True ($fullMascot.Count -eq 16) 'Full mascot must have 16 lines.'
+    Assert-True ($fullMascot.Count -eq 8) 'Full mascot must have 8 lines.'
     $expectedPixels = @(
-        '......ssssssss......',
-        '....sshhhhhhhhss....',
-        '...shhhhhhhhhhhhs...',
-        '..shhhsssssssshhhs..',
-        '.shhssccccccccsshhs.',
-        '.shssccaaaaaaccsshs.',
-        'shsscca######accsshs',
-        'shscc##########ccshs',
-        'sssc##ep####pe##csss',
-        'sssc##pp####pp##csss',
-        'sssc##ff####ff##csss',
-        'ssscqq########qqcsss',
-        'sss#k#h######h#k#sss',
-        'ss#gg#hhhhhhhh#gg#ss',
-        '.ss##ssssssssss##ss.',
-        '..dddddddddddddddd..'
+        '...ssss...',
+        '.shhhhhhs.',
+        '.shcaachs.',
+        'shc####chs',
+        'sc#p##p#cs',
+        'scq####qcs',
+        's#ghhhhg#s',
+        '.dddddddd.'
     )
     $expectedColors = @{
         '.' = $script:Gm.Reset
@@ -279,17 +269,14 @@ try {
         'p' = "$script:Esc[48;2;247;211;138m"
         'q' = "$script:Esc[48;2;181;124;114m"
         'c' = "$script:Esc[48;2;92;70;54m"
-        'e' = "$script:Esc[48;2;255;239;188m"
-        'f' = "$script:Esc[48;2;215;168;92m"
         'a' = "$script:Esc[48;2;38;37;34m"
         'g' = "$script:Esc[48;2;31;31;31m"
-        'k' = "$script:Esc[48;2;48;48;48m"
     }
-    for ($y = 0; $y -lt 16; $y++) {
-        Assert-True ((Strip-AnsiCodes -Text $fullMascot[$y]).Length -eq 40) 'Full mascot line width must be 40 chars.'
+    for ($y = 0; $y -lt 8; $y++) {
+        Assert-True ((Strip-AnsiCodes -Text $fullMascot[$y]).Length -eq 20) 'Full mascot line width must be 20 chars.'
         $pixels = [regex]::Matches($fullMascot[$y], '\x1b\[(?:0|48;2;[0-9;]+)m  ')
-        Assert-True ($pixels.Count -eq 20) "Full mascot row $y must have 20 colored cells."
-        for ($x = 0; $x -lt 20; $x++) {
+        Assert-True ($pixels.Count -eq 10) "Full mascot row $y must have 10 colored cells."
+        for ($x = 0; $x -lt 10; $x++) {
             $expectedColor = $expectedColors[[string]$expectedPixels[$y][$x]]
             Assert-True ($pixels[$x].Value -ceq ($expectedColor + '  ')) "Full mascot pixel $x,$y differs from the approved design."
         }

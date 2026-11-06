@@ -158,7 +158,7 @@ function Write-TuiStartupBanner {
     $mascotLines = @(Get-TuiMascotLines -Mode 'compact')
     $body = @()
     if ($wInit -ge 76) {
-        $mascotVisW = if ($mascotLines.Count -gt 0) { (Strip-AnsiCodes -Text $mascotLines[0]).Length } else { 20 }
+        $mascotVisW = if ($mascotLines.Count -gt 0) { (Strip-AnsiCodes -Text $mascotLines[0]).Length } else { 10 }
         $maxBannerTextW = $wInit - $mascotVisW - 9
         for ($mIdx = 0; $mIdx -lt $mascotLines.Count; $mIdx++) {
             $mLine = $mascotLines[$mIdx]
