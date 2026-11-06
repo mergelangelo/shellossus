@@ -168,7 +168,8 @@ function Expand-UserPrompt {
                 if ($truncatedByLines -or $truncatedByChars) {
                     $content = $content + "`n[... truncated at 300 lines / 20000 chars; use read_file with start_line to read more ...]"
                 }
-                $attachments += "<file path=`"$rel`">`n$content`n</file>"
+                $escapedRel = Escape-XmlText -Text $rel
+                $attachments += "<file path=`"$escapedRel`">`n$content`n</file>"
                 if ($script:OutputMode -ne 'json') {
                     Write-Host ($script:Gm.Aqua + '  [@file] ' + $script:Gm.Grey1 + $rel + $script:Gm.Reset)
                 }

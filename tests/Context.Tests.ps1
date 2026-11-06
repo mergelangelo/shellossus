@@ -501,6 +501,34 @@ try {
     Set-AgentUtf8Content -LiteralPath (Join-Path $workspacePath 'bin.dat') -Value "abc`0def"
     $expandedSkipped = Expand-UserPrompt -Root $workspacePath -Prompt 'Check @nonexistent.txt and @bin.dat'
     Assert-True ($expandedSkipped -eq 'Check @nonexistent.txt and @bin.dat' -and (-not $expandedSkipped.Contains('<file'))) 'Expand-UserPrompt attached nonexistent or binary @file.'
+
+    # 7. Expand-UserPrompt, Resolve-SkillCommand, and Resolve-AgentRoleCommand escape XML special characters in attributes.
+    $xmlSpecialFileName = "a&b'c.txt"
+    Set-AgentUtf8Content -LiteralPath (Join-Path $workspacePath $xmlSpecialFileName) -Value 'xml-attr-test'
+    $expandedXmlSpecial = Expand-UserPrompt -Root $workspacePath -Prompt "Check @$xmlSpecialFileName"
+    Assert-True ($expandedXmlSpecial.Contains('<file path="a&amp;b&apos;c.txt">') -and $expandedXmlSpecial.Contains('xml-attr-test')) 'Expand-UserPrompt did not escape XML special characters (&, '') in @file path attribute.'
+
+    $xmlSkillDir = Join-Path $dotH "skills\dir&'xml"
+    New-Item -ItemType Directory -Path $xmlSkillDir -Force | Out-Null
+    $xmlSkillFile = Join-Path $xmlSkillDir 'SKILL.md'
+    Set-AgentUtf8Content -LiteralPath $xmlSkillFile -Value "---`nname: xml-skill`ndescription: XML escape skill`n---`nSkill body."
+    $null = Get-SkillsCatalog -Root $workspacePath -ConfigDir $globalCfgDir
+    $script:SkillsByName['xml-skill'].name = "xml&'skill"
+    $resolvedXmlSkill = Resolve-SkillCommand -Root $workspacePath -ConfigDir $globalCfgDir -InputText '/skill:xml-skill'
+    Assert-True ($resolvedXmlSkill.Contains('name="xml&amp;&apos;skill"') -and $resolvedXmlSkill.Contains('dir&amp;&apos;xml/SKILL.md"')) 'Resolve-SkillCommand did not escape XML special characters in name and path attributes.'
+
+    $null = Get-AgentRolesCatalog -Root $workspacePath -ConfigDir $globalCfgDir
+    $script:AgentRolesByName['xml-role'] = @{
+        name = "role&'name"
+        permission = "Read&'Only"
+        description = 'XML escape role'
+        system_prompt = 'Role body.'
+        tools = @()
+        model = ''
+        builtin = $false
+    }
+    $resolvedXmlRole = Resolve-AgentRoleCommand -Root $workspacePath -ConfigDir $globalCfgDir -InputText '/agent:xml-role'
+    Assert-True ($resolvedXmlRole.Contains('<agent_role name="role&amp;&apos;name" permission="Read&amp;&apos;Only">') -and $resolvedXmlRole.Contains('Role body.')) 'Resolve-AgentRoleCommand did not escape XML special characters in name and permission attributes.'
 }
 finally {
     Remove-TestEnvironment -Env $envData
