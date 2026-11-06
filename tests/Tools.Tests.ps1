@@ -1256,6 +1256,93 @@ try {
         Remove-Item Function:\Write-Host -ErrorAction SilentlyContinue
         Remove-Item Function:\Start-Sleep -ErrorAction SilentlyContinue
     }
+
+    # Regression: Get-SubagentToolNames excludes write/exec/state/interactive tools for ReadOnly subagents,
+    # excludes web tools in non-interactive ReadOnly mode when AutoApproveWeb is false, and Invoke-SubagentInProcess
+    # isolates parent $script:ActiveSessionTodos and $parentState.todos from craft subagent todo calls.
+    $savedPermSubTodo = $script:AgentPermission
+    $savedModeSubTodo = $script:OutputMode
+    $savedAutoWebSubTodo = $script:AutoApproveWeb
+    $savedStateSubTodo = $script:ActiveState
+    $savedTodosSubTodo = @($script:ActiveSessionTodos)
+    try {
+        $script:AgentPermission = 'AutoEdit'
+        $script:OutputMode = 'text'
+        $script:AutoApproveWeb = $false
+        $reconRole = Resolve-AgentRole -Name 'recon' -Root $workspacePath -ConfigDir ''
+        $auditRole = Resolve-AgentRole -Name 'audit' -Root $workspacePath -ConfigDir ''
+        $reconTools = @(Get-SubagentToolNames -Role $reconRole)
+        $auditTools = @(Get-SubagentToolNames -Role $auditRole)
+        foreach ($excludedTool in @('write_file', 'edit_file', 'run_command', 'memory', 'todo', 'ask_user', 'run_agent')) {
+            Assert-True ($reconTools -notcontains $excludedTool) "recon ReadOnly subagent exposed $excludedTool."
+            Assert-True ($auditTools -notcontains $excludedTool) "audit ReadOnly subagent exposed $excludedTool."
+        }
+        Assert-True (($reconTools -contains 'read_file') -and ($reconTools -contains 'fetch_url') -and ($reconTools -contains 'web_search')) 'Interactive ReadOnly recon subagent should retain read_file, fetch_url, and web_search.'
+
+        $nonInteractiveRoTools = @(Get-SubagentToolNames -Role $reconRole -ForceReadOnly -NonInteractive)
+        Assert-True (($nonInteractiveRoTools -notcontains 'fetch_url') -and ($nonInteractiveRoTools -notcontains 'web_search')) 'Get-SubagentToolNames -ForceReadOnly -NonInteractive did not exclude fetch_url and web_search when AutoApproveWeb is false.'
+        Assert-True (($nonInteractiveRoTools -contains 'list_files') -and ($nonInteractiveRoTools -contains 'read_file') -and ($nonInteractiveRoTools -contains 'find_files') -and ($nonInteractiveRoTools -contains 'grep_files')) 'Get-SubagentToolNames -ForceReadOnly -NonInteractive dropped core workspace read tools.'
+
+        $script:OutputMode = 'json'
+        $parentTodoList = @(@{ content = 'Parent task 1'; status = 'in_progress' }, @{ content = 'Parent task 2'; status = 'pending' })
+        $parentStateForSubTodo = @{
+            session_id = 'parent-todo-sess'
+            workspace = $workspacePath
+            model = 'test-model'
+            messages = @(@{ role = 'system'; content = 'sys' })
+            todos = @($parentTodoList)
+        }
+        $script:ActiveState = $parentStateForSubTodo
+        $script:ActiveSessionTodos = @($parentTodoList)
+        $script:subTodoStep = 0
+        function Invoke-WebRequest {
+            param($Uri, $Method, $Headers, $ContentType, $Body, $TimeoutSec, $ErrorAction, [switch]$UseBasicParsing, $OutFile)
+            $script:subTodoStep++
+            if ($script:subTodoStep -eq 1) {
+                $r = @{ choices = @(@{ finish_reason = 'tool_calls'; message = @{
+                    content = ''
+                    tool_calls = @(@{ id = 'sub-td-1'; type = 'function'; function = @{ name = 'todo'; arguments = '{"todos":[{"content":"Subagent local step","status":"completed"}]}' } })
+                } }) } | ConvertTo-Json -Depth 10 -Compress
+            }
+            elseif ($script:subTodoStep -eq 2) {
+                $r = @{ choices = @(@{ finish_reason = 'stop'; message = @{ content = 'Craft subagent finished' } }) } | ConvertTo-Json -Depth 10 -Compress
+            }
+            elseif ($script:subTodoStep -eq 3) {
+                $r = @{ choices = @(@{ finish_reason = 'tool_calls'; message = @{
+                    content = ''
+                    tool_calls = @(@{ id = 'sub-td-2'; type = 'function'; function = @{ name = 'todo'; arguments = '{"todos":[{"content":"Subagent failing step","status":"in_progress"}]}' } })
+                } }) } | ConvertTo-Json -Depth 10 -Compress
+            }
+            else {
+                throw 'Subagent failed after updating todo'
+            }
+            Set-Content -LiteralPath $OutFile -Value $r -Encoding UTF8 -NoNewline
+        }
+        $craftTodoRes = Invoke-AgentTool -Root $workspacePath -Call @{
+            id = 'sub-craft-todo'
+            function = @{ name = 'run_agent'; arguments = '{"role":"craft","prompt":"Run subagent with local todo"}' }
+        } | ConvertFrom-Json
+        Assert-True ($craftTodoRes.status -eq 'completed') 'Craft subagent with todo call did not complete.'
+        Assert-True ($script:ActiveSessionTodos.Count -eq 2 -and $script:ActiveSessionTodos[0].content -eq 'Parent task 1' -and $script:ActiveSessionTodos[1].content -eq 'Parent task 2') 'Craft subagent todo call overwrote parent $script:ActiveSessionTodos.'
+        Assert-True ($parentStateForSubTodo.todos.Count -eq 2 -and $parentStateForSubTodo.todos[0].content -eq 'Parent task 1' -and $parentStateForSubTodo.todos[1].content -eq 'Parent task 2') 'Craft subagent todo call overwrote $parentState.todos.'
+        Assert-True ($script:ActiveState -eq $parentStateForSubTodo) 'Invoke-SubagentInProcess did not restore $script:ActiveState.'
+
+        $craftFailRes = Invoke-AgentTool -Root $workspacePath -Call @{
+            id = 'sub-craft-todo-fail'
+            function = @{ name = 'run_agent'; arguments = '{"role":"craft","prompt":"Run failing subagent with local todo"}' }
+        } | ConvertFrom-Json
+        Assert-True ([bool]$craftFailRes.error) 'Expected failing craft subagent to return an error.'
+        Assert-True ($script:ActiveSessionTodos.Count -eq 2 -and $script:ActiveSessionTodos[0].content -eq 'Parent task 1' -and $script:ActiveSessionTodos[1].content -eq 'Parent task 2') 'Failing craft subagent todo call corrupted parent $script:ActiveSessionTodos.'
+        Assert-True ($parentStateForSubTodo.todos.Count -eq 2 -and $parentStateForSubTodo.todos[0].content -eq 'Parent task 1' -and $parentStateForSubTodo.todos[1].content -eq 'Parent task 2') 'Failing craft subagent todo call corrupted $parentState.todos.'
+    }
+    finally {
+        Remove-Item Function:\Invoke-WebRequest -ErrorAction SilentlyContinue
+        $script:AgentPermission = $savedPermSubTodo
+        $script:OutputMode = $savedModeSubTodo
+        $script:AutoApproveWeb = $savedAutoWebSubTodo
+        $script:ActiveState = $savedStateSubTodo
+        $script:ActiveSessionTodos = $savedTodosSubTodo
+    }
 }
 finally {
     Remove-TestEnvironment -Env $envData

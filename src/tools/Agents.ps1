@@ -31,14 +31,19 @@ function Get-ForkedSubagentMessages {
 }
 
 function Get-SubagentToolNames {
-    param($Role, [switch]$ForceReadOnly)
+    param($Role, [switch]$ForceReadOnly, [switch]$NonInteractive)
+    $isReadOnly = ($ForceReadOnly -or $script:AgentPermission -eq 'ReadOnly' -or ($Role -and $Role.permission -eq 'ReadOnly'))
+    $isNonInteractive = ($NonInteractive -or $script:OutputMode -eq 'json')
     # Resolve patterns against the parent's effective capabilities, including
     # exclusions and NoTools. Never interpret an empty intersection as allow-all.
     foreach ($tool in @(Get-AgentTools)) {
         $name = [string]$tool.function.name
         if ($name -eq 'run_agent') { continue }
-        if (($ForceReadOnly -or $Role.permission -eq 'ReadOnly') -and $name -in @('write_file', 'edit_file', 'run_command')) { continue }
-        if ($Role.tools -and $Role.tools.Count -gt 0) {
+        if ($isReadOnly) {
+            if ($name -in @('write_file', 'edit_file', 'run_command', 'memory', 'todo', 'ask_user')) { continue }
+            if ($isNonInteractive -and (-not $script:AutoApproveWeb) -and $name -in @('fetch_url', 'web_search')) { continue }
+        }
+        if ($Role -and $Role.tools -and $Role.tools.Count -gt 0) {
             $matched = $false
             foreach ($pattern in $Role.tools) {
                 if ($name -like (Resolve-ToolCanonicalName -Name $pattern)) { $matched = $true; break }
@@ -76,11 +81,13 @@ function Invoke-SubagentInProcess {
     $childTools = @(Get-SubagentToolNames -Role $roleObj -ForceReadOnly:$ForceReadOnly)
     $savedModel = $script:ActiveModelId
     $savedState = $script:ActiveState
+    $savedTodos = @($script:ActiveSessionTodos)
     try {
         $script:SubagentDepth = $savedDepth + 1
         $script:AgentPermission = $effPerm
         $script:EnabledTools = $childTools
         $script:NoTools = ($savedNoTools -or $childTools.Count -eq 0)
+        $script:ActiveSessionTodos = @()
         $baseSys = Build-SystemPrompt -Root $Root -ConfigDir $configDir
         $subSys = $baseSys + "`n`n[Subagent Role: $($roleObj.name)]`n" + $roleObj.system_prompt
         $initMsgs = @(if ($ContextMode -eq 'fork') {
@@ -142,6 +149,7 @@ function Invoke-SubagentInProcess {
         $script:NoTools = $savedNoTools
         $script:ActiveModelId = $savedModel
         $script:ActiveState = $savedState
+        $script:ActiveSessionTodos = $savedTodos
     }
 }
 
@@ -242,7 +250,7 @@ if ($env:SHELLOSSUS_SUB_REASONING_EFFORT) { $workerArgs.ReasoningEffort = $env:S
                 $t = $Tasks[$i]
                 $rName = if ($t.role) { [string]$t.role } else { 'recon' }
                 $roleObj = Resolve-AgentRole -Name $rName -Root $Root -ConfigDir $configDir
-                $childTools = @(Get-SubagentToolNames -Role $roleObj -ForceReadOnly)
+                $childTools = @(Get-SubagentToolNames -Role $roleObj -ForceReadOnly -NonInteractive)
                 $effModel = if ($roleObj.model) { [string]$roleObj.model } elseif ($script:ActiveModelId) { $script:ActiveModelId } else { 'test-model' }
                 $promptTemp = New-AgentTempFile
                 $outTemp = New-AgentTempFile
