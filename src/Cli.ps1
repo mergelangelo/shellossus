@@ -336,7 +336,7 @@ if (-not $LibraryOnly) {
                 continue
             }
             if ($trimmedQ -match '^/context(?:\s+(.+))?$') { Invoke-ReplContextCommand -State $state -CtxArg $(if ($Matches[1]) { $Matches[1].Trim() } else { '' }); continue }
-            if ($trimmedQ -match '^/model(?:\s+(.+))?$') { $Model = Invoke-ReplModelCommand -State $state -CurrentModel $Model -SessionDir $sessionDir -NewModel $Matches[1]; continue }
+            if ($trimmedQ -match '^/model(?:\s+(.+))?$') { $Model = Invoke-ReplModelCommand -State $state -CurrentModel $Model -SessionDir $sessionDir -NewModel $Matches[1] -SessionFile $sessionFile -RootPath $rootPath; continue }
             if ($trimmedQ -match '^/theme(?:\s+(.+))?$') { Invoke-ReplThemeCommand -ThemeArg $(if ($Matches[1]) { $Matches[1].Trim() } else { '' }); continue }
             if ($trimmedQ -match '^/compact(?:\s+(.+))?$') { Invoke-ReplCompactCommand -State $state -Endpoint $endpoint -Model $Model -ApiKey $agentKey -SessionFile $sessionFile -RootPath $rootPath -Focus $Matches[1]; continue }
             if ($trimmedQ -eq '/sessions' -or $trimmedQ -match '^/resume(?:\s+(.+))?$') {
