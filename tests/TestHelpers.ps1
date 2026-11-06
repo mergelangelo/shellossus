@@ -25,6 +25,13 @@ function Assert-True {
 
 function New-TestEnvironment {
     $baseTemp = if ($env:TEMP) { $env:TEMP } elseif ($env:TMPDIR) { $env:TMPDIR } else { '/tmp' }
+    # macOS /tmp and /var are symlinks. The ancestor walk rejects them, so fixtures use the physical path.
+    if ($env:OS -ne 'Windows_NT' -and (Test-PathHasReparsePoint -Path $baseTemp)) {
+        $candidate = '/private' + $baseTemp
+        if ((Test-Path -LiteralPath $candidate) -and -not (Test-PathHasReparsePoint -Path $candidate)) {
+            $baseTemp = $candidate
+        }
+    }
     $root = Join-Path $baseTemp ('shellossus-' + [guid]::NewGuid().ToString('N'))
     $ws = Join-Path $root 'workspace'
     New-Item -ItemType Directory -Path $ws -Force | Out-Null

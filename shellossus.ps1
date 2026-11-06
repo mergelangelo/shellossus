@@ -379,8 +379,7 @@ function Test-PathHasReparsePoint {
         if ($stopItem) { $stopNorm = $stopItem.FullName.TrimEnd('\').TrimEnd('/') }
     }
     $curr = $Path
-    for ($depth = 0; $depth -lt 64; $depth++) {
-        if (-not $curr) { break }
+    while ($curr) {
         if (Test-Path -LiteralPath $curr) {
             $item = Get-Item -LiteralPath $curr -Force -ErrorAction SilentlyContinue
             if ($item) {
@@ -461,12 +460,7 @@ function Resolve-AgentPath {
             $skillItem = Get-Item -LiteralPath $skillTarget -Force -ErrorAction Stop
             if ($skillItem.PSProvider.Name -ne 'FileSystem' -or $skillItem.PSIsContainer) { throw 'Invalid skill file.' }
             if (Test-IsSecretFile $skillItem) { throw 'Agent tools cannot access credential configuration files.' }
-            $cursor = $skillItem
-            while ($null -ne $cursor) {
-                if (($cursor.Attributes -band 1024) -ne 0) { throw 'Reparse points are not allowed.' }
-                if ($cursor.PSIsContainer) { $cursor = $cursor.Parent }
-                else { $cursor = $cursor.Directory }
-            }
+            if (Test-PathHasReparsePoint -Path $skillItem.FullName) { throw 'Reparse points are not allowed.' }
             return $skillItem.FullName
         }
     }
@@ -486,12 +480,7 @@ function Resolve-AgentPath {
         throw 'Path is outside the workspace.'
     }
     # Reject junctions/symlinks, including those in workspace ancestors.
-    $cursor = $item
-    while ($null -ne $cursor) {
-        if (($cursor.Attributes -band 1024) -ne 0) { throw 'Reparse points are not allowed.' }
-        if ($cursor.PSIsContainer) { $cursor = $cursor.Parent }
-        else { $cursor = $cursor.Directory }
-    }
+    if (Test-PathHasReparsePoint -Path $item.FullName) { throw 'Reparse points are not allowed.' }
     return $item.FullName
 }
 
@@ -7067,14 +7056,7 @@ function Get-SkillsCatalog {
             if ($skillCountInDir -ge 40) { break }
             $skillCountInDir++
             if (($skillFile.Attributes -band 1024) -ne 0 -or $skillFile.Length -gt 128KB) { continue }
-            $hasReparse = $false
-            $cursor = $skillFile
-            while ($null -ne $cursor) {
-                if (($cursor.Attributes -band 1024) -ne 0) { $hasReparse = $true; break }
-                if ($cursor.PSIsContainer) { $cursor = $cursor.Parent }
-                else { $cursor = $cursor.Directory }
-            }
-            if ($hasReparse) { continue }
+            if (Test-PathHasReparsePoint -Path $skillFile.FullName) { continue }
             $raw = Get-Content -LiteralPath $skillFile.FullName -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
             if (-not $raw) { continue }
             $skillName = $skillFile.Directory.Name
@@ -7215,14 +7197,7 @@ function Get-AgentRolesCatalog {
             if ($roleCountInDir -ge 40) { break }
             $roleCountInDir++
             if (($roleFile.Attributes -band 1024) -ne 0 -or $roleFile.Length -gt 128KB) { continue }
-            $hasReparse = $false
-            $cursor = $roleFile
-            while ($null -ne $cursor) {
-                if (($cursor.Attributes -band 1024) -ne 0) { $hasReparse = $true; break }
-                if ($cursor.PSIsContainer) { $cursor = $cursor.Parent }
-                else { $cursor = $cursor.Directory }
-            }
-            if ($hasReparse) { continue }
+            if (Test-PathHasReparsePoint -Path $roleFile.FullName) { continue }
             $raw = Get-Content -LiteralPath $roleFile.FullName -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
             if (-not $raw) { continue }
             $baseName = ($roleFile.Name -replace '\.md$', '').ToLower()

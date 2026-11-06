@@ -336,8 +336,7 @@ function Test-PathHasReparsePoint {
         if ($stopItem) { $stopNorm = $stopItem.FullName.TrimEnd('\').TrimEnd('/') }
     }
     $curr = $Path
-    for ($depth = 0; $depth -lt 64; $depth++) {
-        if (-not $curr) { break }
+    while ($curr) {
         if (Test-Path -LiteralPath $curr) {
             $item = Get-Item -LiteralPath $curr -Force -ErrorAction SilentlyContinue
             if ($item) {
@@ -418,12 +417,7 @@ function Resolve-AgentPath {
             $skillItem = Get-Item -LiteralPath $skillTarget -Force -ErrorAction Stop
             if ($skillItem.PSProvider.Name -ne 'FileSystem' -or $skillItem.PSIsContainer) { throw 'Invalid skill file.' }
             if (Test-IsSecretFile $skillItem) { throw 'Agent tools cannot access credential configuration files.' }
-            $cursor = $skillItem
-            while ($null -ne $cursor) {
-                if (($cursor.Attributes -band 1024) -ne 0) { throw 'Reparse points are not allowed.' }
-                if ($cursor.PSIsContainer) { $cursor = $cursor.Parent }
-                else { $cursor = $cursor.Directory }
-            }
+            if (Test-PathHasReparsePoint -Path $skillItem.FullName) { throw 'Reparse points are not allowed.' }
             return $skillItem.FullName
         }
     }
@@ -443,11 +437,6 @@ function Resolve-AgentPath {
         throw 'Path is outside the workspace.'
     }
     # Reject junctions/symlinks, including those in workspace ancestors.
-    $cursor = $item
-    while ($null -ne $cursor) {
-        if (($cursor.Attributes -band 1024) -ne 0) { throw 'Reparse points are not allowed.' }
-        if ($cursor.PSIsContainer) { $cursor = $cursor.Parent }
-        else { $cursor = $cursor.Directory }
-    }
+    if (Test-PathHasReparsePoint -Path $item.FullName) { throw 'Reparse points are not allowed.' }
     return $item.FullName
 }
