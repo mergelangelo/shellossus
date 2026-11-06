@@ -118,8 +118,7 @@ if (-not $LibraryOnly) {
         $expState = @{ session_id = ''; workspace = $rootPath; model = $Model; messages = @() }
         Invoke-SessionResume -SessionFile $Export -State $expState -CurrentWorkspace $rootPath | Out-Null
         $outHtml = $Export -replace '\.jsonl$', '.html'
-        $exported = Export-AgentSessionHtml -State $expState -OutputPath $outHtml
-        Write-Host ($script:Gm.Green + "Exported session HTML: $exported" + $script:Gm.Reset)
+        $null = Export-AgentSessionOutput -State $expState -ExportPath $outHtml -RootPath $rootPath -Model $Model
         return
     }
     if (-not $Export) {
@@ -224,15 +223,7 @@ if (-not $LibraryOnly) {
         }
     }
     if ($Export) {
-        if ($Export -match '\.jsonl$') {
-            Save-AgentSession -SessionFile $Export -State $state -Workspace $rootPath -Model $Model
-            Write-Host ($script:Gm.Green + "Exported session JSONL: $Export" + $script:Gm.Reset)
-        }
-        else {
-            $outHtml = if ($Export -match '\.html?$') { $Export } else { $Export + '.html' }
-            $exported = Export-AgentSessionHtml -State $state -OutputPath $outHtml
-            Write-Host ($script:Gm.Green + "Exported session HTML: $exported" + $script:Gm.Reset)
-        }
+        $null = Export-AgentSessionOutput -State $state -ExportPath $Export -RootPath $rootPath -Model $Model
         return
     }
     try {
@@ -286,409 +277,78 @@ if (-not $LibraryOnly) {
             $trimmedQ = Resolve-ReplCommandAlias -InputText $rawTrimmed
             if ($trimmedQ -eq '/exit' -or $trimmedQ -eq '/quit') { break }
             if ($trimmedQ -eq '/clear' -or $trimmedQ -eq '/new') {
-                $newId = 'sess-' + (Get-Date -Format 'yyyyMMdd-HHmmss') + '-' + (Get-Random -Minimum 100000 -Maximum 999999)
-                $fullSystemPrompt = Build-SystemPrompt -Root $rootPath -ConfigDir $configDir
-                $system = @{ role = 'system'; content = $fullSystemPrompt }
-                $state.session_id = $newId
-                $state.session_name = ''
-                $state.parent_session = ''
-                $state.workspace = $rootPath
-                $state.model = $Model
-                $state.messages = @($system)
-                $state.tree_entries = @()
-                $state.leaf_id = $null
-                $state.todos = @()
-                $script:ActiveSessionTodos = @()
-                Sync-AgentCapabilities -State $state | Out-Null
-                Clear-AgentUndoBackups -UndoEntries $undoStack
-                $undoStack = @()
-                $sessionFile = if ($NoSession) { '' } else { Join-Path $sessionDir ($newId + '.jsonl') }
-                $script:ActiveSessionId = $newId
-                $script:ActiveSessionFile = $sessionFile
-                Write-Host ($script:Gm.Grey1 + '  Started a new conversation session.' + $script:Gm.Reset)
+                $newRes = Invoke-ReplNewSessionCommand -State $state -RootPath $rootPath -ConfigDir $configDir -Model $Model -SessionDir $sessionDir -NoSession:$NoSession -UndoStack $undoStack
+                $fullSystemPrompt = $newRes.full_system_prompt; $system = $newRes.system
+                $sessionFile = $newRes.session_file; $undoStack = @($newRes.undo_stack)
                 continue
             }
-            if ($trimmedQ -match '^/(?:todo|todos)(?:\s+(.+))?$') {
-                $sub = if ($Matches[1]) { $Matches[1].Trim().ToLower() } else { '' }
-                if ($sub -eq 'clear') {
-                    $script:ActiveSessionTodos = @()
-                    if ($state) { $state.todos = @() }
-                    Write-Host ($script:Gm.Grey1 + '  Cleared active todo list.' + $script:Gm.Reset)
-                }
-                else {
-                    $currTodos = @(if ($script:ActiveSessionTodos -and @($script:ActiveSessionTodos).Count -gt 0) { @($script:ActiveSessionTodos) } elseif ($state -and $state.todos -and @($state.todos).Count -gt 0) { @($state.todos) })
-                    if ($currTodos.Count -gt 0) {
-                        Write-TodoCard -Todos $currTodos
-                    }
-                    else {
-                        Write-Host ($script:Gm.Grey1 + '  No active tasks in todo list.' + $script:Gm.Reset)
-                    }
-                }
-                continue
-            }
-            if ($trimmedQ -match '^/(?:memory|mem)(?:\s+(.+))?$') {
-                $memSub = if ($Matches[1]) { $Matches[1].Trim() } else { '' }
-                Invoke-ReplMemoryCommand -State $state -RootPath $rootPath -ConfigDir $configDir -MemArg $memSub
-                continue
-            }
-            if ($trimmedQ -eq '/help' -or $trimmedQ -eq '/hotkeys') {
-                Write-TuiHelpCard
-                continue
-            }
+            if ($trimmedQ -match '^/(?:todo|todos)(?:\s+(.+))?$') { Invoke-ReplTodoCommand -State $state -TodoArg $Matches[1]; continue }
+            if ($trimmedQ -match '^/(?:memory|mem)(?:\s+(.+))?$') { Invoke-ReplMemoryCommand -State $state -RootPath $rootPath -ConfigDir $configDir -MemArg $Matches[1]; continue }
+            if ($trimmedQ -eq '/help' -or $trimmedQ -eq '/hotkeys') { Write-TuiHelpCard; continue }
             if ($trimmedQ -eq '/doctor') {
                 $doctorSessionDir = if ($sessionFile) { Split-Path $sessionFile -Parent } else { $sessionDir }
                 $report = Get-AgentDoctorReport -BaseUrl $BaseUrl -ModelId $Model -ApiKey $agentKey -Workspace $rootPath -SessionDir $doctorSessionDir -NoSession:(-not $sessionFile) -ConfigState $doctorConfigState
                 Write-AgentDoctorReport -Report $report -Mode $script:OutputMode
                 continue
             }
-            if ($trimmedQ -eq '/mascot') {
-                Write-TuiMascotCard -Mode 'full'
-                continue
-            }
-            if ($trimmedQ -eq '/agents') {
-                Write-TuiAgentsCard -RootPath $rootPath -ConfigDir $configDir
-                continue
-            }
-            if ($trimmedQ -eq '/skills') {
-                Write-TuiSkillsCard -RootPath $rootPath -ConfigDir $configDir
-                continue
-            }
-            if ($trimmedQ -match '^/permission(?:\s+(.+))?$') {
-                $reqPerm = if ($Matches[1]) { $Matches[1].Trim() } else { '' }
-                Invoke-ReplPermissionCommand -State $state -ReqPerm $reqPerm
-                continue
-            }
-            if ($trimmedQ -match '^/diagnostics(?:\s+(.+))?$') {
-                $diagArg = if ($Matches[1]) { $Matches[1] } else { '' }
-                Invoke-ReplDiagnosticsCommand -RootPath $rootPath -Arg $diagArg
-                continue
-            }
-            if ($trimmedQ -match '^/(?:reasoning|thinking)(?:\s+(.+))?$') {
-                $argR = if ($Matches[1]) { $Matches[1].Trim().ToLower() } else { '' }
-                Invoke-ReplReasoningCommand -ArgR $argR
-                continue
-            }
-            if ($trimmedQ -match '^/name(?:\s+(.+))?$') {
-                if ($Matches[1]) {
-                    $state.session_name = $Matches[1].Trim()
-                    Save-AgentSession -SessionFile $sessionFile -State $state -Workspace $rootPath -Model $Model
-                    Write-Host ($script:Gm.Green + "  Session name set to: $($state.session_name)" + $script:Gm.Reset)
-                }
-                else {
-                    $nm = if ($state.session_name) { $state.session_name } else { '(unnamed)' }
-                    Write-Host ($script:Gm.Aqua + "  Session name: $nm (use /name <text> to set)" + $script:Gm.Reset)
-                }
-                continue
-            }
+            if ($trimmedQ -eq '/mascot') { Write-TuiMascotCard -Mode 'full'; continue }
+            if ($trimmedQ -eq '/agents') { Write-TuiAgentsCard -RootPath $rootPath -ConfigDir $configDir; continue }
+            if ($trimmedQ -eq '/skills') { Write-TuiSkillsCard -RootPath $rootPath -ConfigDir $configDir; continue }
+            if ($trimmedQ -match '^/permission(?:\s+(.+))?$') { Invoke-ReplPermissionCommand -State $state -ReqPerm $(if ($Matches[1]) { $Matches[1].Trim() } else { '' }); continue }
+            if ($trimmedQ -match '^/diagnostics(?:\s+(.+))?$') { Invoke-ReplDiagnosticsCommand -RootPath $rootPath -Arg $Matches[1]; continue }
+            if ($trimmedQ -match '^/(?:reasoning|thinking)(?:\s+(.+))?$') { Invoke-ReplReasoningCommand -ArgR $(if ($Matches[1]) { $Matches[1].Trim().ToLower() } else { '' }); continue }
+            if ($trimmedQ -match '^/name(?:\s+(.+))?$') { Invoke-ReplNameCommand -State $state -SessionFile $sessionFile -RootPath $rootPath -Model $Model -NameArg $Matches[1]; continue }
             if ($trimmedQ -match '^/tree(?:\s+(.+))?$') {
-                if ($Matches[1]) {
-                    $targetEntryId = $Matches[1].Trim()
-                    try {
-                        Switch-SessionBranch -State $state -TargetId $targetEntryId | Out-Null
-                        Clear-AgentUndoBackups -UndoEntries $undoStack
-                        $undoStack = @()
-                        Save-AgentSession -SessionFile $sessionFile -State $state -Workspace $rootPath -Model $Model
-                        Write-Host ($script:Gm.Green + "  Switched active branch to entry $targetEntryId ($($state.messages.Count) messages in active path)." + $script:Gm.Reset)
-                    }
-                    catch {
-                        Write-Host ($script:Gm.Red + '  ' + $_.Exception.Message + $script:Gm.Reset)
-                    }
-                }
-                else {
-                    foreach ($tLn in @(Format-TuiTreeCard -State $state)) {
-                        Write-Host $tLn
-                    }
-                }
+                $treeRes = Invoke-ReplTreeCommand -State $state -SessionFile $sessionFile -RootPath $rootPath -Model $Model -UndoStack $undoStack -TargetEntryId $Matches[1]
+                $undoStack = @($treeRes.undo_stack)
                 continue
             }
             if ($trimmedQ -match '^/(?:fork|clone)(?:\s+(.+))?$') {
-                $forkEntryId = if ($Matches[1]) { $Matches[1].Trim() } else { '' }
-                try {
-                    $forkRes = Invoke-SessionFork -State $state -SessionDir $sessionDir -EntryId $forkEntryId
-                    $state = $forkRes.state
-                    $sessionFile = if ($NoSession) { '' } else { $forkRes.session_file }
-                    Clear-AgentUndoBackups -UndoEntries $undoStack
-                    $undoStack = @()
-                    Write-Host ($script:Gm.Green + "  Forked session to: $($forkRes.session_file) (id=$($forkRes.session_id))" + $script:Gm.Reset)
-                }
-                catch {
-                    Write-Host ($script:Gm.Red + '  Fork failed: ' + $_.Exception.Message + $script:Gm.Reset)
-                }
+                $forkRes = Invoke-ReplForkCommand -State $state -SessionDir $sessionDir -SessionFile $sessionFile -NoSession:$NoSession -UndoStack $undoStack -ForkEntryId $Matches[1]
+                $state = $forkRes.state; $sessionFile = $forkRes.session_file; $undoStack = @($forkRes.undo_stack)
                 continue
             }
-            if ($trimmedQ -match '^/(?:export|share)(?:\s+(.+))?$') {
-                $expArg = if ($Matches[1]) { $Matches[1].Trim() } else { '' }
-                try {
-                    if (-not $expArg) {
-                        $baseName = if ($state.session_id) { [string]$state.session_id } else { 'session-export' }
-                        $expArg = Join-Path $rootPath ($baseName + '.html')
-                    }
-                    elseif ($expArg -notmatch '^([a-zA-Z]:[\\/]|[\\/])') {
-                        $expArg = Join-Path $rootPath $expArg
-                    }
-                    if ($expArg -match '\.jsonl$') {
-                        Save-AgentSession -SessionFile $expArg -State $state -Workspace $rootPath -Model $Model
-                        Write-Host ($script:Gm.Green + "  Exported session JSONL: $expArg" + $script:Gm.Reset)
-                    }
-                    else {
-                        if ($expArg -notmatch '\.html?$') { $expArg += '.html' }
-                        $outHtml = Export-AgentSessionHtml -State $state -OutputPath $expArg
-                        Write-Host ($script:Gm.Green + "  Exported session HTML: $outHtml" + $script:Gm.Reset)
-                    }
-                }
-                catch {
-                    Write-Host ($script:Gm.Red + '  Export failed: ' + $_.Exception.Message + $script:Gm.Reset)
-                }
-                continue
-            }
+            if ($trimmedQ -match '^/(?:export|share)(?:\s+(.+))?$') { Invoke-ReplExportCommand -State $state -RootPath $rootPath -Model $Model -ExportArg $Matches[1]; continue }
             if ($trimmedQ -match '^/import(?:\s+(.+))?$') {
-                if (-not $Matches[1]) {
-                    Write-Host ($script:Gm.Red + '  Usage: /import <path-to-session.jsonl>' + $script:Gm.Reset)
-                    continue
-                }
-                $impArg = $Matches[1].Trim()
-                $impPath = if (Test-Path -LiteralPath $impArg) { $impArg } else { Join-Path $rootPath $impArg }
-                if (-not (Test-Path -LiteralPath $impPath)) {
-                    Write-Host ($script:Gm.Red + "  File not found: $impArg" + $script:Gm.Reset)
-                    continue
-                }
-                try {
-                    Invoke-SessionResume -SessionFile $impPath -State $state -CurrentWorkspace $rootPath | Out-Null
-                    $sessionFile = if ($NoSession) { '' } else { $impPath }
-                    Clear-AgentUndoBackups -UndoEntries $undoStack
-                    $undoStack = @()
-                    $lastFailedQuestion = ''
-                    if ($state.model) { $Model = $state.model }
-                    Write-Host ($script:Gm.Green + "  Imported session: $impPath ($($state.messages.Count) messages)" + $script:Gm.Reset)
-                }
-                catch {
-                    Write-Host ($script:Gm.Red + '  Import failed: ' + $_.Exception.Message + $script:Gm.Reset)
-                }
+                $impRes = Invoke-ReplImportCommand -State $state -RootPath $rootPath -SessionFile $sessionFile -Model $Model -NoSession:$NoSession -UndoStack $undoStack -LastFailedQuestion $lastFailedQuestion -ImportArg $Matches[1]
+                $sessionFile = $impRes.session_file; $Model = $impRes.model
+                $undoStack = @($impRes.undo_stack); $lastFailedQuestion = $impRes.last_failed_question
                 continue
             }
-            if ($trimmedQ -eq '/copy') {
-                $lastAssistant = $null
-                for ($i = $state.messages.Count - 1; $i -ge 0; $i--) {
-                    if ($state.messages[$i].role -eq 'assistant' -and $state.messages[$i].content) {
-                        $lastAssistant = [string]$state.messages[$i].content
-                        break
-                    }
-                }
-                if (-not $lastAssistant) {
-                    Write-Host ($script:Gm.Grey1 + '  No assistant message to copy.' + $script:Gm.Reset)
-                }
-                else {
-                    try {
-                        Set-Clipboard -Value $lastAssistant -ErrorAction Stop
-                        Write-Host ($script:Gm.Green + "  Copied last assistant response ($($lastAssistant.Length) chars) to clipboard." + $script:Gm.Reset)
-                    }
-                    catch {
-                        Write-Host ($script:Gm.Red + '  Clipboard copy failed: ' + $_.Exception.Message + $script:Gm.Reset)
-                    }
-                }
-                continue
-            }
+            if ($trimmedQ -eq '/copy') { Invoke-ReplCopyCommand -State $state; continue }
             if ($trimmedQ -eq '/reload') {
-                $state.scoped_instr_cache = @{}
-                $fullSystemPrompt = Build-SystemPrompt -Root $rootPath -ConfigDir $configDir
-                $system.content = $fullSystemPrompt
-                if ($state.messages.Count -gt 0 -and $state.messages[0].role -eq 'system') {
-                    $state.messages[0].content = $fullSystemPrompt
-                }
-                Sync-AgentCapabilities -State $state | Out-Null
-                Write-Host ($script:Gm.Green + '  Reloaded context files (AGENTS.md, SOUL.md, MEMORY.md, SYSTEM.md), skills, and templates.' + $script:Gm.Reset)
+                $reloadRes = Invoke-ReplReloadCommand -State $state -SystemMessage $system -RootPath $rootPath -ConfigDir $configDir
+                $fullSystemPrompt = $reloadRes.full_system_prompt; $system = $reloadRes.system
                 continue
             }
             if ($trimmedQ -match '^/save(?:\s+(.+))?$') {
-                if ($Matches[1]) {
-                    $nameArg = $Matches[1].Trim()
-                    if ($nameArg -notmatch '\.jsonl$') { $nameArg += '.jsonl' }
-                    $sessionFile = Join-Path $sessionDir (Split-Path $nameArg -Leaf)
-                }
-                Save-AgentSession -SessionFile $sessionFile -State $state -Workspace $rootPath -Model $Model
-                Write-Host ($script:Gm.Green + "  Saved session: $sessionFile" + $script:Gm.Reset)
+                $saveRes = Invoke-ReplSaveCommand -State $state -SessionDir $sessionDir -SessionFile $sessionFile -RootPath $rootPath -Model $Model -SaveArg $Matches[1]
+                $sessionFile = $saveRes.session_file
                 continue
             }
             if ($trimmedQ -eq '/undo') {
-                if ($undoStack.Count -eq 0) {
-                    Write-Host ($script:Gm.Grey1 + '  Nothing to undo.' + $script:Gm.Reset)
-                    continue
-                }
-                $lastUndo = $undoStack[$undoStack.Count - 1]
-                try {
-                    Invoke-AgentUndo -State $state -UndoEntry $lastUndo
-                    if ($undoStack.Count -eq 1) { $undoStack = @() }
-                    else { $undoStack = @($undoStack[0..($undoStack.Count - 2)]) }
-                    Save-AgentSession -SessionFile $sessionFile -State $state -Workspace $rootPath -Model $Model
-                    Write-Host ($script:Gm.Green + '  Reverted last turn and restored disk state.' + $script:Gm.Reset)
-                }
-                catch {
-                    Write-Host ($script:Gm.Red + '  ' + $_.Exception.Message + $script:Gm.Reset)
-                }
+                $undoRes = Invoke-ReplUndoCommand -State $state -SessionFile $sessionFile -RootPath $rootPath -Model $Model -UndoStack $undoStack
+                $undoStack = @($undoRes.undo_stack)
                 continue
             }
             if ($trimmedQ -eq '/status' -or $trimmedQ -eq '/tokens' -or $trimmedQ -eq '/session') {
-                foreach ($sLn in @(Format-TuiStatusCard -State $state -Model $Model -MaxSteps $MaxSteps -SessionFile $sessionFile -UndoCount $undoStack.Count)) {
-                    Write-Host $sLn
-                }
+                foreach ($sLn in @(Format-TuiStatusCard -State $state -Model $Model -MaxSteps $MaxSteps -SessionFile $sessionFile -UndoCount $undoStack.Count)) { Write-Host $sLn }
                 continue
             }
-            if ($trimmedQ -match '^/context(?:\s+(.+))?$') {
-                $ctxArg = if ($Matches[1]) { $Matches[1].Trim() } else { '' }
-                Invoke-ReplContextCommand -State $state -CtxArg $ctxArg
-                continue
-            }
-            if ($trimmedQ -match '^/model(?:\s+(.+))?$') {
-                $reqModel = if ($Matches[1]) { $Matches[1].Trim() } else { '' }
-                $newModel = Select-ReplModelId -CurrentModel $Model -SessionDir $sessionDir -NewModel $reqModel
-                if ($newModel) {
-                    $Model = $newModel
-                    $state.model = $Model
-                    $script:ActiveModelId = $Model
-                    if ($script:AgentConfigPath) {
-                        $null = Update-AgentConfigOptionalKey -Path $script:AgentConfigPath -Key 'SHELLOSSUS_MODEL' -Value $Model
-                    }
-                    Write-Host ($script:Gm.Green + "  Model switched to: $Model" + $script:Gm.Reset)
-                }
-                continue
-            }
-            if ($trimmedQ -match '^/theme(?:\s+(.+))?$') {
-                $thArg = if ($Matches[1]) { $Matches[1].Trim() } else { '' }
-                Invoke-ReplThemeCommand -ThemeArg $thArg
-                continue
-            }
-            if ($trimmedQ -match '^/compact(?:\s+(.+))?$') {
-                $focus = if ($Matches[1]) { $Matches[1].Trim() } else { '' }
-                try {
-                    if (Invoke-AgentCompact -State $state -Endpoint $endpoint -ModelId $Model -ApiKey $agentKey -Focus $focus) {
-                        Save-AgentSession -SessionFile $sessionFile -State $state -Workspace $rootPath -Model $Model
-                        $st = Get-ContextStats -State $state
-                        Write-Host ($script:Gm.Green + "  Context compacted (~$($st.est_tokens) tokens remaining)." + $script:Gm.Reset)
-                    }
-                    else {
-                        Write-Host ($script:Gm.Grey1 + '  Not enough history to compact yet.' + $script:Gm.Reset)
-                    }
-                }
-                catch {
-                    Write-Host ($script:Gm.Red + '  Compaction failed: ' + (Format-AgentError -ErrorRecord $_) + $script:Gm.Reset)
-                }
-                continue
-            }
+            if ($trimmedQ -match '^/context(?:\s+(.+))?$') { Invoke-ReplContextCommand -State $state -CtxArg $(if ($Matches[1]) { $Matches[1].Trim() } else { '' }); continue }
+            if ($trimmedQ -match '^/model(?:\s+(.+))?$') { $Model = Invoke-ReplModelCommand -State $state -CurrentModel $Model -SessionDir $sessionDir -NewModel $Matches[1]; continue }
+            if ($trimmedQ -match '^/theme(?:\s+(.+))?$') { Invoke-ReplThemeCommand -ThemeArg $(if ($Matches[1]) { $Matches[1].Trim() } else { '' }); continue }
+            if ($trimmedQ -match '^/compact(?:\s+(.+))?$') { Invoke-ReplCompactCommand -State $state -Endpoint $endpoint -Model $Model -ApiKey $agentKey -SessionFile $sessionFile -RootPath $rootPath -Focus $Matches[1]; continue }
             if ($trimmedQ -eq '/sessions' -or $trimmedQ -match '^/resume(?:\s+(.+))?$') {
-                $isResumeCmd = ($trimmedQ -match '^/resume')
-                $arg = if ($isResumeCmd -and $Matches[1]) { $Matches[1].Trim() } else { '' }
-                if (-not (Test-Path -LiteralPath $sessionDir)) {
-                    Write-Host ($script:Gm.Grey1 + '  No saved sessions found.' + $script:Gm.Reset)
-                    continue
-                }
-                $wsNorm = $rootPath.TrimEnd('\').TrimEnd('/')
-                $list = @(Get-ChildItem -LiteralPath $sessionDir -Filter '*.jsonl' -File | Sort-Object LastWriteTime -Descending | Where-Object {
-                    $m = Get-AgentSessionMeta -SessionFile $_.FullName
-                    (-not $m) -or (-not $m.workspace) -or ($m.workspace.TrimEnd('\').TrimEnd('/') -ieq $wsNorm)
-                } | Select-Object -First 15)
-                if ($list.Count -eq 0) {
-                    Write-Host ($script:Gm.Grey1 + '  No saved sessions for this workspace.' + $script:Gm.Reset)
-                    continue
-                }
-                $chosen = $null
-                if (-not $arg) {
-                    $sItems = @()
-                    for ($i = 0; $i -lt $list.Count; $i++) {
-                        $meta = Get-AgentSessionMeta -SessionFile $list[$i].FullName
-                        $mdlInfo = if ($meta -and $meta.model) { "model: $($meta.model)" } else { '' }
-                        $sName = if ($meta -and $meta.session_name) { [string]$meta.session_name } elseif ($meta -and $meta.name) { [string]$meta.name } else { '' }
-                        $nmTag = if ($sName) { "[$sName] " } else { '' }
-                        $desc = ("{0}{1} ({2})" -f $nmTag, $list[$i].LastWriteTime.ToString('yyyy-MM-dd HH:mm'), $mdlInfo)
-                        $sItems += @{
-                            label = $list[$i].Name
-                            value = $list[$i].FullName
-                            description = $desc
-                            active = ($sessionFile -and ($list[$i].FullName -ieq $sessionFile))
-                        }
-                    }
-                    $pickedSess = Invoke-TuiSelector -Title 'Saved Workspace Sessions' -Items $sItems -PromptText 'Select session number to resume (Enter cancels)'
-                    if ($pickedSess) { $chosen = [string]$pickedSess }
-                }
-                elseif ($arg -match '^\d+$') {
-                    $idx = [int]$arg - 1
-                    if ($idx -ge 0 -and $idx -lt $list.Count) { $chosen = $list[$idx].FullName }
-                }
-                else {
-                    $cand = Join-Path $sessionDir (Split-Path $arg -Leaf)
-                    if (Test-Path -LiteralPath $cand) { $chosen = $cand }
-                    elseif (-not ($arg -match '\.jsonl$')) {
-                        $candJsonl = Join-Path $sessionDir ((Split-Path $arg -Leaf) + '.jsonl')
-                        if (Test-Path -LiteralPath $candJsonl) { $chosen = $candJsonl }
-                    }
-                }
-                if ($chosen) {
-                    try {
-                        Invoke-SessionResume -SessionFile $chosen -State $state -CurrentWorkspace $rootPath | Out-Null
-                        $sessionFile = $chosen
-                        Clear-AgentUndoBackups -UndoEntries $undoStack
-                        $undoStack = @()
-                        $lastFailedQuestion = ''
-                        if ($state.model) { $Model = $state.model }
-                        if ($PSBoundParameters.Keys -notcontains 'Permission') { $script:AgentPermission = 'Ask' }
-                        Sync-AgentCapabilities -State $state | Out-Null
-                        Write-Host ($script:Gm.Green + "  Resumed session: $sessionFile ($($state.messages.Count) messages, model=$Model, permission=$($script:AgentPermission))" + $script:Gm.Reset)
-                    }
-                    catch {
-                        Write-Host ($script:Gm.Red + '  ' + $_.Exception.Message + $script:Gm.Reset)
-                    }
-                }
-                elseif ($arg) {
-                    Write-Host ($script:Gm.Red + "  Session not found: $arg" + $script:Gm.Reset)
-                }
+                $resArg = if ($trimmedQ -ne '/sessions' -and $Matches[1]) { $Matches[1] } else { '' }
+                $sessRes = Invoke-ReplSessionsCommand -State $state -SessionDir $sessionDir -SessionFile $sessionFile -RootPath $rootPath -Model $Model -UndoStack $undoStack -LastFailedQuestion $lastFailedQuestion -PermissionSpecified:($PSBoundParameters.Keys -contains 'Permission') -ResumeArg $resArg
+                $sessionFile = $sessRes.session_file; $Model = $sessRes.model
+                $undoStack = @($sessRes.undo_stack); $lastFailedQuestion = $sessRes.last_failed_question
                 continue
             }
             if ($trimmedQ -match '^/continue(?:\s+(.+))?$') {
-                $contSteps = $MaxSteps
-                if ($Matches[1]) {
-                    $rawSteps = $Matches[1].Trim()
-                    if ($rawSteps -notmatch '^\d+$') {
-                        Write-Host ($script:Gm.Red + '  Usage: /continue [steps]' + $script:Gm.Reset)
-                        continue
-                    }
-                    $contSteps = [int]$rawSteps
-                    if ($contSteps -lt 1 -or $contSteps -gt 500) {
-                        Write-Host ($script:Gm.Red + '  Steps must be between 1 and 500.' + $script:Gm.Reset)
-                        continue
-                    }
-                }
-                $nonSys = @($state.messages | Where-Object { $_.role -ne 'system' })
-                if ($nonSys.Count -eq 0) {
-                    Write-Host ($script:Gm.Grey1 + '  Nothing to continue.' + $script:Gm.Reset)
-                    continue
-                }
-                Ensure-SessionTree -State $state
-                $beforeTurn = @(Copy-SessionHashtableArray -Items $state.messages)
-                $beforeLeafId = if ($state.leaf_id) { [string]$state.leaf_id } else { '' }
-                $beforeTreeEntries = @(Copy-SessionHashtableArray -Items $state.tree_entries)
-                $stBefore = Get-ContextStats -State $state
-                if ($stBefore.est_tokens -gt $stBefore.compact_threshold_tokens) {
-                    $limStr = Format-TokenCount -Tokens $stBefore.compact_threshold_tokens
-                    Write-Host ($script:Gm.Yellow + "  [auto-compact] Context exceeds $limStr tokens, compacting older history..." + $script:Gm.Reset)
-                    try { Invoke-AgentCompact -State $state -Endpoint $endpoint -ModelId $Model -ApiKey $agentKey | Out-Null } catch {}
-                }
-                $script:CurrentTurnWrites = @()
-                Write-Host ($script:Gm.Aqua + "  [continue] Continuing agent turn (up to $contSteps steps)..." + $script:Gm.Reset)
-                try {
-                    Invoke-AgentContinue -State $state -Endpoint $endpoint -ModelId $Model -ApiKey $agentKey -Root $rootPath -Steps $contSteps | Out-Null
-                    $lastFailedQuestion = ''
-                    $undoStack += @{ messages = $beforeTurn; leaf_id = $beforeLeafId; tree_entries = $beforeTreeEntries; writes = @($script:CurrentTurnWrites) }
-                    Save-AgentSession -SessionFile $sessionFile -State $state -Workspace $rootPath -Model $Model
-                }
-                catch {
-                    $state.messages = $beforeTurn
-                    try {
-                        Invoke-AgentUndo -State $state -UndoEntry @{ messages = $beforeTurn; leaf_id = $beforeLeafId; tree_entries = $beforeTreeEntries; writes = @($script:CurrentTurnWrites) }
-                    }
-                    catch {
-                        Write-Host ($script:Gm.Red + 'Rollback warning: ' + $_.Exception.Message + $script:Gm.Reset)
-                    }
-                    Write-Host ($script:Gm.Red + 'Continue failed; turn rolled back: ' + (Format-AgentError -ErrorRecord $_) + $script:Gm.Reset)
-                }
+                $contRes = Invoke-ReplContinueCommand -State $state -Endpoint $endpoint -Model $Model -ApiKey $agentKey -RootPath $rootPath -SessionFile $sessionFile -MaxSteps $MaxSteps -UndoStack $undoStack -LastFailedQuestion $lastFailedQuestion -ContinueArg $Matches[1]
+                $undoStack = @($contRes.undo_stack); $lastFailedQuestion = $contRes.last_failed_question
                 continue
             }
             if ($trimmedQ -eq '/retry') {
@@ -710,23 +370,7 @@ if (-not $LibraryOnly) {
                 $question = $tplText
             }
             if ($trimmedQ.StartsWith('!')) {
-                $localOnly = $trimmedQ.StartsWith('!!')
-                $cmdStr = if ($localOnly) { $trimmedQ.Substring(2).Trim() } else { $trimmedQ.Substring(1).Trim() }
-                if (-not $cmdStr) { continue }
-                try {
-                    $res = Invoke-ShellCommand -Root $rootPath -Command $cmdStr
-                    if ($res.output) { Write-Host ($script:Gm.Fg + $res.output + $script:Gm.Reset) }
-                    Write-Host ($script:Gm.Grey1 + "  [exit $($res.exit_code)]" + $script:Gm.Reset)
-                    if (-not $localOnly) {
-                        $state.messages += @{ role = 'user'; content = ("[Shell command $cmdStr exit=$($res.exit_code)]`n" + $res.output) }
-                        Ensure-SessionTree -State $state
-                        Save-AgentSession -SessionFile $sessionFile -State $state -Workspace $rootPath -Model $Model
-                        Write-Host ($script:Gm.Aqua + '  (Output added to conversation context)' + $script:Gm.Reset)
-                    }
-                }
-                catch {
-                    Write-Host ($script:Gm.Red + '  Command error: ' + $_.Exception.Message + $script:Gm.Reset)
-                }
+                Invoke-ReplBangCommand -State $state -InputText $trimmedQ -RootPath $rootPath -SessionFile $sessionFile -Model $Model
                 continue
             }
             Ensure-SessionTree -State $state
