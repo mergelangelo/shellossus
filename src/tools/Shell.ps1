@@ -127,18 +127,10 @@ function Invoke-ShellCommand {
             $env:SHELLOSSUS_API_KEY = $null
             $env:H_AGENT_API_KEY = $null
             $env:OPENAI_API_KEY = $null
-            if ($script:ActiveSessionId) {
-                $env:SHELLOSSUS_SESSION_ID = $script:ActiveSessionId
-            }
-            if ($script:ActiveSessionFile) {
-                $env:SHELLOSSUS_SESSION_FILE = $script:ActiveSessionFile
-            }
-            if ($script:ActiveModelId) {
-                $env:SHELLOSSUS_MODEL = $script:ActiveModelId
-            }
-            if ($script:ReasoningEffort) {
-                $env:SHELLOSSUS_REASONING_LEVEL = $script:ReasoningEffort
-            }
+            $env:SHELLOSSUS_SESSION_ID = if ($script:ActiveSessionId) { [string]$script:ActiveSessionId } else { '' }
+            $env:SHELLOSSUS_SESSION_FILE = if ($script:ActiveSessionFile) { [string]$script:ActiveSessionFile } else { '' }
+            $env:SHELLOSSUS_MODEL = if ($script:ActiveModelId) { [string]$script:ActiveModelId } else { '' }
+            $env:SHELLOSSUS_REASONING_LEVEL = if ($script:ReasoningEffort) { [string]$script:ReasoningEffort } else { '' }
             $wrappedCmd = "try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch {}`n" + $Command
             $argList = if ($env:OS -eq 'Windows_NT') {
                 $escaped = ($wrappedCmd -replace '(\\*)"', '$1$1\"') -replace '(\\*)$', '$1$1'
@@ -197,14 +189,16 @@ function Invoke-ShellCommand {
         if ($truncated) {
             try {
                 $outDir = Join-Path (Join-Path $rootFull '.shellossus') 'output'
-                if (-not (Test-Path -LiteralPath $outDir)) { New-Item -ItemType Directory -Path $outDir -Force -ErrorAction Stop | Out-Null }
-                $logName = 'cmd-' + (Get-Date -Format 'yyyyMMdd-HHmmss') + '-' + (Get-Random -Minimum 100000 -Maximum 999999) + '.log'
-                $logFull = Join-Path $outDir $logName
-                Copy-Item -LiteralPath $outTemp.FullName -Destination $logFull -Force -ErrorAction Stop
-                if ($errItem.Length -gt 0) {
-                    Get-Content -LiteralPath $errTemp.FullName -ReadCount 500 -Encoding UTF8 -ErrorAction SilentlyContinue | Add-Content -LiteralPath $logFull -Encoding UTF8 -ErrorAction SilentlyContinue
+                if (-not (Test-PathHasReparsePoint -Path $outDir -StopAt $rootFull)) {
+                    if (-not (Test-Path -LiteralPath $outDir)) { New-Item -ItemType Directory -Path $outDir -Force -ErrorAction Stop | Out-Null }
+                    $logName = 'cmd-' + (Get-Date -Format 'yyyyMMdd-HHmmss') + '-' + (Get-Random -Minimum 100000 -Maximum 999999) + '.log'
+                    $logFull = Join-Path $outDir $logName
+                    Copy-Item -LiteralPath $outTemp.FullName -Destination $logFull -Force -ErrorAction Stop
+                    if ($errItem.Length -gt 0) {
+                        Get-Content -LiteralPath $errTemp.FullName -ReadCount 500 -Encoding UTF8 -ErrorAction SilentlyContinue | Add-Content -LiteralPath $logFull -Encoding UTF8 -ErrorAction SilentlyContinue
+                    }
+                    $fullLogRel = Get-WorkspaceRelativePath -Root $Root -FullPath $logFull
                 }
-                $fullLogRel = Get-WorkspaceRelativePath -Root $Root -FullPath $logFull
             }
             catch {}
         }

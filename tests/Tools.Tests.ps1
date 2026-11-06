@@ -348,6 +348,97 @@ try {
     $truncCmd = Invoke-AgentTool -Root $workspacePath -Call $call | ConvertFrom-Json
     Assert-True ($truncCmd.truncated -and [bool]$truncCmd.full_output_path -and (Test-Path -LiteralPath (Join-Path $workspacePath $truncCmd.full_output_path))) 'Truncated run_command did not save full output log.'
 
+    # Child shell publishes the current session values, including empty, and does not keep a stale parent value.
+    $savedChildSessionId = $env:SHELLOSSUS_SESSION_ID
+    $savedChildSessionFile = $env:SHELLOSSUS_SESSION_FILE
+    $savedChildModel = $env:SHELLOSSUS_MODEL
+    $savedChildReason = $env:SHELLOSSUS_REASONING_LEVEL
+    $savedChildSKey = $env:SHELLOSSUS_API_KEY
+    $savedChildHKey = $env:H_AGENT_API_KEY
+    $savedChildOKey = $env:OPENAI_API_KEY
+    $savedScriptSessionId = $script:ActiveSessionId
+    $savedScriptSessionFile = $script:ActiveSessionFile
+    $savedScriptModelId = $script:ActiveModelId
+    $savedScriptReason = $script:ReasoningEffort
+    try {
+        $env:SHELLOSSUS_SESSION_ID = 'stale'
+        $script:ActiveSessionId = ''
+        $staleChild = Invoke-ShellCommand -Root $workspacePath -Command 'Write-Output $env:SHELLOSSUS_SESSION_ID'
+        Assert-True (([string]$staleChild.output).Trim() -eq '') "Child inherited a stale SHELLOSSUS_SESSION_ID, got '$($staleChild.output)'."
+        Assert-True ($env:SHELLOSSUS_SESSION_ID -eq 'stale') 'Parent SHELLOSSUS_SESSION_ID was not restored to stale.'
+
+        $env:SHELLOSSUS_SESSION_FILE = 'stale-file'
+        $script:ActiveSessionFile = ''
+        $env:SHELLOSSUS_MODEL = 'stale-model'
+        $script:ActiveModelId = ''
+        $env:SHELLOSSUS_REASONING_LEVEL = 'stale-reason'
+        $script:ReasoningEffort = ''
+        $staleOthers = Invoke-ShellCommand -Root $workspacePath -Command 'Write-Output $env:SHELLOSSUS_SESSION_FILE; Write-Output $env:SHELLOSSUS_MODEL; Write-Output $env:SHELLOSSUS_REASONING_LEVEL'
+        Assert-True (([string]$staleOthers.output).Trim() -eq '') "Child inherited a stale session file, model, or reasoning level, got '$($staleOthers.output)'."
+        Assert-True ($env:SHELLOSSUS_SESSION_FILE -eq 'stale-file' -and $env:SHELLOSSUS_MODEL -eq 'stale-model' -and $env:SHELLOSSUS_REASONING_LEVEL -eq 'stale-reason') 'Parent session file, model, or reasoning level was not restored.'
+
+        $script:ActiveSessionId = 'live-session'
+        $script:ActiveSessionFile = 'live-file'
+        $script:ActiveModelId = 'live-model'
+        $script:ReasoningEffort = 'high'
+        $liveChild = Invoke-ShellCommand -Root $workspacePath -Command 'Write-Output $env:SHELLOSSUS_SESSION_ID; Write-Output $env:SHELLOSSUS_SESSION_FILE; Write-Output $env:SHELLOSSUS_MODEL; Write-Output $env:SHELLOSSUS_REASONING_LEVEL'
+        $liveLines = @(([string]$liveChild.output) -split "`r?`n" | Where-Object { $_ -ne '' })
+        Assert-True ($liveLines.Count -eq 4 -and $liveLines[0] -eq 'live-session' -and $liveLines[1] -eq 'live-file' -and $liveLines[2] -eq 'live-model' -and $liveLines[3] -eq 'high') "Child did not see the current session values, got '$($liveChild.output)'."
+        Assert-True ($env:SHELLOSSUS_SESSION_ID -eq 'stale' -and $env:SHELLOSSUS_SESSION_FILE -eq 'stale-file' -and $env:SHELLOSSUS_MODEL -eq 'stale-model' -and $env:SHELLOSSUS_REASONING_LEVEL -eq 'stale-reason') 'Parent session environment changed while publishing current session values.'
+
+        $env:SHELLOSSUS_API_KEY = 'sec-s'
+        $env:H_AGENT_API_KEY = 'sec-h'
+        $env:OPENAI_API_KEY = 'sec-o'
+        $keyChild = Invoke-ShellCommand -Root $workspacePath -Command 'Write-Output $env:SHELLOSSUS_API_KEY; Write-Output $env:H_AGENT_API_KEY; Write-Output $env:OPENAI_API_KEY'
+        Assert-True (([string]$keyChild.output).Trim() -eq '') 'Invoke-ShellCommand did not scrub API keys from the child environment.'
+        Assert-True ($env:SHELLOSSUS_API_KEY -eq 'sec-s' -and $env:H_AGENT_API_KEY -eq 'sec-h' -and $env:OPENAI_API_KEY -eq 'sec-o') 'Invoke-ShellCommand did not restore API keys after the command.'
+    }
+    finally {
+        $env:SHELLOSSUS_SESSION_ID = $savedChildSessionId
+        $env:SHELLOSSUS_SESSION_FILE = $savedChildSessionFile
+        $env:SHELLOSSUS_MODEL = $savedChildModel
+        $env:SHELLOSSUS_REASONING_LEVEL = $savedChildReason
+        $env:SHELLOSSUS_API_KEY = $savedChildSKey
+        $env:H_AGENT_API_KEY = $savedChildHKey
+        $env:OPENAI_API_KEY = $savedChildOKey
+        $script:ActiveSessionId = $savedScriptSessionId
+        $script:ActiveSessionFile = $savedScriptSessionFile
+        $script:ActiveModelId = $savedScriptModelId
+        $script:ReasoningEffort = $savedScriptReason
+    }
+
+    # A junction at .shellossus must not receive the truncated output log. Skip only when this OS cannot create a junction.
+    $junctionRoot = Join-Path $testRoot 'junction-shell-ws'
+    $junctionOutside = Join-Path $testRoot 'junction-shell-outside'
+    New-Item -ItemType Directory -Path $junctionRoot, $junctionOutside -Force | Out-Null
+    $dotJunction = Join-Path $junctionRoot '.shellossus'
+    $junctionCreated = $false
+    try {
+        New-Item -ItemType Junction -Path $dotJunction -Target $junctionOutside -ErrorAction Stop | Out-Null
+        $junctionItem = Get-Item -LiteralPath $dotJunction -Force -ErrorAction Stop
+        if (($junctionItem.Attributes -band 1024) -eq 0) { throw 'Junction was not created.' }
+        $junctionCreated = $true
+    }
+    catch {
+        if ($env:OS -eq 'Windows_NT') { throw }
+    }
+    if ($junctionCreated) {
+        try {
+            $beforeJunction = @(Get-ChildItem -LiteralPath $junctionOutside -Force -ErrorAction SilentlyContinue)
+            $junctionCmd = Invoke-ShellCommand -Root $junctionRoot -Command '1..320 | ForEach-Object { $_ }'
+            $afterJunction = @(Get-ChildItem -LiteralPath $junctionOutside -Force -ErrorAction SilentlyContinue)
+            Assert-True ($junctionCmd.truncated -and $null -eq $junctionCmd.full_output_path) 'Reparse .shellossus copied the output log.'
+            Assert-True ($afterJunction.Count -eq $beforeJunction.Count) 'Junction target gained a new file from the output log.'
+            Assert-True (([string]$junctionCmd.output).Trim().Length -gt 0) 'Command output was dropped when the output log was skipped.'
+        }
+        finally {
+            $junctionItem = Get-Item -LiteralPath $dotJunction -Force -ErrorAction SilentlyContinue
+            if ($junctionItem -and (($junctionItem.Attributes -band 1024) -ne 0)) {
+                $junctionItem.Delete()
+            }
+        }
+    }
+
     $call.function.arguments = '{"command":"Start-Sleep -Seconds 10","timeout_sec":1}'
     $timeoutRes = Invoke-AgentTool -Root $workspacePath -Call $call | ConvertFrom-Json
     Assert-True ($timeoutRes.status -eq 'timed_out' -and $timeoutRes.timed_out -eq $true) 'Hanging run_command was not terminated on timeout.'
