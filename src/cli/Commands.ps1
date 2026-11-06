@@ -262,7 +262,7 @@ function Invoke-ReplCompactCommand {
 }
 
 function Invoke-ReplSessionsCommand {
-    param($State, [string]$SessionDir, [string]$SessionFile = '', [string]$RootPath, [string]$Model = '', [AllowEmptyCollection()][array]$UndoStack = @(), [string]$LastFailedQuestion = '', [switch]$PermissionSpecified, [string]$ResumeArg = '')
+    param($State, [string]$SessionDir, [string]$SessionFile = '', [string]$RootPath, [string]$Model = '', [AllowEmptyCollection()][array]$UndoStack = @(), [string]$LastFailedQuestion = '', [switch]$PermissionSpecified, [string]$ResumeArg = '', [switch]$NoSession)
     $arg = if ($ResumeArg) { $ResumeArg.Trim() } else { '' }
     if (-not (Test-Path -LiteralPath $SessionDir)) {
         Write-Host ($script:Gm.Grey1 + '  No saved sessions found.' + $script:Gm.Reset)
@@ -311,14 +311,14 @@ function Invoke-ReplSessionsCommand {
     if ($chosen) {
         try {
             Invoke-SessionResume -SessionFile $chosen -State $State -CurrentWorkspace $RootPath | Out-Null
-            $SessionFile = $chosen
+            $SessionFile = if ($NoSession) { '' } else { $chosen }
             Clear-AgentUndoBackups -UndoEntries $UndoStack
             $UndoStack = @()
             $LastFailedQuestion = ''
             if ($State.model) { $Model = $State.model }
             if (-not $PermissionSpecified) { $script:AgentPermission = 'Ask' }
             Sync-AgentCapabilities -State $State | Out-Null
-            Write-Host ($script:Gm.Green + "  Resumed session: $SessionFile ($($State.messages.Count) messages, model=$Model, permission=$($script:AgentPermission))" + $script:Gm.Reset)
+            Write-Host ($script:Gm.Green + "  Resumed session: $chosen ($($State.messages.Count) messages, model=$Model, permission=$($script:AgentPermission))" + $script:Gm.Reset)
         }
         catch {
             Write-Host ($script:Gm.Red + '  ' + $_.Exception.Message + $script:Gm.Reset)

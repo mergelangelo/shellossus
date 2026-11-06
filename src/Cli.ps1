@@ -341,7 +341,7 @@ if (-not $LibraryOnly) {
             if ($trimmedQ -match '^/compact(?:\s+(.+))?$') { Invoke-ReplCompactCommand -State $state -Endpoint $endpoint -Model $Model -ApiKey $agentKey -SessionFile $sessionFile -RootPath $rootPath -Focus $Matches[1]; continue }
             if ($trimmedQ -eq '/sessions' -or $trimmedQ -match '^/resume(?:\s+(.+))?$') {
                 $resArg = if ($trimmedQ -ne '/sessions' -and $Matches[1]) { $Matches[1] } else { '' }
-                $sessRes = Invoke-ReplSessionsCommand -State $state -SessionDir $sessionDir -SessionFile $sessionFile -RootPath $rootPath -Model $Model -UndoStack $undoStack -LastFailedQuestion $lastFailedQuestion -PermissionSpecified:($PSBoundParameters.Keys -contains 'Permission') -ResumeArg $resArg
+                $sessRes = Invoke-ReplSessionsCommand -State $state -SessionDir $sessionDir -SessionFile $sessionFile -RootPath $rootPath -Model $Model -UndoStack $undoStack -LastFailedQuestion $lastFailedQuestion -PermissionSpecified:($PSBoundParameters.Keys -contains 'Permission') -ResumeArg $resArg -NoSession:$NoSession
                 $sessionFile = $sessRes.session_file; $Model = $sessRes.model
                 $undoStack = @($sessRes.undo_stack); $lastFailedQuestion = $sessRes.last_failed_question
                 continue
