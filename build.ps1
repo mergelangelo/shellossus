@@ -38,6 +38,7 @@ function Assert-AsciiFile {
 $modules = @(
     'Config.ps1',
     'Theme.ps1',
+    'ui/Ansi.ps1',
     'ui/Cards.ps1',
     'ui/Input.ps1',
     'ui/Markdown.ps1',

@@ -424,7 +424,7 @@ function Resolve-AgentPath {
 }
 
 # --- src/Theme.ps1 ---
-# Terminal UI themes, palette switching, status bar, and prompt frame.
+# Terminal UI color themes, palette switching, and box-drawing glyphs.
 
 $script:Esc = [string][char]27
 $script:Bel = [string][char]7
@@ -760,6 +760,9 @@ $script:Box = @{
     Check    = [string][char]0x2713
     Cross    = [string][char]0x2717
 }
+
+# --- src/ui/Ansi.ps1 ---
+# ANSI string helpers, terminal width, box framing, context gauge, and status bar.
 
 function Strip-AnsiCodes {
     param([string]$Text)
