@@ -233,10 +233,23 @@ function Test-AgentPathWithinRoot {
 
 function Get-WorkspaceRelativePath {
     param([string]$Root, [string]$FullPath)
-    $rootNorm = (Get-Item -LiteralPath $Root -Force).FullName.TrimEnd('\').TrimEnd('/')
-    $resolvedFull = if (Test-Path -LiteralPath $FullPath) { (Get-Item -LiteralPath $FullPath -Force).FullName } else { $FullPath }
-    if ($resolvedFull.StartsWith($rootNorm + '\', [StringComparison]::OrdinalIgnoreCase) -or
-        $resolvedFull.StartsWith($rootNorm + '/', [StringComparison]::OrdinalIgnoreCase)) {
+    $rootFull = if ($Root -and (Test-Path -LiteralPath $Root)) { (Get-Item -LiteralPath $Root -Force).FullName } else { $Root }
+    $resolvedFull = if ($FullPath -and (Test-Path -LiteralPath $FullPath)) { (Get-Item -LiteralPath $FullPath -Force).FullName } else { $FullPath }
+    $isWin = ($env:OS -eq 'Windows_NT')
+    $isWinDrivePath = $isWin -and ($rootFull -match '^[a-zA-Z]:[/\\]')
+    $rootNorm = if ($isWin) { $rootFull.TrimEnd('\').TrimEnd('/') } else { $rootFull.TrimEnd('/') }
+    $fullNorm = if ($isWin) { $resolvedFull.TrimEnd('\').TrimEnd('/') } else { $resolvedFull.TrimEnd('/') }
+    if ($isWinDrivePath) {
+        if ($fullNorm -ieq $rootNorm) { return '.' }
+        if ($resolvedFull.StartsWith($rootNorm + '\', [StringComparison]::OrdinalIgnoreCase) -or
+            $resolvedFull.StartsWith($rootNorm + '/', [StringComparison]::OrdinalIgnoreCase)) {
+            return $resolvedFull.Substring($rootNorm.Length + 1).Replace('\', '/')
+        }
+        return $FullPath
+    }
+    if ($fullNorm -ceq $rootNorm) { return '.' }
+    if ($resolvedFull.StartsWith($rootNorm + '/', [StringComparison]::Ordinal) -or
+        ($isWin -and $resolvedFull.StartsWith($rootNorm + '\', [StringComparison]::Ordinal))) {
         return $resolvedFull.Substring($rootNorm.Length + 1).Replace('\', '/')
     }
     return $FullPath

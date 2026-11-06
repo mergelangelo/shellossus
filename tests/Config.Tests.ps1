@@ -162,7 +162,11 @@ try {
     Assert-True ((Get-Content -LiteralPath $utf8Path -Raw -Encoding UTF8) -ceq $unicodeVal) 'Set-AgentUtf8Content Unicode roundtrip failed.'
     Assert-True ((Get-Item -LiteralPath $utf8Path -Force).Length -eq 8) 'Set-AgentUtf8Content Unicode string included a BOM or wrong byte length.'
 
-    # Regression: Test-AgentPathWithinRoot normalizes trailing slashes, matches Windows drive paths case-insensitively, and keeps POSIX paths case-sensitive.
+    # Regression: Test-AgentPathWithinRoot and Get-WorkspaceRelativePath normalize trailing slashes, match Windows drive paths case-insensitively, and keep POSIX paths case-sensitive.
+    Assert-True ((Get-WorkspaceRelativePath -Root $workspacePath -FullPath $workspacePath) -eq '.') 'Get-WorkspaceRelativePath did not return . for exact workspace root.'
+    Assert-True ((Get-WorkspaceRelativePath -Root ($workspacePath + '/') -FullPath $workspacePath) -eq '.') 'Get-WorkspaceRelativePath did not return . when Root has trailing slash.'
+    Assert-True ((Get-WorkspaceRelativePath -Root $workspacePath -FullPath ($workspacePath + '/')) -eq '.') 'Get-WorkspaceRelativePath did not return . when FullPath has trailing slash.'
+    Assert-True ((Get-WorkspaceRelativePath -Root $workspacePath -FullPath (Join-Path (Join-Path $workspacePath 'sub') 'file.txt')) -eq 'sub/file.txt') 'Get-WorkspaceRelativePath did not return forward-slash relative path for nested file.'
     $savedOs = $env:OS
     try {
         $env:OS = 'Windows_NT'
@@ -173,11 +177,18 @@ try {
         Assert-True (Test-AgentPathWithinRoot -RootPath 'C:\Workspace\Project' -TargetPath 'c:\workspace\project/sub/file.txt') 'Test-AgentPathWithinRoot failed for case-variant forward-slash child path on Windows.'
         Assert-True (-not (Test-AgentPathWithinRoot -RootPath 'C:\Workspace\Project' -TargetPath 'c:\workspace\project_other\file.txt')) 'Test-AgentPathWithinRoot accepted sibling prefix path on Windows.'
         Assert-True (-not (Test-AgentPathWithinRoot -RootPath '/tmp/workspace' -TargetPath '/tmp/WORKSPACE/file.txt')) 'Test-AgentPathWithinRoot accepted case-variant POSIX path on Windows.'
+        Assert-True ((Get-WorkspaceRelativePath -Root 'C:\repo\work' -FullPath 'c:\Repo\Work') -eq '.') 'Get-WorkspaceRelativePath failed for case-variant Windows drive root.'
+        Assert-True ((Get-WorkspaceRelativePath -Root 'C:\repo\work\' -FullPath 'c:\Repo\Work\') -eq '.') 'Get-WorkspaceRelativePath failed for trailing-slash case-variant Windows drive root.'
+        Assert-True ((Get-WorkspaceRelativePath -Root 'C:\repo\work' -FullPath 'c:\Repo\Work\src\a.ps1') -eq 'src/a.ps1') 'Get-WorkspaceRelativePath failed for case-variant Windows drive nested path.'
+        Assert-True ((Get-WorkspaceRelativePath -Root '/tmp/workspace' -FullPath '/tmp/WORKSPACE/file.txt') -eq '/tmp/WORKSPACE/file.txt') 'Get-WorkspaceRelativePath stripped case-variant POSIX prefix on Windows.'
 
         $env:OS = ''
         Assert-True (Test-AgentPathWithinRoot -RootPath '/workspace/Project/' -TargetPath '/workspace/Project') 'Test-AgentPathWithinRoot failed for trailing-slash root path on Unix.'
         Assert-True (Test-AgentPathWithinRoot -RootPath '/workspace/Project' -TargetPath '/workspace/Project/sub/file.txt') 'Test-AgentPathWithinRoot failed for exact-case child path on Unix.'
         Assert-True (-not (Test-AgentPathWithinRoot -RootPath '/workspace/Project' -TargetPath '/workspace/project/sub/file.txt')) 'Test-AgentPathWithinRoot accepted wrong-case path on Unix.'
+        Assert-True ((Get-WorkspaceRelativePath -Root '/workspace/Project/' -FullPath '/workspace/Project') -eq '.') 'Get-WorkspaceRelativePath failed for trailing-slash root on Unix.'
+        Assert-True ((Get-WorkspaceRelativePath -Root '/workspace/Project' -FullPath '/workspace/Project/sub/file.txt') -eq 'sub/file.txt') 'Get-WorkspaceRelativePath failed for exact-case child path on Unix.'
+        Assert-True ((Get-WorkspaceRelativePath -Root '/workspace/Project' -FullPath '/workspace/project/sub/file.txt') -eq '/workspace/project/sub/file.txt') 'Get-WorkspaceRelativePath stripped wrong-case prefix on Unix.'
     }
     finally {
         $env:OS = $savedOs
