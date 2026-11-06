@@ -502,6 +502,21 @@ try {
     $expandedSkipped = Expand-UserPrompt -Root $workspacePath -Prompt 'Check @nonexistent.txt and @bin.dat'
     Assert-True ($expandedSkipped -eq 'Check @nonexistent.txt and @bin.dat' -and (-not $expandedSkipped.Contains('<file'))) 'Expand-UserPrompt attached nonexistent or binary @file.'
 
+    # A repeated @file that resolves to the same path attaches once. Distinct files still attach. The user text keeps every @ token.
+    Set-AgentUtf8Content -LiteralPath (Join-Path $workspacePath 'a.txt') -Value 'alpha'
+    Set-AgentUtf8Content -LiteralPath (Join-Path $workspacePath 'b.txt') -Value 'beta'
+    $expandedRepeat = Expand-UserPrompt -Root $workspacePath -Prompt '@a.txt @a.txt'
+    $repeatFileCount = @($expandedRepeat -split '<file', 0, 'SimpleMatch').Count - 1
+    Assert-True ($repeatFileCount -eq 1) "Prompt @a.txt @a.txt yielded $repeatFileCount <file blocks."
+    Assert-True ($expandedRepeat.StartsWith('@a.txt @a.txt')) 'Expand-UserPrompt removed a repeated @ token from the user text.'
+    $expandedAlias = Expand-UserPrompt -Root $workspacePath -Prompt '@a.txt @./a.txt'
+    $aliasFileCount = @($expandedAlias -split '<file', 0, 'SimpleMatch').Count - 1
+    Assert-True ($aliasFileCount -eq 1) "Prompt @a.txt @./a.txt yielded $aliasFileCount <file blocks."
+    Assert-True ($expandedAlias.StartsWith('@a.txt @./a.txt')) 'Expand-UserPrompt removed an alias @ token from the user text.'
+    $expandedDistinct = Expand-UserPrompt -Root $workspacePath -Prompt '@a.txt @b.txt'
+    $distinctFileCount = @($expandedDistinct -split '<file', 0, 'SimpleMatch').Count - 1
+    Assert-True ($distinctFileCount -eq 2) "Prompt @a.txt @b.txt yielded $distinctFileCount <file blocks."
+
     # 7. Expand-UserPrompt, Resolve-SkillCommand, and Resolve-AgentRoleCommand escape XML special characters in attributes.
     $xmlSpecialFileName = "a&b'c.txt"
     Set-AgentUtf8Content -LiteralPath (Join-Path $workspacePath $xmlSpecialFileName) -Value 'xml-attr-test'

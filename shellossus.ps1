@@ -7470,12 +7470,15 @@ function Resolve-PromptTemplate {
 function Expand-UserPrompt {
     param([string]$Root, [string]$Prompt)
     $attachments = @()
+    $seenPaths = @{}
     foreach ($token in @($Prompt -split '\s+')) {
         if ($token.StartsWith('@') -and $token.Length -gt 1) {
             $rel = $token.Substring(1).TrimEnd(',', '.', ';', ':', ')', ']', '?', '!')
             if (-not $rel) { continue }
             try {
                 $resolved = Resolve-AgentPath -Root $Root -RelativePath $rel
+                if ($seenPaths.ContainsKey($resolved)) { continue }
+                $seenPaths[$resolved] = $true
                 $item = Get-Item -LiteralPath $resolved -Force -ErrorAction Stop
                 if ($item.PSIsContainer) { throw 'Target is a directory.' }
                 if ($item.Length -gt 1MB) { throw 'File exceeds 1 MiB limit.' }
