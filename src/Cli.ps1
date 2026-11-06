@@ -229,17 +229,8 @@ if (-not $LibraryOnly) {
     try {
         if ($Prompt) {
             Ensure-SessionTree -State $state
-            $beforeTurn = @(Copy-SessionHashtableArray -Items $state.messages)
-            $beforeLeafId = if ($state.leaf_id) { [string]$state.leaf_id } else { '' }
-            $beforeTreeEntries = @(Copy-SessionHashtableArray -Items $state.tree_entries)
-            $stBefore = Get-ContextStats -State $state
-            if ($stBefore.est_tokens -gt $stBefore.compact_threshold_tokens) {
-                if ($script:OutputMode -ne 'json') {
-                    $limStr = Format-TokenCount -Tokens $stBefore.compact_threshold_tokens
-                    Write-Host ($script:Gm.Yellow + "  [auto-compact] Context exceeds $limStr tokens, compacting older history..." + $script:Gm.Reset)
-                }
-                try { Invoke-AgentCompact -State $state -Endpoint $endpoint -ModelId $Model -ApiKey $agentKey | Out-Null } catch {}
-            }
+            $turnSnapshot = New-AgentTurnSnapshot -State $state
+            $null = Invoke-ThresholdAutoCompact -State $state -Endpoint $endpoint -ModelId $Model -ApiKey $agentKey
             $script:CurrentTurnWrites = @()
             $tplPrompt = Resolve-PromptTemplate -Root $rootPath -ConfigDir $configDir -InputText $Prompt.Trim()
             $effectivePrompt = if ($null -ne $tplPrompt) { $tplPrompt } else { $Prompt }
@@ -251,9 +242,8 @@ if (-not $LibraryOnly) {
             }
             catch {
                 $errMsg = Format-AgentError -ErrorRecord $_
-                $state.messages = $beforeTurn
                 try {
-                    Invoke-AgentUndo -State $state -UndoEntry @{ messages = $beforeTurn; leaf_id = $beforeLeafId; tree_entries = $beforeTreeEntries; writes = @($script:CurrentTurnWrites) }
+                    Restore-AgentTurnSnapshot -State $state -Snapshot $turnSnapshot -Writes @($script:CurrentTurnWrites)
                 }
                 catch {
                     if ($script:OutputMode -ne 'json') {
@@ -374,29 +364,21 @@ if (-not $LibraryOnly) {
                 continue
             }
             Ensure-SessionTree -State $state
-            $beforeTurn = @(Copy-SessionHashtableArray -Items $state.messages)
-            $beforeLeafId = if ($state.leaf_id) { [string]$state.leaf_id } else { '' }
-            $beforeTreeEntries = @(Copy-SessionHashtableArray -Items $state.tree_entries)
-            $stBefore = Get-ContextStats -State $state
-            if ($stBefore.est_tokens -gt $stBefore.compact_threshold_tokens) {
-                $limStr = Format-TokenCount -Tokens $stBefore.compact_threshold_tokens
-                Write-Host ($script:Gm.Yellow + "  [auto-compact] Context exceeds $limStr tokens, compacting older history..." + $script:Gm.Reset)
-                try { Invoke-AgentCompact -State $state -Endpoint $endpoint -ModelId $Model -ApiKey $agentKey | Out-Null } catch {}
-            }
+            $turnSnapshot = New-AgentTurnSnapshot -State $state
+            $null = Invoke-ThresholdAutoCompact -State $state -Endpoint $endpoint -ModelId $Model -ApiKey $agentKey
             $script:CurrentTurnWrites = @()
             $expandedQuestion = Expand-UserPrompt -Root $rootPath -Prompt $question
             $state.messages += @{ role = 'user'; content = $expandedQuestion }
             try {
                 Invoke-AgentTurn -State $state -Endpoint $endpoint -ModelId $Model -ApiKey $agentKey -Root $rootPath -Steps $MaxSteps
                 $lastFailedQuestion = ''
-                $undoStack += @{ messages = $beforeTurn; leaf_id = $beforeLeafId; tree_entries = $beforeTreeEntries; writes = @($script:CurrentTurnWrites) }
+                $undoStack += @{ messages = $turnSnapshot.messages; leaf_id = $turnSnapshot.leaf_id; tree_entries = $turnSnapshot.tree_entries; writes = @($script:CurrentTurnWrites) }
                 Save-AgentSession -SessionFile $sessionFile -State $state -Workspace $rootPath -Model $Model
             }
             catch {
                 $lastFailedQuestion = $question
-                $state.messages = $beforeTurn
                 try {
-                    Invoke-AgentUndo -State $state -UndoEntry @{ messages = $beforeTurn; leaf_id = $beforeLeafId; tree_entries = $beforeTreeEntries; writes = @($script:CurrentTurnWrites) }
+                    Restore-AgentTurnSnapshot -State $state -Snapshot $turnSnapshot -Writes @($script:CurrentTurnWrites)
                 }
                 catch {
                     Write-Host ($script:Gm.Red + 'Rollback warning: ' + $_.Exception.Message + $script:Gm.Reset)
