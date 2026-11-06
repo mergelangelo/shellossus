@@ -1390,6 +1390,94 @@ try {
     $modelEmptyMeta = Get-AgentSessionMeta -SessionFile $modelEmptyFile
     Assert-True ($modelEmptyMeta.model -eq 'old-model') "Empty session file rewrote meta model to '$($modelEmptyMeta.model)'."
     Assert-True (($modelEmptyStampBefore -eq $modelEmptyStampAfter) -and ($modelEmptyBytesBefore -eq $modelEmptyBytesAfter) -and ($modelEmptyNamesBefore -eq $modelEmptyNamesAfter)) "Invoke-ReplModelCommand -SessionFile '' wrote session data."
+
+    # Regression (Task 16): an exception restores the pre-turn messages and undo writes.
+    # A cancelled tool inside a successful turn keeps the new messages; restore is catch-only.
+    $script:crStep = 0
+    $script:crSawFile = $false
+    $script:crTargetFile = Join-Path $workspacePath 'continue-rollback.txt'
+    $script:crCancelStep = 0
+    $crCancelFile = Join-Path $workspacePath 'continue-cancelled.txt'
+    $savedCrPerm = $script:AgentPermission
+    $savedCrMode = $script:OutputMode
+    function Write-Host {
+        param([Parameter(Position = 0, ValueFromRemainingArguments = $true)]$Object, [switch]$NoNewline, $ForegroundColor, $BackgroundColor)
+    }
+    function Start-Sleep {
+        param($Seconds, $Milliseconds)
+    }
+    try {
+        $script:AgentPermission = 'AutoEdit'
+        $script:OutputMode = 'text'
+        function Invoke-WebRequest {
+            param($Uri, $Method, $Headers, $ContentType, $Body, $TimeoutSec, $ErrorAction, [switch]$UseBasicParsing, $OutFile)
+            $script:crStep++
+            if ($script:crStep -eq 1) {
+                $r = @{ choices = @(@{ finish_reason = 'tool_calls'; message = @{
+                    content = ''
+                    tool_calls = @(@{ id = 'cr-w1'; type = 'function'; function = @{ name = 'write_file'; arguments = '{"path":"continue-rollback.txt","content":"temp-data"}' } })
+                } }) } | ConvertTo-Json -Depth 10 -Compress
+                Set-Content -LiteralPath $OutFile -Value $r -Encoding UTF8 -NoNewline
+                return
+            }
+            if (Test-Path -LiteralPath $script:crTargetFile) { $script:crSawFile = $true }
+            throw 'HTTP 500 Internal Server Error'
+        }
+        $crState = @{
+            messages = @(
+                @{ role = 'system'; content = 'sys-keep' },
+                @{ role = 'user'; content = 'user-keep' }
+            )
+        }
+        $crResult = Invoke-ReplContinueCommand -State $crState -Endpoint 'https://example.invalid/v1/chat/completions' -Model 'test-model' -ApiKey 'fake' -RootPath $workspacePath -SessionFile '' -MaxSteps 4 -UndoStack @()
+        Assert-True ($script:crSawFile) 'Continue failure did not write the file before the exception.'
+        Assert-True (-not (Test-Path -LiteralPath $script:crTargetFile)) 'Exception did not undo the file written during the turn.'
+        $crRoles = @($crState.messages | ForEach-Object { [string]$_.role })
+        Assert-True ($crRoles.Count -eq 2 -and $crRoles[0] -eq 'system' -and $crRoles[1] -eq 'user' -and [string]$crState.messages[0].content -eq 'sys-keep' -and [string]$crState.messages[1].content -eq 'user-keep') 'Exception did not restore pre-turn messages.'
+        Assert-True ([string]$crState.leaf_id -eq 'e0001' -and @($crState.tree_entries).Count -eq 1 -and [string]$crState.tree_entries[0].id -eq 'e0001') 'Exception did not restore pre-turn leaf_id and tree_entries.'
+        Assert-True ($null -ne $crResult.undo_stack -and @($crResult.undo_stack).Count -eq 0) 'Failed continue pushed an undo-stack entry.'
+
+        $script:AgentPermission = 'Ask'
+        $script:OutputMode = 'json'
+        function Invoke-WebRequest {
+            param($Uri, $Method, $Headers, $ContentType, $Body, $TimeoutSec, $ErrorAction, [switch]$UseBasicParsing, $OutFile)
+            $script:crCancelStep++
+            if ($script:crCancelStep -eq 1) {
+                $r = @{ choices = @(@{ finish_reason = 'tool_calls'; message = @{
+                    content = ''
+                    tool_calls = @(@{ id = 'cr-can-1'; type = 'function'; function = @{ name = 'write_file'; arguments = '{"path":"continue-cancelled.txt","content":"nope"}' } })
+                } }) } | ConvertTo-Json -Depth 10 -Compress
+            }
+            else {
+                $r = @{ choices = @(@{ finish_reason = 'stop'; message = @{ content = 'Kept after cancel.' } }) } | ConvertTo-Json -Depth 10 -Compress
+            }
+            Set-Content -LiteralPath $OutFile -Value $r -Encoding UTF8 -NoNewline
+        }
+        $crCancelState = @{
+            messages = @(
+                @{ role = 'system'; content = 'sys-keep' },
+                @{ role = 'user'; content = 'user-keep' }
+            )
+        }
+        $crCancelResult = Invoke-ReplContinueCommand -State $crCancelState -Endpoint 'https://example.invalid/v1/chat/completions' -Model 'test-model' -ApiKey 'fake' -RootPath $workspacePath -SessionFile '' -MaxSteps 4 -UndoStack @()
+        Assert-True (-not (Test-Path -LiteralPath $crCancelFile)) 'Cancelled write_file created a file.'
+        Assert-True ([string]$crCancelState.messages[-1].content -eq 'Kept after cancel.') 'Successful turn with a cancelled tool did not keep the final assistant message.'
+        $crCancelTool = @($crCancelState.messages | Where-Object { $_.role -eq 'tool' })
+        $crCancelParsed = $crCancelTool[0].content | ConvertFrom-Json
+        Assert-True ($crCancelTool.Count -eq 1 -and $crCancelParsed.status -eq 'cancelled') 'Successful turn did not keep the cancelled tool result.'
+        $crCancelStack = @($crCancelResult.undo_stack)
+        Assert-True ($crCancelStack.Count -eq 1 -and @($crCancelStack[0].messages).Count -eq 2 -and [string]$crCancelStack[0].leaf_id -eq 'e0001' -and [string]$crCancelState.leaf_id -ne 'e0001') 'Successful turn restored the pre-turn snapshot or dropped the undo entry.'
+    }
+    finally {
+        $script:AgentPermission = $savedCrPerm
+        $script:OutputMode = $savedCrMode
+        $script:CurrentTurnWrites = @()
+        Remove-Item Function:\Invoke-WebRequest -ErrorAction SilentlyContinue
+        Remove-Item Function:\Write-Host -ErrorAction SilentlyContinue
+        Remove-Item Function:\Start-Sleep -ErrorAction SilentlyContinue
+        if ($script:crTargetFile -and (Test-Path -LiteralPath $script:crTargetFile)) { Remove-Item -LiteralPath $script:crTargetFile -Force -ErrorAction SilentlyContinue }
+        if ($crCancelFile -and (Test-Path -LiteralPath $crCancelFile)) { Remove-Item -LiteralPath $crCancelFile -Force -ErrorAction SilentlyContinue }
+    }
 }
 finally {
     Remove-TestEnvironment -Env $envData

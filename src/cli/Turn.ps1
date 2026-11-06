@@ -29,6 +29,47 @@ function Get-ToolCallSignature {
     return ("{0}|{1}|{2}" -f $Epoch, $fnName, $canonArgs)
 }
 
+function New-AgentTurnSnapshot {
+    param($State)
+    $leafId = if ($State.leaf_id) { [string]$State.leaf_id } else { '' }
+    $messages = @(Copy-SessionHashtableArray -Items $State.messages)
+    $treeEntries = @(Copy-SessionHashtableArray -Items $State.tree_entries)
+    return @{
+        messages = $messages
+        leaf_id = $leafId
+        tree_entries = $treeEntries
+    }
+}
+
+function Restore-AgentTurnSnapshot {
+    param($State, $Snapshot, [AllowEmptyCollection()][array]$Writes = @())
+    $State.messages = @($Snapshot.messages)
+    Invoke-AgentUndo -State $State -UndoEntry @{
+        messages = @($Snapshot.messages)
+        leaf_id = [string]$Snapshot.leaf_id
+        tree_entries = @($Snapshot.tree_entries)
+        writes = @($Writes)
+    }
+}
+
+function Invoke-ThresholdAutoCompact {
+    param($State, [string]$Endpoint, [string]$ModelId, [string]$ApiKey)
+    $stats = Get-ContextStats -State $State
+    if ($stats.est_tokens -gt $stats.compact_threshold_tokens) {
+        if ($script:OutputMode -ne 'json') {
+            $limStr = Format-TokenCount -Tokens $stats.compact_threshold_tokens
+            Write-Host ($script:Gm.Yellow + "  [auto-compact] Context exceeds $limStr tokens, compacting older history..." + $script:Gm.Reset)
+        }
+        try {
+            if (Invoke-AgentCompact -State $State -Endpoint $Endpoint -ModelId $ModelId -ApiKey $ApiKey) {
+                return $true
+            }
+        }
+        catch {}
+    }
+    return $false
+}
+
 function Invoke-AgentTurn {
     param($State, [string]$Endpoint, [string]$ModelId, [string]$ApiKey, [string]$Root, [int]$Steps = 50, [int]$MaxRepeatCalls = 0)
     $overflowRetried = $false
@@ -49,19 +90,9 @@ function Invoke-AgentTurn {
     $scopedInstrCache = $State.scoped_instr_cache
     for ($step = 0; $step -lt $Steps; $step++) {
         if ($step -gt 0) {
-            $stStep = Get-ContextStats -State $State
-            if ($stStep.est_tokens -gt $stStep.compact_threshold_tokens) {
-                if ($script:OutputMode -ne 'json') {
-                    $limStr = Format-TokenCount -Tokens $stStep.compact_threshold_tokens
-                    Write-Host ($script:Gm.Yellow + "  [auto-compact] Context exceeds $limStr tokens, compacting older history..." + $script:Gm.Reset)
-                }
-                try {
-                    if (Invoke-AgentCompact -State $State -Endpoint $Endpoint -ModelId $ModelId -ApiKey $ApiKey) {
-                        $mutationEpoch++
-                        $toolCallCounts = @{}
-                    }
-                }
-                catch {}
+            if (Invoke-ThresholdAutoCompact -State $State -Endpoint $Endpoint -ModelId $ModelId -ApiKey $ApiKey) {
+                $mutationEpoch++
+                $toolCallCounts = @{}
             }
         }
         $capSync = Sync-AgentCapabilities -State $State -Root $Root

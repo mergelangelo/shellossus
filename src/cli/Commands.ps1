@@ -354,27 +354,19 @@ function Invoke-ReplContinueCommand {
         return @{ state = $State; undo_stack = @($UndoStack); last_failed_question = $LastFailedQuestion }
     }
     Ensure-SessionTree -State $State
-    $beforeTurn = @(Copy-SessionHashtableArray -Items $State.messages)
-    $beforeLeafId = if ($State.leaf_id) { [string]$State.leaf_id } else { '' }
-    $beforeTreeEntries = @(Copy-SessionHashtableArray -Items $State.tree_entries)
-    $stBefore = Get-ContextStats -State $State
-    if ($stBefore.est_tokens -gt $stBefore.compact_threshold_tokens) {
-        $limStr = Format-TokenCount -Tokens $stBefore.compact_threshold_tokens
-        Write-Host ($script:Gm.Yellow + "  [auto-compact] Context exceeds $limStr tokens, compacting older history..." + $script:Gm.Reset)
-        try { Invoke-AgentCompact -State $State -Endpoint $Endpoint -ModelId $Model -ApiKey $ApiKey | Out-Null } catch {}
-    }
+    $turnSnapshot = New-AgentTurnSnapshot -State $State
+    $null = Invoke-ThresholdAutoCompact -State $State -Endpoint $Endpoint -ModelId $Model -ApiKey $ApiKey
     $script:CurrentTurnWrites = @()
     Write-Host ($script:Gm.Aqua + "  [continue] Continuing agent turn (up to $contSteps steps)..." + $script:Gm.Reset)
     try {
         Invoke-AgentContinue -State $State -Endpoint $Endpoint -ModelId $Model -ApiKey $ApiKey -Root $RootPath -Steps $contSteps | Out-Null
         $LastFailedQuestion = ''
-        $UndoStack += @{ messages = $beforeTurn; leaf_id = $beforeLeafId; tree_entries = $beforeTreeEntries; writes = @($script:CurrentTurnWrites) }
+        $UndoStack += @{ messages = $turnSnapshot.messages; leaf_id = $turnSnapshot.leaf_id; tree_entries = $turnSnapshot.tree_entries; writes = @($script:CurrentTurnWrites) }
         Save-AgentSession -SessionFile $SessionFile -State $State -Workspace $RootPath -Model $Model
     }
     catch {
-        $State.messages = $beforeTurn
         try {
-            Invoke-AgentUndo -State $State -UndoEntry @{ messages = $beforeTurn; leaf_id = $beforeLeafId; tree_entries = $beforeTreeEntries; writes = @($script:CurrentTurnWrites) }
+            Restore-AgentTurnSnapshot -State $State -Snapshot $turnSnapshot -Writes @($script:CurrentTurnWrites)
         }
         catch {
             Write-Host ($script:Gm.Red + 'Rollback warning: ' + $_.Exception.Message + $script:Gm.Reset)
