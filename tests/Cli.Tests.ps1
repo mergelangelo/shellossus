@@ -857,6 +857,38 @@ try {
     finally {
         Remove-Variable -Name ssStep, ssSawFile, ssJsonLines, ssTargetFile -Scope Global -ErrorAction SilentlyContinue
     }
+
+    # Regression: REPL !cmd shortcut interpolates the actual command string into conversation context (not literal $cmdStr).
+    $bangSessDir = Join-Path $testRoot 'bang-sessions'
+    New-Item -ItemType Directory -Path $bangSessDir -Force | Out-Null
+    $bangSessFile = Join-Path $bangSessDir 'bang-test.jsonl'
+    $global:bangReadQueue = @('!Write-Output "bang-check-42"', '/exit')
+    function global:Read-Host {
+        param($Prompt)
+        if (-not $global:bangReadQueue -or $global:bangReadQueue.Count -eq 0) { return '/exit' }
+        $next = $global:bangReadQueue[0]
+        if ($global:bangReadQueue.Count -eq 1) { $global:bangReadQueue = @() }
+        else { $global:bangReadQueue = @($global:bangReadQueue[1..($global:bangReadQueue.Count - 1)]) }
+        return $next
+    }
+    function Write-Host {
+        param([Parameter(Position = 0, ValueFromRemainingArguments = $true)]$Object, [switch]$NoNewline, $ForegroundColor, $BackgroundColor)
+    }
+    try {
+        & "$PSScriptRoot\..\shellossus.ps1" -Workspace $workspacePath -BaseUrl 'https://example.invalid/v1' -Model 'test-model' -Session $bangSessFile -SessionDir $bangSessDir -ConfigPath $setupCfgFile
+    }
+    finally {
+        Remove-Item Function:\global:Read-Host -ErrorAction SilentlyContinue
+        Remove-Item Function:\Write-Host -ErrorAction SilentlyContinue
+        Remove-Variable -Name bangReadQueue -Scope Global -ErrorAction SilentlyContinue
+    }
+    Assert-True (Test-Path -LiteralPath $bangSessFile) 'REPL !cmd session file was not saved.'
+    $bangLoadedState = @{ session_id = ''; workspace = $workspacePath; model = 'test-model'; messages = @() }
+    Invoke-SessionResume -SessionFile $bangSessFile -State $bangLoadedState -CurrentWorkspace $workspacePath | Out-Null
+    $bangUserMsgs = @($bangLoadedState.messages | Where-Object { $_.role -eq 'user' })
+    Assert-True ($bangUserMsgs.Count -eq 1) "Expected 1 user message from !cmd in session history, got $($bangUserMsgs.Count)."
+    $bangContent = [string]$bangUserMsgs[0].content
+    Assert-True ($bangContent.Contains('[Shell command Write-Output "bang-check-42" exit=0]') -and (-not $bangContent.Contains('$cmdStr')) -and $bangContent.Contains('bang-check-42')) "REPL !cmd message did not interpolate command string properly: $bangContent"
 }
 finally {
     Remove-TestEnvironment -Env $envData

@@ -693,7 +693,7 @@ if (-not $LibraryOnly) {
                     if ($res.output) { Write-Host ($script:Gm.Fg + $res.output + $script:Gm.Reset) }
                     Write-Host ($script:Gm.Grey1 + "  [exit $($res.exit_code)]" + $script:Gm.Reset)
                     if (-not $localOnly) {
-                        $state.messages += @{ role = 'user'; content = ("[Shell command `$cmdStr` exit=$($res.exit_code)]`n" + $res.output) }
+                        $state.messages += @{ role = 'user'; content = ("[Shell command $cmdStr exit=$($res.exit_code)]`n" + $res.output) }
                         Save-AgentSession -SessionFile $sessionFile -State $state -Workspace $rootPath -Model $Model
                         Write-Host ($script:Gm.Aqua + '  (Output added to conversation context)' + $script:Gm.Reset)
                     }
