@@ -1213,6 +1213,68 @@ try {
     $falseViewRealClear = Format-MemoryArguments -Arguments ([pscustomobject]@{ view = 'false'; clear = 'true' })
     Assert-True ($falseViewRealClear.action -eq 'clear') 'view="false" blocked a real clear flag.'
 
+    # Regression (Task 14): a model-supplied user_initiated flag stays on the normalized object and is rejected.
+    # Direct Invoke-AgentMemory and /memory keep passing the flag and skip Ask confirmation.
+    $norm = Format-MemoryArguments -Arguments ([pscustomobject]@{ action = 'append'; content = 'x'; user_initiated = $true })
+    $threw = $false
+    try { Test-AgentToolArguments -Name 'memory' -Arguments $norm } catch { $threw = $_.Exception.Message -match 'user_initiated' }
+    Assert-True ($threw) 'model-supplied user_initiated was stripped instead of rejected.'
+    Assert-True ($norm.ContainsKey('user_initiated') -and ($norm.user_initiated -eq $true)) 'Format-MemoryArguments dropped user_initiated before validation.'
+
+    $savedPermUserInit = $script:AgentPermission
+    $savedApprovalUserInit = $script:approval
+    $savedOutputUserInit = $script:OutputMode
+    $savedActiveUserInit = $script:ActiveState
+    $userInitRoot = Join-Path $workspacePath 'user-init-mem'
+    New-Item -ItemType Directory -Path $userInitRoot -Force | Out-Null
+    try {
+        $script:OutputMode = 'text'
+        $script:AgentPermission = 'Auto'
+        $modelSupplied = Invoke-AgentTool -Root $userInitRoot -Call @{ id = 'mem-ui'; function = @{ name = 'memory'; arguments = '{"action":"append","content":"x","user_initiated":true}' } } | ConvertFrom-Json
+        Assert-True ($modelSupplied.error -like '*Unknown argument*user_initiated*') "model tool call did not reject user_initiated: $($modelSupplied.error)"
+        Assert-True ((-not (Test-Path -LiteralPath (Join-Path $userInitRoot 'MEMORY.md'))) -and (-not (Test-Path -LiteralPath (Join-Path $userInitRoot '.shellossus/MEMORY.md')))) 'model-supplied user_initiated wrote memory.'
+
+        $script:AgentPermission = 'Ask'
+        $script:approval = 'n'
+        $promptsBeforeDecline = $script:prompts
+        $declinedDirect = Invoke-AgentMemory -Root $userInitRoot -Arguments @{ action = 'append'; content = 'should-not-write' } | ConvertFrom-Json
+        Assert-True ($declinedDirect.status -eq 'cancelled' -and (-not $declinedDirect.success) -and ($script:prompts -gt $promptsBeforeDecline)) 'Ask mode memory append without user_initiated did not require confirmation.'
+        Assert-True (-not (Test-Path -LiteralPath (Join-Path $userInitRoot '.shellossus/MEMORY.md'))) 'declined direct memory append wrote a file.'
+
+        $promptsBeforeUserInit = $script:prompts
+        $userInitAsk = Invoke-AgentMemory -Root $userInitRoot -Arguments @{ action = 'append'; content = 'x'; user_initiated = $true } | ConvertFrom-Json
+        Assert-True ($userInitAsk.success -and $userInitAsk.status -eq 'written' -and ($script:prompts -eq $promptsBeforeUserInit)) 'Ask mode treated a direct user_initiated memory call as unknown or required confirmation.'
+
+        $script:AgentPermission = 'Auto'
+        $userInitAuto = Invoke-AgentMemory -Root $userInitRoot -Arguments @{ action = 'append'; content = 'x'; user_initiated = $true } | ConvertFrom-Json
+        Assert-True ($userInitAuto.success -and $userInitAuto.status -eq 'written' -and (-not ($userInitAuto.error -like '*Unknown argument*'))) 'Auto mode treated a direct user_initiated memory call as unknown.'
+
+        $script:AgentPermission = 'Ask'
+        $script:approval = 'n'
+        $promptsBeforeReplMem = $script:prompts
+        $replMemState = @{
+            workspace = $userInitRoot
+            messages = @(
+                @{ role = 'system'; content = 'sys' }
+            )
+        }
+        $script:ActiveState = $replMemState
+        Invoke-ReplMemoryCommand -State $replMemState -RootPath $userInitRoot -ConfigDir $testRoot -MemArg 'add typed note'
+        $replMemFile = Join-Path $userInitRoot '.shellossus/MEMORY.md'
+        $replMemText = ''
+        if (Test-Path -LiteralPath $replMemFile) { $replMemText = [string](Get-Content -LiteralPath $replMemFile -Raw -Encoding UTF8) }
+        Assert-True (($script:prompts -eq $promptsBeforeReplMem) -and $replMemText.Contains('typed note')) 'user-typed /memory change required confirmation or was rejected.'
+    }
+    finally {
+        $script:AgentPermission = $savedPermUserInit
+        $script:approval = $savedApprovalUserInit
+        $script:OutputMode = $savedOutputUserInit
+        $script:ActiveState = $savedActiveUserInit
+        if (Test-Path -LiteralPath $userInitRoot) {
+            Remove-Item -LiteralPath $userInitRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+
     # append memory (also verify live Sync-AgentMemoryContext updates active system prompt)
     $script:approval = 'WRITE'
     $memSyncState = @{
