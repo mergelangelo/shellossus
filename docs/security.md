@@ -11,8 +11,8 @@ You can set the permission mode at launch (`-Permission <Mode>`) or switch it at
 | Mode | Read & Search Tools | File Write & Edit Tools | Shell Execution (`run_command`) | Typical Use Case |
 | --- | --- | --- | --- | --- |
 | `ReadOnly` | Allowed | Hidden & blocked | Hidden & blocked | Code review, SQL/log analysis, architecture Q&A |
-| `Ask` *(default)* | Allowed | Requires confirmation (`y` / `Enter` / `WRITE`) | Requires confirmation (`y` / `Enter` / `RUN`) | Safe everyday pair programming |
-| `AutoEdit` | Allowed | Auto-approved (saves backup) | Requires confirmation (`y` / `Enter` / `RUN`) | Fast iterative coding while keeping shell commands gated |
+| `Ask` *(default)* | Allowed | Requires confirmation (`y` / `a` / `WRITE`; `Enter` cancels) | Requires confirmation (`y` / `a` / `RUN`; `Enter` cancels) | Safe everyday pair programming |
+| `AutoEdit` | Allowed | Auto-approved (saves backup) | Requires confirmation (`y` / `a` / `RUN`; `Enter` cancels) | Fast iterative coding while keeping shell commands gated |
 | `Auto` | Allowed | Auto-approved (saves backup) | Auto-approved | Trusted automation or sandboxed environments |
 
 When resuming a saved session via `/resume`, `shellossus` resets the active permission mode to `Ask` unless `-Permission` was explicitly passed at launch.
@@ -24,7 +24,7 @@ The table describes the model's `write_file`, `edit_file`, and `run_command` too
 ## Workspace Isolation & Path Safety
 
 1. **Workspace Boundary Enforcement:**
-   - `list_files`, `read_file`, `find_files`, `grep_files`, `write_file`, `edit_file`, and `@file` attachments use workspace path validation. Paths resolving outside the workspace directory are rejected (`Path is outside the workspace.`). Boundary checks use case-sensitive path comparison on all platforms; absolute paths with different capitalization from the workspace may therefore be rejected even on case-insensitive filesystems.
+   - `list_files`, `read_file`, `find_files`, `grep_files`, `write_file`, `edit_file`, and `@file` attachments use workspace path validation. Paths resolving outside the workspace directory are rejected (`Path is outside the workspace.`). Boundary checks (`Test-AgentPathWithinRoot` and `Get-WorkspaceRelativePath`) match Windows drive paths (`C:\...`) case-insensitively on Windows (`OrdinalIgnoreCase`) while keeping POSIX paths case-sensitive (`Ordinal`).
    - The read-only exception for these file tools is `read_file` access to global `SKILL.md` files explicitly registered by `Get-SkillsCatalog` from the global configuration directory (normally `%USERPROFILE%\.shellossus\skills`).
    - Shell commands start with the workspace as their working directory, but retain the user's OS permissions. They can change directory, read/write other paths (including configuration files), invoke programs, and use the network. Permission prompts approve execution; they do not sandbox it.
    - `memory` is a separate fixed-path tool: workspace scope uses an existing root `MEMORY.md`, otherwise `.shellossus/MEMORY.md`; global scope uses `MEMORY.md` beside the active configuration file. It does not use `Resolve-AgentPath`, but it checks its target path and ancestor directories up to the scope root for reparse points (`Test-PathHasReparsePoint`).
@@ -46,13 +46,13 @@ The table describes the model's `write_file`, `edit_file`, and `run_command` too
   - Before changing any file, undo verifies every pending backup against its recorded `before_content`, including intermediate backups from repeated edits to the same file. Missing, unreadable, or corrupted backups stop the entire preflight; files, backups, and conversation state are preserved for a retry.
   - Undo checks each recorded target and its parent path for workspace boundaries and reparse points during preflight and again before each restoration or deletion. As with the file tools, these application-level checks do not eliminate filesystem races.
   - When `/undo` is invoked, `Invoke-AgentUndo` checks whether the file on disk was modified manually after the agent's write. If manual edits are detected, `/undo` refuses to overwrite the file and preserves the backup path.
-  - Backup files are only deleted after restoration succeeds and the restored content is verified against the recorded original content.
+  - During `/undo`, backup files are deleted only after restoration succeeds and the restored content is verified against the recorded original content. Temporary backup files are also removed when a session is reset or switched (`/new`, `/clear`, `/resume`, `/import`, `/tree`, `/fork`) or when `shellossus` exits.
 
 ### What `/undo` Does Not Cover
 
 `/undo` restores the tracked turn's conversation messages and recorded file changes. It does not reverse effects of `run_command`, `!cmd`, `!!cmd`, `memory` (either scope), task-board state, configuration/setup, session exports, network requests, or changes by external processes. The same limit applies to automatic rollback after a failed turn. For example, `write_file` creating `a.txt` is tracked, while a shell command creating `b.txt` or `memory` appending a note is not.
 
-Undo history is kept in memory and is reset when a session is resumed or its active branch changes; loading JSONL history does not reconstruct file backups. Preflight failure prevents that undo operation from changing files, but I/O failure during restoration can leave some files restored and others pending. Backups are temporary local files, not a durable transaction journal. Keep version control or other backups for long-lived recovery.
+Undo history is kept in memory and is reset (removing temporary backup files) when a session is reset or switched (`/new`, `/clear`, `/resume`, `/import`, `/tree`, `/fork`) or when `shellossus` exits; loading JSONL history does not reconstruct file backups. Preflight failure prevents that undo operation from changing files, but I/O failure during restoration can leave some files restored and others pending. Backups are temporary local files, not a durable transaction journal. Keep version control or other backups for long-lived recovery.
 
 ---
 
@@ -67,7 +67,7 @@ For `fetch_url` and `web_search`, downloads run in a separate PowerShell process
 
 ## Subagent Tool Restrictions
 
-In-process and separate-process subagents receive the intersection of the parent's effective tool permissions and the role's tool filter. Parent exclusions, aliases, and wildcard filters are respected. An empty intersection disables all tools; it never means unrestricted access. Parallel workers remain `ReadOnly`, and recursive `run_agent` calls are disabled.
+In-process and separate-process subagents receive the intersection of the parent's effective tool permissions and the role's tool filter. Parent exclusions, aliases, and wildcard filters are respected. An empty intersection disables all tools; it never means unrestricted access. `ReadOnly` subagents exclude `write_file`, `edit_file`, `run_command`, `memory`, `todo`, and `ask_user` (plus `fetch_url` and `web_search` in non-interactive JSON mode when web tools are not auto-approved), and in-process subagents preserve the parent session's active `todo` state. Parallel workers remain `ReadOnly`, and recursive `run_agent` calls are disabled.
 
 ---
 

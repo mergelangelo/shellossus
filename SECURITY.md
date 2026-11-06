@@ -29,8 +29,8 @@ Please include:
 
 ### 1. Permission Modes & Confirmation Prompts
 By default, `shellossus` operates in **`Ask`** mode:
-- **`write_file` / `edit_file` / `memory`:** In `Ask` mode, modifying file or memory calls require confirmation via single-key `[y]es` / `[a]ll` / `Enter` (or typing `WRITE`).
-- **Command Execution:** In `Ask` / `AutoEdit` mode, requires confirmation via single-key `[y]es` / `[a]ll` / `Enter` (or typing `RUN`).
+- **`write_file` / `edit_file` / `memory`:** In `Ask` mode, modifying file or memory calls require confirmation via single-key `[y]es` / `[a]ll` (or typing `WRITE`); pressing `Enter` defaults to `[n]o` (cancels).
+- **Command Execution:** In `Ask` / `AutoEdit` mode, requires confirmation via single-key `[y]es` / `[a]ll` (or typing `RUN`); pressing `Enter` defaults to `[n]o` (cancels).
 - **`ReadOnly` Mode:** Strips file write tools and shell execution tools entirely from the model's capabilities and rejects unauthorized invocations (including modifying `memory` actions).
 - User-entered `!cmd` / `!!cmd` shortcuts execute directly even in `ReadOnly`; this mode restricts model tools, not the user's explicit commands or session persistence.
 
