@@ -571,6 +571,50 @@ try {
     elseif ($env:OS -eq 'Windows_NT') {
         throw 'Junction creation failed on Windows. This assertion must not be skipped in the Windows CI job.'
     }
+
+    # Registered skill keys use forward slashes. A backslash relative path resolves only with -AllowRegisteredSkill.
+    $backslashSkillDir = Join-Path $testRoot 'backslash-skill'
+    New-Item -ItemType Directory -Path $backslashSkillDir -Force | Out-Null
+    $backslashSkillFile = Join-Path $backslashSkillDir 'SKILL.md'
+    Set-Content -LiteralPath $backslashSkillFile -Value "---`nname: demo`ndescription: Backslash skill key`n---`nOutside body." -Encoding UTF8
+    $backslashSkillFull = (Get-Item -LiteralPath $backslashSkillFile -Force).FullName
+    $hadDemoSkillKey = $script:RegisteredSkills.ContainsKey('skills/demo/SKILL.md')
+    $priorDemoSkill = $null
+    if ($hadDemoSkillKey) { $priorDemoSkill = $script:RegisteredSkills['skills/demo/SKILL.md'] }
+    $script:RegisteredSkills['skills/demo/SKILL.md'] = $backslashSkillFull
+    try {
+        $unswitched = $null
+        $unswitchedThrew = $false
+        try {
+            $unswitched = Resolve-AgentPath -Root $workspacePath -RelativePath 'skills\demo\SKILL.md'
+        }
+        catch {
+            $unswitchedThrew = $true
+        }
+        $stayedInside = $false
+        if ($unswitchedThrew) {
+            $stayedInside = $true
+        }
+        elseif ($unswitched) {
+            $stayedInside = ($unswitched -ne $backslashSkillFull) -and (Test-AgentPathWithinRoot -RootPath $workspacePath -TargetPath $unswitched)
+        }
+        Assert-True $stayedInside 'A backslash skill path escaped the workspace without -AllowRegisteredSkill.'
+        $resolvedBackslash = $null
+        $backslashThrew = $false
+        $backslashMessage = ''
+        try {
+            $resolvedBackslash = Resolve-AgentPath -Root $workspacePath -RelativePath 'skills\demo\SKILL.md' -AllowRegisteredSkill
+        }
+        catch {
+            $backslashThrew = $true
+            $backslashMessage = $_.Exception.Message
+        }
+        Assert-True ((-not $backslashThrew) -and ($resolvedBackslash -eq $backslashSkillFull)) "Resolve-AgentPath did not resolve a registered skill path that uses backslashes. $backslashMessage"
+    }
+    finally {
+        if ($hadDemoSkillKey) { $script:RegisteredSkills['skills/demo/SKILL.md'] = $priorDemoSkill }
+        else { [void]$script:RegisteredSkills.Remove('skills/demo/SKILL.md') }
+    }
 }
 finally {
     Remove-TestEnvironment -Env $envData
