@@ -306,6 +306,7 @@ function Invoke-AgentWebDownload {
     else {
         $stdout = New-AgentTempFile
         $stderr = New-AgentTempFile
+        $workerFile = $null
         $proc = $null
         try {
             $classifierBody = (Get-Command -Name 'Test-BlockedWebAddress' -CommandType Function).Definition
@@ -368,12 +369,17 @@ try {
 }
 '@
             $worker = $workerHead + $classifierBody + $workerTail
-            $workerArguments = Get-AgentCommandArguments -CommandText $worker
+            # A multiline -Command is cut at the first newline on Windows PowerShell 5.1.
+            $workerFile = New-AgentTempFile
+            Set-AgentUtf8Content -LiteralPath $workerFile.FullName -Value $worker
+            $launch = '$ErrorActionPreference = ''Stop''; Invoke-Expression (Get-Content -LiteralPath $env:SHELLOSSUS_WEB_WORKER_FILE -Raw)'
+            $workerArguments = Get-AgentCommandArguments -CommandText $launch
             $proc = Invoke-WithProcessEnvironment -Values @{
                 SHELLOSSUS_API_KEY = $null
                 OPENAI_API_KEY = $null
                 SHELLOSSUS_WEB_DOWNLOAD_URI = $Uri
                 SHELLOSSUS_WEB_DOWNLOAD_FILE = $OutFile
+                SHELLOSSUS_WEB_WORKER_FILE = $workerFile.FullName
             } -Action {
                 Start-Process -FilePath (Get-AgentEnvironment).shell_exe -ArgumentList $workerArguments -RedirectStandardOutput $stdout.FullName -RedirectStandardError $stderr.FullName -NoNewWindow -PassThru -ErrorAction Stop
             }
@@ -386,7 +392,9 @@ try {
                 if (((Get-Date) - $started).TotalSeconds -gt 35) { throw 'Web request timed out.' }
                 Start-Sleep -Milliseconds 100
             }
-            if ($null -ne $proc.ExitCode -and $proc.ExitCode -ne 0) {
+            Wait-Process -InputObject $proc -ErrorAction SilentlyContinue
+            $workerFailed = ($null -eq $proc.ExitCode) -or ($proc.ExitCode -ne 0) -or (-not (Test-Path -LiteralPath $OutFile))
+            if ($workerFailed) {
                 $errOut = ''
                 if (Test-Path -LiteralPath $stdout.FullName) {
                     $errOut = Get-Content -LiteralPath $stdout.FullName -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
@@ -408,6 +416,9 @@ try {
                 Wait-Process -InputObject $proc -Timeout 2 -ErrorAction SilentlyContinue
             }
             Remove-Item -LiteralPath $stdout.FullName, $stderr.FullName -Force -ErrorAction SilentlyContinue
+            if ($workerFile) {
+                Remove-Item -LiteralPath $workerFile.FullName -Force -ErrorAction SilentlyContinue
+            }
         }
     }
     $resultFile = Get-Item -LiteralPath $OutFile -Force -ErrorAction Stop
