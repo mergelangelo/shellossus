@@ -7904,6 +7904,7 @@ function Invoke-SessionResume {
     }
     if ($State.session_id) { $script:ActiveSessionId = [string]$State.session_id }
     if ($State.model) { $script:ActiveModelId = [string]$State.model }
+    $script:ActiveSessionFile = $SessionFile
     $State.undo_stack = @()
     $State.last_failed_question = ''
     $State.last_prompt_tokens = 0
@@ -10207,6 +10208,7 @@ function Invoke-ReplImportCommand {
     try {
         Invoke-SessionResume -SessionFile $impPath -State $State -CurrentWorkspace $RootPath | Out-Null
         $SessionFile = if ($NoSession) { '' } else { $impPath }
+        if ($NoSession) { $script:ActiveSessionFile = '' }
         Clear-AgentUndoBackups -UndoEntries $UndoStack
         $UndoStack = @()
         $LastFailedQuestion = ''
@@ -10374,6 +10376,7 @@ function Invoke-ReplSessionsCommand {
         try {
             Invoke-SessionResume -SessionFile $chosen -State $State -CurrentWorkspace $RootPath | Out-Null
             $SessionFile = if ($NoSession) { '' } else { $chosen }
+            if ($NoSession) { $script:ActiveSessionFile = '' }
             Clear-AgentUndoBackups -UndoEntries $UndoStack
             $UndoStack = @()
             $LastFailedQuestion = ''
@@ -10665,6 +10668,7 @@ if (-not $LibraryOnly) {
         if (Test-Path -LiteralPath $candSess) {
             $sessionFile = if ($NoSession) { '' } else { $candSess }
             Invoke-SessionResume -SessionFile $candSess -State $state -CurrentWorkspace $rootPath | Out-Null
+            if ($NoSession) { $script:ActiveSessionFile = '' }
             if ($PSBoundParameters.Keys -notcontains 'Model' -and $state.model) { $Model = $state.model }
         }
         elseif (-not $NoSession) {
@@ -10687,6 +10691,7 @@ if (-not $LibraryOnly) {
         if ($latestProjectSession) {
             $sessionFile = if ($NoSession) { '' } else { $latestProjectSession }
             Invoke-SessionResume -SessionFile $latestProjectSession -State $state -CurrentWorkspace $rootPath | Out-Null
+            if ($NoSession) { $script:ActiveSessionFile = '' }
             if ($PSBoundParameters.Keys -notcontains 'Model' -and $state.model) { $Model = $state.model }
         }
     }

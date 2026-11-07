@@ -202,6 +202,7 @@ function Invoke-SessionResume {
     }
     if ($State.session_id) { $script:ActiveSessionId = [string]$State.session_id }
     if ($State.model) { $script:ActiveModelId = [string]$State.model }
+    $script:ActiveSessionFile = $SessionFile
     $State.undo_stack = @()
     $State.last_failed_question = ''
     $State.last_prompt_tokens = 0

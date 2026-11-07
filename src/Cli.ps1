@@ -206,6 +206,7 @@ if (-not $LibraryOnly) {
         if (Test-Path -LiteralPath $candSess) {
             $sessionFile = if ($NoSession) { '' } else { $candSess }
             Invoke-SessionResume -SessionFile $candSess -State $state -CurrentWorkspace $rootPath | Out-Null
+            if ($NoSession) { $script:ActiveSessionFile = '' }
             if ($PSBoundParameters.Keys -notcontains 'Model' -and $state.model) { $Model = $state.model }
         }
         elseif (-not $NoSession) {
@@ -228,6 +229,7 @@ if (-not $LibraryOnly) {
         if ($latestProjectSession) {
             $sessionFile = if ($NoSession) { '' } else { $latestProjectSession }
             Invoke-SessionResume -SessionFile $latestProjectSession -State $state -CurrentWorkspace $rootPath | Out-Null
+            if ($NoSession) { $script:ActiveSessionFile = '' }
             if ($PSBoundParameters.Keys -notcontains 'Model' -and $state.model) { $Model = $state.model }
         }
     }

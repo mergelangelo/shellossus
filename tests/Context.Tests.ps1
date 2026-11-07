@@ -833,9 +833,10 @@ try {
         $dirtyState13.usage_input_tokens = 999
         $dirtyState13.usage_output_tokens = 888
         $dirtyState13.scoped_instr_cache = @{ 'stale' = $true }
+        $script:ActiveSessionFile = 'stale-session-file'
         Invoke-SessionResume -SessionFile $savedSess13 -State $dirtyState13 -CurrentWorkspace $workspacePath | Out-Null
         Assert-True ($dirtyState13.usage_input_tokens -eq 0 -and $dirtyState13.usage_output_tokens -eq 0 -and $dirtyState13.scoped_instr_cache.Count -eq 0) 'Invoke-SessionResume did not reset usage_input_tokens, usage_output_tokens, and scoped_instr_cache.'
-        Assert-True ($script:ActiveSessionId -eq 'sess-saved-13' -and $script:ActiveModelId -eq 'resumed-model-13') 'Invoke-SessionResume did not sync ActiveSessionId and ActiveModelId.'
+        Assert-True ($script:ActiveSessionId -eq 'sess-saved-13' -and $script:ActiveModelId -eq 'resumed-model-13' -and $script:ActiveSessionFile -eq $savedSess13) 'Invoke-SessionResume did not sync ActiveSessionId, ActiveSessionFile, and ActiveModelId.'
 
         $dirtyState13.usage_input_tokens = 777
         $dirtyState13.usage_output_tokens = 666

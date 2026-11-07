@@ -156,6 +156,7 @@ function Invoke-ReplImportCommand {
     try {
         Invoke-SessionResume -SessionFile $impPath -State $State -CurrentWorkspace $RootPath | Out-Null
         $SessionFile = if ($NoSession) { '' } else { $impPath }
+        if ($NoSession) { $script:ActiveSessionFile = '' }
         Clear-AgentUndoBackups -UndoEntries $UndoStack
         $UndoStack = @()
         $LastFailedQuestion = ''
@@ -323,6 +324,7 @@ function Invoke-ReplSessionsCommand {
         try {
             Invoke-SessionResume -SessionFile $chosen -State $State -CurrentWorkspace $RootPath | Out-Null
             $SessionFile = if ($NoSession) { '' } else { $chosen }
+            if ($NoSession) { $script:ActiveSessionFile = '' }
             Clear-AgentUndoBackups -UndoEntries $UndoStack
             $UndoStack = @()
             $LastFailedQuestion = ''
