@@ -53,11 +53,7 @@ function Save-AgentSession {
                 role = [string]$te.role
                 content = $te.content
             }
-            if ($te.entry_type) { $bEntry.entry_type = [string]$te.entry_type }
-            if ($te.first_kept_entry_id) { $bEntry.first_kept_entry_id = [string]$te.first_kept_entry_id }
-            if ($te.reasoning_content) { $bEntry.reasoning_content = $te.reasoning_content }
-            if ($te.tool_calls) { $bEntry.tool_calls = @($te.tool_calls) }
-            if ($te.tool_call_id) { $bEntry.tool_call_id = [string]$te.tool_call_id }
+            Copy-MessageOptionalFields -Source $te -Target $bEntry
             $lines += ($bEntry | ConvertTo-Json -Depth 20 -Compress)
         }
     }
@@ -145,11 +141,7 @@ function Read-AgentSession {
                     role = [string]$obj.role
                     content = $obj.content
                 }
-                if ($obj.entry_type) { $bMsg.entry_type = [string]$obj.entry_type }
-                if ($obj.first_kept_entry_id) { $bMsg.first_kept_entry_id = [string]$obj.first_kept_entry_id }
-                if ($obj.reasoning_content) { $bMsg.reasoning_content = $obj.reasoning_content }
-                if ($obj.tool_calls) { $bMsg.tool_calls = @($obj.tool_calls) }
-                if ($obj.tool_call_id) { $bMsg.tool_call_id = [string]$obj.tool_call_id }
+                Copy-MessageOptionalFields -Source $obj -Target $bMsg
                 $State.tree_entries += $bMsg
             }
             continue
@@ -157,11 +149,7 @@ function Read-AgentSession {
         $msg = @{ role = [string]$obj.role; content = $obj.content }
         if ($obj.id) { $msg.id = [string]$obj.id }
         if ($obj.parent_id) { $msg.parent_id = [string]$obj.parent_id }
-        if ($obj.entry_type) { $msg.entry_type = [string]$obj.entry_type }
-        if ($obj.first_kept_entry_id) { $msg.first_kept_entry_id = [string]$obj.first_kept_entry_id }
-        if ($obj.reasoning_content) { $msg.reasoning_content = $obj.reasoning_content }
-        if ($obj.tool_calls) { $msg.tool_calls = @($obj.tool_calls) }
-        if ($obj.tool_call_id) { $msg.tool_call_id = [string]$obj.tool_call_id }
+        Copy-MessageOptionalFields -Source $obj -Target $msg
         $messages += $msg
     }
     return $messages

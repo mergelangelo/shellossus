@@ -366,12 +366,9 @@ function Invoke-AgentCompact {
     foreach ($te in @($State.tree_entries)) {
         if ($te -and $te.id) { $existingById[[string]$te.id] = $true }
     }
-    $counter = $State.tree_entries.Count + 1
-    $compId = ('e{0:D4}' -f $counter)
-    while ($existingById.ContainsKey($compId)) {
-        $counter++
-        $compId = ('e{0:D4}' -f $counter)
-    }
+    # Entry count, not count+1: New-SessionTreeEntryId advances before formatting.
+    $counter = @{ Value = $State.tree_entries.Count }
+    $compId = New-SessionTreeEntryId -ExistingById $existingById -Counter $counter
     $compEntry = @{
         id = $compId
         parent_id = $State.leaf_id

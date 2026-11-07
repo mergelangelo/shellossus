@@ -19,9 +19,7 @@ function Get-ForkedSubagentMessages {
         if ($m.role -eq 'system') { continue }
         if ($m.role -eq 'user' -and $m.content -is [string] -and $m.content.StartsWith('[Capability State Change]')) { continue }
         $copyMsg = @{ role = [string]$m.role; content = $m.content }
-        if ($m.reasoning_content) { $copyMsg.reasoning_content = $m.reasoning_content }
-        if ($m.tool_calls) { $copyMsg.tool_calls = @($m.tool_calls) }
-        if ($m.tool_call_id) { $copyMsg.tool_call_id = [string]$m.tool_call_id }
+        Copy-MessageOptionalFields -Source $m -Target $copyMsg
         $forked += $copyMsg
     }
     if (-not (Test-ValidConversationBoundary -Messages $forked)) {
