@@ -1811,6 +1811,134 @@ try {
         Remove-Item Function:\Read-Host -ErrorAction SilentlyContinue
         Remove-Item Function:\Write-Host -ErrorAction SilentlyContinue
     }
+
+    # Task 7: /import parses into temporary state. A broken JSONL reports the error and leaves the live session alone. A valid import still replaces the session and resets permission when -Permission was not passed.
+    $task7SavedPerm = $script:AgentPermission
+    $task7SavedMode = $script:OutputMode
+    $task7SavedWeb = $script:AutoApproveWeb
+    $task7SavedStartupSpecified = $script:StartupPermissionSpecified
+    $task7SavedStartupPerm = $script:StartupAgentPermission
+    $task7SavedCmd = $script:AutoApproveCommands
+    $task7SavedTodos = @($script:ActiveSessionTodos)
+    $task7Dir = Join-Path $testRoot 'task7-sessions'
+    New-Item -ItemType Directory -Path $task7Dir -Force | Out-Null
+    Set-Content -LiteralPath (Join-Path $workspacePath 'AGENTS.md') -Value 'TASK7-DISK-AGENTS' -Encoding UTF8
+    $task7Good = Join-Path $task7Dir 'good.jsonl'
+    $script:ActiveSessionTodos = @(@{ content = 'IMPORTED-TODO'; status = 'pending' })
+    $task7GoodSrc = @{
+        session_id = 'sess-task7-good'
+        session_name = 'IMPORTED-NAME'
+        leaf_id = 'e0001'
+        messages = @(
+            @{ role = 'system'; content = 'STALE-TASK7-SYSTEM' },
+            @{ id = 'e0001'; parent_id = $null; role = 'user'; content = 'IMPORTED-USER' }
+        )
+        tree_entries = @(
+            @{ id = 'e0001'; parent_id = $null; role = 'user'; content = 'IMPORTED-USER' },
+            @{ id = 'e0009'; parent_id = 'e0001'; role = 'assistant'; content = 'IMPORTED-TREE' }
+        )
+        todos = @(@{ content = 'IMPORTED-TODO'; status = 'pending' })
+    }
+    Save-AgentSession -SessionFile $task7Good -State $task7GoodSrc -Workspace $workspacePath -Model 'imported-model' -SessionId 'sess-task7-good'
+    $task7Bad = Join-Path $task7Dir 'broken.jsonl'
+    $task7BadLines = @(Get-Content -LiteralPath $task7Good -Encoding UTF8)
+    $task7BadLines += 'this is not json'
+    Set-Content -LiteralPath $task7Bad -Value $task7BadLines -Encoding UTF8
+    $global:task7Host = @()
+    function Write-Host {
+        param([Parameter(Position = 0, ValueFromRemainingArguments = $true)]$Object, [switch]$NoNewline, $Separator, $ForegroundColor, $BackgroundColor)
+        $text = ($Object | ForEach-Object { [string]$_ }) -join ' '
+        if ($text) { $global:task7Host = @($global:task7Host) + @($text) }
+    }
+    try {
+        $script:OutputMode = 'text'
+        $script:StartupPermissionSpecified = $false
+        $script:StartupAgentPermission = 'Auto'
+        $script:AgentPermission = 'AutoEdit'
+        $script:AutoApproveWeb = $true
+        $script:AutoApproveCommands = $true
+        $script:ActiveSessionTodos = @(@{ content = 'LIVE-ACTIVE-TODO'; status = 'in_progress' })
+        $task7Live = @{
+            session_id = 'sess-task7-live'
+            session_name = 'LIVE-NAME'
+            parent_session = 'sess-task7-parent'
+            leaf_id = 'live-leaf'
+            workspace = $workspacePath
+            model = 'live-model'
+            messages = @(
+                @{ role = 'system'; content = 'LIVE-SYSTEM' },
+                @{ role = 'user'; content = 'LIVE-USER' }
+            )
+            tree_entries = @(
+                @{ id = 'live-leaf'; parent_id = $null; role = 'user'; content = 'LIVE-TREE' }
+            )
+            todos = @(
+                @{ content = 'LIVE-TODO'; status = 'pending' }
+            )
+        }
+        $task7Fail = Invoke-ReplImportCommand -State $task7Live -RootPath $workspacePath -SessionFile '' -Model 'live-model' -UndoStack @() -ImportArg $task7Bad
+        Assert-True ([string]$task7Live.session_name -eq 'LIVE-NAME') 'Failed /import changed the live session name.'
+        Assert-True (@($task7Live.tree_entries).Count -eq 1 -and [string]$task7Live.tree_entries[0].id -eq 'live-leaf' -and [string]$task7Live.tree_entries[0].content -eq 'LIVE-TREE') 'Failed /import changed the live tree.'
+        Assert-True (@($task7Live.todos).Count -eq 1 -and [string]$task7Live.todos[0].content -eq 'LIVE-TODO' -and [string]$task7Live.todos[0].status -eq 'pending') 'Failed /import changed the live todo.'
+        Assert-True (@($task7Live.messages).Count -eq 2 -and [string]$task7Live.messages[0].content -eq 'LIVE-SYSTEM' -and [string]$task7Live.messages[1].role -eq 'user' -and [string]$task7Live.messages[1].content -eq 'LIVE-USER') 'Failed /import changed the live messages.'
+        Assert-True (@($script:ActiveSessionTodos).Count -eq 1 -and [string]$script:ActiveSessionTodos[0].content -eq 'LIVE-ACTIVE-TODO' -and [string]$script:ActiveSessionTodos[0].status -eq 'in_progress') 'Failed /import changed ActiveSessionTodos.'
+        Assert-True ([string]$task7Live.session_id -eq 'sess-task7-live' -and [string]$task7Live.parent_session -eq 'sess-task7-parent' -and [string]$task7Live.leaf_id -eq 'live-leaf') 'Failed /import changed live session identity.'
+        Assert-True ([string]$task7Fail.session_file -eq '') 'Failed /import adopted the broken session file.'
+        $task7FailText = $global:task7Host -join "`n"
+        Assert-True ($task7FailText -like '*Import failed*') "Failed /import did not report the error: $task7FailText"
+        Assert-True ($task7FailText -notlike '*Imported session*') 'Failed /import reported success.'
+        Assert-True ($script:AgentPermission -eq 'AutoEdit' -and $script:AutoApproveWeb -eq $true -and $script:AutoApproveCommands -eq $true) 'Failed /import reset permission or web approval.'
+
+        $global:task7Host = @()
+        $script:StartupPermissionSpecified = $false
+        $script:StartupAgentPermission = 'Auto'
+        $script:AgentPermission = 'Auto'
+        $script:AutoApproveWeb = $true
+        $script:AutoApproveCommands = $true
+        $script:ActiveSessionTodos = @(@{ content = 'LIVE-ACTIVE-TODO'; status = 'in_progress' })
+        $task7LiveOk = @{
+            session_id = 'sess-task7-live'
+            session_name = 'LIVE-NAME'
+            parent_session = 'sess-task7-parent'
+            leaf_id = 'live-leaf'
+            workspace = $workspacePath
+            model = 'live-model'
+            messages = @(
+                @{ role = 'system'; content = 'LIVE-SYSTEM' },
+                @{ role = 'user'; content = 'LIVE-USER' }
+            )
+            tree_entries = @(
+                @{ id = 'live-leaf'; parent_id = $null; role = 'user'; content = 'LIVE-TREE' }
+            )
+            todos = @(
+                @{ content = 'LIVE-TODO'; status = 'pending' }
+            )
+        }
+        $task7Ok = Invoke-ReplImportCommand -State $task7LiveOk -RootPath $workspacePath -SessionFile '' -Model 'live-model' -UndoStack @() -ImportArg $task7Good
+        Assert-True ([string]$task7Ok.state.session_name -eq 'IMPORTED-NAME') 'Valid /import did not replace the session name.'
+        $task7TreeText = (@($task7Ok.state.tree_entries | ForEach-Object { [string]$_.content }) -join "`n")
+        Assert-True (($task7TreeText -like '*IMPORTED-TREE*') -and ($task7TreeText -notlike '*LIVE-TREE*')) 'Valid /import did not replace the session tree.'
+        Assert-True (@($task7Ok.state.todos).Count -eq 1 -and [string]$task7Ok.state.todos[0].content -eq 'IMPORTED-TODO') 'Valid /import did not replace the session todo.'
+        Assert-True (@($script:ActiveSessionTodos).Count -eq 1 -and [string]$script:ActiveSessionTodos[0].content -eq 'IMPORTED-TODO') 'Valid /import did not replace ActiveSessionTodos.'
+        $task7OkUsers = @($task7Ok.state.messages | Where-Object { $_.role -eq 'user' -and [string]$_.content -eq 'IMPORTED-USER' })
+        $task7OkLiveLeft = @($task7Ok.state.messages | Where-Object { [string]$_.content -eq 'LIVE-USER' })
+        Assert-True ($task7OkUsers.Count -eq 1 -and $task7OkLiveLeft.Count -eq 0) 'Valid /import did not replace the live user message.'
+        Assert-True ($script:AgentPermission -eq 'Ask' -and $script:AutoApproveWeb -eq $false -and $script:AutoApproveCommands -eq $false) "Valid /import without -Permission left permission=$($script:AgentPermission) web=$($script:AutoApproveWeb) commands=$($script:AutoApproveCommands)."
+        $task7Sys = [string]$task7Ok.state.messages[0].content
+        Assert-True ($task7Ok.state.messages[0].role -eq 'system' -and $task7Sys.Contains('TASK7-DISK-AGENTS') -and (-not $task7Sys.Contains('STALE-TASK7-SYSTEM')) -and $task7Sys.Contains('Permission mode: Ask.')) 'Valid /import did not rebuild the system prompt from disk and reset permission.'
+        $task7OkText = $global:task7Host -join "`n"
+        Assert-True ($task7OkText -like '*Imported session*') "Valid /import did not report success: $task7OkText"
+    }
+    finally {
+        $script:AgentPermission = $task7SavedPerm
+        $script:OutputMode = $task7SavedMode
+        $script:AutoApproveWeb = $task7SavedWeb
+        $script:StartupPermissionSpecified = $task7SavedStartupSpecified
+        $script:StartupAgentPermission = $task7SavedStartupPerm
+        $script:AutoApproveCommands = $task7SavedCmd
+        $script:ActiveSessionTodos = @($task7SavedTodos)
+        Remove-Item Function:\Write-Host -ErrorAction SilentlyContinue
+    }
 }
 finally {
     Remove-TestEnvironment -Env $envData

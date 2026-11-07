@@ -140,35 +140,32 @@ function Read-AgentSession {
     param([string]$SessionFile, $State = $null)
     if (-not (Test-Path -LiteralPath $SessionFile)) { throw "Session file not found: $SessionFile" }
     $messages = @()
-    $script:ActiveSessionTodos = @()
-    if ($null -ne $State) {
-        $State.todos = @()
-        $State.tree_entries = @()
-        $State.session_name = ''
-        $State.parent_session = ''
-        $State.leaf_id = ''
-    }
+    $loadedTodos = @()
+    $loadedTree = @()
+    $sawMeta = $false
+    $loadedSessionId = ''
+    $loadedWorkspace = ''
+    $loadedModel = ''
+    $loadedName = ''
+    $loadedParent = ''
+    $loadedLeaf = ''
     foreach ($line in @(Get-Content -LiteralPath $SessionFile -Encoding UTF8 -ErrorAction Stop)) {
         $trimmed = $line.Trim()
         if (-not $trimmed) { continue }
         $obj = $trimmed | ConvertFrom-Json -ErrorAction Stop
         if ($obj.type -eq 'session_meta') {
             $loadedTodos = @(if ($obj.todos) { @($obj.todos) })
-            $script:ActiveSessionTodos = @($loadedTodos)
-            if ($null -ne $State) {
-                $State.session_id = [string]$obj.id
-                $State.workspace = [string]$obj.workspace
-                $State.model = [string]$obj.model
-                $State.session_name = if ($obj.name) { [string]$obj.name } elseif ($obj.session_name) { [string]$obj.session_name } else { '' }
-                $State.parent_session = if ($obj.parent_session) { [string]$obj.parent_session } else { '' }
-                $State.leaf_id = if ($obj.leaf_id) { [string]$obj.leaf_id } else { '' }
-                $State.todos = @($loadedTodos)
-            }
+            $sawMeta = $true
+            $loadedSessionId = [string]$obj.id
+            $loadedWorkspace = [string]$obj.workspace
+            $loadedModel = [string]$obj.model
+            $loadedName = if ($obj.name) { [string]$obj.name } elseif ($obj.session_name) { [string]$obj.session_name } else { '' }
+            $loadedParent = if ($obj.parent_session) { [string]$obj.parent_session } else { '' }
+            $loadedLeaf = if ($obj.leaf_id) { [string]$obj.leaf_id } else { '' }
             continue
         }
         if ($obj.type -eq 'branch_entry') {
             if ($null -ne $State) {
-                if ($null -eq $State.tree_entries) { $State.tree_entries = @() }
                 $bMsg = @{
                     id = [string]$obj.id
                     parent_id = $obj.parent_id
@@ -176,7 +173,7 @@ function Read-AgentSession {
                     content = $obj.content
                 }
                 Copy-MessageOptionalFields -Source $obj -Target $bMsg
-                $State.tree_entries += $bMsg
+                $loadedTree += $bMsg
             }
             continue
         }
@@ -185,6 +182,19 @@ function Read-AgentSession {
         if ($obj.parent_id) { $msg.parent_id = [string]$obj.parent_id }
         Copy-MessageOptionalFields -Source $obj -Target $msg
         $messages += $msg
+    }
+    $script:ActiveSessionTodos = @($loadedTodos)
+    if ($null -ne $State) {
+        $State.todos = @($loadedTodos)
+        $State.tree_entries = @($loadedTree)
+        $State.session_name = $loadedName
+        $State.parent_session = $loadedParent
+        $State.leaf_id = $loadedLeaf
+        if ($sawMeta) {
+            $State.session_id = $loadedSessionId
+            $State.workspace = $loadedWorkspace
+            $State.model = $loadedModel
+        }
     }
     return $messages
 }
@@ -218,11 +228,10 @@ function Invoke-SessionResume {
             throw "Cannot resume session from a different workspace ($($meta.workspace))."
         }
     }
-    $State.tree_entries = @()
+    $loadedMessages = @(Read-AgentSession -SessionFile $SessionFile -State $State)
     $State.usage_input_tokens = 0
     $State.usage_output_tokens = 0
     $State.scoped_instr_cache = @{}
-    $loadedMessages = @(Read-AgentSession -SessionFile $SessionFile -State $State)
     $loadedHadSystem = $false
     foreach ($loadedMsg in @($loadedMessages)) {
         if ($loadedMsg.role -eq 'system') {
