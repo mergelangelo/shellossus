@@ -348,6 +348,31 @@ try {
     $truncCmd = Invoke-AgentTool -Root $workspacePath -Call $call | ConvertFrom-Json
     Assert-True ($truncCmd.truncated -and [bool]$truncCmd.full_output_path -and (Test-Path -LiteralPath (Join-Path $workspacePath $truncCmd.full_output_path))) 'Truncated run_command did not save full output log.'
 
+    # Task 18: Windows -Command quoting matches the previous inline escape and never adds -ExecutionPolicy.
+    $savedQuoteOs = Get-Item -LiteralPath 'Env:OS' -ErrorAction SilentlyContinue
+    try {
+        $quoteCmd = 'say "hi"\'
+        $env:OS = 'Windows_NT'
+        $windowsArgs = Get-AgentCommandArguments -CommandText $quoteCmd
+        $expectedWindows = '-NoProfile -NonInteractive -Command "say \"hi\"\\"'
+        Assert-True ($windowsArgs -is [string]) 'Windows command arguments were not one string.'
+        Assert-True ($windowsArgs -eq $expectedWindows) "Windows escape changed for a command containing say `"hi`": $windowsArgs"
+        Assert-True (($windowsArgs -notmatch 'ExecutionPolicy') -and ($windowsArgs -notmatch 'Bypass')) 'Get-AgentCommandArguments added ExecutionPolicy or Bypass.'
+        $env:OS = 'Other'
+        $unixArgs = @(Get-AgentCommandArguments -CommandText $quoteCmd)
+        Assert-True ($unixArgs.Count -eq 4 -and $unixArgs[0] -eq '-NoProfile' -and $unixArgs[1] -eq '-NonInteractive' -and $unixArgs[2] -eq '-Command' -and $unixArgs[3] -eq $quoteCmd) "Non-Windows arguments were not the four-element raw command."
+        $unixJoined = $unixArgs -join ' '
+        Assert-True (($unixJoined -notmatch 'ExecutionPolicy') -and ($unixJoined -notmatch 'Bypass')) 'Non-Windows arguments added ExecutionPolicy or Bypass.'
+    }
+    finally {
+        if ($null -eq $savedQuoteOs) {
+            Remove-Item -LiteralPath 'Env:OS' -ErrorAction SilentlyContinue
+        }
+        else {
+            Set-Item -LiteralPath 'Env:OS' -Value ([string]$savedQuoteOs.Value)
+        }
+    }
+
     # Child shell publishes the current session values, including empty, and does not keep a stale parent value.
     $savedChildSessionId = $env:SHELLOSSUS_SESSION_ID
     $savedChildSessionFile = $env:SHELLOSSUS_SESSION_FILE

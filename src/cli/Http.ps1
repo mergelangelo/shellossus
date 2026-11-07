@@ -128,52 +128,16 @@ catch {
     exit 1
 }
 '@
-        $argList = if ($env:OS -eq 'Windows_NT') {
-            $escaped = ($workerCmd -replace '(\\*)"', '$1$1\"') -replace '(\\*)$', '$1$1'
-            "-NoProfile -NonInteractive -Command `"$escaped`""
-        }
-        else {
-            @('-NoProfile', '-NonInteractive', '-Command', $workerCmd)
-        }
-        $proc = $null
-        $httpEnvNames = @(
-            'SHELLOSSUS_HTTP_URI',
-            'SHELLOSSUS_HTTP_KEY',
-            'SHELLOSSUS_HTTP_IN',
-            'SHELLOSSUS_HTTP_OUT',
-            'SHELLOSSUS_HTTP_ERR',
-            'SHELLOSSUS_HTTP_TIMEOUT'
-        )
-        $httpEnvPresent = @{}
-        $httpEnvPrior = @{}
-        foreach ($httpEnvName in $httpEnvNames) {
-            $httpEnvItem = Get-Item -LiteralPath ('Env:' + $httpEnvName) -ErrorAction SilentlyContinue
-            if ($null -eq $httpEnvItem) {
-                $httpEnvPresent[$httpEnvName] = $false
-            }
-            else {
-                $httpEnvPresent[$httpEnvName] = $true
-                $httpEnvPrior[$httpEnvName] = [string]$httpEnvItem.Value
-            }
-        }
-        try {
-            $env:SHELLOSSUS_HTTP_URI = $Uri
-            $env:SHELLOSSUS_HTTP_KEY = $ApiKey
-            $env:SHELLOSSUS_HTTP_IN = $reqTemp.FullName
-            $env:SHELLOSSUS_HTTP_OUT = $OutFile
-            $env:SHELLOSSUS_HTTP_ERR = $errTemp.FullName
-            $env:SHELLOSSUS_HTTP_TIMEOUT = [string]$TimeoutSec
-            $proc = Start-Process -FilePath $shellExe -ArgumentList $argList -RedirectStandardOutput $stdoutTemp.FullName -RedirectStandardError $stderrTemp.FullName -NoNewWindow -PassThru -ErrorAction Stop
-        }
-        finally {
-            foreach ($httpEnvName in $httpEnvNames) {
-                if ($httpEnvPresent[$httpEnvName]) {
-                    Set-Item -LiteralPath ('Env:' + $httpEnvName) -Value $httpEnvPrior[$httpEnvName]
-                }
-                else {
-                    Remove-Item -LiteralPath ('Env:' + $httpEnvName) -ErrorAction SilentlyContinue
-                }
-            }
+        $argList = Get-AgentCommandArguments -CommandText $workerCmd
+        $proc = Invoke-WithProcessEnvironment -Values @{
+            SHELLOSSUS_HTTP_URI = $Uri
+            SHELLOSSUS_HTTP_KEY = $ApiKey
+            SHELLOSSUS_HTTP_IN = $reqTemp.FullName
+            SHELLOSSUS_HTTP_OUT = $OutFile
+            SHELLOSSUS_HTTP_ERR = $errTemp.FullName
+            SHELLOSSUS_HTTP_TIMEOUT = [string]$TimeoutSec
+        } -Action {
+            Start-Process -FilePath $shellExe -ArgumentList $argList -RedirectStandardOutput $stdoutTemp.FullName -RedirectStandardError $stderrTemp.FullName -NoNewWindow -PassThru -ErrorAction Stop
         }
         Wait-AgentProcessWithSpinner -Process $proc -StatusLabel $StatusLabel -TimeoutSec $TimeoutSec
         $errItem = Get-Item -LiteralPath $errTemp.FullName -Force -ErrorAction SilentlyContinue

@@ -194,33 +194,23 @@ function Invoke-AgentWebDownload {
         $request['MaximumRedirection'] = 0
     }
     if ($webCommand -and $webCommand.CommandType -eq 'Function') {
-        $savedSKey = $env:SHELLOSSUS_API_KEY
-        $savedHKey = $env:H_AGENT_API_KEY
-        $savedOKey = $env:OPENAI_API_KEY
-        try {
-            $env:SHELLOSSUS_API_KEY = $null
-            $env:H_AGENT_API_KEY = $null
-            $env:OPENAI_API_KEY = $null
-            Invoke-WebRequest @request
-        }
-        catch {
-            throw (Format-WebRequestError -ErrorRecord $_)
-        }
-        finally {
-            $env:SHELLOSSUS_API_KEY = $savedSKey
-            $env:H_AGENT_API_KEY = $savedHKey
-            $env:OPENAI_API_KEY = $savedOKey
+        Invoke-WithProcessEnvironment -Values @{
+            SHELLOSSUS_API_KEY = $null
+            H_AGENT_API_KEY = $null
+            OPENAI_API_KEY = $null
+        } -Action {
+            try {
+                Invoke-WebRequest @request
+            }
+            catch {
+                throw (Format-WebRequestError -ErrorRecord $_)
+            }
         }
     }
     else {
         $stdout = New-AgentTempFile
         $stderr = New-AgentTempFile
         $proc = $null
-        $oldUri = $env:SHELLOSSUS_WEB_DOWNLOAD_URI
-        $oldFile = $env:SHELLOSSUS_WEB_DOWNLOAD_FILE
-        $savedSKey = $env:SHELLOSSUS_API_KEY
-        $savedHKey = $env:H_AGENT_API_KEY
-        $savedOKey = $env:OPENAI_API_KEY
         try {
             $worker = @'
 $ErrorActionPreference = 'Stop'
@@ -243,25 +233,15 @@ try {
     exit 1
 }
 '@
-            $workerArguments = if ($env:OS -eq 'Windows_NT') {
-                $escaped = ($worker -replace '(\\*)"', '$1$1\"') -replace '(\\*)$', '$1$1'
-                "-NoProfile -NonInteractive -Command `"$escaped`""
-            }
-            else { @('-NoProfile', '-NonInteractive', '-Command', $worker) }
-            try {
-                $env:SHELLOSSUS_API_KEY = $null
-                $env:H_AGENT_API_KEY = $null
-                $env:OPENAI_API_KEY = $null
-                $env:SHELLOSSUS_WEB_DOWNLOAD_URI = $Uri
-                $env:SHELLOSSUS_WEB_DOWNLOAD_FILE = $OutFile
-                $proc = Start-Process -FilePath (Get-AgentEnvironment).shell_exe -ArgumentList $workerArguments -RedirectStandardOutput $stdout.FullName -RedirectStandardError $stderr.FullName -NoNewWindow -PassThru -ErrorAction Stop
-            }
-            finally {
-                $env:SHELLOSSUS_WEB_DOWNLOAD_URI = $oldUri
-                $env:SHELLOSSUS_WEB_DOWNLOAD_FILE = $oldFile
-                $env:SHELLOSSUS_API_KEY = $savedSKey
-                $env:H_AGENT_API_KEY = $savedHKey
-                $env:OPENAI_API_KEY = $savedOKey
+            $workerArguments = Get-AgentCommandArguments -CommandText $worker
+            $proc = Invoke-WithProcessEnvironment -Values @{
+                SHELLOSSUS_API_KEY = $null
+                H_AGENT_API_KEY = $null
+                OPENAI_API_KEY = $null
+                SHELLOSSUS_WEB_DOWNLOAD_URI = $Uri
+                SHELLOSSUS_WEB_DOWNLOAD_FILE = $OutFile
+            } -Action {
+                Start-Process -FilePath (Get-AgentEnvironment).shell_exe -ArgumentList $workerArguments -RedirectStandardOutput $stdout.FullName -RedirectStandardError $stderr.FullName -NoNewWindow -PassThru -ErrorAction Stop
             }
             $started = Get-Date
             while (-not $proc.HasExited) {

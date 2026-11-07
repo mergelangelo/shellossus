@@ -2547,6 +2547,57 @@ function Get-AgentEnvironment {
     }
 }
 
+function Get-AgentCommandArguments {
+    param([string]$CommandText)
+    # Windows is one argument string. Elsewhere the raw command is the fourth element.
+    # Never adds -ExecutionPolicy.
+    if ($env:OS -eq 'Windows_NT') {
+        $escaped = ($CommandText -replace '(\\*)"', '$1$1\"') -replace '(\\*)$', '$1$1'
+        return "-NoProfile -NonInteractive -Command `"$escaped`""
+    }
+    return @('-NoProfile', '-NonInteractive', '-Command', $CommandText)
+}
+
+function Invoke-WithProcessEnvironment {
+    param([hashtable]$Values, [scriptblock]$Action)
+    # A null value removes that name for the action. Any other value is set.
+    # A name that was present is restored with Set-Item. A name that was absent is removed.
+    $names = @($Values.Keys)
+    $present = @{}
+    $prior = @{}
+    foreach ($name in $names) {
+        $item = Get-Item -LiteralPath ('Env:' + $name) -ErrorAction SilentlyContinue
+        if ($null -eq $item) {
+            $present[$name] = $false
+        }
+        else {
+            $present[$name] = $true
+            $prior[$name] = [string]$item.Value
+        }
+    }
+    try {
+        foreach ($name in $names) {
+            if ($null -eq $Values[$name]) {
+                Remove-Item -LiteralPath ('Env:' + $name) -ErrorAction SilentlyContinue
+            }
+            else {
+                Set-Item -LiteralPath ('Env:' + $name) -Value ([string]$Values[$name])
+            }
+        }
+        & $Action
+    }
+    finally {
+        foreach ($name in $names) {
+            if ($present[$name]) {
+                Set-Item -LiteralPath ('Env:' + $name) -Value $prior[$name]
+            }
+            else {
+                Remove-Item -LiteralPath ('Env:' + $name) -ErrorAction SilentlyContinue
+            }
+        }
+    }
+}
+
 # --- src/tools/Schemas.ps1 ---
 # Canonical tool definitions, OpenAI function-calling JSON schemas, and capability descriptors.
 
@@ -4632,9 +4683,6 @@ function Invoke-ShellCommand {
     $shellExe = $envInfo.shell_exe
     $outTemp = New-AgentTempFile
     $errTemp = New-AgentTempFile
-    $savedSKey = $env:SHELLOSSUS_API_KEY
-    $savedHKey = $env:H_AGENT_API_KEY
-    $savedOKey = $env:OPENAI_API_KEY
     $savedSSess = $env:SHELLOSSUS_SESSION_ID
     $savedSFile = $env:SHELLOSSUS_SESSION_FILE
     $savedSMod = $env:SHELLOSSUS_MODEL
@@ -4648,22 +4696,19 @@ function Invoke-ShellCommand {
     $startTime = Get-Date
     try {
         try {
-            $env:SHELLOSSUS_API_KEY = $null
-            $env:H_AGENT_API_KEY = $null
-            $env:OPENAI_API_KEY = $null
             $env:SHELLOSSUS_SESSION_ID = if ($script:ActiveSessionId) { [string]$script:ActiveSessionId } else { '' }
             $env:SHELLOSSUS_SESSION_FILE = if ($script:ActiveSessionFile) { [string]$script:ActiveSessionFile } else { '' }
             $env:SHELLOSSUS_MODEL = if ($script:ActiveModelId) { [string]$script:ActiveModelId } else { '' }
             $env:SHELLOSSUS_REASONING_LEVEL = if ($script:ReasoningEffort) { [string]$script:ReasoningEffort } else { '' }
             $wrappedCmd = "try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch {}`n" + $Command
-            $argList = if ($env:OS -eq 'Windows_NT') {
-                $escaped = ($wrappedCmd -replace '(\\*)"', '$1$1\"') -replace '(\\*)$', '$1$1'
-                "-NoProfile -NonInteractive -Command `"$escaped`""
+            $argList = Get-AgentCommandArguments -CommandText $wrappedCmd
+            $proc = Invoke-WithProcessEnvironment -Values @{
+                SHELLOSSUS_API_KEY = $null
+                H_AGENT_API_KEY = $null
+                OPENAI_API_KEY = $null
+            } -Action {
+                Start-Process -FilePath $shellExe -ArgumentList $argList -WorkingDirectory $rootFull -RedirectStandardOutput $outTemp.FullName -RedirectStandardError $errTemp.FullName -NoNewWindow -PassThru -ErrorAction Stop
             }
-            else {
-                @('-NoProfile', '-NonInteractive', '-Command', $wrappedCmd)
-            }
-            $proc = Start-Process -FilePath $shellExe -ArgumentList $argList -WorkingDirectory $rootFull -RedirectStandardOutput $outTemp.FullName -RedirectStandardError $errTemp.FullName -NoNewWindow -PassThru -ErrorAction Stop
             if (-not $proc.HasExited) {
                 try {
                     $trackedProcesses[[string]$proc.Id] = @{ id = $proc.Id; start_ticks = $proc.StartTime.Ticks; depth = 0 }
@@ -4692,9 +4737,6 @@ function Invoke-ShellCommand {
             }
         }
         finally {
-            $env:SHELLOSSUS_API_KEY = $savedSKey
-            $env:H_AGENT_API_KEY = $savedHKey
-            $env:OPENAI_API_KEY = $savedOKey
             $env:SHELLOSSUS_SESSION_ID = $savedSSess
             $env:SHELLOSSUS_SESSION_FILE = $savedSFile
             $env:SHELLOSSUS_MODEL = $savedSMod
@@ -5230,33 +5272,23 @@ function Invoke-AgentWebDownload {
         $request['MaximumRedirection'] = 0
     }
     if ($webCommand -and $webCommand.CommandType -eq 'Function') {
-        $savedSKey = $env:SHELLOSSUS_API_KEY
-        $savedHKey = $env:H_AGENT_API_KEY
-        $savedOKey = $env:OPENAI_API_KEY
-        try {
-            $env:SHELLOSSUS_API_KEY = $null
-            $env:H_AGENT_API_KEY = $null
-            $env:OPENAI_API_KEY = $null
-            Invoke-WebRequest @request
-        }
-        catch {
-            throw (Format-WebRequestError -ErrorRecord $_)
-        }
-        finally {
-            $env:SHELLOSSUS_API_KEY = $savedSKey
-            $env:H_AGENT_API_KEY = $savedHKey
-            $env:OPENAI_API_KEY = $savedOKey
+        Invoke-WithProcessEnvironment -Values @{
+            SHELLOSSUS_API_KEY = $null
+            H_AGENT_API_KEY = $null
+            OPENAI_API_KEY = $null
+        } -Action {
+            try {
+                Invoke-WebRequest @request
+            }
+            catch {
+                throw (Format-WebRequestError -ErrorRecord $_)
+            }
         }
     }
     else {
         $stdout = New-AgentTempFile
         $stderr = New-AgentTempFile
         $proc = $null
-        $oldUri = $env:SHELLOSSUS_WEB_DOWNLOAD_URI
-        $oldFile = $env:SHELLOSSUS_WEB_DOWNLOAD_FILE
-        $savedSKey = $env:SHELLOSSUS_API_KEY
-        $savedHKey = $env:H_AGENT_API_KEY
-        $savedOKey = $env:OPENAI_API_KEY
         try {
             $worker = @'
 $ErrorActionPreference = 'Stop'
@@ -5279,25 +5311,15 @@ try {
     exit 1
 }
 '@
-            $workerArguments = if ($env:OS -eq 'Windows_NT') {
-                $escaped = ($worker -replace '(\\*)"', '$1$1\"') -replace '(\\*)$', '$1$1'
-                "-NoProfile -NonInteractive -Command `"$escaped`""
-            }
-            else { @('-NoProfile', '-NonInteractive', '-Command', $worker) }
-            try {
-                $env:SHELLOSSUS_API_KEY = $null
-                $env:H_AGENT_API_KEY = $null
-                $env:OPENAI_API_KEY = $null
-                $env:SHELLOSSUS_WEB_DOWNLOAD_URI = $Uri
-                $env:SHELLOSSUS_WEB_DOWNLOAD_FILE = $OutFile
-                $proc = Start-Process -FilePath (Get-AgentEnvironment).shell_exe -ArgumentList $workerArguments -RedirectStandardOutput $stdout.FullName -RedirectStandardError $stderr.FullName -NoNewWindow -PassThru -ErrorAction Stop
-            }
-            finally {
-                $env:SHELLOSSUS_WEB_DOWNLOAD_URI = $oldUri
-                $env:SHELLOSSUS_WEB_DOWNLOAD_FILE = $oldFile
-                $env:SHELLOSSUS_API_KEY = $savedSKey
-                $env:H_AGENT_API_KEY = $savedHKey
-                $env:OPENAI_API_KEY = $savedOKey
+            $workerArguments = Get-AgentCommandArguments -CommandText $worker
+            $proc = Invoke-WithProcessEnvironment -Values @{
+                SHELLOSSUS_API_KEY = $null
+                H_AGENT_API_KEY = $null
+                OPENAI_API_KEY = $null
+                SHELLOSSUS_WEB_DOWNLOAD_URI = $Uri
+                SHELLOSSUS_WEB_DOWNLOAD_FILE = $OutFile
+            } -Action {
+                Start-Process -FilePath (Get-AgentEnvironment).shell_exe -ArgumentList $workerArguments -RedirectStandardOutput $stdout.FullName -RedirectStandardError $stderr.FullName -NoNewWindow -PassThru -ErrorAction Stop
             }
             $started = Get-Date
             while (-not $proc.HasExited) {
@@ -6011,30 +6033,7 @@ if ($env:SHELLOSSUS_SUB_NO_CONTEXT -eq '1') { $workerArgs.NoContextFiles = $true
 if ($env:SHELLOSSUS_SUB_REASONING_EFFORT) { $workerArgs.ReasoningEffort = $env:SHELLOSSUS_SUB_REASONING_EFFORT }
 & $env:SHELLOSSUS_SUB_SCRIPT @workerArgs
 '@
-    $argList = if ($env:OS -eq 'Windows_NT') {
-        $escaped = ($workerCmd -replace '(\\*)"', '$1$1\"') -replace '(\\*)$', '$1$1'
-        "-NoProfile -NonInteractive -Command `"$escaped`""
-    }
-    else {
-        @('-NoProfile', '-NonInteractive', '-Command', $workerCmd)
-    }
-    $workerEnvNames = @(
-        'SHELLOSSUS_SUB_SCRIPT',
-        'SHELLOSSUS_SUB_ROOT',
-        'SHELLOSSUS_SUB_BASEURL',
-        'SHELLOSSUS_SUB_MODEL',
-        'SHELLOSSUS_SUB_STEPS',
-        'SHELLOSSUS_SUB_PROMPT',
-        'SHELLOSSUS_SUB_TOOLS',
-        'SHELLOSSUS_SUB_NO_TOOLS',
-        'SHELLOSSUS_SUB_CONFIG',
-        'SHELLOSSUS_SUB_NO_SKILLS',
-        'SHELLOSSUS_SUB_NO_TEMPLATES',
-        'SHELLOSSUS_SUB_NO_CONTEXT',
-        'SHELLOSSUS_SUB_REASONING_EFFORT',
-        'SHELLOSSUS_SUB_ROLE',
-        'SHELLOSSUS_SUB_ROLE_PROMPT'
-    )
+    $argList = Get-AgentCommandArguments -CommandText $workerCmd
     $allResults = @()
     $batchSize = 4
     for ($offset = 0; $offset -lt $Tasks.Count; $offset += $batchSize) {
@@ -6056,37 +6055,27 @@ if ($env:SHELLOSSUS_SUB_REASONING_EFFORT) { $workerArgs.ReasoningEffort = $env:S
                 if ($script:OutputMode -ne 'json') {
                     Write-Host ($script:Gm.Aqua + ("  [run_agent:{0}] (parallel ReadOnly) " -f $roleObj.name) + $script:Gm.Grey1 + (Invoke-TruncateLine -Line ([string]$t.prompt) -MaxChars 90).text + $script:Gm.Reset)
                 }
-                $proc = $null
-                $savedSKey = $env:SHELLOSSUS_API_KEY
-                $savedWorkerEnv = @{}
-                foreach ($envName in $workerEnvNames) {
-                    $savedWorkerEnv[$envName] = (Get-Item -LiteralPath ("Env:" + $envName) -ErrorAction SilentlyContinue).Value
-                }
-                try {
-                    $env:SHELLOSSUS_API_KEY = $effKey
-                    $env:SHELLOSSUS_SUB_SCRIPT = $ScriptPath
-                    $env:SHELLOSSUS_SUB_ROOT = $Root
-                    $env:SHELLOSSUS_SUB_BASEURL = $baseUrl
-                    $env:SHELLOSSUS_SUB_MODEL = $effModel
-                    $env:SHELLOSSUS_SUB_STEPS = [string]$MaxSteps
-                    $env:SHELLOSSUS_SUB_PROMPT = $promptTemp.FullName
-                    $env:SHELLOSSUS_SUB_TOOLS = $childTools -join ','
-                    $env:SHELLOSSUS_SUB_NO_TOOLS = if ($childTools.Count -eq 0) { '1' } else { '0' }
-                    $env:SHELLOSSUS_SUB_CONFIG = $script:AgentConfigPath
-                    $env:SHELLOSSUS_SUB_NO_SKILLS = if ($script:NoSkills) { '1' } else { '0' }
-                    $env:SHELLOSSUS_SUB_NO_TEMPLATES = if ($script:NoPromptTemplates) { '1' } else { '0' }
-                    $env:SHELLOSSUS_SUB_NO_CONTEXT = if ($script:NoContextFiles) { '1' } else { '0' }
-                    $env:SHELLOSSUS_SUB_REASONING_EFFORT = if ($script:ReasoningEffort) { [string]$script:ReasoningEffort } else { '' }
-                    $env:SHELLOSSUS_SUB_ROLE = [string]$roleObj.name
-                    $env:SHELLOSSUS_SUB_ROLE_PROMPT = [string]$roleObj.system_prompt
-                    $proc = Start-Process -FilePath $shellExe -ArgumentList $argList -WorkingDirectory $Root -RedirectStandardOutput $outTemp.FullName -RedirectStandardError $errTemp.FullName -NoNewWindow -PassThru -ErrorAction Stop
-                }
-                finally {
-                    $env:SHELLOSSUS_API_KEY = $savedSKey
-                    foreach ($envName in $savedWorkerEnv.Keys) {
-                        if ($null -eq $savedWorkerEnv[$envName]) { Remove-Item -LiteralPath ("Env:" + $envName) -ErrorAction SilentlyContinue }
-                        else { Set-Item -LiteralPath ("Env:" + $envName) -Value $savedWorkerEnv[$envName] }
-                    }
+                $proc = Invoke-WithProcessEnvironment -Values @{
+                    SHELLOSSUS_API_KEY = $effKey
+                    H_AGENT_API_KEY = $null
+                    OPENAI_API_KEY = $null
+                    SHELLOSSUS_SUB_SCRIPT = $ScriptPath
+                    SHELLOSSUS_SUB_ROOT = $Root
+                    SHELLOSSUS_SUB_BASEURL = $baseUrl
+                    SHELLOSSUS_SUB_MODEL = $effModel
+                    SHELLOSSUS_SUB_STEPS = [string]$MaxSteps
+                    SHELLOSSUS_SUB_PROMPT = $promptTemp.FullName
+                    SHELLOSSUS_SUB_TOOLS = ($childTools -join ',')
+                    SHELLOSSUS_SUB_NO_TOOLS = $(if ($childTools.Count -eq 0) { '1' } else { '0' })
+                    SHELLOSSUS_SUB_CONFIG = $script:AgentConfigPath
+                    SHELLOSSUS_SUB_NO_SKILLS = $(if ($script:NoSkills) { '1' } else { '0' })
+                    SHELLOSSUS_SUB_NO_TEMPLATES = $(if ($script:NoPromptTemplates) { '1' } else { '0' })
+                    SHELLOSSUS_SUB_NO_CONTEXT = $(if ($script:NoContextFiles) { '1' } else { '0' })
+                    SHELLOSSUS_SUB_REASONING_EFFORT = $(if ($script:ReasoningEffort) { [string]$script:ReasoningEffort } else { '' })
+                    SHELLOSSUS_SUB_ROLE = [string]$roleObj.name
+                    SHELLOSSUS_SUB_ROLE_PROMPT = [string]$roleObj.system_prompt
+                } -Action {
+                    Start-Process -FilePath $shellExe -ArgumentList $argList -WorkingDirectory $Root -RedirectStandardOutput $outTemp.FullName -RedirectStandardError $errTemp.FullName -NoNewWindow -PassThru -ErrorAction Stop
                 }
                 $workers += @{
                     role = $roleObj.name
@@ -9126,52 +9115,16 @@ catch {
     exit 1
 }
 '@
-        $argList = if ($env:OS -eq 'Windows_NT') {
-            $escaped = ($workerCmd -replace '(\\*)"', '$1$1\"') -replace '(\\*)$', '$1$1'
-            "-NoProfile -NonInteractive -Command `"$escaped`""
-        }
-        else {
-            @('-NoProfile', '-NonInteractive', '-Command', $workerCmd)
-        }
-        $proc = $null
-        $httpEnvNames = @(
-            'SHELLOSSUS_HTTP_URI',
-            'SHELLOSSUS_HTTP_KEY',
-            'SHELLOSSUS_HTTP_IN',
-            'SHELLOSSUS_HTTP_OUT',
-            'SHELLOSSUS_HTTP_ERR',
-            'SHELLOSSUS_HTTP_TIMEOUT'
-        )
-        $httpEnvPresent = @{}
-        $httpEnvPrior = @{}
-        foreach ($httpEnvName in $httpEnvNames) {
-            $httpEnvItem = Get-Item -LiteralPath ('Env:' + $httpEnvName) -ErrorAction SilentlyContinue
-            if ($null -eq $httpEnvItem) {
-                $httpEnvPresent[$httpEnvName] = $false
-            }
-            else {
-                $httpEnvPresent[$httpEnvName] = $true
-                $httpEnvPrior[$httpEnvName] = [string]$httpEnvItem.Value
-            }
-        }
-        try {
-            $env:SHELLOSSUS_HTTP_URI = $Uri
-            $env:SHELLOSSUS_HTTP_KEY = $ApiKey
-            $env:SHELLOSSUS_HTTP_IN = $reqTemp.FullName
-            $env:SHELLOSSUS_HTTP_OUT = $OutFile
-            $env:SHELLOSSUS_HTTP_ERR = $errTemp.FullName
-            $env:SHELLOSSUS_HTTP_TIMEOUT = [string]$TimeoutSec
-            $proc = Start-Process -FilePath $shellExe -ArgumentList $argList -RedirectStandardOutput $stdoutTemp.FullName -RedirectStandardError $stderrTemp.FullName -NoNewWindow -PassThru -ErrorAction Stop
-        }
-        finally {
-            foreach ($httpEnvName in $httpEnvNames) {
-                if ($httpEnvPresent[$httpEnvName]) {
-                    Set-Item -LiteralPath ('Env:' + $httpEnvName) -Value $httpEnvPrior[$httpEnvName]
-                }
-                else {
-                    Remove-Item -LiteralPath ('Env:' + $httpEnvName) -ErrorAction SilentlyContinue
-                }
-            }
+        $argList = Get-AgentCommandArguments -CommandText $workerCmd
+        $proc = Invoke-WithProcessEnvironment -Values @{
+            SHELLOSSUS_HTTP_URI = $Uri
+            SHELLOSSUS_HTTP_KEY = $ApiKey
+            SHELLOSSUS_HTTP_IN = $reqTemp.FullName
+            SHELLOSSUS_HTTP_OUT = $OutFile
+            SHELLOSSUS_HTTP_ERR = $errTemp.FullName
+            SHELLOSSUS_HTTP_TIMEOUT = [string]$TimeoutSec
+        } -Action {
+            Start-Process -FilePath $shellExe -ArgumentList $argList -RedirectStandardOutput $stdoutTemp.FullName -RedirectStandardError $stderrTemp.FullName -NoNewWindow -PassThru -ErrorAction Stop
         }
         Wait-AgentProcessWithSpinner -Process $proc -StatusLabel $StatusLabel -TimeoutSec $TimeoutSec
         $errItem = Get-Item -LiteralPath $errTemp.FullName -Force -ErrorAction SilentlyContinue
