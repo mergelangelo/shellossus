@@ -239,6 +239,9 @@ function Invoke-AgentCommand {
             Write-Host ('  ' + $script:Gm.Grey0 + $script:Box.V + ' ' + $script:Gm.Aqua + $script:Box.Check + ' [auto-approved by Auto mode]' + $script:Gm.Reset)
         }
     }
+    elseif (($script:OutputMode -ne 'json') -and $script:AutoApproveCommands) {
+        Write-Host ('  ' + $script:Gm.Grey0 + $script:Box.V + ' ' + $script:Gm.Aqua + $script:Box.Check + ' [commands are auto-approved for this session]' + $script:Gm.Reset)
+    }
     else {
         if ($script:OutputMode -eq 'json') {
             return (@{ status = 'cancelled'; message = 'Interactive confirmation is disabled in JSON mode. Use -Permission Auto to allow command execution.' } | ConvertTo-Json -Compress)
@@ -246,8 +249,8 @@ function Invoke-AgentCommand {
         $promptStr = '  ' + $script:Gm.Grey0 + $script:Box.V + ' ' + $script:Gm.BoldYellow + 'Confirm [y]es, [n]o, [a]ll commands: ' + $script:Gm.Fg
         $choice = Read-TuiConfirmation -PromptText $promptStr -ActionType 'run'
         if ($choice -eq 'a') {
-            $script:AgentPermission = 'Auto'
-            Write-Host ('  ' + $script:Gm.Grey0 + $script:Box.V + ' ' + $script:Gm.Aqua + $script:Box.Check + ' [switched permission to Auto for this session]' + $script:Gm.Reset)
+            $script:AutoApproveCommands = $true
+            Write-Host ('  ' + $script:Gm.Grey0 + $script:Box.V + ' ' + $script:Gm.Aqua + $script:Box.Check + ' [commands are auto-approved for this session]' + $script:Gm.Reset)
         }
         elseif ($choice -ne 'y') {
             Write-Host ('  ' + $script:Gm.Grey0 + $script:Box.BL + $script:Box.H + ' ' + $script:Gm.Red + $script:Box.Cross + ' cancelled' + $script:Gm.Reset)

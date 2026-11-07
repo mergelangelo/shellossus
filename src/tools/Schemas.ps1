@@ -271,7 +271,7 @@ function Get-AgentCapabilities {
         can_write = $canWrite
         can_exec = $canExec
         write_requires_confirmation = (($perm -eq 'Ask') -and $canWrite)
-        exec_requires_confirmation = (($perm -in @('Ask', 'AutoEdit')) -and $canExec)
+        exec_requires_confirmation = (($perm -in @('Ask', 'AutoEdit')) -and $canExec -and -not $script:AutoApproveCommands)
         environment = $envInfo
         signature = ("{0}|{1}" -f $perm, ($toolNames -join ','))
     }

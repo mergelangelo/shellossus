@@ -2173,6 +2173,9 @@ $script:SubagentDepth = 0
 $script:MaxSubagentDepth = 1
 $script:ActiveSessionTodos = @()
 $script:AutoApproveWeb = $false
+$script:AutoApproveCommands = $false
+$script:StartupAgentPermission = 'Ask'
+$script:StartupPermissionSpecified = $false
 
 function Resolve-ToolCanonicalName {
     param([string]$Name)
@@ -2786,7 +2789,7 @@ function Get-AgentCapabilities {
         can_write = $canWrite
         can_exec = $canExec
         write_requires_confirmation = (($perm -eq 'Ask') -and $canWrite)
-        exec_requires_confirmation = (($perm -in @('Ask', 'AutoEdit')) -and $canExec)
+        exec_requires_confirmation = (($perm -in @('Ask', 'AutoEdit')) -and $canExec -and -not $script:AutoApproveCommands)
         environment = $envInfo
         signature = ("{0}|{1}" -f $perm, ($toolNames -join ','))
     }
@@ -4786,6 +4789,9 @@ function Invoke-AgentCommand {
             Write-Host ('  ' + $script:Gm.Grey0 + $script:Box.V + ' ' + $script:Gm.Aqua + $script:Box.Check + ' [auto-approved by Auto mode]' + $script:Gm.Reset)
         }
     }
+    elseif (($script:OutputMode -ne 'json') -and $script:AutoApproveCommands) {
+        Write-Host ('  ' + $script:Gm.Grey0 + $script:Box.V + ' ' + $script:Gm.Aqua + $script:Box.Check + ' [commands are auto-approved for this session]' + $script:Gm.Reset)
+    }
     else {
         if ($script:OutputMode -eq 'json') {
             return (@{ status = 'cancelled'; message = 'Interactive confirmation is disabled in JSON mode. Use -Permission Auto to allow command execution.' } | ConvertTo-Json -Compress)
@@ -4793,8 +4799,8 @@ function Invoke-AgentCommand {
         $promptStr = '  ' + $script:Gm.Grey0 + $script:Box.V + ' ' + $script:Gm.BoldYellow + 'Confirm [y]es, [n]o, [a]ll commands: ' + $script:Gm.Fg
         $choice = Read-TuiConfirmation -PromptText $promptStr -ActionType 'run'
         if ($choice -eq 'a') {
-            $script:AgentPermission = 'Auto'
-            Write-Host ('  ' + $script:Gm.Grey0 + $script:Box.V + ' ' + $script:Gm.Aqua + $script:Box.Check + ' [switched permission to Auto for this session]' + $script:Gm.Reset)
+            $script:AutoApproveCommands = $true
+            Write-Host ('  ' + $script:Gm.Grey0 + $script:Box.V + ' ' + $script:Gm.Aqua + $script:Box.Check + ' [commands are auto-approved for this session]' + $script:Gm.Reset)
         }
         elseif ($choice -ne 'y') {
             Write-Host ('  ' + $script:Gm.Grey0 + $script:Box.BL + $script:Box.H + ' ' + $script:Gm.Red + $script:Box.Cross + ' cancelled' + $script:Gm.Reset)
@@ -7040,10 +7046,20 @@ function Sync-AgentCapabilities {
                 'File modification and shell execution are now unavailable. Explain the limitation immediately if asked to modify files or run commands.'
             }
             elseif ($cap.permission -eq 'Ask') {
-                'write_file, edit_file (requires WRITE confirmation after diff preview), and run_command (requires RUN confirmation) are now available. Call write_file or edit_file directly when asked to modify files.'
+                if ($script:AutoApproveCommands) {
+                    'write_file and edit_file require WRITE confirmation after a diff preview. run_command is auto-approved for this session. Call write_file or edit_file directly when asked to modify files.'
+                }
+                else {
+                    'write_file, edit_file (requires WRITE confirmation after diff preview), and run_command (requires RUN confirmation) are now available. Call write_file or edit_file directly when asked to modify files.'
+                }
             }
             elseif ($cap.permission -eq 'AutoEdit') {
-                'write_file and edit_file are now auto-approved; run_command requires RUN confirmation.'
+                if ($script:AutoApproveCommands) {
+                    'write_file and edit_file are now auto-approved. run_command is auto-approved for this session.'
+                }
+                else {
+                    'write_file and edit_file are now auto-approved; run_command requires RUN confirmation.'
+                }
             }
             else {
                 'write_file, edit_file, and run_command are now auto-approved.'
@@ -10257,6 +10273,27 @@ function Export-AgentSessionOutput {
     return $exported
 }
 
+function Reset-AgentSessionApprovals {
+    param($State)
+    $script:AutoApproveWeb = $false
+    $script:AutoApproveCommands = $false
+    if ($script:StartupPermissionSpecified) {
+        $startupPerm = [string]$script:StartupAgentPermission
+        if ($startupPerm -in @('ReadOnly', 'Ask', 'AutoEdit', 'Auto')) {
+            $script:AgentPermission = $startupPerm
+        }
+        else {
+            $script:AgentPermission = 'Ask'
+        }
+    }
+    else {
+        $script:AgentPermission = 'Ask'
+    }
+    if ($State) {
+        Sync-AgentCapabilities -State $State | Out-Null
+    }
+}
+
 function Invoke-ReplNewSessionCommand {
     param($State, [string]$RootPath, [string]$ConfigDir = '', [string]$Model = '', [string]$SessionDir = '', [switch]$NoSession, [AllowEmptyCollection()][array]$UndoStack = @())
     $newId = 'sess-' + (Get-Date -Format 'yyyyMMdd-HHmmss') + '-' + (Get-Random -Minimum 100000 -Maximum 999999)
@@ -10280,7 +10317,7 @@ function Invoke-ReplNewSessionCommand {
     $State.loop_detected = $false
     $State.last_failed_question = ''
     $script:ActiveSessionTodos = @()
-    Sync-AgentCapabilities -State $State | Out-Null
+    Reset-AgentSessionApprovals -State $State
     Clear-AgentUndoBackups -UndoEntries $UndoStack
     $sessionFile = if ($NoSession) { '' } else { Join-Path $SessionDir ($newId + '.jsonl') }
     $script:ActiveSessionId = $newId
@@ -10353,6 +10390,7 @@ function Invoke-ReplForkCommand {
         $SessionFile = if ($NoSession) { '' } else { $forkRes.session_file }
         Clear-AgentUndoBackups -UndoEntries $UndoStack
         $UndoStack = @()
+        Reset-AgentSessionApprovals -State $State
         Write-Host ($script:Gm.Green + "  Forked session to: $($forkRes.session_file) (id=$($forkRes.session_id))" + $script:Gm.Reset)
     }
     catch {
@@ -10399,6 +10437,7 @@ function Invoke-ReplImportCommand {
         $UndoStack = @()
         $LastFailedQuestion = ''
         if ($State.model) { $Model = $State.model }
+        Reset-AgentSessionApprovals -State $State
         Write-Host ($script:Gm.Green + "  Imported session: $impPath ($($State.messages.Count) messages)" + $script:Gm.Reset)
     }
     catch {
@@ -10512,7 +10551,7 @@ function Invoke-ReplCompactCommand {
 }
 
 function Invoke-ReplSessionsCommand {
-    param($State, [string]$SessionDir, [string]$SessionFile = '', [string]$RootPath, [string]$Model = '', [AllowEmptyCollection()][array]$UndoStack = @(), [string]$LastFailedQuestion = '', [switch]$PermissionSpecified, [string]$ResumeArg = '', [switch]$NoSession)
+    param($State, [string]$SessionDir, [string]$SessionFile = '', [string]$RootPath, [string]$Model = '', [AllowEmptyCollection()][array]$UndoStack = @(), [string]$LastFailedQuestion = '', [string]$ResumeArg = '', [switch]$NoSession)
     $arg = if ($ResumeArg) { $ResumeArg.Trim() } else { '' }
     if (-not (Test-Path -LiteralPath $SessionDir)) {
         Write-Host ($script:Gm.Grey1 + '  No saved sessions found.' + $script:Gm.Reset)
@@ -10567,8 +10606,7 @@ function Invoke-ReplSessionsCommand {
             $UndoStack = @()
             $LastFailedQuestion = ''
             if ($State.model) { $Model = $State.model }
-            if (-not $PermissionSpecified) { $script:AgentPermission = 'Ask' }
-            Sync-AgentCapabilities -State $State | Out-Null
+            Reset-AgentSessionApprovals -State $State
             Write-Host ($script:Gm.Green + "  Resumed session: $chosen ($($State.messages.Count) messages, model=$Model, permission=$($script:AgentPermission))" + $script:Gm.Reset)
         }
         catch {
@@ -10794,6 +10832,8 @@ if (-not $LibraryOnly) {
     }
     if ($Permission -notin @('ReadOnly', 'Ask', 'AutoEdit', 'Auto')) { throw 'Permission must be one of: ReadOnly, Ask, AutoEdit, Auto.' }
     $script:AgentPermission = $Permission
+    $script:StartupAgentPermission = $Permission
+    $script:StartupPermissionSpecified = ($PSBoundParameters.Keys -contains 'Permission')
     if ($env:SHELLOSSUS_SUB_AUTO_WEB -eq '1') { $script:AutoApproveWeb = $true }
     $script:Diagnostics = [bool]$Diagnostics
     $script:NoTools = [bool]$NoTools
@@ -10988,7 +11028,7 @@ if (-not $LibraryOnly) {
             if ($trimmedQ -match '^/compact(?:\s+(.+))?$') { Invoke-ReplCompactCommand -State $state -Endpoint $endpoint -Model $Model -ApiKey $agentKey -SessionFile $sessionFile -RootPath $rootPath -Focus $Matches[1]; continue }
             if ($trimmedQ -eq '/sessions' -or $trimmedQ -match '^/resume(?:\s+(.+))?$') {
                 $resArg = if ($trimmedQ -ne '/sessions' -and $Matches[1]) { $Matches[1] } else { '' }
-                $sessRes = Invoke-ReplSessionsCommand -State $state -SessionDir $sessionDir -SessionFile $sessionFile -RootPath $rootPath -Model $Model -UndoStack $undoStack -LastFailedQuestion $lastFailedQuestion -PermissionSpecified:($PSBoundParameters.Keys -contains 'Permission') -ResumeArg $resArg -NoSession:$NoSession
+                $sessRes = Invoke-ReplSessionsCommand -State $state -SessionDir $sessionDir -SessionFile $sessionFile -RootPath $rootPath -Model $Model -UndoStack $undoStack -LastFailedQuestion $lastFailedQuestion -ResumeArg $resArg -NoSession:$NoSession
                 $sessionFile = $sessRes.session_file; $Model = $sessRes.model
                 $undoStack = @($sessRes.undo_stack); $lastFailedQuestion = $sessRes.last_failed_question
                 continue

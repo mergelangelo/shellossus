@@ -144,6 +144,8 @@ if (-not $LibraryOnly) {
     }
     if ($Permission -notin @('ReadOnly', 'Ask', 'AutoEdit', 'Auto')) { throw 'Permission must be one of: ReadOnly, Ask, AutoEdit, Auto.' }
     $script:AgentPermission = $Permission
+    $script:StartupAgentPermission = $Permission
+    $script:StartupPermissionSpecified = ($PSBoundParameters.Keys -contains 'Permission')
     if ($env:SHELLOSSUS_SUB_AUTO_WEB -eq '1') { $script:AutoApproveWeb = $true }
     $script:Diagnostics = [bool]$Diagnostics
     $script:NoTools = [bool]$NoTools
@@ -338,7 +340,7 @@ if (-not $LibraryOnly) {
             if ($trimmedQ -match '^/compact(?:\s+(.+))?$') { Invoke-ReplCompactCommand -State $state -Endpoint $endpoint -Model $Model -ApiKey $agentKey -SessionFile $sessionFile -RootPath $rootPath -Focus $Matches[1]; continue }
             if ($trimmedQ -eq '/sessions' -or $trimmedQ -match '^/resume(?:\s+(.+))?$') {
                 $resArg = if ($trimmedQ -ne '/sessions' -and $Matches[1]) { $Matches[1] } else { '' }
-                $sessRes = Invoke-ReplSessionsCommand -State $state -SessionDir $sessionDir -SessionFile $sessionFile -RootPath $rootPath -Model $Model -UndoStack $undoStack -LastFailedQuestion $lastFailedQuestion -PermissionSpecified:($PSBoundParameters.Keys -contains 'Permission') -ResumeArg $resArg -NoSession:$NoSession
+                $sessRes = Invoke-ReplSessionsCommand -State $state -SessionDir $sessionDir -SessionFile $sessionFile -RootPath $rootPath -Model $Model -UndoStack $undoStack -LastFailedQuestion $lastFailedQuestion -ResumeArg $resArg -NoSession:$NoSession
                 $sessionFile = $sessRes.session_file; $Model = $sessRes.model
                 $undoStack = @($sessRes.undo_stack); $lastFailedQuestion = $sessRes.last_failed_question
                 continue

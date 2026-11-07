@@ -1542,6 +1542,274 @@ try {
         Remove-Item Function:\Write-Host -ErrorAction SilentlyContinue
         $null = Set-AgentContextLimits -WindowSpec '128k' -CompactSpec '75%'
     }
+
+    # Regression (Task 4): web and command [a]ll stay inside the session that declared them.
+    $task4SavedPerm = $script:AgentPermission
+    $task4SavedMode = $script:OutputMode
+    $task4SavedWeb = $script:AutoApproveWeb
+    $task4SavedStartupSpecified = $script:StartupPermissionSpecified
+    $task4SavedStartupPerm = $script:StartupAgentPermission
+    $task4SavedCmd = $script:AutoApproveCommands
+    $task4Dir = Join-Path $testRoot 'task4-sessions'
+    New-Item -ItemType Directory -Path $task4Dir -Force | Out-Null
+    $global:task4Host = @()
+    $global:task4Queue = @()
+    $script:task4UseApproval = $true
+    $script:approval = ''
+    $script:prompts = 0
+    function Write-Host {
+        param([Parameter(Position = 0, ValueFromRemainingArguments = $true)]$Object, [switch]$NoNewline, $Separator, $ForegroundColor, $BackgroundColor)
+        $text = ($Object | ForEach-Object { [string]$_ }) -join ' '
+        if ($text) { $global:task4Host = @($global:task4Host) + @($text) }
+    }
+    function Read-Host {
+        param($Prompt)
+        if ($global:task4Queue -and @($global:task4Queue).Count -gt 0) {
+            $next = [string]@($global:task4Queue)[0]
+            if (@($global:task4Queue).Count -le 1) { $global:task4Queue = @() }
+            else { $global:task4Queue = @(@($global:task4Queue)[1..(@($global:task4Queue).Count - 1)]) }
+            return $next
+        }
+        if ($script:task4UseApproval) {
+            $script:prompts++
+            return $script:approval
+        }
+        return '/exit'
+    }
+    try {
+        $script:OutputMode = 'text'
+        $script:AgentPermission = 'Ask'
+        $script:StartupPermissionSpecified = $false
+        $script:StartupAgentPermission = 'Ask'
+        $script:AutoApproveWeb = $false
+        $script:AutoApproveCommands = $false
+        $script:approval = 'a'
+        $webNew = Request-AgentWebConfirmation -ToolName 'fetch_url' -Target 'https://example.com/task4-new'
+        Assert-True ($webNew.approved -and $script:AutoApproveWeb -eq $true) 'Web [a]ll did not approve the request for this session.'
+        $script:AutoApproveCommands = $true
+        $task4New = @{ messages = @(@{ role = 'system'; content = 'sys' }); workspace = $workspacePath; model = 'test-model' }
+        $null = Invoke-ReplNewSessionCommand -State $task4New -RootPath $workspacePath -ConfigDir '' -Model 'test-model' -SessionDir $task4Dir -UndoStack @()
+        Assert-True ($script:AutoApproveWeb -eq $false) 'Web [a]ll survived /new.'
+        Assert-True ($script:AutoApproveCommands -eq $false) '/new left the command-only approval flag set.'
+
+        $script:OutputMode = 'text'
+        $script:AgentPermission = 'Ask'
+        $script:AutoApproveWeb = $false
+        $script:approval = 'a'
+        $webFork = Request-AgentWebConfirmation -ToolName 'fetch_url' -Target 'https://example.com/task4-fork'
+        Assert-True ($webFork.approved -and $script:AutoApproveWeb -eq $true) 'Web [a]ll did not set the flag before /fork.'
+        $script:AutoApproveCommands = $true
+        $task4Fork = @{
+            session_id = 'sess-task4-fork-src'
+            workspace = $workspacePath
+            model = 'test-model'
+            messages = @(
+                @{ role = 'system'; content = 'sys' },
+                @{ role = 'user'; content = 'fork-user' },
+                @{ role = 'assistant'; content = 'fork-assistant' }
+            )
+        }
+        $task4ForkRes = Invoke-ReplForkCommand -State $task4Fork -SessionDir $task4Dir -NoSession -UndoStack @()
+        Assert-True ([string]$task4ForkRes.state.session_id -ne 'sess-task4-fork-src') 'Successful /fork did not create a new session id.'
+        Assert-True ($script:AutoApproveWeb -eq $false) 'Web [a]ll survived /fork.'
+        Assert-True ($script:AutoApproveCommands -eq $false) '/fork left the command-only approval flag set.'
+
+        $task4Good = Join-Path $task4Dir 'good.jsonl'
+        $task4GoodSrc = @{
+            session_id = 'sess-task4-good'
+            messages = @(
+                @{ role = 'system'; content = 'sys' },
+                @{ role = 'user'; content = 'task4-imported-user' },
+                @{ role = 'assistant'; content = 'task4-imported-assistant' }
+            )
+        }
+        Save-AgentSession -SessionFile $task4Good -State $task4GoodSrc -Workspace $workspacePath -Model 'test-model' -SessionId 'sess-task4-good'
+        $script:AgentPermission = 'Ask'
+        $script:AutoApproveWeb = $false
+        $script:approval = 'a'
+        $webImport = Request-AgentWebConfirmation -ToolName 'fetch_url' -Target 'https://example.com/task4-import'
+        Assert-True ($webImport.approved -and $script:AutoApproveWeb -eq $true) 'Web [a]ll did not set the flag before /import.'
+        $script:AutoApproveCommands = $true
+        $task4ImportLive = @{ messages = @(@{ role = 'system'; content = 'live' }); workspace = $workspacePath; model = 'live-model' }
+        $task4ImportRes = Invoke-ReplImportCommand -State $task4ImportLive -RootPath $workspacePath -SessionFile '' -Model 'live-model' -UndoStack @() -ImportArg $task4Good
+        $task4ImportUsers = @($task4ImportRes.state.messages | Where-Object { $_.role -eq 'user' -and [string]$_.content -eq 'task4-imported-user' })
+        Assert-True ($task4ImportUsers.Count -eq 1) 'Successful /import did not load the saved user text.'
+        Assert-True ($script:AutoApproveWeb -eq $false) 'Web [a]ll survived /import.'
+        Assert-True ($script:AutoApproveCommands -eq $false) '/import left the command-only approval flag set.'
+
+        $script:AgentPermission = 'Ask'
+        $script:AutoApproveWeb = $false
+        $script:approval = 'a'
+        $webResume = Request-AgentWebConfirmation -ToolName 'fetch_url' -Target 'https://example.com/task4-resume'
+        Assert-True ($webResume.approved -and $script:AutoApproveWeb -eq $true) 'Web [a]ll did not set the flag before /resume.'
+        $script:AutoApproveCommands = $true
+        $task4ResumeLive = @{ messages = @(@{ role = 'system'; content = 'live' }); workspace = $workspacePath; model = 'live-model' }
+        $task4ResumeRes = Invoke-ReplSessionsCommand -State $task4ResumeLive -SessionDir $task4Dir -SessionFile '' -RootPath $workspacePath -Model 'live-model' -UndoStack @() -ResumeArg 'good.jsonl'
+        $task4ResumeUsers = @($task4ResumeRes.state.messages | Where-Object { $_.role -eq 'user' -and [string]$_.content -eq 'task4-imported-user' })
+        Assert-True ($task4ResumeUsers.Count -eq 1) 'Successful /resume did not load the saved user text.'
+        Assert-True ($script:AutoApproveWeb -eq $false) 'Web [a]ll survived /resume.'
+        Assert-True ($script:AutoApproveCommands -eq $false) '/resume left the command-only approval flag set.'
+
+        $script:AutoApproveWeb = $true
+        $script:AutoApproveCommands = $true
+        $script:AgentPermission = 'AutoEdit'
+        $task4MissLive = @{ messages = @(@{ role = 'system'; content = 'live' }); workspace = $workspacePath; model = 'live-model' }
+        $null = Invoke-ReplImportCommand -State $task4MissLive -RootPath $workspacePath -SessionFile '' -Model 'live-model' -UndoStack @() -ImportArg (Join-Path $task4Dir 'missing.jsonl')
+        Assert-True ($script:AutoApproveWeb -eq $true -and $script:AutoApproveCommands -eq $true -and $script:AgentPermission -eq 'AutoEdit') 'Failed /import cleared session approvals or permission.'
+        $task4Other = Join-Path $testRoot 'task4-other-ws'
+        New-Item -ItemType Directory -Path $task4Other -Force | Out-Null
+        $task4Foreign = Join-Path $task4Dir 'foreign.jsonl'
+        $task4ForeignSrc = @{
+            messages = @(
+                @{ role = 'system'; content = 'sys' },
+                @{ role = 'user'; content = 'foreign-user' }
+            )
+        }
+        Save-AgentSession -SessionFile $task4Foreign -State $task4ForeignSrc -Workspace $task4Other -Model 'test-model' -SessionId 'sess-task4-foreign'
+        $script:AutoApproveWeb = $true
+        $script:AutoApproveCommands = $true
+        $script:AgentPermission = 'AutoEdit'
+        $task4BadImport = @{ messages = @(@{ role = 'system'; content = 'live' }); workspace = $workspacePath; model = 'live-model' }
+        $null = Invoke-ReplImportCommand -State $task4BadImport -RootPath $workspacePath -SessionFile '' -Model 'live-model' -UndoStack @() -ImportArg $task4Foreign
+        Assert-True ($script:AutoApproveWeb -eq $true -and $script:AutoApproveCommands -eq $true -and $script:AgentPermission -eq 'AutoEdit') 'Import of another workspace cleared session approvals or permission.'
+        $script:AutoApproveWeb = $true
+        $script:AutoApproveCommands = $true
+        $script:AgentPermission = 'AutoEdit'
+        $task4MissResume = @{ messages = @(@{ role = 'system'; content = 'live' }); workspace = $workspacePath; model = 'live-model' }
+        $null = Invoke-ReplSessionsCommand -State $task4MissResume -SessionDir $task4Dir -SessionFile '' -RootPath $workspacePath -Model 'live-model' -UndoStack @() -ResumeArg 'missing.jsonl'
+        Assert-True ($script:AutoApproveWeb -eq $true -and $script:AutoApproveCommands -eq $true -and $script:AgentPermission -eq 'AutoEdit') 'Resume of a missing session cleared session approvals or permission.'
+        $script:AutoApproveWeb = $true
+        $script:AutoApproveCommands = $true
+        $script:AgentPermission = 'AutoEdit'
+        $task4BadResume = @{ messages = @(@{ role = 'system'; content = 'live' }); workspace = $workspacePath; model = 'live-model' }
+        $null = Invoke-ReplSessionsCommand -State $task4BadResume -SessionDir $task4Dir -SessionFile '' -RootPath $workspacePath -Model 'live-model' -UndoStack @() -ResumeArg 'foreign.jsonl'
+        Assert-True ($script:AutoApproveWeb -eq $true -and $script:AutoApproveCommands -eq $true -and $script:AgentPermission -eq 'AutoEdit') 'Failed /resume cleared session approvals or permission.'
+        $script:AutoApproveWeb = $true
+        $script:AutoApproveCommands = $true
+        $script:AgentPermission = 'AutoEdit'
+        $task4BadFork = @{
+            session_id = 'sess-task4-bad-fork'
+            workspace = $workspacePath
+            model = 'test-model'
+            messages = @(
+                @{ role = 'system'; content = 'sys' },
+                @{ role = 'user'; content = 'do a thing' },
+                @{ role = 'assistant'; content = ''; tool_calls = @(@{ id = 'missing-tool'; type = 'function'; function = @{ name = 'read_file'; arguments = '{"path":"hello.txt"}' } }) }
+            )
+        }
+        $null = Invoke-ReplForkCommand -State $task4BadFork -SessionDir $task4Dir -NoSession -UndoStack @()
+        Assert-True ($script:AutoApproveWeb -eq $true -and $script:AutoApproveCommands -eq $true -and $script:AgentPermission -eq 'AutoEdit') 'Failed /fork cleared session approvals or permission.'
+
+        $script:OutputMode = 'text'
+        $script:AgentPermission = 'Ask'
+        $script:StartupPermissionSpecified = $false
+        $script:StartupAgentPermission = 'Ask'
+        $script:AutoApproveWeb = $false
+        $script:AutoApproveCommands = $false
+        $script:approval = 'a'
+        $script:prompts = 0
+        $global:task4Host = @()
+        $task4CmdCall = @{ id = 't4-cmd'; function = @{ name = 'run_command'; arguments = '{"command":"Write-Output task4-cmd"}' } }
+        $task4Cmd1 = Invoke-AgentTool -Root $workspacePath -Call $task4CmdCall | ConvertFrom-Json
+        $task4ShellText = $global:task4Host -join "`n"
+        Assert-True ($task4Cmd1.status -eq 'executed') 'Shell [a]ll did not run the approved command.'
+        Assert-True ($script:AgentPermission -eq 'Ask') "Shell [a]ll changed AgentPermission to $($script:AgentPermission)."
+        Assert-True ($script:AutoApproveCommands -eq $true) 'Shell [a]ll did not set the command-only approval flag.'
+        $task4Cap = Get-AgentCapabilities -Root $workspacePath
+        Assert-True ((-not $task4Cap.exec_requires_confirmation) -and ($task4Cap.permission -eq 'Ask')) 'Command-only approval still told the model that run_command needs confirmation.'
+        Assert-True ($task4ShellText -like '*commands are auto-approved for this session*') 'Shell [a]ll did not say commands are auto-approved for this session.'
+        Assert-True ($task4ShellText -notlike '*switched permission to Auto*') 'Shell [a]ll still announced a switch to Auto.'
+        $task4PromptsAfterAll = $script:prompts
+        $script:approval = 'n'
+        $task4WriteCall = @{ id = 't4-write'; function = @{ name = 'write_file'; arguments = '{"path":"task4-shell-all.txt","content":"nope"}' } }
+        $task4Write = Invoke-AgentTool -Root $workspacePath -Call $task4WriteCall | ConvertFrom-Json
+        Assert-True ($task4Write.status -eq 'cancelled' -and $script:prompts -gt $task4PromptsAfterAll) 'Shell [a]ll auto-approved a later file write.'
+        Assert-True (-not (Test-Path -LiteralPath (Join-Path $workspacePath 'task4-shell-all.txt'))) 'Shell [a]ll created a file without write approval.'
+        Assert-True ($script:AgentPermission -eq 'Ask') 'File confirmation after shell [a]ll changed AgentPermission.'
+        $script:approval = 'n'
+        $task4PromptsBeforeCmd2 = $script:prompts
+        $task4Cmd2 = Invoke-AgentTool -Root $workspacePath -Call $task4CmdCall | ConvertFrom-Json
+        Assert-True ($task4Cmd2.status -eq 'executed' -and $script:prompts -eq $task4PromptsBeforeCmd2) 'A later run_command was not auto-approved after shell [a]ll.'
+        $task4AfterShell = @{ messages = @(@{ role = 'system'; content = 'sys' }); workspace = $workspacePath; model = 'test-model' }
+        $null = Invoke-ReplNewSessionCommand -State $task4AfterShell -RootPath $workspacePath -ConfigDir '' -Model 'test-model' -SessionDir $task4Dir -UndoStack @()
+        Assert-True ($script:AutoApproveCommands -eq $false) '/new after shell [a]ll left the command flag set.'
+        $task4CapAfter = Get-AgentCapabilities -Root $workspacePath
+        Assert-True ($task4CapAfter.exec_requires_confirmation) '/new left run_command auto-approved in capabilities.'
+        $script:approval = 'n'
+        $task4PromptsBeforeCmd3 = $script:prompts
+        $task4Cmd3 = Invoke-AgentTool -Root $workspacePath -Call $task4CmdCall | ConvertFrom-Json
+        Assert-True ($task4Cmd3.status -eq 'cancelled' -and $script:prompts -gt $task4PromptsBeforeCmd3) '/new did not make the next run_command ask again.'
+
+        $script:OutputMode = 'text'
+        $script:StartupPermissionSpecified = $false
+        $script:StartupAgentPermission = 'Auto'
+        $script:AgentPermission = 'Ask'
+        $script:AutoApproveWeb = $true
+        $script:AutoApproveCommands = $true
+        $script:approval = 'a'
+        $task4EditCall = @{ id = 't4-edit-all'; function = @{ name = 'write_file'; arguments = '{"path":"task4-file-all.txt","content":"yes"}' } }
+        $task4Edit = Invoke-AgentTool -Root $workspacePath -Call $task4EditCall | ConvertFrom-Json
+        Assert-True ($task4Edit.status -eq 'written' -and $script:AgentPermission -eq 'AutoEdit') 'File [a]ll did not switch permission to AutoEdit.'
+        $task4AskNew = @{ messages = @(@{ role = 'system'; content = 'old' }); workspace = $workspacePath; model = 'test-model' }
+        $task4AskRes = Invoke-ReplNewSessionCommand -State $task4AskNew -RootPath $workspacePath -ConfigDir '' -Model 'test-model' -SessionDir $task4Dir -UndoStack @()
+        Assert-True ($script:AgentPermission -eq 'Ask') "Process without -Permission returned $($script:AgentPermission) from /new after file [a]ll."
+        Assert-True (([string]$task4AskRes.state.messages[0].content) -match 'Permission mode: Ask\.') '/new did not sync capabilities back to Ask.'
+        Assert-True ($script:AutoApproveWeb -eq $false -and $script:AutoApproveCommands -eq $false) '/new after file [a]ll left a session approval flag set.'
+
+        $script:StartupPermissionSpecified = $true
+        $script:StartupAgentPermission = 'Auto'
+        $script:AgentPermission = 'Ask'
+        $task4AutoNew = @{ messages = @(@{ role = 'system'; content = 'old' }); workspace = $workspacePath; model = 'test-model' }
+        $task4AutoRes = Invoke-ReplNewSessionCommand -State $task4AutoNew -RootPath $workspacePath -ConfigDir '' -Model 'test-model' -SessionDir $task4Dir -UndoStack @()
+        Assert-True ($script:AgentPermission -eq 'Auto') "Process started with -Permission Auto restored $($script:AgentPermission) on /new."
+        Assert-True (([string]$task4AutoRes.state.messages[0].content) -match 'Permission mode: Auto\.') '/new did not sync capabilities back to the startup Auto permission.'
+
+        $script:OutputMode = 'json'
+        $script:AgentPermission = 'Ask'
+        $script:AutoApproveCommands = $true
+        $script:prompts = 0
+        $task4JsonAsk = Invoke-AgentTool -Root $workspacePath -Call $task4CmdCall | ConvertFrom-Json
+        Assert-True ($task4JsonAsk.status -eq 'cancelled' -and $script:prompts -eq 0) 'JSON mode ran a command without Auto permission.'
+        $script:AgentPermission = 'Auto'
+        $task4JsonAuto = Invoke-AgentTool -Root $workspacePath -Call $task4CmdCall | ConvertFrom-Json
+        Assert-True ($task4JsonAuto.status -eq 'executed' -and $script:prompts -eq 0) 'JSON mode with Auto permission did not run the command.'
+        $script:OutputMode = 'text'
+
+        $task4Cfg = Join-Path $testRoot 'task4.env'
+        Save-AgentConfig -Path $task4Cfg -Config @{
+            SHELLOSSUS_BASE_URL = 'https://example.invalid/v1'
+            SHELLOSSUS_MODEL = 'test-model'
+            SHELLOSSUS_API_KEY = 'test-key'
+        }
+        $script:task4UseApproval = $false
+        $global:task4Host = @()
+        $global:task4Queue = @('/permission Ask', '/status', '/new', '/status', '/exit')
+        & "$PSScriptRoot\..\shellossus.ps1" -Workspace $workspacePath -BaseUrl 'https://example.invalid/v1' -Model 'test-model' -Permission Auto -Mode text -NoSession -ConfigPath $task4Cfg
+        $task4AutoText = $global:task4Host -join "`n"
+        $task4AutoPermLines = @($global:task4Host | Where-Object { $_ -like '*Permission:*' })
+        Assert-True ($task4AutoText -like '*Permission mode set to: Ask*') 'REPL started with -Permission Auto did not accept /permission Ask.'
+        Assert-True ($task4AutoPermLines.Count -ge 1 -and $task4AutoPermLines[-1] -match '\[Auto\]') 'REPL started with -Permission Auto did not keep Auto after /new.'
+        $global:task4Host = @()
+        $global:task4Queue = @('/permission Auto', '/new', '/status', '/exit')
+        & "$PSScriptRoot\..\shellossus.ps1" -Workspace $workspacePath -BaseUrl 'https://example.invalid/v1' -Model 'test-model' -Mode text -NoSession -ConfigPath $task4Cfg
+        $task4DefaultText = $global:task4Host -join "`n"
+        $task4DefaultPermLines = @($global:task4Host | Where-Object { $_ -like '*Permission:*' })
+        Assert-True ($task4DefaultText -like '*Permission mode set to: Auto*') 'REPL started without -Permission did not accept /permission Auto.'
+        Assert-True ($task4DefaultPermLines.Count -ge 1 -and $task4DefaultPermLines[-1] -match '\[Ask\]' -and $task4DefaultPermLines[-1] -notmatch '\[Auto\]') 'REPL started without -Permission did not return to Ask after /new.'
+    }
+    finally {
+        $script:AgentPermission = $task4SavedPerm
+        $script:OutputMode = $task4SavedMode
+        $script:AutoApproveWeb = $task4SavedWeb
+        $script:StartupPermissionSpecified = $task4SavedStartupSpecified
+        $script:StartupAgentPermission = $task4SavedStartupPerm
+        $script:AutoApproveCommands = $task4SavedCmd
+        $script:approval = ''
+        $script:task4UseApproval = $false
+        $global:task4Queue = @()
+        Remove-Item Function:\Read-Host -ErrorAction SilentlyContinue
+        Remove-Item Function:\Write-Host -ErrorAction SilentlyContinue
+    }
 }
 finally {
     Remove-TestEnvironment -Env $envData

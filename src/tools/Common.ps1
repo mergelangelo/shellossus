@@ -21,6 +21,9 @@ $script:SubagentDepth = 0
 $script:MaxSubagentDepth = 1
 $script:ActiveSessionTodos = @()
 $script:AutoApproveWeb = $false
+$script:AutoApproveCommands = $false
+$script:StartupAgentPermission = 'Ask'
+$script:StartupPermissionSpecified = $false
 
 function Resolve-ToolCanonicalName {
     param([string]$Name)

@@ -295,10 +295,20 @@ function Sync-AgentCapabilities {
                 'File modification and shell execution are now unavailable. Explain the limitation immediately if asked to modify files or run commands.'
             }
             elseif ($cap.permission -eq 'Ask') {
-                'write_file, edit_file (requires WRITE confirmation after diff preview), and run_command (requires RUN confirmation) are now available. Call write_file or edit_file directly when asked to modify files.'
+                if ($script:AutoApproveCommands) {
+                    'write_file and edit_file require WRITE confirmation after a diff preview. run_command is auto-approved for this session. Call write_file or edit_file directly when asked to modify files.'
+                }
+                else {
+                    'write_file, edit_file (requires WRITE confirmation after diff preview), and run_command (requires RUN confirmation) are now available. Call write_file or edit_file directly when asked to modify files.'
+                }
             }
             elseif ($cap.permission -eq 'AutoEdit') {
-                'write_file and edit_file are now auto-approved; run_command requires RUN confirmation.'
+                if ($script:AutoApproveCommands) {
+                    'write_file and edit_file are now auto-approved. run_command is auto-approved for this session.'
+                }
+                else {
+                    'write_file and edit_file are now auto-approved; run_command requires RUN confirmation.'
+                }
             }
             else {
                 'write_file, edit_file, and run_command are now auto-approved.'
