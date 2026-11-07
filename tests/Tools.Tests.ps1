@@ -601,6 +601,15 @@ try {
     Assert-True ($headRes.truncated -and $headRes.truncated_by -eq 'lines' -and $headRes.output_lines -eq 2 -and $headRes.content -eq "line1`nline2") 'Invoke-TruncateHead lines limit failed.'
     $tailRes = Invoke-TruncateTail -Content ("line1`nline2`nline3`nline4") -MaxLines 2 -MaxBytes 1000
     Assert-True ($tailRes.truncated -and $tailRes.truncated_by -eq 'lines' -and $tailRes.output_lines -eq 2 -and $tailRes.content -eq "line3`nline4") 'Invoke-TruncateTail lines limit failed.'
+    Assert-True ($headRes.truncatedBy -ceq $headRes.truncated_by -and $tailRes.truncatedBy -ceq $tailRes.truncated_by) 'truncated_by did not equal truncatedBy.'
+    $headEmpty = Invoke-TruncateHead -Content ''
+    $headUnder = Invoke-TruncateHead -Content "a`nb" -MaxLines 10 -MaxBytes 100
+    $tailEmpty = Invoke-TruncateTail -Content ''
+    $tailUnder = Invoke-TruncateTail -Content "a`nb" -MaxLines 10 -MaxBytes 100
+    Assert-True ((-not $headEmpty.truncated) -and ($null -eq $headEmpty.truncatedBy) -and ($null -eq $headEmpty.truncated_by) -and (-not ($headEmpty.truncatedBy -is [string]))) 'Invoke-TruncateHead empty truncatedBy was not null.'
+    Assert-True ((-not $headUnder.truncated) -and ($null -eq $headUnder.truncatedBy) -and ($null -eq $headUnder.truncated_by) -and (-not ($headUnder.truncatedBy -is [string]))) 'Invoke-TruncateHead under-limit truncatedBy was not null.'
+    Assert-True ((-not $tailEmpty.truncated) -and ($null -eq $tailEmpty.truncatedBy) -and ($null -eq $tailEmpty.truncated_by) -and (-not ($tailEmpty.truncatedBy -is [string]))) 'Invoke-TruncateTail empty truncatedBy was not null.'
+    Assert-True ((-not $tailUnder.truncated) -and ($null -eq $tailUnder.truncatedBy) -and ($null -eq $tailUnder.truncated_by) -and (-not ($tailUnder.truncatedBy -is [string]))) 'Invoke-TruncateTail under-limit truncatedBy was not null.'
     $lineTrunc = Invoke-TruncateLine -Line ('x' * 600) -MaxChars 500
     Assert-True ($lineTrunc.was_truncated -and $lineTrunc.text.EndsWith('... [truncated]')) 'Invoke-TruncateLine failed.'
 
