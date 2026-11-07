@@ -6183,9 +6183,7 @@ function Get-ForkedSubagentMessages {
         if ($m.role -eq 'system') { continue }
         if ($m.role -eq 'user' -and $m.content -is [string] -and $m.content.StartsWith('[Capability State Change]')) { continue }
         $copyMsg = @{ role = [string]$m.role; content = $m.content }
-        if ($m.reasoning_content) { $copyMsg.reasoning_content = $m.reasoning_content }
-        if ($m.tool_calls) { $copyMsg.tool_calls = @($m.tool_calls) }
-        if ($m.tool_call_id) { $copyMsg.tool_call_id = [string]$m.tool_call_id }
+        Copy-MessageOptionalFields -Source $m -Target $copyMsg
         $forked += $copyMsg
     }
     if (-not (Test-ValidConversationBoundary -Messages $forked)) {
@@ -7381,6 +7379,32 @@ function Expand-UserPrompt {
 # --- src/context/SessionTree.ps1 ---
 # Multi-branch conversation DAG tree and branch context reconstruction.
 
+function Copy-MessageOptionalFields {
+    param($Source, $Target)
+    # Copies entry_type, first_kept_entry_id, reasoning_content,
+    # tool_calls (as an array), and tool_call_id when present.
+    # Does not copy role, content, id, or parent_id.
+    if ($Source.entry_type) { $Target.entry_type = [string]$Source.entry_type }
+    if ($Source.first_kept_entry_id) { $Target.first_kept_entry_id = [string]$Source.first_kept_entry_id }
+    if ($Source.reasoning_content) { $Target.reasoning_content = $Source.reasoning_content }
+    if ($Source.tool_calls) { $Target.tool_calls = @($Source.tool_calls) }
+    if ($Source.tool_call_id) { $Target.tool_call_id = [string]$Source.tool_call_id }
+}
+
+function New-SessionTreeEntryId {
+    param($ExistingById, $Counter)
+    # Returns the next free 'e0001'-style id and advances $Counter.Value
+    # to that id. Callers pass @{ Value = <entry count> }.
+    # PowerShell 7 ConstrainedLanguage cannot construct [ref].
+    $Counter.Value = $Counter.Value + 1
+    $newId = ('e{0:D4}' -f $Counter.Value)
+    while ($ExistingById.ContainsKey($newId)) {
+        $Counter.Value = $Counter.Value + 1
+        $newId = ('e{0:D4}' -f $Counter.Value)
+    }
+    return $newId
+}
+
 function Convert-TreeEntryToMessage {
     param($Entry)
     $msg = @{
@@ -7389,11 +7413,7 @@ function Convert-TreeEntryToMessage {
         role = [string]$Entry.role
         content = $Entry.content
     }
-    if ($Entry.entry_type) { $msg.entry_type = [string]$Entry.entry_type }
-    if ($Entry.first_kept_entry_id) { $msg.first_kept_entry_id = [string]$Entry.first_kept_entry_id }
-    if ($Entry.reasoning_content) { $msg.reasoning_content = $Entry.reasoning_content }
-    if ($Entry.tool_calls) { $msg.tool_calls = @($Entry.tool_calls) }
-    if ($Entry.tool_call_id) { $msg.tool_call_id = [string]$Entry.tool_call_id }
+    Copy-MessageOptionalFields -Source $Entry -Target $msg
     return $msg
 }
 
@@ -7535,11 +7555,7 @@ function Ensure-SessionTree {
                     content = $m.content
                     timestamp = (Get-Date -Format 'yyyy-MM-ddTHH:mm:ssK')
                 }
-                if ($m.entry_type) { $entryCopy.entry_type = [string]$m.entry_type }
-                if ($m.first_kept_entry_id) { $entryCopy.first_kept_entry_id = [string]$m.first_kept_entry_id }
-                if ($m.reasoning_content) { $entryCopy.reasoning_content = $m.reasoning_content }
-                if ($m.tool_calls) { $entryCopy.tool_calls = @($m.tool_calls) }
-                if ($m.tool_call_id) { $entryCopy.tool_call_id = [string]$m.tool_call_id }
+                Copy-MessageOptionalFields -Source $m -Target $entryCopy
                 $State.tree_entries += $entryCopy
                 $existingById[$mid] = $entryCopy
             }
@@ -7551,7 +7567,7 @@ function Ensure-SessionTree {
     else {
         $lastExistingMsgId
     }
-    $counter = $State.tree_entries.Count
+    $counter = @{ Value = $State.tree_entries.Count }
     for ($i = 0; $i -lt $State.messages.Count; $i++) {
         $m = $State.messages[$i]
         if ($m.role -eq 'system') { continue }
@@ -7559,12 +7575,7 @@ function Ensure-SessionTree {
         if ($m.id -and $existingById.ContainsKey([string]$m.id)) {
             continue
         }
-        $counter++
-        $newId = ('e{0:D4}' -f $counter)
-        while ($existingById.ContainsKey($newId)) {
-            $counter++
-            $newId = ('e{0:D4}' -f $counter)
-        }
+        $newId = New-SessionTreeEntryId -ExistingById $existingById -Counter $counter
         $m.id = $newId
         $m.parent_id = $currLeaf
         $currLeaf = $newId
@@ -7576,11 +7587,7 @@ function Ensure-SessionTree {
             content = $m.content
             timestamp = (Get-Date -Format 'yyyy-MM-ddTHH:mm:ssK')
         }
-        if ($m.entry_type) { $entryCopy.entry_type = [string]$m.entry_type }
-        if ($m.first_kept_entry_id) { $entryCopy.first_kept_entry_id = [string]$m.first_kept_entry_id }
-        if ($m.reasoning_content) { $entryCopy.reasoning_content = $m.reasoning_content }
-        if ($m.tool_calls) { $entryCopy.tool_calls = @($m.tool_calls) }
-        if ($m.tool_call_id) { $entryCopy.tool_call_id = [string]$m.tool_call_id }
+        Copy-MessageOptionalFields -Source $m -Target $entryCopy
         $State.tree_entries += $entryCopy
         $existingById[$currLeaf] = $entryCopy
     }
@@ -7692,11 +7699,7 @@ function Save-AgentSession {
                 role = [string]$te.role
                 content = $te.content
             }
-            if ($te.entry_type) { $bEntry.entry_type = [string]$te.entry_type }
-            if ($te.first_kept_entry_id) { $bEntry.first_kept_entry_id = [string]$te.first_kept_entry_id }
-            if ($te.reasoning_content) { $bEntry.reasoning_content = $te.reasoning_content }
-            if ($te.tool_calls) { $bEntry.tool_calls = @($te.tool_calls) }
-            if ($te.tool_call_id) { $bEntry.tool_call_id = [string]$te.tool_call_id }
+            Copy-MessageOptionalFields -Source $te -Target $bEntry
             $lines += ($bEntry | ConvertTo-Json -Depth 20 -Compress)
         }
     }
@@ -7784,11 +7787,7 @@ function Read-AgentSession {
                     role = [string]$obj.role
                     content = $obj.content
                 }
-                if ($obj.entry_type) { $bMsg.entry_type = [string]$obj.entry_type }
-                if ($obj.first_kept_entry_id) { $bMsg.first_kept_entry_id = [string]$obj.first_kept_entry_id }
-                if ($obj.reasoning_content) { $bMsg.reasoning_content = $obj.reasoning_content }
-                if ($obj.tool_calls) { $bMsg.tool_calls = @($obj.tool_calls) }
-                if ($obj.tool_call_id) { $bMsg.tool_call_id = [string]$obj.tool_call_id }
+                Copy-MessageOptionalFields -Source $obj -Target $bMsg
                 $State.tree_entries += $bMsg
             }
             continue
@@ -7796,11 +7795,7 @@ function Read-AgentSession {
         $msg = @{ role = [string]$obj.role; content = $obj.content }
         if ($obj.id) { $msg.id = [string]$obj.id }
         if ($obj.parent_id) { $msg.parent_id = [string]$obj.parent_id }
-        if ($obj.entry_type) { $msg.entry_type = [string]$obj.entry_type }
-        if ($obj.first_kept_entry_id) { $msg.first_kept_entry_id = [string]$obj.first_kept_entry_id }
-        if ($obj.reasoning_content) { $msg.reasoning_content = $obj.reasoning_content }
-        if ($obj.tool_calls) { $msg.tool_calls = @($obj.tool_calls) }
-        if ($obj.tool_call_id) { $msg.tool_call_id = [string]$obj.tool_call_id }
+        Copy-MessageOptionalFields -Source $obj -Target $msg
         $messages += $msg
     }
     return $messages
@@ -8380,12 +8375,9 @@ function Invoke-AgentCompact {
     foreach ($te in @($State.tree_entries)) {
         if ($te -and $te.id) { $existingById[[string]$te.id] = $true }
     }
-    $counter = $State.tree_entries.Count + 1
-    $compId = ('e{0:D4}' -f $counter)
-    while ($existingById.ContainsKey($compId)) {
-        $counter++
-        $compId = ('e{0:D4}' -f $counter)
-    }
+    # Entry count, not count+1: New-SessionTreeEntryId advances before formatting.
+    $counter = @{ Value = $State.tree_entries.Count }
+    $compId = New-SessionTreeEntryId -ExistingById $existingById -Counter $counter
     $compEntry = @{
         id = $compId
         parent_id = $State.leaf_id

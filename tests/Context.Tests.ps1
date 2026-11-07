@@ -104,6 +104,22 @@ try {
     }
     Invoke-SessionResume -SessionFile $sessionFile -State $dirtyState -CurrentWorkspace $workspacePath | Out-Null
     Assert-True ($dirtyState.model -eq 'model-a' -and $dirtyState.undo_stack.Count -eq 0 -and $dirtyState.last_failed_question -eq '' -and $dirtyState.messages.Count -eq 3) 'Invoke-SessionResume did not synchronize model or clear undo_stack/last_failed_question.'
+    $reasonSessionFile = Join-Path $testRoot 'reason-sessions/reason-roundtrip.jsonl'
+    $reasonState = @{
+        messages = @(
+            @{ role = 'system'; content = 'sys' },
+            @{ role = 'assistant'; content = 'using a tool'; reasoning_content = 'plan the call'; tool_calls = @{ id = 'tc-reason'; type = 'function'; function = @{ name = 'list_files'; arguments = '{}' } } }
+        )
+    }
+    $reasonSaveOut = @(Save-AgentSession -SessionFile $reasonSessionFile -State $reasonState -Workspace $workspacePath -Model 'model-a' -SessionId 'sid-reason')
+    Assert-True ($reasonSaveOut.Count -eq 0 -and [string]$reasonState.messages[1].id -eq 'e0001') 'Empty tree first id was not e0001 or Save-AgentSession emitted pipeline output.'
+    $reasonRestoredState = @{}
+    $reasonMsgs = @(Read-AgentSession -SessionFile $reasonSessionFile -State $reasonRestoredState)
+    $reasonToolId = ''
+    if ($reasonMsgs.Count -gt 1 -and $reasonMsgs[1].tool_calls) {
+        $reasonToolId = [string]@($reasonMsgs[1].tool_calls)[0].id
+    }
+    Assert-True ($reasonMsgs.Count -eq 2 -and [string]$reasonMsgs[1].reasoning_content -eq 'plan the call' -and ($reasonMsgs[1].tool_calls -is [array]) -and @($reasonMsgs[1].tool_calls).Count -eq 1 -and $reasonToolId -eq 'tc-reason') 'Session roundtrip dropped reasoning_content or tool_calls.'
 
     # Session tree branching (/tree), session forking (/fork), and HTML session export (/export).
     $treeSessionDir = Join-Path $testRoot 'tree-sessions'
