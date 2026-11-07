@@ -235,8 +235,20 @@ function Format-AskUserArguments {
     if ($rawOptions -is [string]) {
         try {
             $parsed = $rawOptions | ConvertFrom-Json -ErrorAction Stop
-            if ($parsed -is [array]) { $rawOptions = $parsed }
-            elseif ($null -ne $parsed) { $rawOptions = @($parsed) }
+            if ($parsed -is [array]) {
+                $rawOptions = $parsed
+            }
+            elseif (Test-IsJsonObject -Value $parsed) {
+                $rawOptions = @($parsed)
+            }
+            elseif ($null -eq $parsed) {
+                # [] and null emit nothing. An empty list uses the Yes/No or plan-review default.
+                $rawOptions = @()
+            }
+            else {
+                # A parsed number or boolean is not an option list.
+                $rawOptions = $parsed
+            }
         }
         catch {}
     }

@@ -1133,8 +1133,27 @@ try {
     Assert-True ($threwFalseOpt) 'options=$false was rewritten into Yes/No and passed validation.'
     Assert-True ($throwTextFalse -eq "Argument 'options' must be an array.") "options=`$false validation error was: $throwTextFalse"
 
+    # A JSON string of a scalar parses to a ValueType. It must stay a ValueType so validation rejects it.
+    foreach ($badOpt in @('false', '123', 'true', '0')) {
+        $normBadStr = Format-AskUserArguments -Arguments ([pscustomobject]@{ question = 'Q'; options = $badOpt })
+        $threwBadStr = $false
+        $throwBadStr = ''
+        try { Test-AgentToolArguments -Name 'ask_user' -Arguments $normBadStr } catch { $threwBadStr = $true; $throwBadStr = [string]$_.Exception.Message }
+        Assert-True ($threwBadStr) "options='$badOpt' was rewritten into Yes/No and passed validation."
+        Assert-True ($throwBadStr -eq "Argument 'options' must be an array.") "options='$badOpt' validation error was: $throwBadStr"
+    }
+
     $normJsonOpt = Format-AskUserArguments -Arguments ([pscustomobject]@{ question = 'Q'; options = '["A","B"]' })
     Assert-True ($normJsonOpt.options.Count -eq 2 -and $normJsonOpt.options[0].label -eq 'A' -and $normJsonOpt.options[1].value -eq 'B') 'JSON options array string was not normalized.'
+
+    $normJsonObj = Format-AskUserArguments -Arguments ([pscustomobject]@{ question = 'Q'; options = '{"label":"Ship"}' })
+    Assert-True ($normJsonObj.options.Count -eq 1 -and $normJsonObj.options[0].label -eq 'Ship' -and $normJsonObj.options[0].value -eq 'Ship') 'JSON options object string was not normalized.'
+
+    $normEmptyArr = Format-AskUserArguments -Arguments ([pscustomobject]@{ question = 'Q'; options = '[]' })
+    Assert-True ($normEmptyArr.options.Count -eq 2 -and $normEmptyArr.options[0].value -eq 'Yes' -and $normEmptyArr.options[1].value -eq 'No') 'Empty JSON options array did not become Yes/No.'
+
+    $normEmptyPlan = Format-AskUserArguments -Arguments ([pscustomobject]@{ question = 'Q'; intent = 'plan-review'; options = '[]' })
+    Assert-True ($normEmptyPlan.options.Count -eq 3 -and $normEmptyPlan.options[0].value -eq 'Approve') 'Empty JSON options array did not use plan-review defaults.'
 
     $normLabelOpt = Format-AskUserArguments -Arguments ([pscustomobject]@{ question = 'Q'; options = ([pscustomobject]@{ label = 'Ship' }) })
     Assert-True ($normLabelOpt.options.Count -eq 1 -and $normLabelOpt.options[0].label -eq 'Ship' -and $normLabelOpt.options[0].value -eq 'Ship') 'Single labeled options object was not normalized.'
