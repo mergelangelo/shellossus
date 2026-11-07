@@ -1939,6 +1939,125 @@ try {
         $script:ActiveSessionTodos = @($task7SavedTodos)
         Remove-Item Function:\Write-Host -ErrorAction SilentlyContinue
     }
+
+    # Task 8: a -Session file that does not exist yet is the path run_command publishes.
+    $task8Dir = Join-Path $testRoot 'task8-sessions'
+    New-Item -ItemType Directory -Path $task8Dir -Force | Out-Null
+    $task8Missing = Join-Path $task8Dir 'fresh-task8.jsonl'
+    $task8Out = Join-Path $task8Dir 'published-env.txt'
+    Assert-True (-not (Test-Path -LiteralPath $task8Missing)) 'Task 8 fixture session file already existed.'
+    $task8SavedEnvFile = $env:SHELLOSSUS_SESSION_FILE
+    $env:SHELLOSSUS_SESSION_FILE = 'stale-task8-session-file'
+    $task8Cmd = '!Set-Content -LiteralPath "' + $task8Out + '" -Value $env:SHELLOSSUS_SESSION_FILE -Encoding ascii'
+    $global:task8Queue = @($task8Cmd, '/exit')
+    function global:Read-Host {
+        param($Prompt)
+        if (-not $global:task8Queue -or $global:task8Queue.Count -eq 0) { return '/exit' }
+        $next = $global:task8Queue[0]
+        if ($global:task8Queue.Count -eq 1) { $global:task8Queue = @() }
+        else { $global:task8Queue = @($global:task8Queue[1..($global:task8Queue.Count - 1)]) }
+        return $next
+    }
+    function Write-Host {
+        param([Parameter(Position = 0, ValueFromRemainingArguments = $true)]$Object, [switch]$NoNewline, $Separator, $ForegroundColor, $BackgroundColor)
+    }
+    try {
+        & "$PSScriptRoot\..\shellossus.ps1" -Workspace $workspacePath -BaseUrl 'https://example.invalid/v1' -Model 'test-model' -Session $task8Missing -SessionDir $task8Dir -ConfigPath $setupCfgFile
+        Assert-True (Test-Path -LiteralPath $task8Out) 'run_command did not record SHELLOSSUS_SESSION_FILE for a new -Session path.'
+        $task8Published = ([string](Get-Content -LiteralPath $task8Out -Raw -Encoding ascii)).Trim()
+        Assert-True ($task8Published -eq $task8Missing) "A -Session path that does not exist yet was not published. Expected '$task8Missing', got '$task8Published'."
+    }
+    finally {
+        $env:SHELLOSSUS_SESSION_FILE = $task8SavedEnvFile
+        Remove-Item Function:\global:Read-Host -ErrorAction SilentlyContinue
+        Remove-Item Function:\Write-Host -ErrorAction SilentlyContinue
+        Remove-Variable -Name task8Queue -Scope Global -ErrorAction SilentlyContinue
+    }
+
+    # Task 8: a .jsonl export writes the export file and leaves the session path run_command publishes unchanged.
+    $task8Live = Join-Path $task8Dir 'live-task8.jsonl'
+    $task8Export = Join-Path $task8Dir 'export-task8.jsonl'
+    $task8SavedActive = $script:ActiveSessionFile
+    $task8SavedId = $script:ActiveSessionId
+    $task8SavedModel = $script:ActiveModelId
+    $task8SavedEnvFile2 = $env:SHELLOSSUS_SESSION_FILE
+    $script:ActiveSessionFile = $task8Live
+    $script:ActiveSessionId = 'sess-task8-live'
+    $script:ActiveModelId = 'task8-live-model'
+    $env:SHELLOSSUS_SESSION_FILE = 'stale-task8-session-file'
+    $task8ExportState = @{
+        session_id = 'sess-task8-live'
+        session_name = 'Task 8 Live'
+        workspace = $workspacePath
+        model = 'task8-live-model'
+        messages = @(
+            @{ role = 'system'; content = 'sys' },
+            @{ role = 'user'; content = 'Export me' },
+            @{ role = 'assistant'; content = 'Exported answer' }
+        )
+    }
+    function Write-Host {
+        param([Parameter(Position = 0, ValueFromRemainingArguments = $true)]$Object, [switch]$NoNewline, $Separator, $ForegroundColor, $BackgroundColor)
+    }
+    try {
+        $null = Export-AgentSessionOutput -State $task8ExportState -ExportPath $task8Export -RootPath $workspacePath -Model 'task8-live-model'
+        Assert-True (Test-Path -LiteralPath $task8Export) 'JSONL export did not write the export file.'
+        $task8ExportRaw = [string](Get-Content -LiteralPath $task8Export -Raw -Encoding UTF8)
+        Assert-True ($task8ExportRaw.Contains('Exported answer')) 'JSONL export did not contain the session text.'
+        $task8Child = Invoke-ShellCommand -Root $workspacePath -Command 'Write-Output $env:SHELLOSSUS_SESSION_FILE'
+        $task8PublishedExport = ([string]$task8Child.output).Trim()
+        Assert-True ($task8PublishedExport -eq $task8Live) "JSONL export changed the session file run_command publishes. Expected '$task8Live', got '$task8PublishedExport'."
+    }
+    finally {
+        $script:ActiveSessionFile = $task8SavedActive
+        $script:ActiveSessionId = $task8SavedId
+        $script:ActiveModelId = $task8SavedModel
+        $env:SHELLOSSUS_SESSION_FILE = $task8SavedEnvFile2
+        Remove-Item Function:\Write-Host -ErrorAction SilentlyContinue
+    }
+
+    # Task 8: /save with a new name publishes that file, and saving it again keeps publishing it.
+    $task8Before = Join-Path $task8Dir 'before-save.jsonl'
+    $task8Named = Join-Path $task8Dir 'after-save.jsonl'
+    $task8SavedActive2 = $script:ActiveSessionFile
+    $task8SavedId2 = $script:ActiveSessionId
+    $task8SavedModel2 = $script:ActiveModelId
+    $task8SavedEnvFile3 = $env:SHELLOSSUS_SESSION_FILE
+    $script:ActiveSessionFile = $task8Before
+    $script:ActiveSessionId = 'sess-task8-before'
+    $script:ActiveModelId = 'task8-before-model'
+    $env:SHELLOSSUS_SESSION_FILE = 'stale-task8-session-file'
+    $task8SaveState = @{
+        session_id = 'sess-task8-save'
+        workspace = $workspacePath
+        model = 'task8-save-model'
+        messages = @(
+            @{ role = 'system'; content = 'sys' },
+            @{ role = 'user'; content = 'Save me' }
+        )
+    }
+    function Write-Host {
+        param([Parameter(Position = 0, ValueFromRemainingArguments = $true)]$Object, [switch]$NoNewline, $Separator, $ForegroundColor, $BackgroundColor)
+    }
+    try {
+        $task8Save = Invoke-ReplSaveCommand -State $task8SaveState -SessionDir $task8Dir -SessionFile $task8Before -RootPath $workspacePath -Model 'task8-save-model' -SaveArg 'after-save'
+        Assert-True ([string]$task8Save.session_file -eq $task8Named) "/save did not switch to the named session file. Expected '$task8Named', got '$($task8Save.session_file)'."
+        Assert-True (Test-Path -LiteralPath $task8Named) '/save did not write the named session file.'
+        $task8SaveChild = Invoke-ShellCommand -Root $workspacePath -Command 'Write-Output $env:SHELLOSSUS_SESSION_FILE'
+        $task8PublishedSave = ([string]$task8SaveChild.output).Trim()
+        Assert-True ($task8PublishedSave -eq $task8Named) "/save did not publish the new session file. Expected '$task8Named', got '$task8PublishedSave'."
+        Save-AgentSession -SessionFile $task8Named -State $task8SaveState -Workspace $workspacePath -Model 'task8-save-model'
+        $task8TurnChild = Invoke-ShellCommand -Root $workspacePath -Command 'Write-Output $env:SHELLOSSUS_SESSION_FILE'
+        $task8PublishedTurn = ([string]$task8TurnChild.output).Trim()
+        Assert-True ($task8PublishedTurn -eq $task8Named) "Ordinary save of the current session file did not keep publishing it. Expected '$task8Named', got '$task8PublishedTurn'."
+    }
+    finally {
+        $script:ActiveSessionFile = $task8SavedActive2
+        $script:ActiveSessionId = $task8SavedId2
+        $script:ActiveModelId = $task8SavedModel2
+        $env:SHELLOSSUS_SESSION_FILE = $task8SavedEnvFile3
+        Remove-Item Function:\Write-Host -ErrorAction SilentlyContinue
+    }
 }
 finally {
     Remove-TestEnvironment -Env $envData

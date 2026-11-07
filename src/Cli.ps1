@@ -235,6 +235,7 @@ if (-not $LibraryOnly) {
             if ($PSBoundParameters.Keys -notcontains 'Model' -and $state.model) { $Model = $state.model }
         }
     }
+    $script:ActiveSessionFile = $sessionFile
     if ($Export) {
         $null = Export-AgentSessionOutput -State $state -ExportPath $Export -RootPath $rootPath -Model $Model
         return

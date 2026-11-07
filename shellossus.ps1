@@ -10354,7 +10354,13 @@ function Export-AgentSessionOutput {
         [string]$Indent = ''
     )
     if ($ExportPath -match '\.jsonl$') {
-        Save-AgentSession -SessionFile $ExportPath -State $State -Workspace $RootPath -Model $Model
+        $keepSessionFile = $script:ActiveSessionFile
+        try {
+            Save-AgentSession -SessionFile $ExportPath -State $State -Workspace $RootPath -Model $Model
+        }
+        finally {
+            $script:ActiveSessionFile = $keepSessionFile
+        }
         Write-Host ($script:Gm.Green + "${Indent}Exported session JSONL: $ExportPath" + $script:Gm.Reset)
         return $ExportPath
     }
@@ -11015,6 +11021,7 @@ if (-not $LibraryOnly) {
             if ($PSBoundParameters.Keys -notcontains 'Model' -and $state.model) { $Model = $state.model }
         }
     }
+    $script:ActiveSessionFile = $sessionFile
     if ($Export) {
         $null = Export-AgentSessionOutput -State $state -ExportPath $Export -RootPath $rootPath -Model $Model
         return
