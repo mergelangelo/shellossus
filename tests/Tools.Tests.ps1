@@ -956,6 +956,7 @@ try {
             Set-Content -LiteralPath $OutFile -Value $pageHtml -Encoding UTF8 -NoNewline
         }
     }
+    $script:WebDownloadUseHostCommand = $true
     try {
         $fetchRes = Invoke-AgentTool -Root $workspacePath -Call @{ id = 'w-fetch'; function = @{ name = 'fetch_url'; arguments = '{"url":"https://example.com/docs"}' } } | ConvertFrom-Json
         Assert-True ($fetchRes.url -eq 'https://example.com/docs' -and $fetchRes.content.Contains('PowerShell 5.1 guide text.')) 'fetch_url failed to return cleaned page content.'
@@ -997,6 +998,7 @@ try {
         Assert-True ($utf8SearchRes.count -eq 1 -and $utf8SearchRes.results[0].url -eq ('https://ru.wikipedia.org/wiki/' + $expectedCyrillicWord)) 'web_search corrupted multi-byte UTF-8 URL in DuckDuckGo redirect.'
     }
     finally {
+        Remove-Variable -Name WebDownloadUseHostCommand -Scope Script -ErrorAction SilentlyContinue
         Remove-Item Function:\Invoke-WebRequest -ErrorAction SilentlyContinue
     }
 
@@ -1588,6 +1590,7 @@ try {
         Set-Content -LiteralPath $OutFile -Value 'ok' -Encoding UTF8 -NoNewline
     }
     $dlTmp = New-AgentTempFile
+    $script:WebDownloadUseHostCommand = $true
     try {
         $env:SHELLOSSUS_API_KEY = 'sec-s'
         $env:OPENAI_API_KEY = 'sec-o'
@@ -1598,6 +1601,7 @@ try {
     finally {
         $env:SHELLOSSUS_API_KEY = $savedEnvS
         $env:OPENAI_API_KEY = $savedEnvO
+        Remove-Variable -Name WebDownloadUseHostCommand -Scope Script -ErrorAction SilentlyContinue
         Remove-Item Function:\Invoke-WebRequest -ErrorAction SilentlyContinue
         Remove-Item -LiteralPath $dlTmp.FullName -Force -ErrorAction SilentlyContinue
     }
@@ -2252,10 +2256,9 @@ description: Optional subagent role: recon (ReadOnly search), audit (ReadOnly re
     }
 
     # Task 2: the download worker blocks resolved local addresses before Invoke-WebRequest.
-    # Do not define function Invoke-WebRequest here; that branch skips the worker.
     Remove-Item Function:\Invoke-WebRequest -ErrorAction SilentlyContinue
     $downloadCmd = Get-Command -Name 'Invoke-WebRequest' -ErrorAction SilentlyContinue
-    Assert-True ($downloadCmd -and $downloadCmd.CommandType -ne 'Function') 'Invoke-WebRequest was a function, so the download worker did not run.'
+    Assert-True ($downloadCmd -and $downloadCmd.CommandType -ne 'Function') 'Invoke-WebRequest must be the cmdlet for this worker case.'
     foreach ($blockedUri in @(
         'http://10.0.0.1/',
         'http://127.0.0.1/',
@@ -2284,6 +2287,57 @@ description: Optional subagent role: recon (ReadOnly search), audit (ReadOnly re
         Assert-True ((-not $blockedExists) -or $blockedEmpty) "Invoke-AgentWebDownload wrote a response body for $blockedUri."
         if ($blockedExists) { Remove-Item -LiteralPath $blockedOut -Force -ErrorAction SilentlyContinue }
     }
+
+    # Task 3: a function named Invoke-WebRequest must not skip the download worker.
+    Remove-Variable -Name WebDownloadUseHostCommand -Scope Script -ErrorAction SilentlyContinue
+    $script:hostDownloadRan = $false
+    function Invoke-WebRequest {
+        param($Uri, $Method, $Headers, $ContentType, $Body, $TimeoutSec, $ErrorAction, [switch]$UseBasicParsing, $OutFile)
+        $script:hostDownloadRan = $true
+        if ($OutFile) {
+            Set-Content -LiteralPath $OutFile -Value 'fake-download-body' -Encoding ASCII -NoNewline
+        }
+    }
+    $seamOut = Join-Path $testRoot 'blocked-web-function-seam.tmp'
+    if (Test-Path -LiteralPath $seamOut) { Remove-Item -LiteralPath $seamOut -Force }
+    $seamThrew = $false
+    $seamMsg = ''
+    try {
+        Invoke-AgentWebDownload -Uri 'http://10.0.0.1/' -OutFile $seamOut
+    }
+    catch {
+        $seamThrew = $true
+        $seamMsg = [string]$_
+    }
+    finally {
+        Remove-Item Function:\Invoke-WebRequest -ErrorAction SilentlyContinue
+        if (Test-Path -LiteralPath $seamOut) { Remove-Item -LiteralPath $seamOut -Force -ErrorAction SilentlyContinue }
+    }
+    Assert-True (-not $script:hostDownloadRan) 'Fake Invoke-WebRequest ran in-process and wrote the download body.'
+    Assert-True $seamThrew 'Invoke-AgentWebDownload did not throw for http://10.0.0.1/ when Invoke-WebRequest was a function.'
+    Assert-True ($seamMsg -like '*Blocked request*') "Invoke-AgentWebDownload for http://10.0.0.1/ did not report Blocked request: $seamMsg"
+
+    # Task 3: the test-only host command still refuses redirects when the parameter exists.
+    $script:seenMaxRedir = $null
+    function Invoke-WebRequest {
+        param($Uri, $Method, $Headers, $ContentType, $Body, $TimeoutSec, $ErrorAction, [switch]$UseBasicParsing, $OutFile, $MaximumRedirection)
+        $script:seenMaxRedir = $MaximumRedirection
+        if ($OutFile) {
+            Set-Content -LiteralPath $OutFile -Value 'ok' -Encoding ASCII -NoNewline
+        }
+    }
+    $maxRedirOut = Join-Path $testRoot 'host-maxredir.tmp'
+    if (Test-Path -LiteralPath $maxRedirOut) { Remove-Item -LiteralPath $maxRedirOut -Force }
+    $script:WebDownloadUseHostCommand = $true
+    try {
+        Invoke-AgentWebDownload -Uri 'https://example.com/docs' -OutFile $maxRedirOut
+    }
+    finally {
+        Remove-Variable -Name WebDownloadUseHostCommand -Scope Script -ErrorAction SilentlyContinue
+        Remove-Item Function:\Invoke-WebRequest -ErrorAction SilentlyContinue
+        if (Test-Path -LiteralPath $maxRedirOut) { Remove-Item -LiteralPath $maxRedirOut -Force -ErrorAction SilentlyContinue }
+    }
+    Assert-True ($script:seenMaxRedir -eq 0) "Host download did not pass MaximumRedirection 0 (got '$script:seenMaxRedir')."
 }
 finally {
     Remove-TestEnvironment -Env $envData

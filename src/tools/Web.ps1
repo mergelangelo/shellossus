@@ -286,11 +286,11 @@ function Invoke-AgentWebDownload {
         OutFile = $OutFile
         ErrorAction = 'Stop'
     }
-    $webCommand = Get-Command -Name 'Invoke-WebRequest' -ErrorAction SilentlyContinue
-    if ($webCommand -and $webCommand.CommandType -ne 'Function') {
-        $request['MaximumRedirection'] = 0
-    }
-    if ($webCommand -and $webCommand.CommandType -eq 'Function') {
+    if ($script:WebDownloadUseHostCommand -eq $true) {
+        $webCommand = Get-Command -Name 'Invoke-WebRequest' -ErrorAction SilentlyContinue
+        if ($webCommand -and $webCommand.Parameters -and $webCommand.Parameters.MaximumRedirection) {
+            $request['MaximumRedirection'] = 0
+        }
         Invoke-WithProcessEnvironment -Values @{
             SHELLOSSUS_API_KEY = $null
             OPENAI_API_KEY = $null
