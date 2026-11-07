@@ -579,6 +579,12 @@ try {
     $lineTrunc = Invoke-TruncateLine -Line ('x' * 600) -MaxChars 500
     Assert-True ($lineTrunc.was_truncated -and $lineTrunc.text.EndsWith('... [truncated]')) 'Invoke-TruncateLine failed.'
 
+    # ConvertTo-NormalizedObjectArray wraps one hashtable when the detector matches and leaves an int untouched.
+    $wrappedOne = ConvertTo-NormalizedObjectArray -Value @{ name = 'solo' } -ItemNormalizer { param($Item) $Item } -SingleItemDetector { param($Item) $true }
+    Assert-True (($wrappedOne -is [array]) -and ($wrappedOne.Count -eq 1) -and ($wrappedOne[0] -is [hashtable]) -and ($wrappedOne[0].name -eq 'solo')) 'ConvertTo-NormalizedObjectArray did not wrap a hashtable when the detector matched.'
+    $untouchedInt = ConvertTo-NormalizedObjectArray -Value ([int]7) -ItemNormalizer { param($Item) $Item } -SingleItemDetector { param($Item) $true }
+    Assert-True (($untouchedInt -is [int]) -and ($untouchedInt -eq 7)) 'ConvertTo-NormalizedObjectArray did not leave an int untouched.'
+
     $normArgs = Format-EditArguments -ArgsObj ([pscustomobject]@{ path = 'hello.txt'; oldText = 'a'; newText = 'b'; edits = '[{"oldText":"x","newText":"y"}]' })
     Assert-True ($normArgs.old_text -eq 'a' -and $normArgs.new_text -eq 'b' -and $normArgs.edits[0].old_text -eq 'x' -and $normArgs.edits[0].new_text -eq 'y') 'Format-EditArguments camelCase / JSON edits normalization failed.'
     $norm = Format-EditArguments -Arguments ([pscustomobject]@{

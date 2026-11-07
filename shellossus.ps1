@@ -2893,6 +2893,54 @@ function Get-ObjectPropertyNames {
     return @(Get-Member -InputObject $InputObject -MemberType NoteProperty | ForEach-Object { $_.Name })
 }
 
+function Test-IsJsonObject {
+    param($Value)
+    # $true only when not null, not string, not ValueType, not array
+    return (($null -ne $Value) -and ($Value -isnot [string]) -and ($Value -isnot [ValueType]) -and ($Value -isnot [array]))
+}
+
+function ConvertTo-NormalizedObjectArray {
+    param($Value, [scriptblock]$ItemNormalizer, [scriptblock]$SingleItemDetector)
+    # String: ConvertFrom-Json, wrap a single object.
+    # One object: wrap when SingleItemDetector says so.
+    # Array: normalize each object through ItemNormalizer.
+    # Failures to parse a string leave the original value in place.
+    if ($Value -is [string]) {
+        try {
+            $parsed = $Value | ConvertFrom-Json -ErrorAction Stop
+            if ($parsed -is [array]) {
+                $Value = $parsed
+            }
+            elseif ($null -ne $parsed) {
+                $Value = @($parsed)
+            }
+        }
+        catch {
+            return $Value
+        }
+    }
+    elseif ((Test-IsJsonObject -Value $Value) -and ($null -ne $SingleItemDetector)) {
+        $isSingle = & $SingleItemDetector $Value
+        if ($isSingle) {
+            $Value = @($Value)
+        }
+    }
+
+    if ($Value -is [array]) {
+        $normArr = @()
+        foreach ($item in $Value) {
+            if ((Test-IsJsonObject -Value $item) -and ($null -ne $ItemNormalizer)) {
+                $normArr += (& $ItemNormalizer $item)
+            }
+            else {
+                $normArr += $item
+            }
+        }
+        return ,$normArr
+    }
+    return $Value
+}
+
 function Format-EditArguments {
     param($Arguments, $ArgsObj = $null)
     if ($null -eq $Arguments -and $null -ne $ArgsObj) { $Arguments = $ArgsObj }
@@ -2911,42 +2959,23 @@ function Format-EditArguments {
         else { $out[$p] = $Arguments.$p }
     }
     if ($out.ContainsKey('edits') -and $null -ne $out['edits']) {
-        $rawEdits = $out['edits']
-        if ($rawEdits -is [string]) {
-            try {
-                $parsed = $rawEdits | ConvertFrom-Json -ErrorAction Stop
-                if ($parsed -is [array]) { $rawEdits = $parsed }
-                elseif ($null -ne $parsed) { $rawEdits = @($parsed) }
-            }
-            catch {}
-        }
-        elseif ($rawEdits -isnot [array] -and $rawEdits -isnot [ValueType]) {
-            $edItemProps = @(Get-ObjectPropertyNames -InputObject $rawEdits)
-            if (($edItemProps -contains 'old_text' -or $edItemProps -contains 'oldText') -and ($edItemProps -contains 'new_text' -or $edItemProps -contains 'newText')) {
-                $rawEdits = @($rawEdits)
-            }
-        }
-        if ($rawEdits -is [array]) {
-            $normArr = @()
-            foreach ($item in $rawEdits) {
-                if ($null -ne $item -and $item -isnot [string] -and $item -isnot [ValueType] -and $item -isnot [array]) {
-                    $ip = @(Get-ObjectPropertyNames -InputObject $item)
-                    $normItem = @{}
-                    foreach ($k in $ip) {
-                        if ($k -eq 'oldText' -and ($ip -notcontains 'old_text')) { $normItem['old_text'] = $item.$k }
-                        elseif ($k -eq 'newText' -and ($ip -notcontains 'new_text')) { $normItem['new_text'] = $item.$k }
-                        elseif ($k -eq 'oldText' -or $k -eq 'newText') {
-                            # Canonical name is already present. Drop the alias so validation does not see it.
-                        }
-                        else { $normItem[$k] = $item.$k }
-                    }
-                    $normArr += $normItem
+        $out['edits'] = ConvertTo-NormalizedObjectArray -Value $out['edits'] -ItemNormalizer {
+            param($Item)
+            $ip = @(Get-ObjectPropertyNames -InputObject $Item)
+            $normItem = @{}
+            foreach ($k in $ip) {
+                if ($k -eq 'oldText' -and ($ip -notcontains 'old_text')) { $normItem['old_text'] = $Item.$k }
+                elseif ($k -eq 'newText' -and ($ip -notcontains 'new_text')) { $normItem['new_text'] = $Item.$k }
+                elseif ($k -eq 'oldText' -or $k -eq 'newText') {
+                    # Canonical name is already present. Drop the alias so validation does not see it.
                 }
-                else {
-                    $normArr += $item
-                }
+                else { $normItem[$k] = $Item.$k }
             }
-            $out['edits'] = $normArr
+            return $normItem
+        } -SingleItemDetector {
+            param($Item)
+            $names = @(Get-ObjectPropertyNames -InputObject $Item)
+            return (($names -contains 'old_text' -or $names -contains 'oldText') -and ($names -contains 'new_text' -or $names -contains 'newText'))
         }
     }
     return $out
@@ -2970,39 +2999,20 @@ function Format-RunAgentArguments {
     }
     foreach ($arrField in @('parallel', 'pipeline')) {
         if ($out.ContainsKey($arrField) -and $null -ne $out[$arrField]) {
-            $rawArr = $out[$arrField]
-            if ($rawArr -is [string]) {
-                try {
-                    $parsed = $rawArr | ConvertFrom-Json -ErrorAction Stop
-                    if ($parsed -is [array]) { $rawArr = $parsed }
-                    elseif ($null -ne $parsed) { $rawArr = @($parsed) }
+            $out[$arrField] = ConvertTo-NormalizedObjectArray -Value $out[$arrField] -ItemNormalizer {
+                param($Item)
+                $ip = @(Get-ObjectPropertyNames -InputObject $Item)
+                $normItem = @{}
+                foreach ($k in $ip) {
+                    if ($k -eq 'task' -and ($ip -notcontains 'prompt')) { $normItem['prompt'] = $Item.$k }
+                    elseif ($k -eq 'agent' -and ($ip -notcontains 'role')) { $normItem['role'] = $Item.$k }
+                    else { $normItem[$k] = $Item.$k }
                 }
-                catch {}
-            }
-            elseif ($rawArr -isnot [array] -and $rawArr -isnot [ValueType]) {
-                $itemProps = @(Get-ObjectPropertyNames -InputObject $rawArr)
-                if ($itemProps -contains 'prompt' -or $itemProps -contains 'task') {
-                    $rawArr = @($rawArr)
-                }
-            }
-            if ($rawArr -is [array]) {
-                $normArr = @()
-                foreach ($item in $rawArr) {
-                    if ($null -ne $item -and $item -isnot [string] -and $item -isnot [ValueType] -and $item -isnot [array]) {
-                        $ip = @(Get-ObjectPropertyNames -InputObject $item)
-                        $normItem = @{}
-                        foreach ($k in $ip) {
-                            if ($k -eq 'task' -and ($ip -notcontains 'prompt')) { $normItem['prompt'] = $item.$k }
-                            elseif ($k -eq 'agent' -and ($ip -notcontains 'role')) { $normItem['role'] = $item.$k }
-                            else { $normItem[$k] = $item.$k }
-                        }
-                        $normArr += $normItem
-                    }
-                    else {
-                        $normArr += $item
-                    }
-                }
-                $out[$arrField] = $normArr
+                return $normItem
+            } -SingleItemDetector {
+                param($Item)
+                $names = @(Get-ObjectPropertyNames -InputObject $Item)
+                return ($names -contains 'prompt' -or $names -contains 'task')
             }
         }
     }
@@ -3026,47 +3036,30 @@ function Format-TodoArguments {
         }
     }
     if ($out.ContainsKey('todos') -and $null -ne $out['todos']) {
-        $rawTodos = $out['todos']
-        if ($rawTodos -is [string]) {
-            try {
-                $parsed = $rawTodos | ConvertFrom-Json -ErrorAction Stop
-                if ($parsed -is [array]) { $rawTodos = $parsed }
-                elseif ($null -ne $parsed) { $rawTodos = @($parsed) }
-            }
-            catch {}
-        }
-        elseif ($rawTodos -isnot [array] -and $rawTodos -isnot [ValueType]) {
-            $rawTodos = @($rawTodos)
-        }
-        if ($rawTodos -is [array]) {
-            $normArr = @()
-            foreach ($item in $rawTodos) {
-                if ($null -ne $item -and $item -isnot [string] -and $item -isnot [ValueType] -and $item -isnot [array]) {
-                    $ip = @(Get-ObjectPropertyNames -InputObject $item)
-                    $normItem = @{}
-                    foreach ($k in $ip) {
-                        if (($k -eq 'task' -or $k -eq 'title' -or $k -eq 'text' -or $k -eq 'description') -and ($ip -notcontains 'content')) {
-                            $normItem['content'] = $item.$k
-                        }
-                        elseif (($k -eq 'state' -or $k -eq 'done') -and ($ip -notcontains 'status')) {
-                            if ($k -eq 'done' -and $item.$k -is [bool]) {
-                                $normItem['status'] = if ($item.$k) { 'completed' } else { 'pending' }
-                            }
-                            else {
-                                $normItem['status'] = $item.$k
-                            }
-                        }
-                        else {
-                            $normItem[$k] = $item.$k
-                        }
+        $out['todos'] = ConvertTo-NormalizedObjectArray -Value $out['todos'] -ItemNormalizer {
+            param($Item)
+            $ip = @(Get-ObjectPropertyNames -InputObject $Item)
+            $normItem = @{}
+            foreach ($k in $ip) {
+                if (($k -eq 'task' -or $k -eq 'title' -or $k -eq 'text' -or $k -eq 'description') -and ($ip -notcontains 'content')) {
+                    $normItem['content'] = $Item.$k
+                }
+                elseif (($k -eq 'state' -or $k -eq 'done') -and ($ip -notcontains 'status')) {
+                    if ($k -eq 'done' -and $Item.$k -is [bool]) {
+                        $normItem['status'] = if ($Item.$k) { 'completed' } else { 'pending' }
                     }
-                    $normArr += $normItem
+                    else {
+                        $normItem['status'] = $Item.$k
+                    }
                 }
                 else {
-                    $normArr += $item
+                    $normItem[$k] = $Item.$k
                 }
             }
-            $out['todos'] = $normArr
+            return $normItem
+        } -SingleItemDetector {
+            param($Item)
+            return $true
         }
     }
     return $out
