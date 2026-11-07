@@ -630,6 +630,141 @@ try {
         if ($hadDemoSkillKey) { $script:RegisteredSkills['skills/demo/SKILL.md'] = $priorDemoSkill }
         else { [void]$script:RegisteredSkills.Remove('skills/demo/SKILL.md') }
     }
+
+    # Bounded reader: the same full path is kept once, a 9000-character soul truncates, and a reparse candidate is skipped.
+    $boundedDupDir = Join-Path $testRoot 'bounded-dup'
+    New-Item -ItemType Directory -Path $boundedDupDir -Force | Out-Null
+    $boundedDupSoul = Join-Path $boundedDupDir 'SOUL.md'
+    Set-AgentUtf8Content -LiteralPath $boundedDupSoul -Value 'dup-soul-body'
+    $boundedDupDirect = Get-BoundedTextFiles -Paths @($boundedDupSoul, $boundedDupSoul) -Tag 'soul'
+    $boundedDupDirectCount = @($boundedDupDirect -split '<soul ', 0, 'SimpleMatch').Count - 1
+    Assert-True (($boundedDupDirectCount -eq 1) -and $boundedDupDirect.Contains('dup-soul-body')) "A repeated soul path yielded $boundedDupDirectCount blocks."
+    $boundedDupCaller = Get-SoulContext -Root $boundedDupDir -ConfigDir $boundedDupDir
+    $boundedDupCallerCount = @($boundedDupCaller -split '<soul ', 0, 'SimpleMatch').Count - 1
+    Assert-True ($boundedDupCallerCount -eq 1) "Get-SoulContext repeated the soul file shared by root and config dir ($boundedDupCallerCount blocks)."
+
+    $boundedTruncDir = Join-Path $testRoot 'bounded-trunc'
+    New-Item -ItemType Directory -Path $boundedTruncDir -Force | Out-Null
+    Set-AgentUtf8Content -LiteralPath (Join-Path $boundedTruncDir 'SOUL.md') -Value ('Z' * 9000)
+    $boundedTruncSoul = Get-SoulContext -Root $boundedTruncDir -ConfigDir ''
+    Assert-True ($boundedTruncSoul.Contains(('Z' * 8000) + "`n...(truncated)") -and $boundedTruncSoul.Contains('</soul>')) 'A 9000-character soul was not truncated with ...(truncated).'
+    Assert-True (-not $boundedTruncSoul.Contains('Z' * 8001)) 'Soul truncation kept more than 8000 characters.'
+
+    if ($env:OS -eq 'Windows_NT') {
+        $junctionReal = Join-Path $testRoot 'bounded-junction-real'
+        $junctionLink = Join-Path $testRoot 'bounded-junction-link'
+        New-Item -ItemType Directory -Path $junctionReal -Force | Out-Null
+        Set-AgentUtf8Content -LiteralPath (Join-Path $junctionReal 'SOUL.md') -Value 'junction-only-soul'
+        $junctionCreated = $false
+        try {
+            New-Item -ItemType Junction -Path $junctionLink -Target $junctionReal -ErrorAction Stop | Out-Null
+            $junctionItem = Get-Item -LiteralPath $junctionLink -Force -ErrorAction Stop
+            if (($junctionItem.LinkType -eq 'Junction') -or (($junctionItem.Attributes -band 1024) -ne 0)) {
+                $junctionCreated = $true
+            }
+        }
+        catch {
+            $junctionCreated = $false
+        }
+        if (-not $junctionCreated) {
+            throw 'Junction creation failed on Windows. This assertion must not be skipped in the Windows CI job.'
+        }
+        try {
+            $junctionSoul = Get-SoulContext -Root $junctionLink -ConfigDir ''
+            Assert-True ((-not $junctionSoul) -or (-not $junctionSoul.Contains('junction-only-soul'))) 'A soul behind a junction was loaded.'
+            $junctionRealSoul = Get-SoulContext -Root $junctionReal -ConfigDir ''
+            Assert-True ($junctionRealSoul.Contains('junction-only-soul')) 'SOUL.md without a reparse ancestor was skipped.'
+            $junctionBoth = Get-BoundedTextFiles -Paths @((Join-Path $junctionReal 'SOUL.md'), (Join-Path $junctionLink 'SOUL.md')) -Tag 'soul'
+            $junctionCount = @($junctionBoth -split '<soul ', 0, 'SimpleMatch').Count - 1
+            Assert-True ($junctionCount -eq 1) "Junction candidate was repeated ($junctionCount soul blocks)."
+        }
+        finally {
+            if (Test-Path -LiteralPath $junctionLink) {
+                (Get-Item -LiteralPath $junctionLink -Force).Delete()
+            }
+        }
+    }
+    else {
+        $symlinkTarget = Join-Path $testRoot 'bounded-symlink-target.md'
+        $symlinkRoot = Join-Path $testRoot 'bounded-symlink-root'
+        New-Item -ItemType Directory -Path $symlinkRoot -Force | Out-Null
+        Set-AgentUtf8Content -LiteralPath $symlinkTarget -Value 'reparse-only-soul'
+        $symlinkPath = Join-Path $symlinkRoot 'SOUL.md'
+        try {
+            New-Item -ItemType SymbolicLink -Path $symlinkPath -Target $symlinkTarget -ErrorAction Stop | Out-Null
+        }
+        catch {
+            throw 'File symlink creation failed. A file symlink is the reparse candidate on this OS.'
+        }
+        $symlinkItem = Get-Item -LiteralPath $symlinkPath -Force -ErrorAction Stop
+        if (($symlinkItem.Attributes -band 1024) -eq 0) {
+            throw 'File symlink was not a reparse point.'
+        }
+        try {
+            $symlinkSoul = Get-SoulContext -Root $symlinkRoot -ConfigDir ''
+            Assert-True ((-not $symlinkSoul) -or (-not $symlinkSoul.Contains('reparse-only-soul'))) 'A symlinked soul candidate was loaded.'
+            $symlinkBoth = Get-BoundedTextFiles -Paths @($symlinkTarget, $symlinkPath) -Tag 'soul'
+            $symlinkCount = @($symlinkBoth -split '<soul ', 0, 'SimpleMatch').Count - 1
+            Assert-True (($symlinkCount -eq 1) -and $symlinkBoth.Contains('reparse-only-soul')) "Symlink candidate was not skipped ($symlinkCount soul blocks)."
+            Assert-True ((Get-Content -LiteralPath $symlinkTarget -Raw -Encoding UTF8) -ceq 'reparse-only-soul') 'Reading the symlink candidate changed its target.'
+        }
+        finally {
+            if (Test-Path -LiteralPath $symlinkPath) {
+                (Get-Item -LiteralPath $symlinkPath -Force).Delete()
+            }
+        }
+    }
+
+    # Files under the user config directory stay eligible. They are not sent through the workspace boundary.
+    $globalWs = Join-Path $testRoot 'bounded-global-ws'
+    $globalCfg = Join-Path (Join-Path $testRoot 'bounded-global-home') '.shellossus'
+    New-Item -ItemType Directory -Path $globalWs, $globalCfg -Force | Out-Null
+    Set-AgentUtf8Content -LiteralPath (Join-Path $globalCfg 'SOUL.md') -Value 'global-soul-eligible'
+    Set-AgentUtf8Content -LiteralPath (Join-Path $globalCfg 'MEMORY.md') -Value 'global-memory-eligible'
+    Set-AgentUtf8Content -LiteralPath (Join-Path $globalCfg 'AGENTS.md') -Value 'global-agents-eligible'
+    Set-AgentUtf8Content -LiteralPath (Join-Path $globalCfg 'SYSTEM.md') -Value 'global-system-eligible'
+    Set-AgentUtf8Content -LiteralPath (Join-Path $globalCfg 'APPEND_SYSTEM.md') -Value 'global-append-eligible'
+    $globalSoulPath = Join-Path $globalCfg 'SOUL.md'
+    Assert-True (-not (Test-AgentPathWithinRoot -RootPath $globalWs -TargetPath $globalSoulPath)) 'Config-dir soul fixture was inside the workspace.'
+    $globalPrompt = Build-SystemPrompt -Root $globalWs -ConfigDir $globalCfg
+    Assert-True ($globalPrompt.Contains('global-system-eligible') -and $globalPrompt.Contains('global-append-eligible') -and $globalPrompt.Contains('global-soul-eligible') -and $globalPrompt.Contains('<soul source=') -and $globalPrompt.Contains('global-memory-eligible') -and $globalPrompt.Contains('global-agents-eligible') -and $globalPrompt.Contains('Project instructions from ')) 'A user config directory outside the workspace was dropped.'
+
+    $longSysRoot = Join-Path $testRoot 'bounded-long-sys'
+    New-Item -ItemType Directory -Path (Join-Path $longSysRoot '.shellossus'), (Join-Path $longSysRoot '.h-agent') -Force | Out-Null
+    Set-AgentUtf8Content -LiteralPath (Join-Path $longSysRoot '.shellossus/SYSTEM.md') -Value ('Q' * 9000)
+    Set-AgentUtf8Content -LiteralPath (Join-Path $longSysRoot '.h-agent/SYSTEM.md') -Value 'SECOND-SYSTEM-BODY'
+    $longSysPrompt = Build-SystemPrompt -Root $longSysRoot -ConfigDir ''
+    Assert-True ($longSysPrompt.StartsWith('Q' * 9000) -and (-not $longSysPrompt.Contains('...(truncated)')) -and (-not $longSysPrompt.Contains('SECOND-SYSTEM-BODY')) -and (-not $longSysPrompt.Contains('Project instructions from ')) -and (-not $longSysPrompt.Contains('You are Shellossus'))) 'SYSTEM.md changed shape, truncated at 8000 chars, or lost first-file precedence.'
+
+    $longAppendRoot = Join-Path $testRoot 'bounded-long-append'
+    New-Item -ItemType Directory -Path (Join-Path $longAppendRoot '.shellossus'), (Join-Path $longAppendRoot '.h-agent') -Force | Out-Null
+    Set-AgentUtf8Content -LiteralPath (Join-Path $longAppendRoot '.shellossus/APPEND_SYSTEM.md') -Value ('A' * 9000)
+    Set-AgentUtf8Content -LiteralPath (Join-Path $longAppendRoot '.h-agent/APPEND_SYSTEM.md') -Value 'APPEND-SECOND-BODY'
+    $longAppendPrompt = Build-SystemPrompt -Root $longAppendRoot -ConfigDir ''
+    $longAppendAt = $longAppendPrompt.IndexOf('A' * 9000)
+    $longAppendSecond = $longAppendPrompt.IndexOf('APPEND-SECOND-BODY')
+    Assert-True ($longAppendPrompt.Contains('You are Shellossus') -and ($longAppendAt -ge 0) -and ($longAppendSecond -gt $longAppendAt) -and (-not $longAppendPrompt.Contains('...(truncated)')) -and (-not $longAppendPrompt.Contains('Project instructions from '))) 'APPEND_SYSTEM.md changed shape or truncated at 8000 chars.'
+
+    $agentsShape = Get-AgentsContext -Root $workspacePath -ConfigDir ''
+    Assert-True ($agentsShape.Contains('Project instructions from ') -and $agentsShape.Contains('Always use snake_case.')) 'AGENTS.md prose shape changed.'
+
+    $script:bannerLines = @()
+    function Write-Host {
+        param([Parameter(Position = 0, ValueFromRemainingArguments = $true)]$Object, [switch]$NoNewline, $ForegroundColor, $BackgroundColor)
+        $text = ($Object | ForEach-Object { [string]$_ }) -join ' '
+        $script:bannerLines += $text
+    }
+    try {
+        Write-TuiStartupBanner -RootPath $workspacePath -ConfigDir $globalCfgDir -Model 'banner-model'
+    }
+    finally {
+        Remove-Item Function:\Write-Host -ErrorAction SilentlyContinue
+    }
+    $bannerText = Strip-AnsiCodes -Text ($script:bannerLines -join "`n")
+    $bannerSoulAt = $bannerText.IndexOf('SOUL.md')
+    $bannerMemoryAt = $bannerText.IndexOf('MEMORY.md')
+    $bannerAgentsAt = $bannerText.IndexOf('AGENTS.md')
+    Assert-True (($bannerSoulAt -ge 0) -and ($bannerMemoryAt -gt $bannerSoulAt) -and ($bannerAgentsAt -gt $bannerMemoryAt)) 'Startup banner no longer names SOUL.md, MEMORY.md, and AGENTS.md.'
 }
 finally {
     Remove-TestEnvironment -Env $envData
