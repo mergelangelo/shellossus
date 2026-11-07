@@ -18,7 +18,7 @@ function Invoke-AgentMemory {
         Split-Path $script:AgentConfigPath -Parent
     }
     else {
-        Join-Path (if ($env:USERPROFILE) { $env:USERPROFILE } else { $HOME }) '.shellossus'
+        Join-Path (Get-AgentUserRoot) '.shellossus'
     }
 
     $parentDir = $null

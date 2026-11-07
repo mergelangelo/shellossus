@@ -236,7 +236,7 @@ function Invoke-ReplMemoryCommand {
         Split-Path $script:AgentConfigPath -Parent
     }
     else {
-        Join-Path (if ($env:USERPROFILE) { $env:USERPROFILE } else { $HOME }) '.shellossus'
+        Join-Path (Get-AgentUserRoot) '.shellossus'
     }
     $raw = if ($MemArg) { $MemArg.Trim() } else { '' }
     if ($raw -match '^(?i)all(?:\s+view)?$') {
