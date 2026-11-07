@@ -185,6 +185,9 @@ function Invoke-SessionResume {
         }
     }
     $State.tree_entries = @()
+    $State.usage_input_tokens = 0
+    $State.usage_output_tokens = 0
+    $State.scoped_instr_cache = @{}
     $loadedMessages = @(Read-AgentSession -SessionFile $SessionFile -State $State)
     $State.messages = $loadedMessages
     Ensure-SessionTree -State $State
@@ -197,10 +200,14 @@ function Invoke-SessionResume {
     if ($meta -and $meta.model) {
         $State.model = [string]$meta.model
     }
+    if ($State.session_id) { $script:ActiveSessionId = [string]$State.session_id }
+    if ($State.model) { $script:ActiveModelId = [string]$State.model }
     $State.undo_stack = @()
     $State.last_failed_question = ''
     $State.last_prompt_tokens = 0
     $State.last_prompt_chars = 0
+    $State.step_limit_reached = $false
+    $State.loop_detected = $false
     Sync-AgentCapabilities -State $State | Out-Null
     return $State
 }
@@ -251,7 +258,7 @@ function Copy-SessionHashtableArray {
 }
 
 function Invoke-SessionFork {
-    param($State, [string]$SessionDir, [string]$Workspace = '', [string]$Model = '', [string]$FromId = '', [string]$EntryId = '', [string]$NewName = '')
+    param($State, [string]$SessionDir, [string]$Workspace = '', [string]$Model = '', [string]$FromId = '', [string]$EntryId = '', [string]$NewName = '', [switch]$NoSession)
     Ensure-SessionTree -State $State
     $effWs = if ($Workspace) { $Workspace } elseif ($State.workspace) { [string]$State.workspace } else { '' }
     $effMdl = if ($Model) { $Model } elseif ($State.model) { [string]$State.model } else { '' }
@@ -289,6 +296,11 @@ function Invoke-SessionFork {
         todos = $forkTodos
         undo_stack = @()
         last_failed_question = ''
+        usage_input_tokens = 0
+        usage_output_tokens = 0
+        last_prompt_tokens = 0
+        last_prompt_chars = 0
+        scoped_instr_cache = @{}
     }
     if ($effId) {
         Switch-SessionBranch -State $forkState -TargetId $effId | Out-Null
@@ -296,8 +308,13 @@ function Invoke-SessionFork {
     elseif (-not (Test-ValidConversationBoundary -Messages $forkState.messages)) {
         throw 'Cannot fork session: incomplete tool_calls sequence (missing tool result).'
     }
-    $forkFile = Join-Path $SessionDir ($forkState.session_id + '.jsonl')
-    Save-AgentSession -SessionFile $forkFile -State $forkState -Workspace $effWs -Model $effMdl -SessionId $forkState.session_id
+    $forkFile = if ($NoSession) { '' } else { Join-Path $SessionDir ($forkState.session_id + '.jsonl') }
+    $script:ActiveSessionId = $forkState.session_id
+    $script:ActiveSessionFile = $forkFile
+    $script:ActiveModelId = $effMdl
+    if (-not $NoSession) {
+        Save-AgentSession -SessionFile $forkFile -State $forkState -Workspace $effWs -Model $effMdl -SessionId $forkState.session_id
+    }
     return @{ state = $forkState; session_file = $forkFile; session_id = $forkState.session_id }
 }
 

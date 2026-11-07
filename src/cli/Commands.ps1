@@ -33,6 +33,14 @@ function Invoke-ReplNewSessionCommand {
     $State.tree_entries = @()
     $State.leaf_id = $null
     $State.todos = @()
+    $State.usage_input_tokens = 0
+    $State.usage_output_tokens = 0
+    $State.last_prompt_tokens = 0
+    $State.last_prompt_chars = 0
+    $State.scoped_instr_cache = @{}
+    $State.step_limit_reached = $false
+    $State.loop_detected = $false
+    $State.last_failed_question = ''
     $script:ActiveSessionTodos = @()
     Sync-AgentCapabilities -State $State | Out-Null
     Clear-AgentUndoBackups -UndoEntries $UndoStack
@@ -102,7 +110,7 @@ function Invoke-ReplForkCommand {
     param($State, [string]$SessionDir, [string]$SessionFile = '', [switch]$NoSession, [AllowEmptyCollection()][array]$UndoStack = @(), [string]$ForkEntryId = '')
     $entryId = if ($ForkEntryId) { $ForkEntryId.Trim() } else { '' }
     try {
-        $forkRes = Invoke-SessionFork -State $State -SessionDir $SessionDir -EntryId $entryId
+        $forkRes = Invoke-SessionFork -State $State -SessionDir $SessionDir -EntryId $entryId -NoSession:$NoSession
         $State = $forkRes.state
         $SessionFile = if ($NoSession) { '' } else { $forkRes.session_file }
         Clear-AgentUndoBackups -UndoEntries $UndoStack

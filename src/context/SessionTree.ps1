@@ -112,7 +112,7 @@ function Build-BranchContextMessages {
             $compIdx = $i
         }
     }
-    if ($compIdx -lt 0) {
+    if ($path.Count -gt 0 -and $path[$path.Count - 1].entry_type -ne 'compaction') {
         foreach ($te in @($State.tree_entries)) {
             if ($te -and $te.entry_type -eq 'compaction' -and [string]$te.parent_id -eq $LeafId) {
                 $path += $te

@@ -122,6 +122,7 @@ if ($env:SHELLOSSUS_SUB_REASONING_EFFORT) { $workerArgs.ReasoningEffort = $env:S
                     SHELLOSSUS_SUB_NO_TEMPLATES = $(if ($script:NoPromptTemplates) { '1' } else { '0' })
                     SHELLOSSUS_SUB_NO_CONTEXT = $(if ($script:NoContextFiles) { '1' } else { '0' })
                     SHELLOSSUS_SUB_REASONING_EFFORT = $(if ($script:ReasoningEffort) { [string]$script:ReasoningEffort } else { '' })
+                    SHELLOSSUS_SUB_AUTO_WEB = $(if ($script:AutoApproveWeb) { '1' } else { '0' })
                     SHELLOSSUS_SUB_ROLE = [string]$roleObj.name
                     SHELLOSSUS_SUB_ROLE_PROMPT = [string]$roleObj.system_prompt
                 } -Action {
@@ -227,10 +228,6 @@ if ($env:SHELLOSSUS_SUB_REASONING_EFFORT) { $workerArgs.ReasoningEffort = $env:S
                         catch {}
                     }
                 }
-                if (-not $sawToolExecEnd) {
-                    foreach ($ur in $untrackedReads) { $wReadSet[$ur] = $true }
-                    foreach ($pr in $pendingReadsById.Values) { $wReadSet[$pr] = $true }
-                }
                 if (Test-Path -LiteralPath $w.err_file) {
                     $errRaw = Get-Content -LiteralPath $w.err_file -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
                     if ($errRaw -and $errRaw.Trim() -and (-not $sawTurnEnd -or -not $replyText)) {
@@ -246,6 +243,10 @@ if ($env:SHELLOSSUS_SUB_REASONING_EFFORT) { $workerArgs.ReasoningEffort = $env:S
                 }
                 elseif (-not $sawTurnEnd -and $wStatus -eq 'completed' -and $w.proc -and $w.proc.HasExited -and $w.proc.ExitCode -ne 0) {
                     $wStatus = 'error'
+                }
+                if (-not $sawToolExecEnd -and $sawTurnEnd -and (-not $w.timed_out) -and $wStatus -eq 'completed') {
+                    foreach ($ur in $untrackedReads) { $wReadSet[$ur] = $true }
+                    foreach ($pr in $pendingReadsById.Values) { $wReadSet[$pr] = $true }
                 }
                 $wUsageIn = if ($turnUsageIn -ge 0) { $turnUsageIn } else { $msgUsageIn }
                 $wUsageOut = if ($turnUsageOut -ge 0) { $turnUsageOut } else { $msgUsageOut }

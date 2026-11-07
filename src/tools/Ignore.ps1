@@ -21,6 +21,7 @@ function Convert-IgnorePatternToRule {
     $anchored = $pat.StartsWith('/')
     if ($anchored) { $pat = $pat.TrimStart('/') }
     if ($pat.Contains('/')) { $anchored = $true }
+    $pat = $pat.Replace('\\', '__ESC_BSLASH__').Replace('\[', '__ESC_LBRACK__').Replace('\]', '__ESC_RBRACK__').Replace('\*', '__ESC_STAR__').Replace('\?', '__ESC_QMARK__')
     $charClasses = @()
     if ($pat.Contains('[')) {
         $sb = ''
@@ -89,6 +90,8 @@ function Convert-IgnorePatternToRule {
     for ($ccIdx = 0; $ccIdx -lt $charClasses.Count; $ccIdx++) {
         $rx = $rx.Replace("__CC_${ccIdx}__", [string]$charClasses[$ccIdx])
     }
+    $rx = $rx.Replace('__ESC_BSLASH__', '\\').Replace('__ESC_LBRACK__', '\[')
+    $rx = $rx.Replace('__ESC_RBRACK__', '\]').Replace('__ESC_STAR__', '\*').Replace('__ESC_QMARK__', '\?')
     $prefRx = if ($DirPrefix) { ($DirPrefix -replace '([.+^$()\[\]{}|\\*?\-])', '\$1') } else { '' }
     $tailRx = if ($dirOnly) { '/.*$' } else { '(?:/.*)?$' }
     $finalRx = if ($anchored) {

@@ -1518,6 +1518,30 @@ try {
         $script:OutputMode = 'text'
         Remove-Item Function:\Write-Host -ErrorAction SilentlyContinue
     }
+
+    # Regression (Task 10): Invoke-ReplContextCommand and Select-ReplModelId pass -AllowFreeText to Invoke-TuiSelector.
+    $savedCfg10 = $script:AgentConfigPath
+    function Read-Host { return '96k 64k' }
+    function Write-Host {
+        param([Parameter(Position = 0, ValueFromRemainingArguments = $true)]$Object, [switch]$NoNewline, $ForegroundColor, $BackgroundColor)
+    }
+    try {
+        $script:AgentConfigPath = ''
+        $ctxDummyState = @{ messages = @() }
+        Invoke-ReplContextCommand -State $ctxDummyState -CtxArg ''
+        $stAfter10 = Get-ContextStats -State $ctxDummyState
+        Assert-True ($stAfter10.context_window_tokens -eq 96000 -and $stAfter10.compact_threshold_tokens -eq 64000) 'Invoke-ReplContextCommand should accept direct free-text input in selector.'
+
+        function Read-Host { return 'custom-direct-model-v2' }
+        $pickedModel10 = Select-ReplModelId -CurrentModel 'old-model' -SessionDir (Join-Path $testRoot 'no-such-sess-dir') -NewModel ''
+        Assert-True ($pickedModel10 -ceq 'custom-direct-model-v2') "Select-ReplModelId should accept direct free-text model ID in selector, got '$pickedModel10'."
+    }
+    finally {
+        $script:AgentConfigPath = $savedCfg10
+        Remove-Item Function:\Read-Host -ErrorAction SilentlyContinue
+        Remove-Item Function:\Write-Host -ErrorAction SilentlyContinue
+        $null = Set-AgentContextLimits -WindowSpec '128k' -CompactSpec '75%'
+    }
 }
 finally {
     Remove-TestEnvironment -Env $envData

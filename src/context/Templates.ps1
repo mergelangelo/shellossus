@@ -136,8 +136,11 @@ function Resolve-PromptTemplate {
         if (-not $d -or -not (Test-Path -LiteralPath $d)) { continue }
         $cand = Join-Path $d ($name + '.md')
         if (Test-Path -LiteralPath $cand) {
-            $tpl = Get-Content -LiteralPath $cand -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
-            if ($tpl) {
+            $candItem = Get-Item -LiteralPath $cand -Force -ErrorAction SilentlyContinue
+            if (-not $candItem -or $candItem.PSIsContainer -or $candItem.Length -gt 128KB) { continue }
+            if (Test-PathHasReparsePoint -Path $candItem.FullName -StopAt $d) { continue }
+            $tpl = Get-Content -LiteralPath $candItem.FullName -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
+            if ($tpl -and ($tpl -notmatch '\x00')) {
                 $body = $tpl -replace '(?s)^---\r?\n.*?\r?\n---\r?\n?', ''
                 return (Expand-TemplateArgs -Content $body -ArgsString $argsText)
             }
@@ -164,9 +167,9 @@ function Expand-UserPrompt {
                 $lines = @(Get-Content -LiteralPath $resolved -Encoding UTF8 -TotalCount 301 -ErrorAction Stop)
                 $truncatedByLines = ($lines.Count -gt 300)
                 $content = ($lines | Select-Object -First 300) -join "`n"
+                if ($content -match '\x00') { throw 'Binary content is not supported.' }
                 $truncatedByChars = ($content.Length -gt 20000)
                 if ($truncatedByChars) { $content = $content.Substring(0, 20000) }
-                if ($content -match '\x00') { throw 'Binary content is not supported.' }
                 if ($truncatedByLines -or $truncatedByChars) {
                     $content = $content + "`n[... truncated at 300 lines / 20000 chars; use read_file with start_line to read more ...]"
                 }

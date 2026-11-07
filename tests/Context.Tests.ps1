@@ -798,6 +798,127 @@ try {
     Assert-True ($cutRes.cut_index -eq 2) "Expected cut_index=2 (assistant with tool_calls), got $($cutRes.cut_index)."
     $cutResStart2 = Find-CompactionCutPoint -Messages $toolTailMsgs -StartIndex 2 -KeepRecent 2
     Assert-True ($toolTailMsgs[$cutResStart2.cut_index].role -ne 'tool' -and $cutResStart2.cut_index -eq 2) "Expected cut_index=2 when StartIndex=2, got $($cutResStart2.cut_index)."
+
+    # Regression (Task 13): Invoke-ReplNewSessionCommand, Invoke-SessionResume, and Invoke-SessionFork reset counters/caches and respect -NoSession.
+    function Write-Host {
+        param([Parameter(Position = 0, ValueFromRemainingArguments = $true)]$Object, [switch]$NoNewline, $ForegroundColor, $BackgroundColor)
+    }
+    try {
+        $dirtyState13 = @{
+            session_id = 'sess-dirty'
+            workspace = $workspacePath
+            model = 'old-model'
+            messages = @(
+                @{ role = 'system'; content = 'sys' },
+                @{ role = 'user'; content = 'hello' },
+                @{ role = 'assistant'; content = 'world' }
+            )
+            usage_input_tokens = 500
+            usage_output_tokens = 250
+            last_prompt_tokens = 400
+            last_prompt_chars = 1600
+            scoped_instr_cache = @{ 'sub/AGENTS.md' = $true }
+            step_limit_reached = $true
+            loop_detected = $true
+            last_failed_question = 'failed-q'
+        }
+        $forkDir13 = Join-Path $testRoot 'fork-nosess-13'
+        New-Item -ItemType Directory -Path $forkDir13 -Force | Out-Null
+        $forkNoSessRes = Invoke-SessionFork -State $dirtyState13 -SessionDir $forkDir13 -NoSession
+        Assert-True ($forkNoSessRes.session_file -eq '' -and @(Get-ChildItem -LiteralPath $forkDir13).Count -eq 0) 'Invoke-SessionFork -NoSession must not write a session file.'
+        Assert-True ($forkNoSessRes.state.usage_input_tokens -eq 0 -and $forkNoSessRes.state.usage_output_tokens -eq 0 -and $forkNoSessRes.state.last_prompt_tokens -eq 0 -and $forkNoSessRes.state.scoped_instr_cache.Count -eq 0) 'Invoke-SessionFork did not initialize token counters and scoped_instr_cache.'
+
+        $savedSess13 = Join-Path $forkDir13 'saved-13.jsonl'
+        Save-AgentSession -SessionFile $savedSess13 -State $dirtyState13 -Workspace $workspacePath -Model 'resumed-model-13' -SessionId 'sess-saved-13'
+        $dirtyState13.usage_input_tokens = 999
+        $dirtyState13.usage_output_tokens = 888
+        $dirtyState13.scoped_instr_cache = @{ 'stale' = $true }
+        Invoke-SessionResume -SessionFile $savedSess13 -State $dirtyState13 -CurrentWorkspace $workspacePath | Out-Null
+        Assert-True ($dirtyState13.usage_input_tokens -eq 0 -and $dirtyState13.usage_output_tokens -eq 0 -and $dirtyState13.scoped_instr_cache.Count -eq 0) 'Invoke-SessionResume did not reset usage_input_tokens, usage_output_tokens, and scoped_instr_cache.'
+        Assert-True ($script:ActiveSessionId -eq 'sess-saved-13' -and $script:ActiveModelId -eq 'resumed-model-13') 'Invoke-SessionResume did not sync ActiveSessionId and ActiveModelId.'
+
+        $dirtyState13.usage_input_tokens = 777
+        $dirtyState13.usage_output_tokens = 666
+        $dirtyState13.last_prompt_tokens = 555
+        $dirtyState13.last_prompt_chars = 2220
+        $dirtyState13.scoped_instr_cache = @{ 'stale2' = $true }
+        $dirtyState13.step_limit_reached = $true
+        $dirtyState13.loop_detected = $true
+        $dirtyState13.last_failed_question = 'failed-q2'
+        $null = Invoke-ReplNewSessionCommand -State $dirtyState13 -RootPath $workspacePath -ConfigDir '' -Model 'new-model-13' -SessionDir $forkDir13 -NoSession
+        Assert-True ($dirtyState13.usage_input_tokens -eq 0 -and $dirtyState13.usage_output_tokens -eq 0 -and $dirtyState13.last_prompt_tokens -eq 0 -and $dirtyState13.last_prompt_chars -eq 0 -and $dirtyState13.scoped_instr_cache.Count -eq 0 -and (-not $dirtyState13.step_limit_reached) -and (-not $dirtyState13.loop_detected) -and $dirtyState13.last_failed_question -eq '') 'Invoke-ReplNewSessionCommand did not reset all per-session counters/flags/caches.'
+    }
+    finally {
+        Remove-Item Function:\Write-Host -ErrorAction SilentlyContinue
+    }
+
+    # Regression (Task 16): Resolve-PromptTemplate rejects binary/oversized templates, and Expand-UserPrompt checks NUL byte before 20000-char truncation.
+    $tplDir16 = Join-Path $workspacePath '.shellossus/prompts'
+    New-Item -ItemType Directory -Path $tplDir16 -Force | Out-Null
+    $binTplFile = Join-Path $tplDir16 'bintpl.md'
+    Set-Content -LiteralPath $binTplFile -Value ("Hello " + [char]0 + " world") -Encoding Ascii -NoNewline
+    Assert-True ($null -eq (Resolve-PromptTemplate -Root $workspacePath -ConfigDir '' -InputText '/bintpl')) 'Resolve-PromptTemplate should reject template containing NUL byte.'
+    Remove-Item -LiteralPath $binTplFile -Force -ErrorAction SilentlyContinue
+
+    $lateNullFile = Join-Path $workspacePath 'late-null.bin'
+    $lateNullText = ('A' * 20050) + [char]0 + 'tail'
+    Set-Content -LiteralPath $lateNullFile -Value $lateNullText -Encoding Ascii -NoNewline
+    $expandedLateNull = Expand-UserPrompt -Root $workspacePath -Prompt 'check @late-null.bin'
+    Assert-True ($expandedLateNull -notlike '*<file path="late-null.bin">*') 'Expand-UserPrompt should reject @file with NUL byte after 20000 chars.'
+    Remove-Item -LiteralPath $lateNullFile -Force -ErrorAction SilentlyContinue
+
+    # Regression (Task 17): Build-BranchContextMessages attaches child compaction entry of LeafId even when an older compaction exists earlier on the branch.
+    $twoCompState = @{
+        messages = @(@{ role = 'system'; content = 'sys' })
+        tree_entries = @(
+            @{ id = 'e1'; parent_id = $null; entry_type = 'message'; role = 'user'; content = 'u1' },
+            @{ id = 'e2'; parent_id = 'e1'; entry_type = 'message'; role = 'assistant'; content = 'a1' },
+            @{ id = 'c1'; parent_id = 'e2'; entry_type = 'compaction'; role = 'user'; content = '[Compacted Conversation Summary] First summary'; first_kept_entry_id = 'e2' },
+            @{ id = 'e3'; parent_id = 'c1'; entry_type = 'message'; role = 'user'; content = 'u2' },
+            @{ id = 'e4'; parent_id = 'e3'; entry_type = 'message'; role = 'assistant'; content = 'a2' },
+            @{ id = 'c2'; parent_id = 'e4'; entry_type = 'compaction'; role = 'user'; content = '[Compacted Conversation Summary] Second summary'; first_kept_entry_id = 'e4' }
+        )
+        leaf_id = 'c2'
+    }
+    $rebuiltTwoComp = @(Build-BranchContextMessages -State $twoCompState -LeafId 'e4')
+    Assert-True ($rebuiltTwoComp[1].content -like '*Second summary*') 'Build-BranchContextMessages should attach child compaction c2 of LeafId e4 even when older compaction c1 is on the path.'
+
+    # Regression (Task 18): Get-SkillsCatalog and Get-AgentRolesCatalog only parse metadata from YAML frontmatter, ignoring body lines.
+    $fmRoot18 = Join-Path $testRoot 'fm-catalog-18'
+    $fmSkillDir18 = Join-Path $fmRoot18 '.shellossus/skills/real-skill'
+    $fmRoleDir18 = Join-Path $fmRoot18 '.shellossus/agents'
+    New-Item -ItemType Directory -Path $fmSkillDir18, $fmRoleDir18 -Force | Out-Null
+    $skillMd18 = @"
+---
+name: frontmatter-skill
+description: Real skill description
+---
+Body instructions:
+name: body-spoofed-skill
+description: Body spoofed description
+disable-model-invocation: true
+"@
+    Set-AgentUtf8Content -LiteralPath (Join-Path $fmSkillDir18 'SKILL.md') -Value $skillMd18
+    $roleMd18 = @"
+---
+name: frontmatter-role
+description: Real role description
+---
+Body instructions:
+name: body-spoofed-role
+permission: ReadOnly
+tools: list_files
+"@
+    Set-AgentUtf8Content -LiteralPath (Join-Path $fmRoleDir18 'custom.md') -Value $roleMd18
+    $skillsCat18 = Get-SkillsCatalog -Root $fmRoot18 -ConfigDir ''
+    Assert-True ($script:SkillsByName.ContainsKey('frontmatter-skill') -and (-not $script:SkillsByName.ContainsKey('body-spoofed-skill'))) 'Get-SkillsCatalog matched name: in Markdown body instead of frontmatter.'
+    Assert-True ($script:SkillsByName['frontmatter-skill'].description -ceq 'Real skill description' -and (-not $script:SkillsByName['frontmatter-skill'].disable_model_invocation)) 'Get-SkillsCatalog matched description or disable-model-invocation in Markdown body.'
+    Assert-True ($skillsCat18.Contains('frontmatter-skill')) 'Skill with body disable-model-invocation: true should remain in catalog.'
+
+    $rolesCat18 = Get-AgentRolesCatalog -Root $fmRoot18 -ConfigDir ''
+    Assert-True ($script:AgentRolesByName.ContainsKey('frontmatter-role') -and (-not $script:AgentRolesByName.ContainsKey('body-spoofed-role'))) 'Get-AgentRolesCatalog matched name: in Markdown body instead of frontmatter.'
+    Assert-True ($script:AgentRolesByName['frontmatter-role'].permission -ceq 'inherit' -and @($script:AgentRolesByName['frontmatter-role'].tools).Count -eq 0) 'Get-AgentRolesCatalog matched permission: or tools: in Markdown body.'
+    Assert-True ($rolesCat18.Contains('frontmatter-role')) 'Get-AgentRolesCatalog output did not contain frontmatter-role.'
 }
 finally {
     Remove-TestEnvironment -Env $envData

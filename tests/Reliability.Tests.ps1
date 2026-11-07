@@ -203,6 +203,7 @@ $payload = @{
     $script:NoPromptTemplates = $true
     $script:NoContextFiles = $true
     $script:ReasoningEffort = 'high'
+    $script:AutoApproveWeb = $true
     $parentStateForParallel = @{ usage_input_tokens = 10; usage_output_tokens = 5 }
     $script:ActiveState = $parentStateForParallel
     try {
@@ -215,6 +216,25 @@ $payload = @{
         Assert-True ($reader.no_skills -and $reader.no_templates -and $reader.no_context -and $reader.reasoning_effort -eq 'high') 'Worker did not receive -NoSkills, -NoPromptTemplates, -NoContextFiles, or -ReasoningEffort.'
         Assert-True ($reader.user_prompt -eq 'inspect' -and $reader.sys_has_role) ("Parallel worker mixed [Subagent Role] into user -Prompt instead of system prompt: " + ($reader | ConvertTo-Json -Compress))
         Assert-True ($parentStateForParallel.usage_input_tokens -eq 260 -and $parentStateForParallel.usage_output_tokens -eq 75) "Parallel worker token usage was not aggregated into parent state (got in=$($parentStateForParallel.usage_input_tokens), out=$($parentStateForParallel.usage_output_tokens))."
+
+        # Regression (Task 11): Aborted/crashed parallel worker that emitted message_end with read_file tool_call
+        # but never emitted tool_execution_end or completed turn_end must not report pending read_file as completed.
+        $abortWorkerScript = Join-Path $envData.TestRoot 'abort-worker.ps1'
+        $abortWorkerText = @'
+param($Workspace, $BaseUrl, $Model, $Permission, $Mode, [switch]$NoSession, $MaxSteps, $Tools, [switch]$NoTools, $ExcludeTools, $Prompt, $ConfigPath, [switch]$NoSkills, [switch]$NoPromptTemplates, [switch]$NoContextFiles, $ReasoningEffort)
+@{
+    type = 'message_end'
+    role = 'assistant'
+    content = "auto_web=$($env:SHELLOSSUS_SUB_AUTO_WEB)"
+    tool_calls = @(@{ id = 'tc-unexecuted'; type = 'function'; function = @{ name = 'read_file'; arguments = '{"path":"never-read.txt"}' } })
+} | ConvertTo-Json -Depth 10 -Compress
+exit 1
+'@
+        Set-Content -LiteralPath $abortWorkerScript -Value $abortWorkerText -Encoding Ascii
+        $abortResults = @(Invoke-ParallelSubagentProcesses -Root $workspacePath -Tasks @(@{ role = 'recon'; prompt = 'abort test' }) -ScriptPath $abortWorkerScript)
+        Assert-True ($abortResults.Count -eq 1 -and $abortResults[0].status -eq 'error') 'Expected aborted worker status to be error.'
+        Assert-True ($abortResults[0].output -eq 'auto_web=1') "Expected SHELLOSSUS_SUB_AUTO_WEB=1 in worker, got '$($abortResults[0].output)'."
+        Assert-True (@($abortResults[0].read_files).Count -eq 0) 'Aborted worker before tool_execution_end must not report pending read_file as completed.'
     }
     finally {
         $script:EnabledTools = @()
@@ -223,6 +243,7 @@ $payload = @{
         $script:NoPromptTemplates = $false
         $script:NoContextFiles = $false
         $script:ReasoningEffort = ''
+        $script:AutoApproveWeb = $false
         $script:ActiveState = $null
     }
 

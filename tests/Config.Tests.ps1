@@ -418,6 +418,38 @@ try {
         if ($_.Exception.Message -eq 'Invalid path syntax.') { $colonReadBlocked = $true }
     }
     Assert-True $colonReadBlocked 'Expected a:.env to be rejected with Invalid path syntax. in Resolve-AgentPath.'
+
+    # Regression (Task 14): Test-PathHasReparsePoint stops upward traversal at -StopAt even when $StopAt does not exist on disk yet.
+    $realBase14 = Join-Path $testRoot 'real-base-14'
+    $linkedBase14 = Join-Path $testRoot 'linked-base-14'
+    New-Item -ItemType Directory -Path $realBase14 -Force | Out-Null
+    $createdLink14 = $false
+    try {
+        New-Item -ItemType SymbolicLink -Path $linkedBase14 -Target $realBase14 -ErrorAction Stop | Out-Null
+        $createdLink14 = $true
+    }
+    catch {
+        if ($env:OS -eq 'Windows_NT') {
+            try {
+                New-Item -ItemType Junction -Path $linkedBase14 -Target $realBase14 -ErrorAction Stop | Out-Null
+                $createdLink14 = $true
+            }
+            catch { $createdLink14 = $false }
+        }
+    }
+    if ($createdLink14) {
+        try {
+            $nonExistentStop = Join-Path $linkedBase14 'uncreated-home/.shellossus'
+            $targetInsideStop = Join-Path $nonExistentStop 'MEMORY.md'
+            Assert-True (-not (Test-PathHasReparsePoint -Path $targetInsideStop -StopAt $nonExistentStop)) 'Test-PathHasReparsePoint should stop at non-existent StopAt boundary before reaching ancestor symlink.'
+            Assert-True (Test-PathHasReparsePoint -Path $targetInsideStop) 'Test-PathHasReparsePoint without StopAt should detect ancestor symlink.'
+        }
+        finally {
+            if (Test-Path -LiteralPath $linkedBase14) {
+                (Get-Item -LiteralPath $linkedBase14 -Force).Delete()
+            }
+        }
+    }
 }
 finally {
     Remove-TestEnvironment -Env $envData

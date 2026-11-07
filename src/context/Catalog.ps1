@@ -27,12 +27,13 @@ function Get-SkillsCatalog {
             if (Test-PathHasReparsePoint -Path $skillFile.FullName) { continue }
             $raw = Get-Content -LiteralPath $skillFile.FullName -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
             if (-not $raw) { continue }
+            $frontmatter = if ($raw -match '(?s)^---\r?\n(.*?)\r?\n---(?:\r?\n|$)') { $Matches[1] } else { '' }
             $skillName = $skillFile.Directory.Name
             $skillDesc = 'Domain skill instructions.'
             $disableModelInvocation = $false
-            if ($raw -match '(?m)^name:\s*(.+)$') { $skillName = $Matches[1].Trim().Trim('"', "'") }
-            if ($raw -match '(?m)^description:\s*(.+)$') { $skillDesc = $Matches[1].Trim().Trim('"', "'") }
-            if ($raw -match '(?m)^disable-model-invocation:\s*(true|false)\s*$') {
+            if ($frontmatter -match '(?m)^name:\s*(.+)$') { $skillName = $Matches[1].Trim().Trim('"', "'") }
+            if ($frontmatter -match '(?m)^description:\s*(.+)$') { $skillDesc = $Matches[1].Trim().Trim('"', "'") }
+            if ($frontmatter -match '(?m)^disable-model-invocation:\s*(true|false)\s*$') {
                 $disableModelInvocation = ($Matches[1].Trim().ToLower() -eq 'true')
             }
             if ($script:SkillsByName.ContainsKey($skillName)) { continue }
@@ -167,20 +168,21 @@ function Get-AgentRolesCatalog {
             if (Test-PathHasReparsePoint -Path $roleFile.FullName) { continue }
             $raw = Get-Content -LiteralPath $roleFile.FullName -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
             if (-not $raw) { continue }
+            $frontmatter = if ($raw -match '(?s)^---\r?\n(.*?)\r?\n---(?:\r?\n|$)') { $Matches[1] } else { '' }
             $baseName = ($roleFile.Name -replace '\.md$', '').ToLower()
             $roleName = $baseName
             $roleDesc = 'Custom subagent role.'
             $rolePerm = 'inherit'
             $roleModel = ''
             $roleTools = @()
-            if ($raw -match '(?m)^name:\s*(.+)$') { $roleName = $Matches[1].Trim().Trim('"', "'").ToLower() }
-            if ($raw -match '(?m)^description:\s*(.+)$') { $roleDesc = $Matches[1].Trim().Trim('"', "'") }
-            if ($raw -match '(?m)^permission:\s*(.+)$') {
+            if ($frontmatter -match '(?m)^name:\s*(.+)$') { $roleName = $Matches[1].Trim().Trim('"', "'").ToLower() }
+            if ($frontmatter -match '(?m)^description:\s*(.+)$') { $roleDesc = $Matches[1].Trim().Trim('"', "'") }
+            if ($frontmatter -match '(?m)^permission:\s*(.+)$') {
                 $pVal = $Matches[1].Trim().Trim('"', "'")
                 if ($pVal -ieq 'ReadOnly') { $rolePerm = 'ReadOnly' }
             }
-            if ($raw -match '(?m)^model:\s*(.+)$') { $roleModel = $Matches[1].Trim().Trim('"', "'") }
-            if ($raw -match '(?m)^tools:\s*(.+)$') {
+            if ($frontmatter -match '(?m)^model:\s*(.+)$') { $roleModel = $Matches[1].Trim().Trim('"', "'") }
+            if ($frontmatter -match '(?m)^tools:\s*(.+)$') {
                 $tRaw = $Matches[1].Trim().Trim('"', "'", '[', ']')
                 $roleTools = @($tRaw -split ',' | ForEach-Object { $_.Trim().Trim('"', "'") } | Where-Object { $_ })
                 if ($roleTools.Count -gt 0) {

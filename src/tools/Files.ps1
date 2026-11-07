@@ -30,8 +30,22 @@ function Find-EditMatch {
             return @{ index = $idx; length = $crlfOld.Length; matched_text = $crlfOld }
         }
     }
+    elseif ($OldText.Contains("`r`n")) {
+        $lfOld = $OldText.Replace("`r`n", "`n")
+        $idx = $Content.IndexOf($lfOld, [StringComparison]::Ordinal)
+        if ($idx -ge 0) {
+            if ($Content.IndexOf($lfOld, $idx + $lfOld.Length, [StringComparison]::Ordinal) -ge 0) {
+                throw 'old_text occurs more than once. Provide more context.'
+            }
+            return @{ index = $idx; length = $lfOld.Length; matched_text = $lfOld }
+        }
+    }
     $contentLines = @($Content -split "`n")
-    $oldLines = @($OldText -split "`r?`n")
+    $oldClean = $OldText.Replace("`r`n", "`n").TrimEnd("`r")
+    if ($oldClean.Length -gt 0 -and $oldClean.EndsWith("`n")) {
+        $oldClean = $oldClean.Substring(0, $oldClean.Length - 1)
+    }
+    $oldLines = @($oldClean -split "`n")
     if ($oldLines.Count -gt 0 -and $oldLines.Count -le $contentLines.Count) {
         $lineStarts = @()
         $pos = 0

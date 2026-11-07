@@ -58,8 +58,8 @@ function Test-SafeWebUrl {
             if ($hostName -match '^[0:]+0*1(?:%.*)?$' -or
                 $hostName -match '^[0:]+(?:%.*)?$' -or
                 $hostName -match '^(?:fe[89ab][0-9a-f]:|f[cd][0-9a-f]{2}:|ff[0-9a-f]{2}:|[0:]*:ffff:)' -or
-                $hostName -match '^::(?:ffff:(?:0:+)?)?(?:127\.|10\.|192\.168\.|169\.254\.|172\.(?:1[6-9]|2\d|3[01])\.|0\.)' -or
-                $hostName -match '^(?:0+:){0,6}(?:::(?:ffff:(?:0:+)?)?|ffff:)?(?:7f[0-9a-f]{2}|0?a[0-9a-f]{2}|c0a8|a9fe|ac1[0-9a-f]):[0-9a-f]{1,4}$' -or
+                $hostName -match '^(?:0+:){0,6}(?:::(?:ffff:(?:0:+)?)?|ffff:)?(?:127\.|10\.|192\.168\.|169\.254\.|172\.(?:1[6-9]|2\d|3[01])\.|100\.(?:6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.|(?:22[4-9]|23\d|24\d|25[0-5])\.|0\.)' -or
+                $hostName -match '^(?:0+:){0,6}(?:::(?:ffff:(?:0:+)?)?|ffff:)?(?:7f[0-9a-f]{2}|0?a[0-9a-f]{2}|c0a8|a9fe|ac1[0-9a-f]|64[4-7][0-9a-f]|[ef][0-9a-f]{3}|0{1,2}[0-9a-f]{2}):[0-9a-f]{1,4}$' -or
                 $hostName -match '^64:ff9b:') {
                 throw "Blocked request to local or private IPv6 address: $hostName"
             }
@@ -168,7 +168,7 @@ function ConvertFrom-HtmlToText {
     $s = $s -replace '(?is)<li\b[^>]*>', "`n- "
     $s = $s -replace '(?is)<h([1-6])\b[^>]*>', "`n# "
     $s = $s -replace '(?is)<[^>]+>', ' '
-    $s = $s.Replace('&nbsp;', ' ').Replace('&amp;', '&').Replace('&lt;', '<').Replace('&gt;', '>').Replace('&quot;', '"').Replace('&#39;', "'").Replace('&apos;', "'").Replace('&mdash;', '--').Replace('&ndash;', '-')
+    $s = $s.Replace('&nbsp;', ' ').Replace('&lt;', '<').Replace('&gt;', '>').Replace('&quot;', '"').Replace('&#39;', "'").Replace('&apos;', "'").Replace('&mdash;', '--').Replace('&ndash;', '-').Replace('&amp;', '&')
     $lines = @()
     foreach ($ln in @($s -split '\r?\n')) {
         $cleanLn = ($ln -replace '[ \t]+', ' ').Trim()

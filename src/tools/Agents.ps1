@@ -141,13 +141,25 @@ function Invoke-SubagentInProcess {
         }
     }
     finally {
-        $script:AgentPermission = $savedPerm
+        $permRank = @{ 'ReadOnly' = 0; 'Ask' = 1; 'AutoEdit' = 2; 'Auto' = 3 }
+        if (-not $ForceReadOnly -and $roleObj.permission -ne 'ReadOnly' -and $permRank[$script:AgentPermission] -gt $permRank[$savedPerm]) {
+            # Keep session-wide [a]ll permission upgrade approved by the user during craft subagent
+        }
+        else {
+            $script:AgentPermission = $savedPerm
+        }
         $script:SubagentDepth = $savedDepth
         $script:EnabledTools = $savedTools
         $script:NoTools = $savedNoTools
         $script:ActiveModelId = $savedModel
         $script:ActiveState = $savedState
         $script:ActiveSessionTodos = $savedTodos
+        if ($null -ne $savedState -and $savedState.messages -and $savedState.messages.Count -gt 0) {
+            if ($script:AgentPermission -ne $savedPerm) {
+                Sync-AgentCapabilities -State $savedState -Root $Root | Out-Null
+            }
+            Sync-AgentMemoryContext -State $savedState -Root $Root -ConfigDir $configDir | Out-Null
+        }
     }
 }
 

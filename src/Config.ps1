@@ -309,19 +309,26 @@ function Test-PathHasReparsePoint {
     param([string]$Path, [string]$StopAt = '')
     if (-not $Path) { return $false }
     $stopNorm = ''
-    if ($StopAt -and (Test-Path -LiteralPath $StopAt)) {
-        $stopItem = Get-Item -LiteralPath $StopAt -Force -ErrorAction SilentlyContinue
-        if ($stopItem) { $stopNorm = $stopItem.FullName.TrimEnd('\').TrimEnd('/') }
+    if ($StopAt) {
+        if (Test-Path -LiteralPath $StopAt) {
+            $stopItem = Get-Item -LiteralPath $StopAt -Force -ErrorAction SilentlyContinue
+            if ($stopItem) { $stopNorm = $stopItem.FullName.Replace('\', '/').TrimEnd('/') }
+        }
+        if (-not $stopNorm) {
+            $stopNorm = $StopAt.Replace('\', '/').TrimEnd('/')
+        }
     }
     $curr = $Path
     while ($curr) {
+        $currNorm = $curr.Replace('\', '/').TrimEnd('/')
         if (Test-Path -LiteralPath $curr) {
             $item = Get-Item -LiteralPath $curr -Force -ErrorAction SilentlyContinue
             if ($item) {
                 if (($item.Attributes -band 1024) -ne 0) { return $true }
-                if ($stopNorm -and ($item.FullName.TrimEnd('\').TrimEnd('/') -ieq $stopNorm)) { break }
+                if ($stopNorm -and ($item.FullName.Replace('\', '/').TrimEnd('/') -ieq $stopNorm)) { break }
             }
         }
+        if ($stopNorm -and ($currNorm -ieq $stopNorm)) { break }
         $parent = Split-Path $curr -Parent
         if (-not $parent -or ($parent -ieq $curr)) { break }
         $curr = $parent

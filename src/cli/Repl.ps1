@@ -409,7 +409,7 @@ function Invoke-ReplContextCommand {
             @{ label = '200k / 150k (75%)'; value = '200k 150k'; description = 'Large context window (200k tokens)'; active = ($curSt.context_window_tokens -eq 200000 -and $curSt.compact_threshold_tokens -eq 150000) },
             @{ label = '[Custom limits...]'; value = '__custom__'; description = 'Enter "<window> [compact]" e.g. "128k 85k" or "128k 70%"'; active = $false }
         )
-        $pickedCtx = Invoke-TuiSelector -Title "Context Window & Auto-Compact (current: $curWinFmt / compact at $curCompFmt)" -Items $ctxItems -PromptText 'Select preset or type "<window> [compact]" (Enter cancels)'
+        $pickedCtx = Invoke-TuiSelector -Title "Context Window & Auto-Compact (current: $curWinFmt / compact at $curCompFmt)" -Items $ctxItems -PromptText 'Select preset or type "<window> [compact]" (Enter cancels)' -AllowFreeText
         if ($pickedCtx -eq '__custom__') {
             Write-Host ('  ' + $script:Gm.BoldYellow + 'Enter "<window> [compact]" (e.g. 128k 80k or 128k 70%): ' + $script:Gm.Fg) -NoNewline
             $customCtx = Read-Host
@@ -463,7 +463,7 @@ function Select-ReplModelId {
             $mItems += @{ label = $km; value = $km; description = $(if ($km -eq $CurrentModel) { 'active model' } else { 'recent session model' }); active = ($km -eq $CurrentModel) }
         }
         $mItems += @{ label = '[Custom model ID...]'; value = '__custom__'; description = 'Type any OpenAI-compatible model ID'; active = $false }
-        $pickedM = Invoke-TuiSelector -Title "Select Model (current: $CurrentModel)" -Items $mItems -PromptText 'Select number or type model ID (Enter cancels)'
+        $pickedM = Invoke-TuiSelector -Title "Select Model (current: $CurrentModel)" -Items $mItems -PromptText 'Select number or type model ID (Enter cancels)' -AllowFreeText
         if ($pickedM -eq '__custom__') {
             Write-Host ('  ' + $script:Gm.BoldYellow + 'Enter model ID: ' + $script:Gm.Fg) -NoNewline
             $customM = Read-Host

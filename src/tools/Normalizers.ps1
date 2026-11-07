@@ -66,10 +66,10 @@ function Format-EditArguments {
     foreach ($p in $props) {
         if ($p -eq 'oldText' -and ($props -notcontains 'old_text')) { $out['old_text'] = $Arguments.$p }
         elseif ($p -eq 'newText' -and ($props -notcontains 'new_text')) { $out['new_text'] = $Arguments.$p }
-        elseif ($p -eq 'oldText' -or $p -eq 'newText') {
+        elseif ($p -in @('file_path', 'filepath', 'filePath') -and ($props -notcontains 'path') -and (-not $out.ContainsKey('path'))) { $out['path'] = $Arguments.$p }
+        elseif ($p -in @('oldText', 'newText', 'file_path', 'filepath', 'filePath')) {
             # Canonical name is already present. Drop the alias so validation does not see it.
         }
-        elseif ($p -in @('file_path', 'filepath', 'filePath') -and ($props -notcontains 'path') -and (-not $out.ContainsKey('path'))) { $out['path'] = $Arguments.$p }
         else { $out[$p] = $Arguments.$p }
     }
     if ($out.ContainsKey('edits') -and $null -ne $out['edits']) {
@@ -107,8 +107,11 @@ function Format-RunAgentArguments {
         if ($p -eq 'task' -and ($props -notcontains 'prompt')) { $out['prompt'] = $Arguments.$p }
         elseif ($p -eq 'agent' -and ($props -notcontains 'role')) { $out['role'] = $Arguments.$p }
         elseif ($p -eq 'tasks' -and ($props -notcontains 'parallel')) { $out['parallel'] = $Arguments.$p }
-        elseif (($p -eq 'chain' -or $p -eq 'steps') -and ($props -notcontains 'pipeline')) { $out['pipeline'] = $Arguments.$p }
+        elseif (($p -eq 'chain' -or $p -eq 'steps') -and ($props -notcontains 'pipeline') -and (-not $out.ContainsKey('pipeline'))) { $out['pipeline'] = $Arguments.$p }
         elseif ($p -eq 'maxSteps' -and ($props -notcontains 'max_steps')) { $out['max_steps'] = $Arguments.$p }
+        elseif ($p -in @('task', 'agent', 'tasks', 'chain', 'steps', 'maxSteps')) {
+            # Canonical name is already present. Drop the alias so validation does not see it.
+        }
         else { $out[$p] = $Arguments.$p }
     }
     foreach ($arrField in @('parallel', 'pipeline')) {
@@ -120,6 +123,9 @@ function Format-RunAgentArguments {
                 foreach ($k in $ip) {
                     if ($k -eq 'task' -and ($ip -notcontains 'prompt')) { $normItem['prompt'] = $Item.$k }
                     elseif ($k -eq 'agent' -and ($ip -notcontains 'role')) { $normItem['role'] = $Item.$k }
+                    elseif ($k -in @('task', 'agent')) {
+                        # Canonical name is already present. Drop the alias so validation does not see it.
+                    }
                     else { $normItem[$k] = $Item.$k }
                 }
                 return $normItem
@@ -142,8 +148,11 @@ function Format-TodoArguments {
     $props = @(Get-ObjectPropertyNames -InputObject $Arguments)
     $out = @{}
     foreach ($p in $props) {
-        if (($p -eq 'tasks' -or $p -eq 'items' -or $p -eq 'checklist') -and ($props -notcontains 'todos')) {
+        if (($p -eq 'tasks' -or $p -eq 'items' -or $p -eq 'checklist') -and ($props -notcontains 'todos') -and (-not $out.ContainsKey('todos'))) {
             $out['todos'] = $Arguments.$p
+        }
+        elseif ($p -in @('tasks', 'items', 'checklist')) {
+            # Canonical name is already present. Drop the alias so validation does not see it.
         }
         else {
             $out[$p] = $Arguments.$p
@@ -155,16 +164,19 @@ function Format-TodoArguments {
             $ip = @(Get-ObjectPropertyNames -InputObject $Item)
             $normItem = @{}
             foreach ($k in $ip) {
-                if (($k -eq 'task' -or $k -eq 'title' -or $k -eq 'text' -or $k -eq 'description') -and ($ip -notcontains 'content')) {
+                if (($k -eq 'task' -or $k -eq 'title' -or $k -eq 'text' -or $k -eq 'description') -and ($ip -notcontains 'content') -and (-not $normItem.ContainsKey('content'))) {
                     $normItem['content'] = $Item.$k
                 }
-                elseif (($k -eq 'state' -or $k -eq 'done') -and ($ip -notcontains 'status')) {
+                elseif (($k -eq 'state' -or $k -eq 'done') -and ($ip -notcontains 'status') -and (-not $normItem.ContainsKey('status'))) {
                     if ($k -eq 'done' -and $Item.$k -is [bool]) {
                         $normItem['status'] = if ($Item.$k) { 'completed' } else { 'pending' }
                     }
                     else {
                         $normItem['status'] = $Item.$k
                     }
+                }
+                elseif ($k -in @('task', 'title', 'text', 'description', 'state', 'done')) {
+                    # Canonical name is already present. Drop the alias so validation does not see it.
                 }
                 else {
                     $normItem[$k] = $Item.$k
@@ -421,11 +433,13 @@ function Format-AgentToolArguments {
     }
     if ($Name -in @('list_files', 'read_file', 'find_files', 'grep_files', 'write_file')) {
         $props = @(Get-ObjectPropertyNames -InputObject $Arguments)
-        if ($props -notcontains 'path' -and ($props -contains 'file_path' -or $props -contains 'filepath' -or $props -contains 'filePath')) {
+        if ($props -contains 'file_path' -or $props -contains 'filepath' -or $props -contains 'filePath') {
             $out = @{}
             foreach ($p in $props) {
-                if ($p -in @('file_path', 'filepath', 'filePath') -and (-not $out.ContainsKey('path'))) {
-                    $out['path'] = $Arguments.$p
+                if ($p -in @('file_path', 'filepath', 'filePath')) {
+                    if (($props -notcontains 'path') -and (-not $out.ContainsKey('path'))) {
+                        $out['path'] = $Arguments.$p
+                    }
                 }
                 else {
                     $out[$p] = $Arguments.$p

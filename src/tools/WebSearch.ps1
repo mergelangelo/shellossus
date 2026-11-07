@@ -154,11 +154,15 @@ function Invoke-AgentWebSearch {
                     $titleRaw = $Matches[2]
                 }
                 if (-not $href) { continue }
-                if ($href -match '[?&]uddg=([^&"]+)') {
+                $hrefClean = $href.Replace('&amp;', '&')
+                if ($hrefClean -match '[?&]uddg=([^&"]+)') {
                     $href = ConvertFrom-UrlEncodedString -Text $Matches[1]
                 }
-                elseif ($href.StartsWith('//')) {
-                    $href = 'https:' + $href
+                elseif ($hrefClean.StartsWith('//')) {
+                    $href = 'https:' + $hrefClean
+                }
+                else {
+                    $href = $hrefClean
                 }
                 $title = (ConvertFrom-HtmlToText -Html $titleRaw) -replace '\s+', ' '
                 $snippet = ''

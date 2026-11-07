@@ -144,6 +144,7 @@ if (-not $LibraryOnly) {
     }
     if ($Permission -notin @('ReadOnly', 'Ask', 'AutoEdit', 'Auto')) { throw 'Permission must be one of: ReadOnly, Ask, AutoEdit, Auto.' }
     $script:AgentPermission = $Permission
+    if ($env:SHELLOSSUS_SUB_AUTO_WEB -eq '1') { $script:AutoApproveWeb = $true }
     $script:Diagnostics = [bool]$Diagnostics
     $script:NoTools = [bool]$NoTools
     $script:EnabledTools = @(if ($Tools) { $Tools -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ } })
@@ -217,7 +218,7 @@ if (-not $LibraryOnly) {
         if (-not (Test-Path -LiteralPath $candFork)) { throw "Session file to fork not found: $Fork" }
         $srcState = @{ session_id = ''; workspace = $rootPath; model = $Model; messages = @() }
         Invoke-SessionResume -SessionFile $candFork -State $srcState -CurrentWorkspace $rootPath | Out-Null
-        $forkRes = Invoke-SessionFork -State $srcState -SessionDir $sessionDir -NewName $SessionName
+        $forkRes = Invoke-SessionFork -State $srcState -SessionDir $sessionDir -NewName $SessionName -NoSession:$NoSession
         $state = $forkRes.state
         $sessionFile = if ($NoSession) { '' } else { $forkRes.session_file }
         if ($PSBoundParameters.Keys -notcontains 'Model' -and $state.model) { $Model = $state.model }
@@ -277,7 +278,7 @@ if (-not $LibraryOnly) {
             if ($trimmedQ -eq '/clear' -or $trimmedQ -eq '/new') {
                 $newRes = Invoke-ReplNewSessionCommand -State $state -RootPath $rootPath -ConfigDir $configDir -Model $Model -SessionDir $sessionDir -NoSession:$NoSession -UndoStack $undoStack
                 $fullSystemPrompt = $newRes.full_system_prompt; $system = $newRes.system
-                $sessionFile = $newRes.session_file; $undoStack = @($newRes.undo_stack)
+                $sessionFile = $newRes.session_file; $undoStack = @($newRes.undo_stack); $lastFailedQuestion = ''
                 continue
             }
             if ($trimmedQ -match '^/(?:todo|todos)(?:\s+(.+))?$') { Invoke-ReplTodoCommand -State $state -TodoArg $Matches[1]; continue }

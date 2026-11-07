@@ -1606,6 +1606,7 @@ try {
     $script:clampedSpinOut = @()
     $script:spinFakeProc = @{ Id = 0; HasExited = $false; ExitCode = 0 }
     $script:spinPolls = 0
+    $savedGetTerminalWidth = ${function:Get-TerminalWidth}
     function Get-TerminalWidth { return 40 }
     function Write-Host {
         param([Parameter(Position = 0, ValueFromRemainingArguments = $true)]$Object, [switch]$NoNewline, $ForegroundColor, $BackgroundColor)
@@ -1624,7 +1625,7 @@ try {
         Assert-True ($visFrame.Length -le 39) "Wait-AgentProcessWithSpinner did not clamp spinner line to (Get-TerminalWidth) - 1 (got length $($visFrame.Length): $visFrame)."
     }
     finally {
-        Remove-Item Function:\Get-TerminalWidth -ErrorAction SilentlyContinue
+        ${function:Get-TerminalWidth} = $savedGetTerminalWidth
         Remove-Item Function:\Write-Host -ErrorAction SilentlyContinue
         Remove-Item Function:\Start-Sleep -ErrorAction SilentlyContinue
     }
@@ -2053,6 +2054,170 @@ description: Optional subagent role: recon (ReadOnly search), audit (ReadOnly re
     Assert-True (@($singleGrepIgnored.matches).Count -eq 0) 'Single-file grep_files should return 0 matches when target file is ignored by .gitignore.'
     Remove-Item -LiteralPath (Join-Path $workspacePath 'sub') -Recurse -Force
     Remove-Item -LiteralPath (Join-Path $workspacePath 'single-grep.txt') -Force
+
+    # Regression (Task 6): Convert-IgnorePatternToRule handles escaped wildcard/bracket/backslash sequences (\\, \[, \], \*, \?).
+    $escRuleBrack = Convert-IgnorePatternToRule -Line '\[draft\].txt'
+    Assert-True (Test-PathIgnored -RelativePath '[draft].txt' -IsDir $false -Rules @($escRuleBrack)) 'Escaped \[draft\].txt in .gitignore should match literal [draft].txt.'
+    Assert-True (Test-PathIgnored -RelativePath 'docs/[draft].txt' -IsDir $false -Rules @($escRuleBrack)) 'Escaped \[draft\].txt in .gitignore should match nested docs/[draft].txt.'
+    Assert-True (-not (Test-PathIgnored -RelativePath 'd.txt' -IsDir $false -Rules @($escRuleBrack))) 'Escaped \[draft\].txt in .gitignore must not act as character class [draft].'
+    $escRuleStar = Convert-IgnorePatternToRule -Line 'note\*.txt'
+    Assert-True ((Test-PathIgnored -RelativePath 'note*.txt' -IsDir $false -Rules @($escRuleStar)) -and (-not (Test-PathIgnored -RelativePath 'note1.txt' -IsDir $false -Rules @($escRuleStar)))) 'Escaped \* in .gitignore should match only literal *.'
+    $escRuleQmark = Convert-IgnorePatternToRule -Line 'what\?.txt'
+    Assert-True ((Test-PathIgnored -RelativePath 'what?.txt' -IsDir $false -Rules @($escRuleQmark)) -and (-not (Test-PathIgnored -RelativePath 'what1.txt' -IsDir $false -Rules @($escRuleQmark)))) 'Escaped \? in .gitignore should match only literal ?.'
+
+    # Regression (Task 7): Find-EditMatch normalizes CRLF old_text (with or without trailing CRLF) against LF file content.
+    $lfContent = "line1`nline2`nline3`n"
+    $mExactCrlf = Find-EditMatch -Content $lfContent -OldText "line1`r`nline2"
+    Assert-True ($mExactCrlf.index -eq 0 -and $mExactCrlf.matched_text -ceq "line1`nline2") 'Find-EditMatch should match CRLF old_text against LF file content.'
+    $mExactCrlfTrail = Find-EditMatch -Content $lfContent -OldText "line1`r`nline2`r`n"
+    Assert-True ($mExactCrlfTrail.index -eq 0 -and $mExactCrlfTrail.matched_text -ceq "line1`nline2`n") 'Find-EditMatch should match CRLF old_text with trailing CRLF against LF file content.'
+    $mFuzzyCrlfTrail = Find-EditMatch -Content $lfContent -OldText "line1   `r`nline2`r`n"
+    Assert-True ($mFuzzyCrlfTrail.index -eq 0 -and $mFuzzyCrlfTrail.matched_text -ceq "line1`nline2") 'Find-EditMatch fuzzy line matching should strip single trailing newline on CRLF old_text.'
+
+    # Regression (Task 8): ConvertFrom-HtmlToText decodes &amp; last; Invoke-AgentWebSearch decodes &amp; in uddg redirect links.
+    $htmlText = ConvertFrom-HtmlToText -Html '<p>Escaped: &amp;lt;tag&amp;gt; &amp;quot;q&amp;quot;</p>'
+    Assert-True ($htmlText -ceq 'Escaped: &lt;tag&gt; &quot;q&quot;') "Expected '&lt;tag&gt; &quot;q&quot;', got '$htmlText'"
+    $savedPermSearch8 = $script:AgentPermission
+    $savedWebDl8 = ${function:Invoke-AgentWebDownload}
+    try {
+        $script:AgentPermission = 'AutoEdit'
+        function Invoke-AgentWebDownload {
+            param([string]$Uri, [string]$OutFile, [int]$MaxBytes = 2097152)
+            $ddgHtml = '<div class="result"><a class="result__a" href="//duckduckgo.com/l/?kh=-1&amp;uddg=https%3A%2F%2Fexample.com%2Fpath%3Fa%3D1%26b%3D2">Example &amp;lt;Title&amp;gt;</a><a class="result__snippet">Snippet &amp;amp; text</a></div>'
+            Set-Content -LiteralPath $OutFile -Value $ddgHtml -Encoding UTF8 -NoNewline
+        }
+        $wsRes8 = Invoke-AgentWebSearch -Arguments @{ query = 'test query'; limit = 5 } | ConvertFrom-Json
+        Assert-True ($wsRes8.count -eq 1 -and $wsRes8.results[0].url -ceq 'https://example.com/path?a=1&b=2') "Expected decoded uddg URL after &amp;, got '$($wsRes8.results[0].url)'"
+        Assert-True ($wsRes8.results[0].title -ceq 'Example &lt;Title&gt;' -and $wsRes8.results[0].snippet -ceq 'Snippet &amp; text') 'Invoke-AgentWebSearch double-decoded HTML entities in title or snippet.'
+    }
+    finally {
+        $script:AgentPermission = $savedPermSearch8
+        ${function:Invoke-AgentWebDownload} = $savedWebDl8
+    }
+
+    # Regression (Task 9): Normalizers drop redundant alias keys when canonical keys are also present so Test-AgentToolArguments succeeds.
+    foreach ($toolName9 in @('list_files', 'read_file', 'find_files', 'grep_files', 'write_file')) {
+        $baseArgs9 = @{ path = 'a.txt'; file_path = 'b.txt'; filepath = 'c.txt' }
+        if ($toolName9 -eq 'find_files' -or $toolName9 -eq 'grep_files') { $baseArgs9['pattern'] = 'x' }
+        if ($toolName9 -eq 'write_file') { $baseArgs9['content'] = 'hello' }
+        $norm9 = Format-AgentToolArguments -Name $toolName9 -Arguments $baseArgs9
+        Assert-True ($norm9['path'] -eq 'a.txt' -and (-not $norm9.ContainsKey('file_path')) -and (-not $norm9.ContainsKey('filepath'))) "Format-AgentToolArguments did not drop path aliases for $toolName9."
+        Test-AgentToolArguments -Name $toolName9 -Arguments $norm9
+    }
+    $normEdit9 = Format-EditArguments -Arguments @{
+        path = 'a.txt'; file_path = 'a.txt'; filePath = 'a.txt'
+        old_text = 'o'; oldText = 'o'; new_text = 'n'; newText = 'n'
+    }
+    Assert-True ((-not $normEdit9.ContainsKey('file_path')) -and (-not $normEdit9.ContainsKey('oldText')) -and (-not $normEdit9.ContainsKey('newText'))) 'Format-EditArguments did not drop redundant aliases.'
+    Test-AgentToolArguments -Name 'edit_file' -Arguments $normEdit9
+
+    $normBatchEdit9 = Format-EditArguments -Arguments @{
+        path = 'a.txt'; file_path = 'a.txt'
+        edits = @(@{ old_text = 'o1'; oldText = 'o1'; new_text = 'n1'; newText = 'n1' })
+    }
+    Assert-True ((-not $normBatchEdit9.ContainsKey('file_path')) -and (-not $normBatchEdit9.edits[0].ContainsKey('oldText')) -and (-not $normBatchEdit9.edits[0].ContainsKey('newText'))) 'Format-EditArguments did not drop redundant batch aliases.'
+    Test-AgentToolArguments -Name 'edit_file' -Arguments $normBatchEdit9
+
+    $normRunSingle9 = Format-RunAgentArguments -Arguments @{
+        prompt = 'p'; task = 't'; role = 'recon'; agent = 'recon'; max_steps = 5; maxSteps = 5
+    }
+    Assert-True ((-not $normRunSingle9.ContainsKey('task')) -and (-not $normRunSingle9.ContainsKey('agent')) -and (-not $normRunSingle9.ContainsKey('maxSteps'))) 'Format-RunAgentArguments did not drop single-task aliases.'
+    Test-AgentToolArguments -Name 'run_agent' -Arguments $normRunSingle9
+
+    $normRunPar9 = Format-RunAgentArguments -Arguments @{
+        parallel = @(@{ prompt = 'p1'; task = 't1'; role = 'recon'; agent = 'recon' }); tasks = @()
+    }
+    Assert-True ((-not $normRunPar9.ContainsKey('tasks')) -and (-not $normRunPar9.parallel[0].ContainsKey('task')) -and (-not $normRunPar9.parallel[0].ContainsKey('agent'))) 'Format-RunAgentArguments did not drop parallel aliases.'
+    Test-AgentToolArguments -Name 'run_agent' -Arguments $normRunPar9
+
+    $normRunPipe9 = Format-RunAgentArguments -Arguments @{
+        pipeline = @(@{ prompt = 'p2'; task = 't2'; role = 'craft'; agent = 'craft' }); chain = @(); steps = @()
+    }
+    Assert-True ((-not $normRunPipe9.ContainsKey('chain')) -and (-not $normRunPipe9.ContainsKey('steps')) -and (-not $normRunPipe9.pipeline[0].ContainsKey('task')) -and (-not $normRunPipe9.pipeline[0].ContainsKey('agent'))) 'Format-RunAgentArguments did not drop pipeline aliases.'
+    Test-AgentToolArguments -Name 'run_agent' -Arguments $normRunPipe9
+
+    $normTodo9 = Format-TodoArguments -Arguments @{
+        todos = @(@{ content = 'c'; task = 't'; title = 'ti'; text = 'tx'; description = 'd'; status = 'pending'; state = 'pending'; done = $false })
+        tasks = @(); items = @(); checklist = @()
+    }
+    Assert-True ((-not $normTodo9.ContainsKey('tasks')) -and (-not $normTodo9.ContainsKey('items')) -and (-not $normTodo9.ContainsKey('checklist'))) 'Format-TodoArguments did not drop top-level aliases.'
+    Assert-True ((-not $normTodo9.todos[0].ContainsKey('task')) -and (-not $normTodo9.todos[0].ContainsKey('title')) -and (-not $normTodo9.todos[0].ContainsKey('state')) -and (-not $normTodo9.todos[0].ContainsKey('done'))) 'Format-TodoArguments did not drop item-level aliases.'
+    Test-AgentToolArguments -Name 'todo' -Arguments $normTodo9
+
+    # Regression (Task 12): Invoke-SubagentInProcess preserves session-wide [a]ll permission upgrades from craft subagents
+    # and syncs parent <memory> block when subagent updates MEMORY.md.
+    $savedPerm12 = $script:AgentPermission
+    $savedMode12 = $script:OutputMode
+    $savedState12 = $script:ActiveState
+    $savedApproval12 = $script:approval
+    try {
+        $script:AgentPermission = 'Ask'
+        $script:OutputMode = 'text'
+        $script:approval = 'a'
+        $parentSys12 = Build-SystemPrompt -Root $workspacePath -ConfigDir ''
+        $parentState12 = @{
+            session_id = 'parent-12'
+            workspace = $workspacePath
+            model = 'test-model'
+            messages = @(@{ role = 'system'; content = $parentSys12 })
+        }
+        $script:ActiveState = $parentState12
+        $script:sub12Step = 0
+        function Write-Host {
+            param([Parameter(Position = 0, ValueFromRemainingArguments = $true)]$Object, [switch]$NoNewline, $ForegroundColor, $BackgroundColor)
+        }
+        function Invoke-WebRequest {
+            param($Uri, $Method, $Headers, $ContentType, $Body, $TimeoutSec, $ErrorAction, [switch]$UseBasicParsing, $OutFile)
+            $script:sub12Step++
+            if ($script:sub12Step -eq 1) {
+                $r = @{ choices = @(@{ finish_reason = 'tool_calls'; message = @{
+                    content = ''
+                    tool_calls = @(@{ id = 's12-m1'; type = 'function'; function = @{ name = 'memory'; arguments = '{"action":"set","scope":"workspace","content":"Subagent learned invariant 12"}' } })
+                } }) } | ConvertTo-Json -Depth 10 -Compress
+            }
+            else {
+                $r = @{ choices = @(@{ finish_reason = 'stop'; message = @{ content = 'Updated memory and approved all edits.' } }) } | ConvertTo-Json -Depth 10 -Compress
+            }
+            Set-Content -LiteralPath $OutFile -Value $r -Encoding UTF8 -NoNewline
+        }
+        $sub12Res = Invoke-SubagentInProcess -Root $workspacePath -RoleName 'craft' -TaskPrompt 'Record invariant' -ContextMode 'clean' -MaxSteps 4
+        Assert-True ($sub12Res.status -eq 'completed') 'Craft subagent in Task 12 did not complete.'
+        Assert-True ($script:AgentPermission -eq 'AutoEdit') "Expected session-wide [a]ll upgrade to AutoEdit to persist after craft subagent, got '$($script:AgentPermission)'."
+        Assert-True (([string]$parentState12.messages[0].content).Contains('Subagent learned invariant 12')) 'Parent system prompt did not sync <memory> changes made inside subagent.'
+    }
+    finally {
+        Remove-Item Function:\Write-Host -ErrorAction SilentlyContinue
+        Remove-Item Function:\Invoke-WebRequest -ErrorAction SilentlyContinue
+        $memFile12 = Join-Path $workspacePath '.shellossus/MEMORY.md'
+        if (Test-Path -LiteralPath $memFile12) { Remove-Item -LiteralPath $memFile12 -Force -ErrorAction SilentlyContinue }
+        $script:AgentPermission = $savedPerm12
+        $script:OutputMode = $savedMode12
+        $script:ActiveState = $savedState12
+        $script:approval = $savedApproval12
+    }
+
+    # Regression (Task 15): Test-SafeWebUrl blocks uncompressed zero IPv6 prefixes and CGNAT/multicast inside IPv6 without blocking 2001:db8::, 2002::, or 100::.
+    foreach ($badIpv6Url15 in @(
+        'http://[0:0:0:0:0:0:127.0.0.1]/',
+        'http://[0:0:0:0:0:ffff:127.0.0.1]/',
+        'http://[::100.64.0.1]/',
+        'http://[::ffff:100.64.0.1]/',
+        'http://[::224.0.0.1]/',
+        'http://[::ffff:224.0.0.1]/',
+        'http://[::6440:1]/',
+        'http://[::e000:1]/'
+    )) {
+        $blocked15 = $false
+        try { Test-SafeWebUrl -Url $badIpv6Url15 | Out-Null } catch { $blocked15 = $true }
+        Assert-True $blocked15 "Expected $badIpv6Url15 to be blocked by Test-SafeWebUrl."
+    }
+    foreach ($goodIpv6Url15 in @(
+        'https://[2001:db8::1]/',
+        'https://[2002::1]/',
+        'https://[100::1]/'
+    )) {
+        Assert-True (Test-SafeWebUrl -Url $goodIpv6Url15) "Expected $goodIpv6Url15 to be allowed by Test-SafeWebUrl."
+    }
 }
 finally {
     Remove-TestEnvironment -Env $envData

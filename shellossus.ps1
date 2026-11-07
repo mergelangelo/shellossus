@@ -352,19 +352,26 @@ function Test-PathHasReparsePoint {
     param([string]$Path, [string]$StopAt = '')
     if (-not $Path) { return $false }
     $stopNorm = ''
-    if ($StopAt -and (Test-Path -LiteralPath $StopAt)) {
-        $stopItem = Get-Item -LiteralPath $StopAt -Force -ErrorAction SilentlyContinue
-        if ($stopItem) { $stopNorm = $stopItem.FullName.TrimEnd('\').TrimEnd('/') }
+    if ($StopAt) {
+        if (Test-Path -LiteralPath $StopAt) {
+            $stopItem = Get-Item -LiteralPath $StopAt -Force -ErrorAction SilentlyContinue
+            if ($stopItem) { $stopNorm = $stopItem.FullName.Replace('\', '/').TrimEnd('/') }
+        }
+        if (-not $stopNorm) {
+            $stopNorm = $StopAt.Replace('\', '/').TrimEnd('/')
+        }
     }
     $curr = $Path
     while ($curr) {
+        $currNorm = $curr.Replace('\', '/').TrimEnd('/')
         if (Test-Path -LiteralPath $curr) {
             $item = Get-Item -LiteralPath $curr -Force -ErrorAction SilentlyContinue
             if ($item) {
                 if (($item.Attributes -band 1024) -ne 0) { return $true }
-                if ($stopNorm -and ($item.FullName.TrimEnd('\').TrimEnd('/') -ieq $stopNorm)) { break }
+                if ($stopNorm -and ($item.FullName.Replace('\', '/').TrimEnd('/') -ieq $stopNorm)) { break }
             }
         }
+        if ($stopNorm -and ($currNorm -ieq $stopNorm)) { break }
         $parent = Split-Path $curr -Parent
         if (-not $parent -or ($parent -ieq $curr)) { break }
         $curr = $parent
@@ -2858,10 +2865,10 @@ function Format-EditArguments {
     foreach ($p in $props) {
         if ($p -eq 'oldText' -and ($props -notcontains 'old_text')) { $out['old_text'] = $Arguments.$p }
         elseif ($p -eq 'newText' -and ($props -notcontains 'new_text')) { $out['new_text'] = $Arguments.$p }
-        elseif ($p -eq 'oldText' -or $p -eq 'newText') {
+        elseif ($p -in @('file_path', 'filepath', 'filePath') -and ($props -notcontains 'path') -and (-not $out.ContainsKey('path'))) { $out['path'] = $Arguments.$p }
+        elseif ($p -in @('oldText', 'newText', 'file_path', 'filepath', 'filePath')) {
             # Canonical name is already present. Drop the alias so validation does not see it.
         }
-        elseif ($p -in @('file_path', 'filepath', 'filePath') -and ($props -notcontains 'path') -and (-not $out.ContainsKey('path'))) { $out['path'] = $Arguments.$p }
         else { $out[$p] = $Arguments.$p }
     }
     if ($out.ContainsKey('edits') -and $null -ne $out['edits']) {
@@ -2899,8 +2906,11 @@ function Format-RunAgentArguments {
         if ($p -eq 'task' -and ($props -notcontains 'prompt')) { $out['prompt'] = $Arguments.$p }
         elseif ($p -eq 'agent' -and ($props -notcontains 'role')) { $out['role'] = $Arguments.$p }
         elseif ($p -eq 'tasks' -and ($props -notcontains 'parallel')) { $out['parallel'] = $Arguments.$p }
-        elseif (($p -eq 'chain' -or $p -eq 'steps') -and ($props -notcontains 'pipeline')) { $out['pipeline'] = $Arguments.$p }
+        elseif (($p -eq 'chain' -or $p -eq 'steps') -and ($props -notcontains 'pipeline') -and (-not $out.ContainsKey('pipeline'))) { $out['pipeline'] = $Arguments.$p }
         elseif ($p -eq 'maxSteps' -and ($props -notcontains 'max_steps')) { $out['max_steps'] = $Arguments.$p }
+        elseif ($p -in @('task', 'agent', 'tasks', 'chain', 'steps', 'maxSteps')) {
+            # Canonical name is already present. Drop the alias so validation does not see it.
+        }
         else { $out[$p] = $Arguments.$p }
     }
     foreach ($arrField in @('parallel', 'pipeline')) {
@@ -2912,6 +2922,9 @@ function Format-RunAgentArguments {
                 foreach ($k in $ip) {
                     if ($k -eq 'task' -and ($ip -notcontains 'prompt')) { $normItem['prompt'] = $Item.$k }
                     elseif ($k -eq 'agent' -and ($ip -notcontains 'role')) { $normItem['role'] = $Item.$k }
+                    elseif ($k -in @('task', 'agent')) {
+                        # Canonical name is already present. Drop the alias so validation does not see it.
+                    }
                     else { $normItem[$k] = $Item.$k }
                 }
                 return $normItem
@@ -2934,8 +2947,11 @@ function Format-TodoArguments {
     $props = @(Get-ObjectPropertyNames -InputObject $Arguments)
     $out = @{}
     foreach ($p in $props) {
-        if (($p -eq 'tasks' -or $p -eq 'items' -or $p -eq 'checklist') -and ($props -notcontains 'todos')) {
+        if (($p -eq 'tasks' -or $p -eq 'items' -or $p -eq 'checklist') -and ($props -notcontains 'todos') -and (-not $out.ContainsKey('todos'))) {
             $out['todos'] = $Arguments.$p
+        }
+        elseif ($p -in @('tasks', 'items', 'checklist')) {
+            # Canonical name is already present. Drop the alias so validation does not see it.
         }
         else {
             $out[$p] = $Arguments.$p
@@ -2947,16 +2963,19 @@ function Format-TodoArguments {
             $ip = @(Get-ObjectPropertyNames -InputObject $Item)
             $normItem = @{}
             foreach ($k in $ip) {
-                if (($k -eq 'task' -or $k -eq 'title' -or $k -eq 'text' -or $k -eq 'description') -and ($ip -notcontains 'content')) {
+                if (($k -eq 'task' -or $k -eq 'title' -or $k -eq 'text' -or $k -eq 'description') -and ($ip -notcontains 'content') -and (-not $normItem.ContainsKey('content'))) {
                     $normItem['content'] = $Item.$k
                 }
-                elseif (($k -eq 'state' -or $k -eq 'done') -and ($ip -notcontains 'status')) {
+                elseif (($k -eq 'state' -or $k -eq 'done') -and ($ip -notcontains 'status') -and (-not $normItem.ContainsKey('status'))) {
                     if ($k -eq 'done' -and $Item.$k -is [bool]) {
                         $normItem['status'] = if ($Item.$k) { 'completed' } else { 'pending' }
                     }
                     else {
                         $normItem['status'] = $Item.$k
                     }
+                }
+                elseif ($k -in @('task', 'title', 'text', 'description', 'state', 'done')) {
+                    # Canonical name is already present. Drop the alias so validation does not see it.
                 }
                 else {
                     $normItem[$k] = $Item.$k
@@ -3213,11 +3232,13 @@ function Format-AgentToolArguments {
     }
     if ($Name -in @('list_files', 'read_file', 'find_files', 'grep_files', 'write_file')) {
         $props = @(Get-ObjectPropertyNames -InputObject $Arguments)
-        if ($props -notcontains 'path' -and ($props -contains 'file_path' -or $props -contains 'filepath' -or $props -contains 'filePath')) {
+        if ($props -contains 'file_path' -or $props -contains 'filepath' -or $props -contains 'filePath') {
             $out = @{}
             foreach ($p in $props) {
-                if ($p -in @('file_path', 'filepath', 'filePath') -and (-not $out.ContainsKey('path'))) {
-                    $out['path'] = $Arguments.$p
+                if ($p -in @('file_path', 'filepath', 'filePath')) {
+                    if (($props -notcontains 'path') -and (-not $out.ContainsKey('path'))) {
+                        $out['path'] = $Arguments.$p
+                    }
                 }
                 else {
                     $out[$p] = $Arguments.$p
@@ -3471,6 +3492,7 @@ function Convert-IgnorePatternToRule {
     $anchored = $pat.StartsWith('/')
     if ($anchored) { $pat = $pat.TrimStart('/') }
     if ($pat.Contains('/')) { $anchored = $true }
+    $pat = $pat.Replace('\\', '__ESC_BSLASH__').Replace('\[', '__ESC_LBRACK__').Replace('\]', '__ESC_RBRACK__').Replace('\*', '__ESC_STAR__').Replace('\?', '__ESC_QMARK__')
     $charClasses = @()
     if ($pat.Contains('[')) {
         $sb = ''
@@ -3539,6 +3561,8 @@ function Convert-IgnorePatternToRule {
     for ($ccIdx = 0; $ccIdx -lt $charClasses.Count; $ccIdx++) {
         $rx = $rx.Replace("__CC_${ccIdx}__", [string]$charClasses[$ccIdx])
     }
+    $rx = $rx.Replace('__ESC_BSLASH__', '\\').Replace('__ESC_LBRACK__', '\[')
+    $rx = $rx.Replace('__ESC_RBRACK__', '\]').Replace('__ESC_STAR__', '\*').Replace('__ESC_QMARK__', '\?')
     $prefRx = if ($DirPrefix) { ($DirPrefix -replace '([.+^$()\[\]{}|\\*?\-])', '\$1') } else { '' }
     $tailRx = if ($dirOnly) { '/.*$' } else { '(?:/.*)?$' }
     $finalRx = if ($anchored) {
@@ -3827,8 +3851,22 @@ function Find-EditMatch {
             return @{ index = $idx; length = $crlfOld.Length; matched_text = $crlfOld }
         }
     }
+    elseif ($OldText.Contains("`r`n")) {
+        $lfOld = $OldText.Replace("`r`n", "`n")
+        $idx = $Content.IndexOf($lfOld, [StringComparison]::Ordinal)
+        if ($idx -ge 0) {
+            if ($Content.IndexOf($lfOld, $idx + $lfOld.Length, [StringComparison]::Ordinal) -ge 0) {
+                throw 'old_text occurs more than once. Provide more context.'
+            }
+            return @{ index = $idx; length = $lfOld.Length; matched_text = $lfOld }
+        }
+    }
     $contentLines = @($Content -split "`n")
-    $oldLines = @($OldText -split "`r?`n")
+    $oldClean = $OldText.Replace("`r`n", "`n").TrimEnd("`r")
+    if ($oldClean.Length -gt 0 -and $oldClean.EndsWith("`n")) {
+        $oldClean = $oldClean.Substring(0, $oldClean.Length - 1)
+    }
+    $oldLines = @($oldClean -split "`n")
     if ($oldLines.Count -gt 0 -and $oldLines.Count -le $contentLines.Count) {
         $lineStarts = @()
         $pos = 0
@@ -5069,8 +5107,8 @@ function Test-SafeWebUrl {
             if ($hostName -match '^[0:]+0*1(?:%.*)?$' -or
                 $hostName -match '^[0:]+(?:%.*)?$' -or
                 $hostName -match '^(?:fe[89ab][0-9a-f]:|f[cd][0-9a-f]{2}:|ff[0-9a-f]{2}:|[0:]*:ffff:)' -or
-                $hostName -match '^::(?:ffff:(?:0:+)?)?(?:127\.|10\.|192\.168\.|169\.254\.|172\.(?:1[6-9]|2\d|3[01])\.|0\.)' -or
-                $hostName -match '^(?:0+:){0,6}(?:::(?:ffff:(?:0:+)?)?|ffff:)?(?:7f[0-9a-f]{2}|0?a[0-9a-f]{2}|c0a8|a9fe|ac1[0-9a-f]):[0-9a-f]{1,4}$' -or
+                $hostName -match '^(?:0+:){0,6}(?:::(?:ffff:(?:0:+)?)?|ffff:)?(?:127\.|10\.|192\.168\.|169\.254\.|172\.(?:1[6-9]|2\d|3[01])\.|100\.(?:6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.|(?:22[4-9]|23\d|24\d|25[0-5])\.|0\.)' -or
+                $hostName -match '^(?:0+:){0,6}(?:::(?:ffff:(?:0:+)?)?|ffff:)?(?:7f[0-9a-f]{2}|0?a[0-9a-f]{2}|c0a8|a9fe|ac1[0-9a-f]|64[4-7][0-9a-f]|[ef][0-9a-f]{3}|0{1,2}[0-9a-f]{2}):[0-9a-f]{1,4}$' -or
                 $hostName -match '^64:ff9b:') {
                 throw "Blocked request to local or private IPv6 address: $hostName"
             }
@@ -5179,7 +5217,7 @@ function ConvertFrom-HtmlToText {
     $s = $s -replace '(?is)<li\b[^>]*>', "`n- "
     $s = $s -replace '(?is)<h([1-6])\b[^>]*>', "`n# "
     $s = $s -replace '(?is)<[^>]+>', ' '
-    $s = $s.Replace('&nbsp;', ' ').Replace('&amp;', '&').Replace('&lt;', '<').Replace('&gt;', '>').Replace('&quot;', '"').Replace('&#39;', "'").Replace('&apos;', "'").Replace('&mdash;', '--').Replace('&ndash;', '-')
+    $s = $s.Replace('&nbsp;', ' ').Replace('&lt;', '<').Replace('&gt;', '>').Replace('&quot;', '"').Replace('&#39;', "'").Replace('&apos;', "'").Replace('&mdash;', '--').Replace('&ndash;', '-').Replace('&amp;', '&')
     $lines = @()
     foreach ($ln in @($s -split '\r?\n')) {
         $cleanLn = ($ln -replace '[ \t]+', ' ').Trim()
@@ -5490,11 +5528,15 @@ function Invoke-AgentWebSearch {
                     $titleRaw = $Matches[2]
                 }
                 if (-not $href) { continue }
-                if ($href -match '[?&]uddg=([^&"]+)') {
+                $hrefClean = $href.Replace('&amp;', '&')
+                if ($hrefClean -match '[?&]uddg=([^&"]+)') {
                     $href = ConvertFrom-UrlEncodedString -Text $Matches[1]
                 }
-                elseif ($href.StartsWith('//')) {
-                    $href = 'https:' + $href
+                elseif ($hrefClean.StartsWith('//')) {
+                    $href = 'https:' + $hrefClean
+                }
+                else {
+                    $href = $hrefClean
                 }
                 $title = (ConvertFrom-HtmlToText -Html $titleRaw) -replace '\s+', ' '
                 $snippet = ''
@@ -6024,6 +6066,7 @@ if ($env:SHELLOSSUS_SUB_REASONING_EFFORT) { $workerArgs.ReasoningEffort = $env:S
                     SHELLOSSUS_SUB_NO_TEMPLATES = $(if ($script:NoPromptTemplates) { '1' } else { '0' })
                     SHELLOSSUS_SUB_NO_CONTEXT = $(if ($script:NoContextFiles) { '1' } else { '0' })
                     SHELLOSSUS_SUB_REASONING_EFFORT = $(if ($script:ReasoningEffort) { [string]$script:ReasoningEffort } else { '' })
+                    SHELLOSSUS_SUB_AUTO_WEB = $(if ($script:AutoApproveWeb) { '1' } else { '0' })
                     SHELLOSSUS_SUB_ROLE = [string]$roleObj.name
                     SHELLOSSUS_SUB_ROLE_PROMPT = [string]$roleObj.system_prompt
                 } -Action {
@@ -6129,10 +6172,6 @@ if ($env:SHELLOSSUS_SUB_REASONING_EFFORT) { $workerArgs.ReasoningEffort = $env:S
                         catch {}
                     }
                 }
-                if (-not $sawToolExecEnd) {
-                    foreach ($ur in $untrackedReads) { $wReadSet[$ur] = $true }
-                    foreach ($pr in $pendingReadsById.Values) { $wReadSet[$pr] = $true }
-                }
                 if (Test-Path -LiteralPath $w.err_file) {
                     $errRaw = Get-Content -LiteralPath $w.err_file -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
                     if ($errRaw -and $errRaw.Trim() -and (-not $sawTurnEnd -or -not $replyText)) {
@@ -6148,6 +6187,10 @@ if ($env:SHELLOSSUS_SUB_REASONING_EFFORT) { $workerArgs.ReasoningEffort = $env:S
                 }
                 elseif (-not $sawTurnEnd -and $wStatus -eq 'completed' -and $w.proc -and $w.proc.HasExited -and $w.proc.ExitCode -ne 0) {
                     $wStatus = 'error'
+                }
+                if (-not $sawToolExecEnd -and $sawTurnEnd -and (-not $w.timed_out) -and $wStatus -eq 'completed') {
+                    foreach ($ur in $untrackedReads) { $wReadSet[$ur] = $true }
+                    foreach ($pr in $pendingReadsById.Values) { $wReadSet[$pr] = $true }
                 }
                 $wUsageIn = if ($turnUsageIn -ge 0) { $turnUsageIn } else { $msgUsageIn }
                 $wUsageOut = if ($turnUsageOut -ge 0) { $turnUsageOut } else { $msgUsageOut }
@@ -6328,13 +6371,25 @@ function Invoke-SubagentInProcess {
         }
     }
     finally {
-        $script:AgentPermission = $savedPerm
+        $permRank = @{ 'ReadOnly' = 0; 'Ask' = 1; 'AutoEdit' = 2; 'Auto' = 3 }
+        if (-not $ForceReadOnly -and $roleObj.permission -ne 'ReadOnly' -and $permRank[$script:AgentPermission] -gt $permRank[$savedPerm]) {
+            # Keep session-wide [a]ll permission upgrade approved by the user during craft subagent
+        }
+        else {
+            $script:AgentPermission = $savedPerm
+        }
         $script:SubagentDepth = $savedDepth
         $script:EnabledTools = $savedTools
         $script:NoTools = $savedNoTools
         $script:ActiveModelId = $savedModel
         $script:ActiveState = $savedState
         $script:ActiveSessionTodos = $savedTodos
+        if ($null -ne $savedState -and $savedState.messages -and $savedState.messages.Count -gt 0) {
+            if ($script:AgentPermission -ne $savedPerm) {
+                Sync-AgentCapabilities -State $savedState -Root $Root | Out-Null
+            }
+            Sync-AgentMemoryContext -State $savedState -Root $Root -ConfigDir $configDir | Out-Null
+        }
     }
 }
 
@@ -6958,12 +7013,13 @@ function Get-SkillsCatalog {
             if (Test-PathHasReparsePoint -Path $skillFile.FullName) { continue }
             $raw = Get-Content -LiteralPath $skillFile.FullName -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
             if (-not $raw) { continue }
+            $frontmatter = if ($raw -match '(?s)^---\r?\n(.*?)\r?\n---(?:\r?\n|$)') { $Matches[1] } else { '' }
             $skillName = $skillFile.Directory.Name
             $skillDesc = 'Domain skill instructions.'
             $disableModelInvocation = $false
-            if ($raw -match '(?m)^name:\s*(.+)$') { $skillName = $Matches[1].Trim().Trim('"', "'") }
-            if ($raw -match '(?m)^description:\s*(.+)$') { $skillDesc = $Matches[1].Trim().Trim('"', "'") }
-            if ($raw -match '(?m)^disable-model-invocation:\s*(true|false)\s*$') {
+            if ($frontmatter -match '(?m)^name:\s*(.+)$') { $skillName = $Matches[1].Trim().Trim('"', "'") }
+            if ($frontmatter -match '(?m)^description:\s*(.+)$') { $skillDesc = $Matches[1].Trim().Trim('"', "'") }
+            if ($frontmatter -match '(?m)^disable-model-invocation:\s*(true|false)\s*$') {
                 $disableModelInvocation = ($Matches[1].Trim().ToLower() -eq 'true')
             }
             if ($script:SkillsByName.ContainsKey($skillName)) { continue }
@@ -7098,20 +7154,21 @@ function Get-AgentRolesCatalog {
             if (Test-PathHasReparsePoint -Path $roleFile.FullName) { continue }
             $raw = Get-Content -LiteralPath $roleFile.FullName -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
             if (-not $raw) { continue }
+            $frontmatter = if ($raw -match '(?s)^---\r?\n(.*?)\r?\n---(?:\r?\n|$)') { $Matches[1] } else { '' }
             $baseName = ($roleFile.Name -replace '\.md$', '').ToLower()
             $roleName = $baseName
             $roleDesc = 'Custom subagent role.'
             $rolePerm = 'inherit'
             $roleModel = ''
             $roleTools = @()
-            if ($raw -match '(?m)^name:\s*(.+)$') { $roleName = $Matches[1].Trim().Trim('"', "'").ToLower() }
-            if ($raw -match '(?m)^description:\s*(.+)$') { $roleDesc = $Matches[1].Trim().Trim('"', "'") }
-            if ($raw -match '(?m)^permission:\s*(.+)$') {
+            if ($frontmatter -match '(?m)^name:\s*(.+)$') { $roleName = $Matches[1].Trim().Trim('"', "'").ToLower() }
+            if ($frontmatter -match '(?m)^description:\s*(.+)$') { $roleDesc = $Matches[1].Trim().Trim('"', "'") }
+            if ($frontmatter -match '(?m)^permission:\s*(.+)$') {
                 $pVal = $Matches[1].Trim().Trim('"', "'")
                 if ($pVal -ieq 'ReadOnly') { $rolePerm = 'ReadOnly' }
             }
-            if ($raw -match '(?m)^model:\s*(.+)$') { $roleModel = $Matches[1].Trim().Trim('"', "'") }
-            if ($raw -match '(?m)^tools:\s*(.+)$') {
+            if ($frontmatter -match '(?m)^model:\s*(.+)$') { $roleModel = $Matches[1].Trim().Trim('"', "'") }
+            if ($frontmatter -match '(?m)^tools:\s*(.+)$') {
                 $tRaw = $Matches[1].Trim().Trim('"', "'", '[', ']')
                 $roleTools = @($tRaw -split ',' | ForEach-Object { $_.Trim().Trim('"', "'") } | Where-Object { $_ })
                 if ($roleTools.Count -gt 0) {
@@ -7319,8 +7376,11 @@ function Resolve-PromptTemplate {
         if (-not $d -or -not (Test-Path -LiteralPath $d)) { continue }
         $cand = Join-Path $d ($name + '.md')
         if (Test-Path -LiteralPath $cand) {
-            $tpl = Get-Content -LiteralPath $cand -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
-            if ($tpl) {
+            $candItem = Get-Item -LiteralPath $cand -Force -ErrorAction SilentlyContinue
+            if (-not $candItem -or $candItem.PSIsContainer -or $candItem.Length -gt 128KB) { continue }
+            if (Test-PathHasReparsePoint -Path $candItem.FullName -StopAt $d) { continue }
+            $tpl = Get-Content -LiteralPath $candItem.FullName -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
+            if ($tpl -and ($tpl -notmatch '\x00')) {
                 $body = $tpl -replace '(?s)^---\r?\n.*?\r?\n---\r?\n?', ''
                 return (Expand-TemplateArgs -Content $body -ArgsString $argsText)
             }
@@ -7347,9 +7407,9 @@ function Expand-UserPrompt {
                 $lines = @(Get-Content -LiteralPath $resolved -Encoding UTF8 -TotalCount 301 -ErrorAction Stop)
                 $truncatedByLines = ($lines.Count -gt 300)
                 $content = ($lines | Select-Object -First 300) -join "`n"
+                if ($content -match '\x00') { throw 'Binary content is not supported.' }
                 $truncatedByChars = ($content.Length -gt 20000)
                 if ($truncatedByChars) { $content = $content.Substring(0, 20000) }
-                if ($content -match '\x00') { throw 'Binary content is not supported.' }
                 if ($truncatedByLines -or $truncatedByChars) {
                     $content = $content + "`n[... truncated at 300 lines / 20000 chars; use read_file with start_line to read more ...]"
                 }
@@ -7487,7 +7547,7 @@ function Build-BranchContextMessages {
             $compIdx = $i
         }
     }
-    if ($compIdx -lt 0) {
+    if ($path.Count -gt 0 -and $path[$path.Count - 1].entry_type -ne 'compaction') {
         foreach ($te in @($State.tree_entries)) {
             if ($te -and $te.entry_type -eq 'compaction' -and [string]$te.parent_id -eq $LeafId) {
                 $path += $te
@@ -7827,6 +7887,9 @@ function Invoke-SessionResume {
         }
     }
     $State.tree_entries = @()
+    $State.usage_input_tokens = 0
+    $State.usage_output_tokens = 0
+    $State.scoped_instr_cache = @{}
     $loadedMessages = @(Read-AgentSession -SessionFile $SessionFile -State $State)
     $State.messages = $loadedMessages
     Ensure-SessionTree -State $State
@@ -7839,10 +7902,14 @@ function Invoke-SessionResume {
     if ($meta -and $meta.model) {
         $State.model = [string]$meta.model
     }
+    if ($State.session_id) { $script:ActiveSessionId = [string]$State.session_id }
+    if ($State.model) { $script:ActiveModelId = [string]$State.model }
     $State.undo_stack = @()
     $State.last_failed_question = ''
     $State.last_prompt_tokens = 0
     $State.last_prompt_chars = 0
+    $State.step_limit_reached = $false
+    $State.loop_detected = $false
     Sync-AgentCapabilities -State $State | Out-Null
     return $State
 }
@@ -7893,7 +7960,7 @@ function Copy-SessionHashtableArray {
 }
 
 function Invoke-SessionFork {
-    param($State, [string]$SessionDir, [string]$Workspace = '', [string]$Model = '', [string]$FromId = '', [string]$EntryId = '', [string]$NewName = '')
+    param($State, [string]$SessionDir, [string]$Workspace = '', [string]$Model = '', [string]$FromId = '', [string]$EntryId = '', [string]$NewName = '', [switch]$NoSession)
     Ensure-SessionTree -State $State
     $effWs = if ($Workspace) { $Workspace } elseif ($State.workspace) { [string]$State.workspace } else { '' }
     $effMdl = if ($Model) { $Model } elseif ($State.model) { [string]$State.model } else { '' }
@@ -7931,6 +7998,11 @@ function Invoke-SessionFork {
         todos = $forkTodos
         undo_stack = @()
         last_failed_question = ''
+        usage_input_tokens = 0
+        usage_output_tokens = 0
+        last_prompt_tokens = 0
+        last_prompt_chars = 0
+        scoped_instr_cache = @{}
     }
     if ($effId) {
         Switch-SessionBranch -State $forkState -TargetId $effId | Out-Null
@@ -7938,8 +8010,13 @@ function Invoke-SessionFork {
     elseif (-not (Test-ValidConversationBoundary -Messages $forkState.messages)) {
         throw 'Cannot fork session: incomplete tool_calls sequence (missing tool result).'
     }
-    $forkFile = Join-Path $SessionDir ($forkState.session_id + '.jsonl')
-    Save-AgentSession -SessionFile $forkFile -State $forkState -Workspace $effWs -Model $effMdl -SessionId $forkState.session_id
+    $forkFile = if ($NoSession) { '' } else { Join-Path $SessionDir ($forkState.session_id + '.jsonl') }
+    $script:ActiveSessionId = $forkState.session_id
+    $script:ActiveSessionFile = $forkFile
+    $script:ActiveModelId = $effMdl
+    if (-not $NoSession) {
+        Save-AgentSession -SessionFile $forkFile -State $forkState -Workspace $effWs -Model $effMdl -SessionId $forkState.session_id
+    }
     return @{ state = $forkState; session_file = $forkFile; session_id = $forkState.session_id }
 }
 
@@ -9870,7 +9947,7 @@ function Invoke-ReplContextCommand {
             @{ label = '200k / 150k (75%)'; value = '200k 150k'; description = 'Large context window (200k tokens)'; active = ($curSt.context_window_tokens -eq 200000 -and $curSt.compact_threshold_tokens -eq 150000) },
             @{ label = '[Custom limits...]'; value = '__custom__'; description = 'Enter "<window> [compact]" e.g. "128k 85k" or "128k 70%"'; active = $false }
         )
-        $pickedCtx = Invoke-TuiSelector -Title "Context Window & Auto-Compact (current: $curWinFmt / compact at $curCompFmt)" -Items $ctxItems -PromptText 'Select preset or type "<window> [compact]" (Enter cancels)'
+        $pickedCtx = Invoke-TuiSelector -Title "Context Window & Auto-Compact (current: $curWinFmt / compact at $curCompFmt)" -Items $ctxItems -PromptText 'Select preset or type "<window> [compact]" (Enter cancels)' -AllowFreeText
         if ($pickedCtx -eq '__custom__') {
             Write-Host ('  ' + $script:Gm.BoldYellow + 'Enter "<window> [compact]" (e.g. 128k 80k or 128k 70%): ' + $script:Gm.Fg) -NoNewline
             $customCtx = Read-Host
@@ -9924,7 +10001,7 @@ function Select-ReplModelId {
             $mItems += @{ label = $km; value = $km; description = $(if ($km -eq $CurrentModel) { 'active model' } else { 'recent session model' }); active = ($km -eq $CurrentModel) }
         }
         $mItems += @{ label = '[Custom model ID...]'; value = '__custom__'; description = 'Type any OpenAI-compatible model ID'; active = $false }
-        $pickedM = Invoke-TuiSelector -Title "Select Model (current: $CurrentModel)" -Items $mItems -PromptText 'Select number or type model ID (Enter cancels)'
+        $pickedM = Invoke-TuiSelector -Title "Select Model (current: $CurrentModel)" -Items $mItems -PromptText 'Select number or type model ID (Enter cancels)' -AllowFreeText
         if ($pickedM -eq '__custom__') {
             Write-Host ('  ' + $script:Gm.BoldYellow + 'Enter model ID: ' + $script:Gm.Fg) -NoNewline
             $customM = Read-Host
@@ -10007,6 +10084,14 @@ function Invoke-ReplNewSessionCommand {
     $State.tree_entries = @()
     $State.leaf_id = $null
     $State.todos = @()
+    $State.usage_input_tokens = 0
+    $State.usage_output_tokens = 0
+    $State.last_prompt_tokens = 0
+    $State.last_prompt_chars = 0
+    $State.scoped_instr_cache = @{}
+    $State.step_limit_reached = $false
+    $State.loop_detected = $false
+    $State.last_failed_question = ''
     $script:ActiveSessionTodos = @()
     Sync-AgentCapabilities -State $State | Out-Null
     Clear-AgentUndoBackups -UndoEntries $UndoStack
@@ -10076,7 +10161,7 @@ function Invoke-ReplForkCommand {
     param($State, [string]$SessionDir, [string]$SessionFile = '', [switch]$NoSession, [AllowEmptyCollection()][array]$UndoStack = @(), [string]$ForkEntryId = '')
     $entryId = if ($ForkEntryId) { $ForkEntryId.Trim() } else { '' }
     try {
-        $forkRes = Invoke-SessionFork -State $State -SessionDir $SessionDir -EntryId $entryId
+        $forkRes = Invoke-SessionFork -State $State -SessionDir $SessionDir -EntryId $entryId -NoSession:$NoSession
         $State = $forkRes.state
         $SessionFile = if ($NoSession) { '' } else { $forkRes.session_file }
         Clear-AgentUndoBackups -UndoEntries $UndoStack
@@ -10518,6 +10603,7 @@ if (-not $LibraryOnly) {
     }
     if ($Permission -notin @('ReadOnly', 'Ask', 'AutoEdit', 'Auto')) { throw 'Permission must be one of: ReadOnly, Ask, AutoEdit, Auto.' }
     $script:AgentPermission = $Permission
+    if ($env:SHELLOSSUS_SUB_AUTO_WEB -eq '1') { $script:AutoApproveWeb = $true }
     $script:Diagnostics = [bool]$Diagnostics
     $script:NoTools = [bool]$NoTools
     $script:EnabledTools = @(if ($Tools) { $Tools -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ } })
@@ -10591,7 +10677,7 @@ if (-not $LibraryOnly) {
         if (-not (Test-Path -LiteralPath $candFork)) { throw "Session file to fork not found: $Fork" }
         $srcState = @{ session_id = ''; workspace = $rootPath; model = $Model; messages = @() }
         Invoke-SessionResume -SessionFile $candFork -State $srcState -CurrentWorkspace $rootPath | Out-Null
-        $forkRes = Invoke-SessionFork -State $srcState -SessionDir $sessionDir -NewName $SessionName
+        $forkRes = Invoke-SessionFork -State $srcState -SessionDir $sessionDir -NewName $SessionName -NoSession:$NoSession
         $state = $forkRes.state
         $sessionFile = if ($NoSession) { '' } else { $forkRes.session_file }
         if ($PSBoundParameters.Keys -notcontains 'Model' -and $state.model) { $Model = $state.model }
@@ -10651,7 +10737,7 @@ if (-not $LibraryOnly) {
             if ($trimmedQ -eq '/clear' -or $trimmedQ -eq '/new') {
                 $newRes = Invoke-ReplNewSessionCommand -State $state -RootPath $rootPath -ConfigDir $configDir -Model $Model -SessionDir $sessionDir -NoSession:$NoSession -UndoStack $undoStack
                 $fullSystemPrompt = $newRes.full_system_prompt; $system = $newRes.system
-                $sessionFile = $newRes.session_file; $undoStack = @($newRes.undo_stack)
+                $sessionFile = $newRes.session_file; $undoStack = @($newRes.undo_stack); $lastFailedQuestion = ''
                 continue
             }
             if ($trimmedQ -match '^/(?:todo|todos)(?:\s+(.+))?$') { Invoke-ReplTodoCommand -State $state -TodoArg $Matches[1]; continue }

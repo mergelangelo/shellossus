@@ -351,6 +351,57 @@ try {
 
     $clSingleGrepInc = Invoke-AgentTool -Root $workspacePath -Call @{ id = 'cl-sg-inc'; function = @{ name = 'grep_files'; arguments = '{"path":"a/b/keep.txt","pattern":"public","include":"*.ps1"}' } } | ConvertFrom-Json
     Assert-True (@($clSingleGrepInc.matches).Count -eq 0) 'ConstrainedLanguage single-file grep_files did not enforce include filter.'
+
+    # Regression (Batch 2 in ConstrainedLanguage):
+    # Task 6: escaped .gitignore wildcards/brackets in ConstrainedLanguage
+    $clEscBrack = Convert-IgnorePatternToRule -Line '\[draft\].txt'
+    $clEscStar = Convert-IgnorePatternToRule -Line 'note\*.txt'
+    Assert-True ((Test-PathIgnored -RelativePath '[draft].txt' -IsDir $false -Rules @($clEscBrack)) -and (-not (Test-PathIgnored -RelativePath 'd.txt' -IsDir $false -Rules @($clEscBrack)))) 'ConstrainedLanguage escaped bracket ignore rule failed.'
+    Assert-True ((Test-PathIgnored -RelativePath 'note*.txt' -IsDir $false -Rules @($clEscStar)) -and (-not (Test-PathIgnored -RelativePath 'note1.txt' -IsDir $false -Rules @($clEscStar)))) 'ConstrainedLanguage escaped star ignore rule failed.'
+
+    # Task 7: Find-EditMatch CRLF old_text against LF content in ConstrainedLanguage
+    $clEditMatch = Find-EditMatch -Content "line1`nline2`nline3`n" -OldText "line1`r`nline2`r`n"
+    Assert-True ($clEditMatch.index -eq 0 -and $clEditMatch.matched_text -ceq "line1`nline2`n") 'ConstrainedLanguage Find-EditMatch CRLF-to-LF match failed.'
+
+    # Task 8 & Task 15: ConvertFrom-HtmlToText entity order and Test-SafeWebUrl IPv6 checks in ConstrainedLanguage
+    Assert-True ((ConvertFrom-HtmlToText -Html '<p>&amp;lt;x&amp;gt;</p>') -ceq '&lt;x&gt;') 'ConstrainedLanguage ConvertFrom-HtmlToText double-unescaped &amp;lt;.'
+    foreach ($clBadV6 in @('http://[0:0:0:0:0:0:127.0.0.1]/', 'http://[::100.64.0.1]/', 'http://[::224.0.0.1]/')) {
+        $clBlockedV6 = $false
+        try { Test-SafeWebUrl -Url $clBadV6 | Out-Null } catch { $clBlockedV6 = $true }
+        Assert-True $clBlockedV6 "ConstrainedLanguage Test-SafeWebUrl did not block $clBadV6."
+    }
+    Assert-True ((Test-SafeWebUrl -Url 'https://[2001:db8::1]/') -and (Test-SafeWebUrl -Url 'https://[2002::1]/') -and (Test-SafeWebUrl -Url 'https://[100::1]/')) 'ConstrainedLanguage Test-SafeWebUrl blocked valid IPv6 URL.'
+
+    # Task 9: Normalizer alias dropping in ConstrainedLanguage
+    $clNormRead = Format-AgentToolArguments -Name 'read_file' -Arguments @{ path = 'a.txt'; file_path = 'a.txt' }
+    Test-AgentToolArguments -Name 'read_file' -Arguments $clNormRead
+    $clNormTodo = Format-TodoArguments -Arguments @{ todos = @(@{ content = 'a'; task = 'a'; status = 'pending'; state = 'pending' }); tasks = @() }
+    Test-AgentToolArguments -Name 'todo' -Arguments $clNormTodo
+
+    # Task 14: Test-PathHasReparsePoint non-existent StopAt in ConstrainedLanguage
+    $clNonExistStop = Join-Path $testRoot 'cl-uncreated-home/.shellossus'
+    Assert-True (-not (Test-PathHasReparsePoint -Path (Join-Path $clNonExistStop 'MEMORY.md') -StopAt $clNonExistStop)) 'ConstrainedLanguage Test-PathHasReparsePoint failed on non-existent StopAt.'
+
+    # Task 16: Expand-UserPrompt late NUL byte check before 20,000-char truncation in ConstrainedLanguage
+    $clLateNull = Join-Path $workspacePath 'cl-late-null.bin'
+    Set-Content -LiteralPath $clLateNull -Value (('A' * 20010) + [char]0 + 'z') -Encoding Ascii -NoNewline
+    $clExpandedNull = Expand-UserPrompt -Root $workspacePath -Prompt 'check @cl-late-null.bin'
+    Assert-True ($clExpandedNull -notlike '*<file path="cl-late-null.bin">*') 'ConstrainedLanguage Expand-UserPrompt did not reject late NUL byte.'
+    Remove-Item -LiteralPath $clLateNull -Force -ErrorAction SilentlyContinue
+
+    # Task 17: Build-BranchContextMessages with two compactions on branch in ConstrainedLanguage
+    $clTwoCompState = @{
+        messages = @(@{ role = 'system'; content = 'sys' })
+        tree_entries = @(
+            @{ id = 'e1'; parent_id = $null; entry_type = 'message'; role = 'user'; content = 'u1' },
+            @{ id = 'c1'; parent_id = 'e1'; entry_type = 'compaction'; role = 'user'; content = '[Compacted Conversation Summary] First'; first_kept_entry_id = 'e1' },
+            @{ id = 'e2'; parent_id = 'c1'; entry_type = 'message'; role = 'assistant'; content = 'a1' },
+            @{ id = 'c2'; parent_id = 'e2'; entry_type = 'compaction'; role = 'user'; content = '[Compacted Conversation Summary] Second'; first_kept_entry_id = 'e2' }
+        )
+        leaf_id = 'c2'
+    }
+    $clRebuiltComp = @(Build-BranchContextMessages -State $clTwoCompState -LeafId 'e2')
+    Assert-True ($clRebuiltComp[1].content -like '*Second*') 'ConstrainedLanguage Build-BranchContextMessages failed to attach second child compaction.'
 }
 finally {
     Remove-TestEnvironment -Env $envData
