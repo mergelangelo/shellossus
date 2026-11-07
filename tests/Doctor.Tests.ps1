@@ -130,6 +130,27 @@ try {
     }
     $argsDoctor.BaseUrl = 'https://example.invalid/v1'
 
+    # Empty loopback key uses the local placeholder. A remote URL with an empty key still fails.
+    $task10Before = $global:ShellossusDoctorFixture.requests
+    $task10Real = Get-AgentDoctorReport -BaseUrl 'https://example.invalid/v1' -ModelId 'test-model' -ApiKey 'doctor-secret-key' -Workspace $workspacePath -SessionDir $sessionPath -NoSession
+    $task10RealKey = Get-DoctorCheck $task10Real 'api_key'
+    Assert-True ($task10RealKey.status -eq 'pass' -and $task10RealKey.message -like '*hidden*' -and $task10RealKey.message -notlike '*doctor-secret-key*') 'A real API key did not pass or was printed.'
+    $task10Remote = Get-AgentDoctorReport -BaseUrl 'https://api.example/v1' -ModelId 'test-model' -ApiKey '' -Workspace $workspacePath -SessionDir $sessionPath -NoSession
+    Assert-True ((Get-DoctorCheck $task10Remote 'api_key').status -eq 'fail') 'Empty API key on https://api.example/v1 did not fail api_key.'
+    Assert-True ($global:ShellossusDoctorFixture.requests -eq ($task10Before + 1)) 'Empty API key on a non-loopback URL triggered a network probe.'
+    foreach ($task10Url in @('http://127.0.0.1/v1', 'http://localhost/v1', 'http://[::1]/v1')) {
+        $task10Local = Get-AgentDoctorReport -BaseUrl $task10Url -ModelId 'test-model' -ApiKey '' -Workspace $workspacePath -SessionDir $sessionPath -NoSession
+        $task10LocalKey = Get-DoctorCheck $task10Local 'api_key'
+        $task10LocalMsg = [string]$task10LocalKey.message
+        Assert-True ($task10LocalKey.status -eq 'pass' -or $task10LocalKey.status -eq 'info') "Empty API key on $task10Url failed api_key ($($task10LocalKey.status))."
+        Assert-True ($task10LocalMsg -like '*no*key*configured*' -and $task10LocalMsg -like '*local server*' -and $task10LocalMsg -like '*local placeholder*') "Loopback placeholder was not explained for ${task10Url}: $task10LocalMsg"
+        $task10Endpoint = Get-DoctorCheck $task10Local 'endpoint'
+        Assert-True ($task10Endpoint.status -eq 'info' -and [string]$task10Endpoint.message -like '*local placeholder*' -and [string]$task10Endpoint.message -notlike '*until an API key is configured*') "Loopback endpoint text still asks for a key: $($task10Endpoint.message)"
+    }
+    Assert-True ($global:ShellossusDoctorFixture.requests -eq ($task10Before + 1)) 'Local placeholder triggered an endpoint probe.'
+    $task10Blank = Get-AgentDoctorReport -BaseUrl 'http://127.0.0.1/v1' -ModelId 'test-model' -ApiKey ' ' -Workspace $workspacePath -SessionDir $sessionPath -NoSession
+    Assert-True ((Get-DoctorCheck $task10Blank 'api_key').status -eq 'fail') 'Whitespace API key on loopback was treated as the local placeholder.'
+
     $blockedPath = Join-Path $envData.TestRoot 'not-a-directory'
     Set-Content -LiteralPath $blockedPath -Value 'keep' -Encoding Ascii
     $argsDoctor.SessionDir = $blockedPath
@@ -187,6 +208,11 @@ try {
         $cliReport = $cliOutput | ConvertFrom-Json
         Assert-True ($LASTEXITCODE -eq 1 -and (Get-DoctorCheck $cliReport 'configuration').status -eq 'fail' -and (Get-DoctorCheck $cliReport 'workspace').status -eq 'fail') 'Broken first-run settings prevented a complete diagnostic report.'
         Assert-True ($cliOutput -notlike '*doctor-secret-key*') 'A configuration error exposed secret content.'
+        $task10CliCfg = Join-Path $envData.TestRoot 'task10-missing.env'
+        $task10CliRaw = & $entryPoint -Doctor -BaseUrl 'http://127.0.0.1/v1' -Model 'local-model' -ConfigPath $task10CliCfg -Workspace $workspacePath -NoSession -Mode json
+        $task10CliReport = $task10CliRaw | ConvertFrom-Json
+        $task10CliKey = Get-DoctorCheck $task10CliReport 'api_key'
+        Assert-True (($task10CliKey.status -eq 'pass' -or $task10CliKey.status -eq 'info') -and ([string]$task10CliKey.message -like '*local placeholder*') -and ($task10CliRaw -notlike '*doctor-secret-key*')) ("Standalone -Doctor treated a missing loopback key as a failure: $($task10CliKey.status) $($task10CliKey.message)")
     }
     finally {
         Remove-Item Function:\Read-Host -ErrorAction SilentlyContinue

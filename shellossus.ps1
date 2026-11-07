@@ -8821,7 +8821,19 @@ function Get-AgentDoctorReport {
     $storage.name = 'sessions'
     $checks += $storage
     $hasKey = [bool]($ApiKey -and $ApiKey.Trim())
-    $checks += @{ name = 'api_key'; status = $(if ($hasKey) { 'pass' } else { 'fail' }); message = $(if ($hasKey) { 'API key is configured (value hidden).' } else { 'API key is missing. Run shellossus -Setup or set SHELLOSSUS_API_KEY.' }) }
+    # Same rule as chat startup: an empty key on a loopback server uses the local placeholder.
+    $useLocalPlaceholder = (-not $ApiKey) -and (Test-IsLoopbackBaseUrl -Url $BaseUrl)
+    $apiKeyStatus = 'fail'
+    $apiKeyMessage = 'API key is missing. Run shellossus -Setup or set SHELLOSSUS_API_KEY.'
+    if ($hasKey) {
+        $apiKeyStatus = 'pass'
+        $apiKeyMessage = 'API key is configured (value hidden).'
+    }
+    elseif ($useLocalPlaceholder) {
+        $apiKeyStatus = 'info'
+        $apiKeyMessage = 'No API key was configured for the local server; the local placeholder is used.'
+    }
+    $checks += @{ name = 'api_key'; status = $apiKeyStatus; message = $apiKeyMessage }
     $hasModel = [bool]($ModelId -and $ModelId.Trim())
     $modelCheck = @{ name = 'model'; status = $(if ($hasModel) { 'pass' } else { 'fail' }); message = $(if ($hasModel) { "Configured model: $ModelId. Availability has not been verified." } else { 'Model ID is missing. Run shellossus -Setup or pass -Model with the provider model ID.' }) }
     $checks += $modelCheck
@@ -8830,7 +8842,13 @@ function Get-AgentDoctorReport {
         $checks += @{ name = 'endpoint'; status = 'fail'; message = 'Set an HTTPS API base URL (or http://localhost for local servers, usually ending in /v1), without credentials, query, fragment, or /chat/completions. Configure -BaseUrl or run shellossus -Setup.' }
     }
     elseif (-not $hasKey) {
-        $checks += @{ name = 'endpoint'; status = 'info'; message = "Network check skipped until an API key is configured. Base URL: $BaseUrl" }
+        $endpointMessage = if ($useLocalPlaceholder) {
+            "Network check skipped for the local placeholder. Base URL: $BaseUrl"
+        }
+        else {
+            "Network check skipped until an API key is configured. Base URL: $BaseUrl"
+        }
+        $checks += @{ name = 'endpoint'; status = 'info'; message = $endpointMessage }
     }
     else {
         $probe = Invoke-DoctorModelsRequest -Uri ($BaseUrl.TrimEnd('/') + '/models') -ApiKey $ApiKey
@@ -9154,7 +9172,7 @@ function Invoke-AgentProfileInstall {
 
     $parent = Split-Path $ProfilePath -Parent
     if ($parent -and -not (Test-Path -LiteralPath $parent)) { New-Item -ItemType Directory -Path $parent -Force | Out-Null }
-    Set-Content -LiteralPath $ProfilePath -Value $updated -Encoding UTF8 -NoNewline
+    Set-Content -LiteralPath $ProfilePath -Value $updated -Encoding UTF8 -NoNewline -ErrorAction Stop
     Write-Host ($script:Gm.Green + "Command registered in: $ProfilePath" + $script:Gm.Reset)
     if ($chosenShortcut) {
         Write-Host ($script:Gm.Green + "Registered commands: shellossus, $chosenShortcut" + $script:Gm.Reset)
@@ -10803,11 +10821,16 @@ if (-not $LibraryOnly) {
         $config = Read-AgentConfig -Path $ConfigPath
     }
     catch {
-        if (-not $Doctor) {
+        if ($Doctor) {
+            $doctorConfigState = 'invalid'
+        }
+        elseif ($Setup) {
+            $config = @{}
+        }
+        else {
             Write-AgentJsonEvent -EventType 'turn_end' -Payload @{ status = 'error'; error = $_.Exception.Message }
             throw
         }
-        $doctorConfigState = 'invalid'
     }
     if (-not $Theme -and $config.SHELLOSSUS_THEME) { $Theme = $config.SHELLOSSUS_THEME }
     if ($Theme) {

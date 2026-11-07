@@ -17,11 +17,16 @@ if (-not $LibraryOnly) {
         $config = Read-AgentConfig -Path $ConfigPath
     }
     catch {
-        if (-not $Doctor) {
+        if ($Doctor) {
+            $doctorConfigState = 'invalid'
+        }
+        elseif ($Setup) {
+            $config = @{}
+        }
+        else {
             Write-AgentJsonEvent -EventType 'turn_end' -Payload @{ status = 'error'; error = $_.Exception.Message }
             throw
         }
-        $doctorConfigState = 'invalid'
     }
     if (-not $Theme -and $config.SHELLOSSUS_THEME) { $Theme = $config.SHELLOSSUS_THEME }
     if ($Theme) {

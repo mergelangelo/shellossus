@@ -525,6 +525,30 @@ try {
         Remove-Item Function:\global:shos_spaced -Force -ErrorAction SilentlyContinue
     }
 
+    # A profile write that cannot succeed must not announce that the command was registered.
+    $installAgent = Join-Path $testRoot 'install-agent.ps1'
+    Set-Content -LiteralPath $installAgent -Value "Write-Output 'agent'" -Encoding Ascii
+    $installBlocker = Join-Path $testRoot 'install-parent-blocked'
+    Set-Content -LiteralPath $installBlocker -Value 'not-a-directory' -Encoding Ascii
+    $blockedProfile = Join-Path $installBlocker 'profile.ps1'
+    $installResult = & {
+        $ErrorActionPreference = 'Continue'
+        $text = ''
+        $threw = $false
+        try {
+            $chunks = @(Invoke-AgentProfileInstall -AgentPath $installAgent -ProfilePath $blockedProfile -Shortcut 'task10sc' *>&1)
+            foreach ($chunk in $chunks) { $text += [string]$chunk + "`n" }
+        }
+        catch {
+            $threw = $true
+            $text += [string]$_.Exception.Message
+        }
+        @{ text = $text; threw = $threw }
+    }
+    Assert-True ($installResult.text -notlike '*Command registered*') ("A failed profile write printed Command registered. threw=$($installResult.threw)")
+    Assert-True (-not (Test-Path -LiteralPath $blockedProfile)) 'A failed profile write still created the profile file.'
+    Assert-True ((Get-Content -LiteralPath $installBlocker -Raw -Encoding UTF8).Trim() -eq 'not-a-directory') 'A failed profile write changed the blocked parent path.'
+
     # Subagent context=fork boundary safety and mutationEpoch advancement on subagent file modification.
     $script:AgentPermission = 'AutoEdit'
     Set-Content -LiteralPath (Join-Path $workspacePath 'fork-edit.txt') -Value 'v1' -Encoding UTF8 -NoNewline
@@ -638,6 +662,83 @@ try {
         Remove-Variable -Name setupReadQueue -Scope Global -ErrorAction SilentlyContinue
         $null = Set-AgentTheme -Name 'gruvbox-material'
     }
+
+    # -Setup must reach the wizard when the existing config cannot be parsed.
+    # A broken config outside -Setup and -Doctor still fails.
+    $task10Script = "$PSScriptRoot\..\shellossus.ps1"
+    $task10BadCfg = Join-Path $testRoot 'task10-broken.env'
+    Set-Content -LiteralPath $task10BadCfg -Value 'NOT_A_VALID_LINE=1' -Encoding Ascii
+    $task10PlainThrew = $false
+    $task10PlainMsg = ''
+    try {
+        & $task10Script -ConfigPath $task10BadCfg -Workspace $workspacePath -Prompt 'hello' -NoSession
+    }
+    catch {
+        $task10PlainThrew = $true
+        $task10PlainMsg = [string]$_.Exception.Message
+    }
+    Assert-True ($task10PlainThrew -and $task10PlainMsg -like '*Invalid config entry*') 'Broken config outside -Setup and -Doctor did not fail with the parse error.'
+    $global:task10Prompts = @()
+    $global:task10ReadQueue = @('https://api.example/v1', 'task10-model', 'task10-key', '')
+    function global:Read-Host {
+        param($Prompt)
+        $global:task10Prompts += [string]$Prompt
+        if (-not $global:task10ReadQueue -or $global:task10ReadQueue.Count -eq 0) { return '' }
+        $next = $global:task10ReadQueue[0]
+        if ($global:task10ReadQueue.Count -eq 1) { $global:task10ReadQueue = @() }
+        else { $global:task10ReadQueue = @($global:task10ReadQueue[1..($global:task10ReadQueue.Count - 1)]) }
+        return $next
+    }
+    $task10SetupThrew = $false
+    $task10SetupMsg = ''
+    try {
+        & $task10Script -Setup -ConfigPath $task10BadCfg -Workspace $workspacePath
+    }
+    catch {
+        $task10SetupThrew = $true
+        $task10SetupMsg = [string]$_.Exception.Message
+    }
+    finally {
+        Remove-Item Function:\global:Read-Host -ErrorAction SilentlyContinue
+        Remove-Variable -Name task10ReadQueue -Scope Global -ErrorAction SilentlyContinue
+    }
+    Assert-True ((-not $task10SetupThrew) -and ($global:task10Prompts.Count -ge 1) -and ($global:task10Prompts[0] -like '*API base URL*')) ("-Setup with an invalid config did not reach the wizard. prompts=$($global:task10Prompts.Count) error=$task10SetupMsg")
+    $task10Saved = Read-AgentConfig -Path $task10BadCfg
+    Assert-True ($task10Saved.SHELLOSSUS_BASE_URL -eq 'https://api.example/v1' -and $task10Saved.SHELLOSSUS_MODEL -eq 'task10-model' -and $task10Saved.SHELLOSSUS_API_KEY -eq 'task10-key') '-Setup wizard did not save settings after an invalid config.'
+    Remove-Variable -Name task10Prompts -Scope Global -ErrorAction SilentlyContinue
+
+    $task10Unread = Join-Path $testRoot 'task10-unreadable-config'
+    New-Item -ItemType Directory -Path $task10Unread -Force | Out-Null
+    $task10UnreadPlain = $false
+    try {
+        & $task10Script -ConfigPath $task10Unread -Workspace $workspacePath -Prompt 'hello' -NoSession
+    }
+    catch { $task10UnreadPlain = $true }
+    Assert-True $task10UnreadPlain 'Unreadable config outside -Setup and -Doctor did not fail.'
+    $global:task10Prompts = @()
+    $global:task10ReadQueue = @('https://api.example/v1', 'task10-model', 'task10-key', '')
+    function global:Read-Host {
+        param($Prompt)
+        $global:task10Prompts += [string]$Prompt
+        if (-not $global:task10ReadQueue -or $global:task10ReadQueue.Count -eq 0) { return '' }
+        $next = $global:task10ReadQueue[0]
+        if ($global:task10ReadQueue.Count -eq 1) { $global:task10ReadQueue = @() }
+        else { $global:task10ReadQueue = @($global:task10ReadQueue[1..($global:task10ReadQueue.Count - 1)]) }
+        return $next
+    }
+    $task10DirMsg = ''
+    try {
+        & $task10Script -Setup -ConfigPath $task10Unread -Workspace $workspacePath
+    }
+    catch {
+        $task10DirMsg = [string]$_.Exception.Message
+    }
+    finally {
+        Remove-Item Function:\global:Read-Host -ErrorAction SilentlyContinue
+        Remove-Variable -Name task10ReadQueue -Scope Global -ErrorAction SilentlyContinue
+    }
+    Assert-True (($global:task10Prompts.Count -ge 1) -and ($global:task10Prompts[0] -like '*API base URL*')) ("-Setup with an unreadable config did not print the setup prompt. prompts=$($global:task10Prompts.Count) error=$task10DirMsg")
+    Remove-Variable -Name task10Prompts -Scope Global -ErrorAction SilentlyContinue
 
     # Regression: memory tool mutations advance $mutationEpoch and update $State.messages[0].content during Invoke-AgentTurn.
     $script:memTurnStep = 0

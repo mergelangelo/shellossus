@@ -249,7 +249,7 @@ function Invoke-AgentProfileInstall {
 
     $parent = Split-Path $ProfilePath -Parent
     if ($parent -and -not (Test-Path -LiteralPath $parent)) { New-Item -ItemType Directory -Path $parent -Force | Out-Null }
-    Set-Content -LiteralPath $ProfilePath -Value $updated -Encoding UTF8 -NoNewline
+    Set-Content -LiteralPath $ProfilePath -Value $updated -Encoding UTF8 -NoNewline -ErrorAction Stop
     Write-Host ($script:Gm.Green + "Command registered in: $ProfilePath" + $script:Gm.Reset)
     if ($chosenShortcut) {
         Write-Host ($script:Gm.Green + "Registered commands: shellossus, $chosenShortcut" + $script:Gm.Reset)
