@@ -2058,6 +2058,55 @@ try {
         $env:SHELLOSSUS_SESSION_FILE = $task8SavedEnvFile3
         Remove-Item Function:\Write-Host -ErrorAction SilentlyContinue
     }
+
+    # Regression (Task 9): -Mode json without -Prompt must not enter the REPL or print "You:".
+    # The failure is a JSONL error that names -Prompt. -Mode text without -Prompt still reads input.
+    $task9Cfg = Join-Path $testRoot 'task9-ready.env'
+    Save-AgentConfig -Path $task9Cfg -Config @{
+        SHELLOSSUS_BASE_URL = 'https://example.invalid/v1'
+        SHELLOSSUS_MODEL = 'test-model'
+        SHELLOSSUS_API_KEY = 'task9-key'
+    }
+    $task9Script = Join-Path $PSScriptRoot '..\shellossus.ps1'
+    $task9Shell = (Get-AgentEnvironment -Root $workspacePath).shell_exe
+    $task9Cases = @(
+        @{ label = 'text'; mode = 'text'; marker = 'task9-text-readhost.txt'; expectRead = $true },
+        @{ label = 'json'; mode = 'json'; marker = 'task9-json-readhost.txt'; expectRead = $false }
+    )
+    foreach ($task9Case in $task9Cases) {
+        $task9Marker = Join-Path $testRoot $task9Case.marker
+        if (Test-Path -LiteralPath $task9Marker) { Remove-Item -LiteralPath $task9Marker -Force }
+        $task9Out = Join-Path $testRoot ("task9-" + $task9Case.label + '.out')
+        $task9Err = Join-Path $testRoot ("task9-" + $task9Case.label + '.err')
+        $task9Cmd = "function global:Read-Host { param(`$Prompt) Set-Content -LiteralPath '$($task9Marker.Replace("'", "''"))' -Value 'called' -Encoding Ascii; return '/exit' }; `$env:SHELLOSSUS_BASE_URL = ''; `$env:SHELLOSSUS_MODEL = ''; `$env:SHELLOSSUS_API_KEY = ''; `$env:SHELLOSSUS_WORKSPACE = ''; & '$($task9Script.Replace("'", "''"))' -Mode $($task9Case.mode) -ConfigPath '$($task9Cfg.Replace("'", "''"))' -Workspace '$($workspacePath.Replace("'", "''"))' -NoSession"
+        $task9Args = Get-AgentCommandArguments -CommandText $task9Cmd
+        $task9Proc = Start-Process -FilePath $task9Shell -ArgumentList $task9Args -WorkingDirectory $workspacePath -RedirectStandardOutput $task9Out -RedirectStandardError $task9Err -NoNewWindow -PassThru
+        $task9Exited = $task9Proc.WaitForExit(20000)
+        if (-not $task9Exited) { Stop-Process -Id $task9Proc.Id -Force -ErrorAction SilentlyContinue }
+        $task9OutText = ''
+        $task9ErrText = ''
+        if (Test-Path -LiteralPath $task9Out) { $task9OutText = [string](Get-Content -LiteralPath $task9Out -Raw -ErrorAction SilentlyContinue) }
+        if (Test-Path -LiteralPath $task9Err) { $task9ErrText = [string](Get-Content -LiteralPath $task9Err -Raw -ErrorAction SilentlyContinue) }
+        Assert-True $task9Exited "shellossus -Mode $($task9Case.mode) without -Prompt did not exit. stderr: $task9ErrText"
+        $task9Read = Test-Path -LiteralPath $task9Marker
+        if ($task9Case.expectRead) {
+            Assert-True $task9Read "shellossus -Mode text without -Prompt did not call the Read-Host stand-in. stdout: $task9OutText stderr: $task9ErrText"
+        }
+        else {
+            Assert-True (-not $task9Read) 'shellossus -Mode json without -Prompt called the Read-Host stand-in.'
+            Assert-True ($task9OutText -notlike '*You:*') "shellossus -Mode json without -Prompt wrote a You: prompt to stdout: $task9OutText"
+            $task9SawPromptError = $false
+            foreach ($task9Line in @($task9OutText -split "[\r\n]+")) {
+                if (-not $task9Line.Trim()) { continue }
+                $task9Ev = $task9Line | ConvertFrom-Json -ErrorAction Stop
+                Assert-True ([bool]$task9Ev.type) "Unexpected non-JSON stdout in -Mode json without -Prompt: $task9Line"
+                if ($task9Ev.type -eq 'turn_end' -and $task9Ev.status -eq 'error' -and [string]$task9Ev.error -like '*-Prompt*') {
+                    $task9SawPromptError = $true
+                }
+            }
+            Assert-True $task9SawPromptError "Expected a JSONL turn_end error naming -Prompt. stdout: $task9OutText stderr: $task9ErrText"
+        }
+    }
 }
 finally {
     Remove-TestEnvironment -Env $envData

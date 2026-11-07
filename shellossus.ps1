@@ -11051,6 +11051,11 @@ if (-not $LibraryOnly) {
             }
             return
         }
+        if ($script:OutputMode -eq 'json') {
+            $jsonReplErr = '-Mode json requires -Prompt.'
+            Write-AgentJsonEvent -EventType 'turn_end' -Payload @{ status = 'error'; error = $jsonReplErr }
+            throw $jsonReplErr
+        }
         Write-TuiStartupBanner -RootPath $rootPath -ConfigDir $configDir -Model $Model
         while ($true) {
             Write-TuiPromptFrame -State $state -Root $rootPath -Model $Model -UndoCount $undoStack.Count
