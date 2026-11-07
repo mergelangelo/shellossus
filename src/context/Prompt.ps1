@@ -14,11 +14,59 @@ function Escape-XmlText {
     return $Text.Replace('&', '&amp;').Replace('<', '&lt;').Replace('>', '&gt;').Replace('"', '&quot;').Replace("'", '&apos;')
 }
 
+function Get-BoundedTextFiles {
+    param(
+        [string[]]$Paths,
+        [string]$Tag,
+        [int]$MaxChars = 8000,
+        [int]$MaxBytes = 262144
+    )
+    # Shared reader for context files. Missing paths, directories, reparse points, and files over MaxBytes are skipped.
+    # The same full path is read once. Text longer than MaxChars keeps the existing newline + "...(truncated)" suffix.
+    # soul and memory use the XML element. An empty tag keeps today's prose: AGENTS.md names its path, SYSTEM.md and APPEND_SYSTEM.md stay trimmed text.
+    # Config-dir files, including ~/.shellossus, are not checked against the workspace root.
+    $parts = @()
+    $seenFiles = @{}
+    $tagName = ''
+    if ($Tag) { $tagName = $Tag.ToLower() }
+    foreach ($cand in @($Paths)) {
+        if (-not $cand) { continue }
+        if (-not (Test-Path -LiteralPath $cand)) { continue }
+        $item = Get-Item -LiteralPath $cand -Force -ErrorAction SilentlyContinue
+        if (-not $item -or $item.PSIsContainer) { continue }
+        if (Test-PathHasReparsePoint -Path $item.FullName) { continue }
+        if ($item.Length -gt $MaxBytes) { continue }
+        $fullKey = $item.FullName.ToLower()
+        if ($seenFiles.ContainsKey($fullKey)) { continue }
+        $seenFiles[$fullKey] = $true
+        $text = Get-Content -LiteralPath $item.FullName -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
+        if (-not $text) { continue }
+        $isXml = (($tagName -eq 'soul') -or ($tagName -eq 'memory'))
+        $isAgentsProse = ((-not $tagName) -and ($item.Name -eq 'AGENTS.md'))
+        if ($isXml -or (-not $isAgentsProse)) {
+            if (-not $text.Trim()) { continue }
+        }
+        if (($MaxChars -gt 0) -and ($text.Length -gt $MaxChars)) {
+            $text = $text.Substring(0, $MaxChars) + "`n...(truncated)"
+        }
+        $trimmed = $text.Trim()
+        if ($isXml) {
+            $escapedSource = Escape-XmlText -Text $item.FullName
+            $parts += ("<$tagName source=`"$escapedSource`">`n" + $trimmed + "`n</$tagName>")
+        }
+        elseif ($isAgentsProse) {
+            $parts += ("Project instructions from " + $item.FullName + ":`n" + $trimmed)
+        }
+        elseif ($trimmed) {
+            $parts += $trimmed
+        }
+    }
+    return (@($parts) -join "`n`n")
+}
+
 function Get-SoulContext {
     param([string]$Root, [string]$ConfigDir)
     if ($script:NoContextFiles) { return '' }
-    $parts = @()
-    $seenFiles = @{}
     $candidates = @()
     if ($ConfigDir) {
         foreach ($name in @('SOUL.md', 'ETHOS.md', 'SHELLOSSUS.md')) {
@@ -31,30 +79,12 @@ function Get-SoulContext {
             $candidates += (Join-Path $Root $name)
         }
     }
-    foreach ($cand in $candidates) {
-        if ($cand -and (Test-Path -LiteralPath $cand)) {
-            $item = Get-Item -LiteralPath $cand -Force -ErrorAction SilentlyContinue
-            if ($item -and (-not $item.PSIsContainer) -and (($item.Attributes -band 1024) -eq 0) -and $item.Length -le 256KB) {
-                $fullKey = $item.FullName.ToLower()
-                if ($seenFiles.ContainsKey($fullKey)) { continue }
-                $seenFiles[$fullKey] = $true
-                $text = Get-Content -LiteralPath $item.FullName -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
-                if ($text -and $text.Trim()) {
-                    if ($text.Length -gt 8000) { $text = $text.Substring(0, 8000) + "`n...(truncated)" }
-                    $escapedSource = Escape-XmlText -Text $item.FullName
-                    $parts += ("<soul source=`"$escapedSource`">`n" + $text.Trim() + "`n</soul>")
-                }
-            }
-        }
-    }
-    return ($parts -join "`n`n")
+    return (Get-BoundedTextFiles -Paths $candidates -Tag 'soul')
 }
 
 function Get-MemoryContext {
     param([string]$Root, [string]$ConfigDir)
     if ($script:NoContextFiles) { return '' }
-    $parts = @()
-    $seenFiles = @{}
     $candidates = @()
     if ($ConfigDir) {
         $candidates += (Join-Path $ConfigDir 'MEMORY.md')
@@ -63,23 +93,7 @@ function Get-MemoryContext {
         $candidates += (Join-Path (Join-Path $Root '.shellossus') 'MEMORY.md')
         $candidates += (Join-Path $Root 'MEMORY.md')
     }
-    foreach ($cand in $candidates) {
-        if ($cand -and (Test-Path -LiteralPath $cand)) {
-            $item = Get-Item -LiteralPath $cand -Force -ErrorAction SilentlyContinue
-            if ($item -and (-not $item.PSIsContainer) -and (($item.Attributes -band 1024) -eq 0) -and $item.Length -le 256KB) {
-                $fullKey = $item.FullName.ToLower()
-                if ($seenFiles.ContainsKey($fullKey)) { continue }
-                $seenFiles[$fullKey] = $true
-                $text = Get-Content -LiteralPath $item.FullName -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
-                if ($text -and $text.Trim()) {
-                    if ($text.Length -gt 8000) { $text = $text.Substring(0, 8000) + "`n...(truncated)" }
-                    $escapedSource = Escape-XmlText -Text $item.FullName
-                    $parts += ("<memory source=`"$escapedSource`">`n" + $text.Trim() + "`n</memory>")
-                }
-            }
-        }
-    }
-    return ($parts -join "`n`n")
+    return (Get-BoundedTextFiles -Paths $candidates -Tag 'memory')
 }
 
 function Sync-AgentMemoryContext {
@@ -135,8 +149,6 @@ function Sync-AgentMemoryContext {
 function Get-AgentsContext {
     param([string]$Root, [string]$ConfigDir)
     if ($script:NoContextFiles) { return '' }
-    $parts = @()
-    $seenFiles = @{}
     $candidates = @()
     if ($ConfigDir) {
         $candidates += (Join-Path $ConfigDir 'AGENTS.md')
@@ -144,22 +156,7 @@ function Get-AgentsContext {
     if ($Root) {
         $candidates += (Join-Path $Root 'AGENTS.md')
     }
-    foreach ($cand in $candidates) {
-        if ($cand -and (Test-Path -LiteralPath $cand)) {
-            $item = Get-Item -LiteralPath $cand -Force -ErrorAction SilentlyContinue
-            if ($item -and (-not $item.PSIsContainer) -and (($item.Attributes -band 1024) -eq 0) -and $item.Length -le 256KB) {
-                $fullKey = $item.FullName.ToLower()
-                if ($seenFiles.ContainsKey($fullKey)) { continue }
-                $seenFiles[$fullKey] = $true
-                $text = Get-Content -LiteralPath $item.FullName -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
-                if ($text) {
-                    if ($text.Length -gt 8000) { $text = $text.Substring(0, 8000) + "`n...(truncated)" }
-                    $parts += ("Project instructions from " + $item.FullName + ":`n" + $text.Trim())
-                }
-            }
-        }
-    }
-    return ($parts -join "`n`n")
+    return (Get-BoundedTextFiles -Paths $candidates -Tag '')
 }
 
 function Get-ScopedAgentInstructions {
@@ -364,13 +361,9 @@ function Build-SystemPrompt {
     }
     if ($ConfigDir) { $sysCandidates += (Join-Path $ConfigDir 'SYSTEM.md') }
     foreach ($cand in $sysCandidates) {
-        if ($cand -and (Test-Path -LiteralPath $cand)) {
-            $cItem = Get-Item -LiteralPath $cand -Force -ErrorAction SilentlyContinue
-            if ($cItem -and (-not $cItem.PSIsContainer) -and (($cItem.Attributes -band 1024) -eq 0) -and $cItem.Length -le 256KB) {
-                $customSys = Get-Content -LiteralPath $cItem.FullName -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
-                if ($customSys -and $customSys.Trim()) { $basePrompt = $customSys.Trim(); break }
-            }
-        }
+        # Byte cap only. These files were not char-truncated before the shared reader.
+        $customSys = Get-BoundedTextFiles -Paths @($cand) -Tag '' -MaxChars 262144
+        if ($customSys) { $basePrompt = $customSys; break }
     }
     $basePrompt += "`n`n" + (Format-CapabilitiesPromptBlock -Root $Root)
     $appendCandidates = @()
@@ -379,15 +372,8 @@ function Build-SystemPrompt {
         $appendCandidates += (Join-Path $Root '.shellossus/APPEND_SYSTEM.md')
         $appendCandidates += (Join-Path $Root '.h-agent/APPEND_SYSTEM.md')
     }
-    foreach ($cand in $appendCandidates) {
-        if ($cand -and (Test-Path -LiteralPath $cand)) {
-            $cItem = Get-Item -LiteralPath $cand -Force -ErrorAction SilentlyContinue
-            if ($cItem -and (-not $cItem.PSIsContainer) -and (($cItem.Attributes -band 1024) -eq 0) -and $cItem.Length -le 256KB) {
-                $appText = Get-Content -LiteralPath $cItem.FullName -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
-                if ($appText -and $appText.Trim()) { $basePrompt += "`n`n" + $appText.Trim() }
-            }
-        }
-    }
+    $appendText = Get-BoundedTextFiles -Paths $appendCandidates -Tag '' -MaxChars 262144
+    if ($appendText) { $basePrompt += "`n`n" + $appendText }
     $soulText = Get-SoulContext -Root $Root -ConfigDir $ConfigDir
     if ($soulText) { $basePrompt += "`n`n" + $soulText }
     $memText = Get-MemoryContext -Root $Root -ConfigDir $ConfigDir
