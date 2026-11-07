@@ -117,27 +117,40 @@ function Invoke-TruncateLine {
     return @{ text = ($Line.Substring(0, $MaxChars) + '... [truncated]'); wasTruncated = $true; was_truncated = $true }
 }
 
+function New-TruncateResult {
+    param(
+        [string]$Content, [bool]$Truncated, $TruncatedBy,
+        [int]$TotalLines, [int]$TotalBytes, [int]$OutputLines, [int]$OutputBytes,
+        [bool]$LastLinePartial, [bool]$FirstLineExceedsLimit,
+        [int]$MaxLines, [int]$MaxBytes
+    )
+    return @{
+        content = $Content
+        truncated = $Truncated
+        truncatedBy = $TruncatedBy
+        truncated_by = $TruncatedBy
+        totalLines = $TotalLines
+        total_lines = $TotalLines
+        totalBytes = $TotalBytes
+        total_bytes = $TotalBytes
+        outputLines = $OutputLines
+        output_lines = $OutputLines
+        outputBytes = $OutputBytes
+        output_bytes = $OutputBytes
+        lastLinePartial = $LastLinePartial
+        firstLineExceedsLimit = $FirstLineExceedsLimit
+        maxLines = $MaxLines
+        maxBytes = $MaxBytes
+    }
+}
+
 function Invoke-TruncateHead {
     param([string]$Content, [int]$MaxLines = 2000, [int]$MaxBytes = 51200)
     if (-not $Content) {
-        return @{
-            content = ''
-            truncated = $false
-            truncatedBy = $null
-            truncated_by = $null
-            totalLines = 0
-            total_lines = 0
-            totalBytes = 0
-            total_bytes = 0
-            outputLines = 0
-            output_lines = 0
-            outputBytes = 0
-            output_bytes = 0
-            lastLinePartial = $false
-            firstLineExceedsLimit = $false
-            maxLines = $MaxLines
-            maxBytes = $MaxBytes
-        }
+        return (New-TruncateResult -Content '' -Truncated $false -TruncatedBy $null `
+            -TotalLines 0 -TotalBytes 0 -OutputLines 0 -OutputBytes 0 `
+            -LastLinePartial $false -FirstLineExceedsLimit $false `
+            -MaxLines $MaxLines -MaxBytes $MaxBytes)
     }
     $norm = $Content.Replace("`r`n", "`n")
     $lines = @($norm -split "`n")
@@ -148,44 +161,16 @@ function Invoke-TruncateHead {
     $totalLines = $lines.Count
     $totalBytes = $norm.Length
     if ($totalLines -le $MaxLines -and $totalBytes -le $MaxBytes) {
-        return @{
-            content = $norm
-            truncated = $false
-            truncatedBy = $null
-            truncated_by = $null
-            totalLines = $totalLines
-            total_lines = $totalLines
-            totalBytes = $totalBytes
-            total_bytes = $totalBytes
-            outputLines = $totalLines
-            output_lines = $totalLines
-            outputBytes = $totalBytes
-            output_bytes = $totalBytes
-            lastLinePartial = $false
-            firstLineExceedsLimit = $false
-            maxLines = $MaxLines
-            maxBytes = $MaxBytes
-        }
+        return (New-TruncateResult -Content $norm -Truncated $false -TruncatedBy $null `
+            -TotalLines $totalLines -TotalBytes $totalBytes -OutputLines $totalLines -OutputBytes $totalBytes `
+            -LastLinePartial $false -FirstLineExceedsLimit $false `
+            -MaxLines $MaxLines -MaxBytes $MaxBytes)
     }
     if ($lines.Count -gt 0 -and ([string]$lines[0]).Length -gt $MaxBytes) {
-        return @{
-            content = ''
-            truncated = $true
-            truncatedBy = 'bytes'
-            truncated_by = 'bytes'
-            totalLines = $totalLines
-            total_lines = $totalLines
-            totalBytes = $totalBytes
-            total_bytes = $totalBytes
-            outputLines = 0
-            output_lines = 0
-            outputBytes = 0
-            output_bytes = 0
-            lastLinePartial = $false
-            firstLineExceedsLimit = $true
-            maxLines = $MaxLines
-            maxBytes = $MaxBytes
-        }
+        return (New-TruncateResult -Content '' -Truncated $true -TruncatedBy 'bytes' `
+            -TotalLines $totalLines -TotalBytes $totalBytes -OutputLines 0 -OutputBytes 0 `
+            -LastLinePartial $false -FirstLineExceedsLimit $true `
+            -MaxLines $MaxLines -MaxBytes $MaxBytes)
     }
     $outBytes = 0
     $truncBy = 'lines'
@@ -203,47 +188,19 @@ function Invoke-TruncateHead {
         $truncBy = 'lines'
     }
     $outText = $outLines -join "`n"
-    return @{
-        content = $outText
-        truncated = $true
-        truncatedBy = $truncBy
-        truncated_by = $truncBy
-        totalLines = $totalLines
-        total_lines = $totalLines
-        totalBytes = $totalBytes
-        total_bytes = $totalBytes
-        outputLines = $outLines.Count
-        output_lines = $outLines.Count
-        outputBytes = $outText.Length
-        output_bytes = $outText.Length
-        lastLinePartial = $false
-        firstLineExceedsLimit = $false
-        maxLines = $MaxLines
-        maxBytes = $MaxBytes
-    }
+    return (New-TruncateResult -Content $outText -Truncated $true -TruncatedBy $truncBy `
+        -TotalLines $totalLines -TotalBytes $totalBytes -OutputLines $outLines.Count -OutputBytes $outText.Length `
+        -LastLinePartial $false -FirstLineExceedsLimit $false `
+        -MaxLines $MaxLines -MaxBytes $MaxBytes)
 }
 
 function Invoke-TruncateTail {
     param([string]$Content, [int]$MaxLines = 2000, [int]$MaxBytes = 51200)
     if (-not $Content) {
-        return @{
-            content = ''
-            truncated = $false
-            truncatedBy = $null
-            truncated_by = $null
-            totalLines = 0
-            total_lines = 0
-            totalBytes = 0
-            total_bytes = 0
-            outputLines = 0
-            output_lines = 0
-            outputBytes = 0
-            output_bytes = 0
-            lastLinePartial = $false
-            firstLineExceedsLimit = $false
-            maxLines = $MaxLines
-            maxBytes = $MaxBytes
-        }
+        return (New-TruncateResult -Content '' -Truncated $false -TruncatedBy $null `
+            -TotalLines 0 -TotalBytes 0 -OutputLines 0 -OutputBytes 0 `
+            -LastLinePartial $false -FirstLineExceedsLimit $false `
+            -MaxLines $MaxLines -MaxBytes $MaxBytes)
     }
     $norm = $Content.Replace("`r`n", "`n")
     $lines = @($norm -split "`n")
@@ -254,24 +211,10 @@ function Invoke-TruncateTail {
     $totalLines = $lines.Count
     $totalBytes = $norm.Length
     if ($totalLines -le $MaxLines -and $totalBytes -le $MaxBytes) {
-        return @{
-            content = $norm
-            truncated = $false
-            truncatedBy = $null
-            truncated_by = $null
-            totalLines = $totalLines
-            total_lines = $totalLines
-            totalBytes = $totalBytes
-            total_bytes = $totalBytes
-            outputLines = $totalLines
-            output_lines = $totalLines
-            outputBytes = $totalBytes
-            output_bytes = $totalBytes
-            lastLinePartial = $false
-            firstLineExceedsLimit = $false
-            maxLines = $MaxLines
-            maxBytes = $MaxBytes
-        }
+        return (New-TruncateResult -Content $norm -Truncated $false -TruncatedBy $null `
+            -TotalLines $totalLines -TotalBytes $totalBytes -OutputLines $totalLines -OutputBytes $totalBytes `
+            -LastLinePartial $false -FirstLineExceedsLimit $false `
+            -MaxLines $MaxLines -MaxBytes $MaxBytes)
     }
     $outBytes = 0
     $truncBy = 'lines'
@@ -298,24 +241,10 @@ function Invoke-TruncateTail {
         $truncBy = 'lines'
     }
     $outText = $outLines -join "`n"
-    return @{
-        content = $outText
-        truncated = $true
-        truncatedBy = $truncBy
-        truncated_by = $truncBy
-        totalLines = $totalLines
-        total_lines = $totalLines
-        totalBytes = $totalBytes
-        total_bytes = $totalBytes
-        outputLines = $outLines.Count
-        output_lines = $outLines.Count
-        outputBytes = $outText.Length
-        output_bytes = $outText.Length
-        lastLinePartial = $lastPartial
-        firstLineExceedsLimit = $false
-        maxLines = $MaxLines
-        maxBytes = $MaxBytes
-    }
+    return (New-TruncateResult -Content $outText -Truncated $true -TruncatedBy $truncBy `
+        -TotalLines $totalLines -TotalBytes $totalBytes -OutputLines $outLines.Count -OutputBytes $outText.Length `
+        -LastLinePartial $lastPartial -FirstLineExceedsLimit $false `
+        -MaxLines $MaxLines -MaxBytes $MaxBytes)
 }
 
 function Get-AgentEnvironment {
