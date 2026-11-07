@@ -783,6 +783,21 @@ try {
     $bannerMemoryAt = $bannerText.IndexOf('MEMORY.md')
     $bannerAgentsAt = $bannerText.IndexOf('AGENTS.md')
     Assert-True (($bannerSoulAt -ge 0) -and ($bannerMemoryAt -gt $bannerSoulAt) -and ($bannerAgentsAt -gt $bannerMemoryAt)) 'Startup banner no longer names SOUL.md, MEMORY.md, and AGENTS.md.'
+
+    # Regression (Task 2): Find-CompactionCutPoint must never return a tool message index even when recent messages end with tool results.
+    $toolTailMsgs = @(
+        @{ role = 'system'; content = 'sys' },
+        @{ role = 'user'; content = 'u1' },
+        @{ role = 'assistant'; content = ''; tool_calls = @(@{ id = 'c1'; function = @{ name = 'read_file'; arguments = '{}' } }) },
+        @{ role = 'tool'; tool_call_id = 'c1'; content = 'r1' },
+        @{ role = 'tool'; tool_call_id = 'c2'; content = 'r2' },
+        @{ role = 'tool'; tool_call_id = 'c3'; content = 'r3' }
+    )
+    $cutRes = Find-CompactionCutPoint -Messages $toolTailMsgs -StartIndex 1 -KeepRecent 2
+    Assert-True ($toolTailMsgs[$cutRes.cut_index].role -ne 'tool') "Expected non-tool cut_index, got $($cutRes.cut_index) with role=$($toolTailMsgs[$cutRes.cut_index].role)."
+    Assert-True ($cutRes.cut_index -eq 2) "Expected cut_index=2 (assistant with tool_calls), got $($cutRes.cut_index)."
+    $cutResStart2 = Find-CompactionCutPoint -Messages $toolTailMsgs -StartIndex 2 -KeepRecent 2
+    Assert-True ($toolTailMsgs[$cutResStart2.cut_index].role -ne 'tool' -and $cutResStart2.cut_index -eq 2) "Expected cut_index=2 when StartIndex=2, got $($cutResStart2.cut_index)."
 }
 finally {
     Remove-TestEnvironment -Env $envData

@@ -138,16 +138,24 @@ function Find-CompactionCutPoint {
     }
     if ($targetCut -lt $startIdx) { $targetCut = $startIdx }
     if ($targetCut -ge $Messages.Count) { $targetCut = $Messages.Count - 1 }
-    while ($targetCut -gt $startIdx -and $Messages[$targetCut].role -eq 'tool') {
-        $targetCut--
-    }
-    if ($targetCut -le $startIdx) {
-        $targetCut = $Messages.Count - $KeepRecent
-        if ($targetCut -lt $startIdx) { $targetCut = $startIdx }
-        while ($targetCut -lt ($Messages.Count - 1) -and $Messages[$targetCut].role -eq 'tool') {
-            $targetCut++
+    $chosenCut = $validCuts[0]
+    foreach ($vc in $validCuts) {
+        if ($vc -le $targetCut) {
+            $chosenCut = $vc
+        }
+        else {
+            break
         }
     }
+    if ($chosenCut -le $startIdx -and $validCuts.Count -gt 1) {
+        foreach ($vc in $validCuts) {
+            if ($vc -gt $startIdx) {
+                $chosenCut = $vc
+                break
+            }
+        }
+    }
+    $targetCut = $chosenCut
     $isSplit = $false
     $turnStart = -1
     if ($targetCut -gt $startIdx -and $Messages[$targetCut].role -eq 'assistant') {

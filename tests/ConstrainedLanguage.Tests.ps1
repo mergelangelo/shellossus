@@ -317,6 +317,40 @@ try {
     $bundledText = Get-Content -LiteralPath "$PSScriptRoot\..\shellossus.ps1" -Raw -Encoding UTF8
     $forbiddenTempCmd = 'New-' + 'TemporaryFile'
     Assert-True (-not $bundledText.Contains($forbiddenTempCmd)) 'shellossus.ps1 must use New-AgentTempFile instead of the legacy utility temp-file cmdlet.'
+
+    # Regression (Batch 1 in ConstrainedLanguage):
+    # Task 1: single-letter relative paths with colons rejected in ConstrainedLanguage
+    $clColonWriteBlocked = $false
+    try { Resolve-AgentWriteTarget -Root $workspacePath -RelativePath 'c:secret.txt' | Out-Null }
+    catch { if ($_.Exception.Message -eq 'Invalid path syntax.') { $clColonWriteBlocked = $true } }
+    Assert-True $clColonWriteBlocked 'ConstrainedLanguage Resolve-AgentWriteTarget did not reject c:secret.txt.'
+
+    $clColonReadBlocked = $false
+    try { Resolve-AgentPath -Root $workspacePath -RelativePath 'a:.env' | Out-Null }
+    catch { if ($_.Exception.Message -eq 'Invalid path syntax.') { $clColonReadBlocked = $true } }
+    Assert-True $clColonReadBlocked 'ConstrainedLanguage Resolve-AgentPath did not reject a:.env.'
+
+    # Task 2: Find-CompactionCutPoint never cuts on a tool message in ConstrainedLanguage
+    $clToolTailMsgs = @(
+        @{ role = 'system'; content = 'sys' },
+        @{ role = 'user'; content = 'u1' },
+        @{ role = 'assistant'; content = ''; tool_calls = @(@{ id = 'c1'; function = @{ name = 'read_file'; arguments = '{}' } }) },
+        @{ role = 'tool'; tool_call_id = 'c1'; content = 'r1' },
+        @{ role = 'tool'; tool_call_id = 'c2'; content = 'r2' }
+    )
+    $clCutRes = Find-CompactionCutPoint -Messages $clToolTailMsgs -StartIndex 1 -KeepRecent 1
+    Assert-True ($clToolTailMsgs[$clCutRes.cut_index].role -ne 'tool' -and $clCutRes.cut_index -eq 2) 'ConstrainedLanguage Find-CompactionCutPoint cut on a tool message.'
+
+    # Task 3 & Task 4: /**/ candidate expansion in find_files and single-file grep_files filtering in ConstrainedLanguage
+    $clFindGlob = Invoke-AgentTool -Root $workspacePath -Call @{ id = 'cl-fglob'; function = @{ name = 'find_files'; arguments = '{"path":".","pattern":"a/**/*.txt"}' } } | ConvertFrom-Json
+    $clFoundGlobPaths = @($clFindGlob.matches | ForEach-Object { $_.path })
+    Assert-True ($clFoundGlobPaths -contains 'a/b/keep.txt') 'ConstrainedLanguage find_files with a/**/*.txt failed.'
+
+    $clSingleGrepIg = Invoke-AgentTool -Root $workspacePath -Call @{ id = 'cl-sg-ig'; function = @{ name = 'grep_files'; arguments = '{"path":"a/b/private.log","pattern":"secret"}' } } | ConvertFrom-Json
+    Assert-True (@($clSingleGrepIg.matches).Count -eq 0) 'ConstrainedLanguage single-file grep_files did not enforce .gitignore.'
+
+    $clSingleGrepInc = Invoke-AgentTool -Root $workspacePath -Call @{ id = 'cl-sg-inc'; function = @{ name = 'grep_files'; arguments = '{"path":"a/b/keep.txt","pattern":"public","include":"*.ps1"}' } } | ConvertFrom-Json
+    Assert-True (@($clSingleGrepInc.matches).Count -eq 0) 'ConstrainedLanguage single-file grep_files did not enforce include filter.'
 }
 finally {
     Remove-TestEnvironment -Env $envData

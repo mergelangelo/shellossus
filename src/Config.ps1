@@ -231,7 +231,7 @@ function Resolve-ExistingPathAncestor {
 function Resolve-AgentWriteTarget {
     param([string]$Root, [string]$RelativePath)
     if ($RelativePath -match '[/\\]$') { throw 'Invalid file name.' }
-    if (($RelativePath -replace '^[a-zA-Z]:', '').Contains(':')) { throw 'Invalid path syntax.' }
+    if (($RelativePath -replace '^[a-zA-Z]:(?=[/\\]|$)', '').Contains(':')) { throw 'Invalid path syntax.' }
     $rawParent = Split-Path $RelativePath -Parent
     $parentRel = if ($rawParent) { $rawParent } else { '.' }
     $ancestor = Resolve-ExistingPathAncestor -Root $Root -RelativePath $parentRel
@@ -379,7 +379,7 @@ function Set-AgentUtf8Content {
 function Resolve-AgentPath {
     param([string]$Root, [string]$RelativePath, [switch]$AllowRegisteredSkill)
     if (-not $RelativePath) { $RelativePath = '.' }
-    if (($RelativePath -replace '^[a-zA-Z]:', '').Contains(':')) { throw 'Invalid path syntax.' }
+    if (($RelativePath -replace '^[a-zA-Z]:(?=[/\\]|$)', '').Contains(':')) { throw 'Invalid path syntax.' }
     if ($AllowRegisteredSkill -and $script:RegisteredSkills -and $script:RegisteredSkills.Count -gt 0) {
         $skillTarget = $null
         $slash = $RelativePath.Replace('\', '/')

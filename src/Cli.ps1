@@ -1,6 +1,8 @@
 # CLI entrypoint: interactive setup, configuration resolution, single-shot execution, and interactive REPL loop.
 
 if (-not $LibraryOnly) {
+    $script:OutputMode = if ($Mode) { $Mode.ToLower() } else { 'text' }
+    if ($script:OutputMode -notin @('text', 'json')) { throw 'Mode must be text or json.' }
     if ($Install) {
         $targetAgentPath = if ($PSCommandPath) { $PSCommandPath } else { Join-Path $PSScriptRoot 'shellossus.ps1' }
         Invoke-AgentProfileInstall -AgentPath $targetAgentPath -ProfilePath $ProfilePath -Shortcut $Shortcut -ShortcutSpecified:($PSBoundParameters.Keys -contains 'Shortcut') -NoShortcut:$NoShortcut
@@ -15,7 +17,10 @@ if (-not $LibraryOnly) {
         $config = Read-AgentConfig -Path $ConfigPath
     }
     catch {
-        if (-not $Doctor) { throw }
+        if (-not $Doctor) {
+            Write-AgentJsonEvent -EventType 'turn_end' -Payload @{ status = 'error'; error = $_.Exception.Message }
+            throw
+        }
         $doctorConfigState = 'invalid'
     }
     if (-not $Theme -and $config.SHELLOSSUS_THEME) { $Theme = $config.SHELLOSSUS_THEME }
@@ -24,7 +29,10 @@ if (-not $LibraryOnly) {
             $null = Set-AgentTheme -Name $Theme
         }
         catch {
-            if (-not $Doctor) { throw }
+            if (-not $Doctor) {
+                Write-AgentJsonEvent -EventType 'turn_end' -Payload @{ status = 'error'; error = $_.Exception.Message }
+                throw
+            }
         }
     }
     if ($Setup -and -not $Doctor) {
@@ -113,10 +121,18 @@ if (-not $LibraryOnly) {
         return
     }
     if (-not $Export) {
-        if (-not $BaseUrl) { $BaseUrl = Read-Host 'API base URL (including /v1)' }
-        if (-not (Test-ValidAgentBaseUrl -Url $BaseUrl)) { throw 'An HTTPS base URL (or http://localhost / http://127.0.0.1 for local servers) is required. Run: shellossus -Setup' }
-        if (-not $Model) { $Model = Read-Host 'Model ID' }
-        if (-not $Model) { throw 'Model ID is required.' }
+        if (-not $BaseUrl -and $script:OutputMode -ne 'json') { $BaseUrl = Read-Host 'API base URL (including /v1)' }
+        if (-not (Test-ValidAgentBaseUrl -Url $BaseUrl)) {
+            $urlErr = 'An HTTPS base URL (or http://localhost / http://127.0.0.1 for local servers) is required. Run: shellossus -Setup'
+            Write-AgentJsonEvent -EventType 'turn_end' -Payload @{ status = 'error'; error = $urlErr }
+            throw $urlErr
+        }
+        if (-not $Model -and $script:OutputMode -ne 'json') { $Model = Read-Host 'Model ID' }
+        if (-not $Model) {
+            $mdlErr = 'Model ID is required.'
+            Write-AgentJsonEvent -EventType 'turn_end' -Payload @{ status = 'error'; error = $mdlErr }
+            throw $mdlErr
+        }
     }
     if ($MaxSteps -lt 1 -or $MaxSteps -gt 500) { throw 'MaxSteps must be between 1 and 500.' }
     if ($MaxRepeatCalls -lt 1 -or $MaxRepeatCalls -gt 50) { throw 'MaxRepeatCalls must be between 1 and 50.' }
@@ -129,8 +145,6 @@ if (-not $LibraryOnly) {
     if ($Permission -notin @('ReadOnly', 'Ask', 'AutoEdit', 'Auto')) { throw 'Permission must be one of: ReadOnly, Ask, AutoEdit, Auto.' }
     $script:AgentPermission = $Permission
     $script:Diagnostics = [bool]$Diagnostics
-    $script:OutputMode = if ($Mode) { $Mode.ToLower() } else { 'text' }
-    if ($script:OutputMode -notin @('text', 'json')) { throw 'Mode must be text or json.' }
     $script:NoTools = [bool]$NoTools
     $script:EnabledTools = @(if ($Tools) { $Tools -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ } })
     $script:ExcludedTools = @(if ($ExcludeTools) { $ExcludeTools -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ } })
@@ -152,11 +166,15 @@ if (-not $LibraryOnly) {
         if (-not $agentKey -and (Test-IsLoopbackBaseUrl -Url $BaseUrl)) {
             $agentKey = 'local'
         }
-        if (-not $agentKey) {
+        if (-not $agentKey -and $script:OutputMode -ne 'json') {
             Write-Host ($script:Gm.Yellow + 'Key input is visible. Run shellossus -Setup to save settings for next time.' + $script:Gm.Reset)
             $agentKey = Read-Host 'API key'
         }
-        if (-not $agentKey) { throw 'API key is required.' }
+        if (-not $agentKey) {
+            $keyErr = 'API key is required.'
+            Write-AgentJsonEvent -EventType 'turn_end' -Payload @{ status = 'error'; error = $keyErr }
+            throw $keyErr
+        }
     }
     else {
         $config.Clear()

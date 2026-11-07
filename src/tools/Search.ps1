@@ -24,6 +24,48 @@ function Invoke-AgentListFiles {
     } | ConvertTo-Json -Depth 5 -Compress)
 }
 
+function Get-GlobCandidatePatterns {
+    param([string]$Pattern)
+    if (-not $Pattern) { return @() }
+    $normPat = $Pattern.Replace('\', '/').TrimStart('/')
+    if (-not $normPat) { return @($Pattern) }
+    $candPats = @($normPat)
+    while ($true) {
+        $addedPat = $false
+        foreach ($cp in @($candPats)) {
+            if ($cp.StartsWith('**/')) {
+                $trimmedLead = $cp.Substring(3)
+                if ($trimmedLead -and ($candPats -notcontains $trimmedLead)) {
+                    $candPats += $trimmedLead
+                    $addedPat = $true
+                }
+            }
+            $scanPos = 0
+            while ($scanPos -lt $cp.Length) {
+                $rem = $cp.Substring($scanPos)
+                $relIdx = $rem.IndexOf('/**/')
+                if ($relIdx -lt 0) { break }
+                $absIdx = $scanPos + $relIdx
+                $collapsedMid = $cp.Substring(0, $absIdx) + '/' + $cp.Substring($absIdx + 4)
+                if ($collapsedMid -and ($candPats -notcontains $collapsedMid)) {
+                    $candPats += $collapsedMid
+                    $addedPat = $true
+                }
+                $scanPos = $absIdx + 3
+            }
+            if ($cp.EndsWith('/**')) {
+                $trimmedTrail = $cp.Substring(0, $cp.Length - 3)
+                if ($trimmedTrail -and ($candPats -notcontains $trimmedTrail)) {
+                    $candPats += $trimmedTrail
+                    $addedPat = $true
+                }
+            }
+        }
+        if (-not $addedPat -or $candPats.Count -ge 16) { break }
+    }
+    return @($candPats)
+}
+
 function Invoke-AgentFindFiles {
     param([string]$Root, [string]$Path, $Item, $Arguments, [datetime]$ToolStart)
     if (-not $Item.PSIsContainer) { throw 'Expected a directory.' }
@@ -35,8 +77,7 @@ function Invoke-AgentFindFiles {
     }
     $rawPat = $Arguments.pattern.Trim()
     $isPathPat = ($rawPat.Contains('/') -or $rawPat.Contains('\'))
-    $normPat = $rawPat.Replace('\', '/').TrimStart('/')
-    $altPat = if ($normPat.StartsWith('**/')) { $normPat.Substring(3) } else { '' }
+    $candPats = @(Get-GlobCandidatePatterns -Pattern $rawPat)
     $truncated = $false
     $matchCount = 0
     $found = @(foreach ($walkEntry in @(Get-WorkspaceWalkEntries -Root $Root -SearchPath $Path)) {
@@ -44,7 +85,14 @@ function Invoke-AgentFindFiles {
         $relPath = $walkEntry.rel_path
         $relToSearch = Get-WorkspaceRelativePath -Root $Path -FullPath $child.FullName
         $isMatch = if ($isPathPat) {
-            ($relPath -like $normPat) -or ($relToSearch -like $normPat) -or ($altPat -and (($relPath -like $altPat) -or ($relToSearch -like $altPat)))
+            $matchedPat = $false
+            foreach ($cp in $candPats) {
+                if (($relPath -like $cp) -or ($relToSearch -like $cp)) {
+                    $matchedPat = $true
+                    break
+                }
+            }
+            $matchedPat
         }
         else {
             ($child.Name -like $rawPat)
@@ -73,10 +121,10 @@ function Invoke-AgentGrepFiles {
     $isLiteral = ($Arguments.literal -eq $true)
     $isCaseSensitive = ($Arguments.case_sensitive -eq $true)
     $includeFilter = if ($Arguments.include -is [string] -and $Arguments.include.Trim()) {
-        $Arguments.include.Trim()
+        $Arguments.include.Trim().Replace('\', '/')
     }
     elseif ($Arguments.glob -is [string] -and $Arguments.glob.Trim()) {
-        $Arguments.glob.Trim()
+        $Arguments.glob.Trim().Replace('\', '/')
     }
     else {
         ''
@@ -101,17 +149,40 @@ function Invoke-AgentGrepFiles {
         $startLine = [int]$Arguments.start_line
         if ($startLine -lt 1) { throw 'start_line must be at least 1.' }
     }
+    $includePatterns = @(if ($includeFilter) { Get-GlobCandidatePatterns -Pattern $includeFilter } else { @() })
     $allCandidateFiles = @(if ($Item.PSIsContainer) {
         foreach ($walkEntry in @(Get-WorkspaceWalkEntries -Root $Root -SearchPath $Path -FilesOnly)) {
             $child = $walkEntry.item
             $relCandidate = $walkEntry.rel_path
-            if ($includeFilter -and ($child.Name -notlike $includeFilter) -and ($relCandidate -notlike $includeFilter)) { continue }
+            if ($includePatterns.Count -gt 0) {
+                $incMatched = $false
+                foreach ($incPat in $includePatterns) {
+                    if (($child.Name -like $incPat) -or ($relCandidate -like $incPat)) {
+                        $incMatched = $true
+                        break
+                    }
+                }
+                if (-not $incMatched) { continue }
+            }
             if ($child.Length -le 1MB) { $child.FullName }
         }
     }
     else {
         if ($Item.Length -gt 1MB) { throw 'File exceeds 1 MiB.' }
-        $Item.FullName
+        $relSingle = Get-WorkspaceRelativePath -Root $Root -FullPath $Item.FullName
+        $incOk = ($includePatterns.Count -eq 0)
+        foreach ($incPat in $includePatterns) {
+            if (($Item.Name -like $incPat) -or ($relSingle -like $incPat)) {
+                $incOk = $true
+                break
+            }
+        }
+        if ($incOk) {
+            $singleRules = @(Get-WorkspaceIgnoreRules -Root $Root -SearchPath $Item.FullName)
+            if (-not (Test-PathIgnored -RelativePath $relSingle -IsDir $false -Rules $singleRules)) {
+                $Item.FullName
+            }
+        }
     })
     # Offsets are stable while the candidate file set is unchanged.
     $allCandidateFiles = @($allCandidateFiles | Sort-Object -CaseSensitive)

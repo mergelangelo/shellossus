@@ -399,6 +399,25 @@ try {
         $script:AgentConfigPath = $savedPreviewCfg
         $script:previewReplied = $false
     }
+
+    # Regression (Task 1): single-letter relative paths with colons (e.g. 'c:secret.txt', 'a:.env') must be rejected with 'Invalid path syntax.'
+    $colonWriteBlocked = $false
+    try {
+        Resolve-AgentWriteTarget -Root $workspacePath -RelativePath 'c:secret.txt' | Out-Null
+    }
+    catch {
+        if ($_.Exception.Message -eq 'Invalid path syntax.') { $colonWriteBlocked = $true }
+    }
+    Assert-True $colonWriteBlocked 'Expected c:secret.txt to be rejected with Invalid path syntax. in Resolve-AgentWriteTarget.'
+
+    $colonReadBlocked = $false
+    try {
+        Resolve-AgentPath -Root $workspacePath -RelativePath 'a:.env' | Out-Null
+    }
+    catch {
+        if ($_.Exception.Message -eq 'Invalid path syntax.') { $colonReadBlocked = $true }
+    }
+    Assert-True $colonReadBlocked 'Expected a:.env to be rejected with Invalid path syntax. in Resolve-AgentPath.'
 }
 finally {
     Remove-TestEnvironment -Env $envData

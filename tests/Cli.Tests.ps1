@@ -1468,6 +1468,56 @@ try {
         if ($script:crTargetFile -and (Test-Path -LiteralPath $script:crTargetFile)) { Remove-Item -LiteralPath $script:crTargetFile -Force -ErrorAction SilentlyContinue }
         if ($crCancelFile -and (Test-Path -LiteralPath $crCancelFile)) { Remove-Item -LiteralPath $crCancelFile -Force -ErrorAction SilentlyContinue }
     }
+
+    # Regression (Task 5): invoking shellossus.ps1 in -Mode json with missing BaseUrl, missing Model, or missing API key
+    # never hangs on Read-Host or emits plain-text Write-Host; it emits only valid JSONL on stdout.
+    $emptyCfgPath = Join-Path $testRoot 'empty-json.cfg'
+    $shellExe = (Get-AgentEnvironment -Root $workspacePath).shell_exe
+    $scriptPath = Join-Path $PSScriptRoot '..\shellossus.ps1'
+    $jsonCases = @(
+        @{ label = 'missing BaseUrl'; extra = '' },
+        @{ label = 'missing Model'; extra = "-BaseUrl 'https://example.invalid/v1'" },
+        @{ label = 'missing API key'; extra = "-BaseUrl 'https://example.invalid/v1' -Model 'test-model'" }
+    )
+    $caseIdx = 0
+    foreach ($jc in $jsonCases) {
+        $caseIdx++
+        $jsonOutFile = Join-Path $testRoot "json-missing-$caseIdx.out"
+        $jsonErrFile = Join-Path $testRoot "json-missing-$caseIdx.err"
+        $cmdText = "`$env:SHELLOSSUS_BASE_URL = ''; `$env:SHELLOSSUS_MODEL = ''; `$env:SHELLOSSUS_API_KEY = ''; & '$($scriptPath.Replace("'", "''"))' -Mode json -ConfigPath '$($emptyCfgPath.Replace("'", "''"))' -Workspace '$($workspacePath.Replace("'", "''"))' -Prompt 'hi' $($jc.extra)"
+        $argList = Get-AgentCommandArguments -CommandText $cmdText
+        $p = Start-Process -FilePath $shellExe -ArgumentList $argList -WorkingDirectory $workspacePath -RedirectStandardOutput $jsonOutFile -RedirectStandardError $jsonErrFile -NoNewWindow -PassThru
+        $exited = $p.WaitForExit(10000)
+        if (-not $exited) { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue }
+        Assert-True $exited "shellossus -Mode json hung on Read-Host when $($jc.label)."
+        $outLines = @(if (Test-Path -LiteralPath $jsonOutFile) { Get-Content -LiteralPath $jsonOutFile } else { @() })
+        $sawTurnEndError = $false
+        foreach ($ol in $outLines) {
+            if ($ol.Trim()) {
+                $ev = $ol | ConvertFrom-Json -ErrorAction Stop
+                Assert-True ([bool]$ev.type) "Unexpected non-JSON stdout in -Mode json ($($jc.label)): $ol"
+                if ($ev.type -eq 'turn_end' -and $ev.status -eq 'error' -and [bool]$ev.error) {
+                    $sawTurnEndError = $true
+                }
+            }
+        }
+        Assert-True $sawTurnEndError "Expected turn_end error JSON event in -Mode json when $($jc.label)."
+    }
+
+    $script:jsonBannerLines = @()
+    function Write-Host {
+        param([Parameter(Position = 0, ValueFromRemainingArguments = $true)]$Object, [switch]$NoNewline, $ForegroundColor, $BackgroundColor)
+        $script:jsonBannerLines += (($Object | ForEach-Object { [string]$_ }) -join ' ')
+    }
+    try {
+        $script:OutputMode = 'json'
+        Write-TuiStartupBanner -RootPath $workspacePath -ConfigDir '' -Model 'test-model'
+        Assert-True ($script:jsonBannerLines.Count -eq 0) 'Write-TuiStartupBanner emitted output in JSON mode.'
+    }
+    finally {
+        $script:OutputMode = 'text'
+        Remove-Item Function:\Write-Host -ErrorAction SilentlyContinue
+    }
 }
 finally {
     Remove-TestEnvironment -Env $envData

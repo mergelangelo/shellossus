@@ -274,7 +274,7 @@ function Resolve-ExistingPathAncestor {
 function Resolve-AgentWriteTarget {
     param([string]$Root, [string]$RelativePath)
     if ($RelativePath -match '[/\\]$') { throw 'Invalid file name.' }
-    if (($RelativePath -replace '^[a-zA-Z]:', '').Contains(':')) { throw 'Invalid path syntax.' }
+    if (($RelativePath -replace '^[a-zA-Z]:(?=[/\\]|$)', '').Contains(':')) { throw 'Invalid path syntax.' }
     $rawParent = Split-Path $RelativePath -Parent
     $parentRel = if ($rawParent) { $rawParent } else { '.' }
     $ancestor = Resolve-ExistingPathAncestor -Root $Root -RelativePath $parentRel
@@ -422,7 +422,7 @@ function Set-AgentUtf8Content {
 function Resolve-AgentPath {
     param([string]$Root, [string]$RelativePath, [switch]$AllowRegisteredSkill)
     if (-not $RelativePath) { $RelativePath = '.' }
-    if (($RelativePath -replace '^[a-zA-Z]:', '').Contains(':')) { throw 'Invalid path syntax.' }
+    if (($RelativePath -replace '^[a-zA-Z]:(?=[/\\]|$)', '').Contains(':')) { throw 'Invalid path syntax.' }
     if ($AllowRegisteredSkill -and $script:RegisteredSkills -and $script:RegisteredSkills.Count -gt 0) {
         $skillTarget = $null
         $slash = $RelativePath.Replace('\', '/')
@@ -4110,6 +4110,48 @@ function Invoke-AgentListFiles {
     } | ConvertTo-Json -Depth 5 -Compress)
 }
 
+function Get-GlobCandidatePatterns {
+    param([string]$Pattern)
+    if (-not $Pattern) { return @() }
+    $normPat = $Pattern.Replace('\', '/').TrimStart('/')
+    if (-not $normPat) { return @($Pattern) }
+    $candPats = @($normPat)
+    while ($true) {
+        $addedPat = $false
+        foreach ($cp in @($candPats)) {
+            if ($cp.StartsWith('**/')) {
+                $trimmedLead = $cp.Substring(3)
+                if ($trimmedLead -and ($candPats -notcontains $trimmedLead)) {
+                    $candPats += $trimmedLead
+                    $addedPat = $true
+                }
+            }
+            $scanPos = 0
+            while ($scanPos -lt $cp.Length) {
+                $rem = $cp.Substring($scanPos)
+                $relIdx = $rem.IndexOf('/**/')
+                if ($relIdx -lt 0) { break }
+                $absIdx = $scanPos + $relIdx
+                $collapsedMid = $cp.Substring(0, $absIdx) + '/' + $cp.Substring($absIdx + 4)
+                if ($collapsedMid -and ($candPats -notcontains $collapsedMid)) {
+                    $candPats += $collapsedMid
+                    $addedPat = $true
+                }
+                $scanPos = $absIdx + 3
+            }
+            if ($cp.EndsWith('/**')) {
+                $trimmedTrail = $cp.Substring(0, $cp.Length - 3)
+                if ($trimmedTrail -and ($candPats -notcontains $trimmedTrail)) {
+                    $candPats += $trimmedTrail
+                    $addedPat = $true
+                }
+            }
+        }
+        if (-not $addedPat -or $candPats.Count -ge 16) { break }
+    }
+    return @($candPats)
+}
+
 function Invoke-AgentFindFiles {
     param([string]$Root, [string]$Path, $Item, $Arguments, [datetime]$ToolStart)
     if (-not $Item.PSIsContainer) { throw 'Expected a directory.' }
@@ -4121,8 +4163,7 @@ function Invoke-AgentFindFiles {
     }
     $rawPat = $Arguments.pattern.Trim()
     $isPathPat = ($rawPat.Contains('/') -or $rawPat.Contains('\'))
-    $normPat = $rawPat.Replace('\', '/').TrimStart('/')
-    $altPat = if ($normPat.StartsWith('**/')) { $normPat.Substring(3) } else { '' }
+    $candPats = @(Get-GlobCandidatePatterns -Pattern $rawPat)
     $truncated = $false
     $matchCount = 0
     $found = @(foreach ($walkEntry in @(Get-WorkspaceWalkEntries -Root $Root -SearchPath $Path)) {
@@ -4130,7 +4171,14 @@ function Invoke-AgentFindFiles {
         $relPath = $walkEntry.rel_path
         $relToSearch = Get-WorkspaceRelativePath -Root $Path -FullPath $child.FullName
         $isMatch = if ($isPathPat) {
-            ($relPath -like $normPat) -or ($relToSearch -like $normPat) -or ($altPat -and (($relPath -like $altPat) -or ($relToSearch -like $altPat)))
+            $matchedPat = $false
+            foreach ($cp in $candPats) {
+                if (($relPath -like $cp) -or ($relToSearch -like $cp)) {
+                    $matchedPat = $true
+                    break
+                }
+            }
+            $matchedPat
         }
         else {
             ($child.Name -like $rawPat)
@@ -4159,10 +4207,10 @@ function Invoke-AgentGrepFiles {
     $isLiteral = ($Arguments.literal -eq $true)
     $isCaseSensitive = ($Arguments.case_sensitive -eq $true)
     $includeFilter = if ($Arguments.include -is [string] -and $Arguments.include.Trim()) {
-        $Arguments.include.Trim()
+        $Arguments.include.Trim().Replace('\', '/')
     }
     elseif ($Arguments.glob -is [string] -and $Arguments.glob.Trim()) {
-        $Arguments.glob.Trim()
+        $Arguments.glob.Trim().Replace('\', '/')
     }
     else {
         ''
@@ -4187,17 +4235,40 @@ function Invoke-AgentGrepFiles {
         $startLine = [int]$Arguments.start_line
         if ($startLine -lt 1) { throw 'start_line must be at least 1.' }
     }
+    $includePatterns = @(if ($includeFilter) { Get-GlobCandidatePatterns -Pattern $includeFilter } else { @() })
     $allCandidateFiles = @(if ($Item.PSIsContainer) {
         foreach ($walkEntry in @(Get-WorkspaceWalkEntries -Root $Root -SearchPath $Path -FilesOnly)) {
             $child = $walkEntry.item
             $relCandidate = $walkEntry.rel_path
-            if ($includeFilter -and ($child.Name -notlike $includeFilter) -and ($relCandidate -notlike $includeFilter)) { continue }
+            if ($includePatterns.Count -gt 0) {
+                $incMatched = $false
+                foreach ($incPat in $includePatterns) {
+                    if (($child.Name -like $incPat) -or ($relCandidate -like $incPat)) {
+                        $incMatched = $true
+                        break
+                    }
+                }
+                if (-not $incMatched) { continue }
+            }
             if ($child.Length -le 1MB) { $child.FullName }
         }
     }
     else {
         if ($Item.Length -gt 1MB) { throw 'File exceeds 1 MiB.' }
-        $Item.FullName
+        $relSingle = Get-WorkspaceRelativePath -Root $Root -FullPath $Item.FullName
+        $incOk = ($includePatterns.Count -eq 0)
+        foreach ($incPat in $includePatterns) {
+            if (($Item.Name -like $incPat) -or ($relSingle -like $incPat)) {
+                $incOk = $true
+                break
+            }
+        }
+        if ($incOk) {
+            $singleRules = @(Get-WorkspaceIgnoreRules -Root $Root -SearchPath $Item.FullName)
+            if (-not (Test-PathIgnored -RelativePath $relSingle -IsDir $false -Rules $singleRules)) {
+                $Item.FullName
+            }
+        }
     })
     # Offsets are stable while the candidate file set is unchanged.
     $allCandidateFiles = @($allCandidateFiles | Sort-Object -CaseSensitive)
@@ -8072,16 +8143,24 @@ function Find-CompactionCutPoint {
     }
     if ($targetCut -lt $startIdx) { $targetCut = $startIdx }
     if ($targetCut -ge $Messages.Count) { $targetCut = $Messages.Count - 1 }
-    while ($targetCut -gt $startIdx -and $Messages[$targetCut].role -eq 'tool') {
-        $targetCut--
-    }
-    if ($targetCut -le $startIdx) {
-        $targetCut = $Messages.Count - $KeepRecent
-        if ($targetCut -lt $startIdx) { $targetCut = $startIdx }
-        while ($targetCut -lt ($Messages.Count - 1) -and $Messages[$targetCut].role -eq 'tool') {
-            $targetCut++
+    $chosenCut = $validCuts[0]
+    foreach ($vc in $validCuts) {
+        if ($vc -le $targetCut) {
+            $chosenCut = $vc
+        }
+        else {
+            break
         }
     }
+    if ($chosenCut -le $startIdx -and $validCuts.Count -gt 1) {
+        foreach ($vc in $validCuts) {
+            if ($vc -gt $startIdx) {
+                $chosenCut = $vc
+                break
+            }
+        }
+    }
+    $targetCut = $chosenCut
     $isSplit = $false
     $turnStart = -1
     if ($targetCut -gt $startIdx -and $Messages[$targetCut].role -eq 'assistant') {
@@ -9523,6 +9602,7 @@ function Write-TuiHelpCard {
 
 function Write-TuiStartupBanner {
     param([string]$RootPath, [string]$ConfigDir, [string]$Model)
+    if ($script:OutputMode -eq 'json') { return }
     $wInit = Get-TerminalWidth
     $hdrInit = ' ' + $script:Gm.BoldGreen + $script:Box.Dot + ' shellossus ' + $script:Gm.Grey1 + 'inline TUI' + $script:Gm.Reset + ' '
     $ctxLoaded = @()
@@ -10295,6 +10375,8 @@ function Invoke-ReplBangCommand {
 # CLI entrypoint: interactive setup, configuration resolution, single-shot execution, and interactive REPL loop.
 
 if (-not $LibraryOnly) {
+    $script:OutputMode = if ($Mode) { $Mode.ToLower() } else { 'text' }
+    if ($script:OutputMode -notin @('text', 'json')) { throw 'Mode must be text or json.' }
     if ($Install) {
         $targetAgentPath = if ($PSCommandPath) { $PSCommandPath } else { Join-Path $PSScriptRoot 'shellossus.ps1' }
         Invoke-AgentProfileInstall -AgentPath $targetAgentPath -ProfilePath $ProfilePath -Shortcut $Shortcut -ShortcutSpecified:($PSBoundParameters.Keys -contains 'Shortcut') -NoShortcut:$NoShortcut
@@ -10309,7 +10391,10 @@ if (-not $LibraryOnly) {
         $config = Read-AgentConfig -Path $ConfigPath
     }
     catch {
-        if (-not $Doctor) { throw }
+        if (-not $Doctor) {
+            Write-AgentJsonEvent -EventType 'turn_end' -Payload @{ status = 'error'; error = $_.Exception.Message }
+            throw
+        }
         $doctorConfigState = 'invalid'
     }
     if (-not $Theme -and $config.SHELLOSSUS_THEME) { $Theme = $config.SHELLOSSUS_THEME }
@@ -10318,7 +10403,10 @@ if (-not $LibraryOnly) {
             $null = Set-AgentTheme -Name $Theme
         }
         catch {
-            if (-not $Doctor) { throw }
+            if (-not $Doctor) {
+                Write-AgentJsonEvent -EventType 'turn_end' -Payload @{ status = 'error'; error = $_.Exception.Message }
+                throw
+            }
         }
     }
     if ($Setup -and -not $Doctor) {
@@ -10407,10 +10495,18 @@ if (-not $LibraryOnly) {
         return
     }
     if (-not $Export) {
-        if (-not $BaseUrl) { $BaseUrl = Read-Host 'API base URL (including /v1)' }
-        if (-not (Test-ValidAgentBaseUrl -Url $BaseUrl)) { throw 'An HTTPS base URL (or http://localhost / http://127.0.0.1 for local servers) is required. Run: shellossus -Setup' }
-        if (-not $Model) { $Model = Read-Host 'Model ID' }
-        if (-not $Model) { throw 'Model ID is required.' }
+        if (-not $BaseUrl -and $script:OutputMode -ne 'json') { $BaseUrl = Read-Host 'API base URL (including /v1)' }
+        if (-not (Test-ValidAgentBaseUrl -Url $BaseUrl)) {
+            $urlErr = 'An HTTPS base URL (or http://localhost / http://127.0.0.1 for local servers) is required. Run: shellossus -Setup'
+            Write-AgentJsonEvent -EventType 'turn_end' -Payload @{ status = 'error'; error = $urlErr }
+            throw $urlErr
+        }
+        if (-not $Model -and $script:OutputMode -ne 'json') { $Model = Read-Host 'Model ID' }
+        if (-not $Model) {
+            $mdlErr = 'Model ID is required.'
+            Write-AgentJsonEvent -EventType 'turn_end' -Payload @{ status = 'error'; error = $mdlErr }
+            throw $mdlErr
+        }
     }
     if ($MaxSteps -lt 1 -or $MaxSteps -gt 500) { throw 'MaxSteps must be between 1 and 500.' }
     if ($MaxRepeatCalls -lt 1 -or $MaxRepeatCalls -gt 50) { throw 'MaxRepeatCalls must be between 1 and 50.' }
@@ -10423,8 +10519,6 @@ if (-not $LibraryOnly) {
     if ($Permission -notin @('ReadOnly', 'Ask', 'AutoEdit', 'Auto')) { throw 'Permission must be one of: ReadOnly, Ask, AutoEdit, Auto.' }
     $script:AgentPermission = $Permission
     $script:Diagnostics = [bool]$Diagnostics
-    $script:OutputMode = if ($Mode) { $Mode.ToLower() } else { 'text' }
-    if ($script:OutputMode -notin @('text', 'json')) { throw 'Mode must be text or json.' }
     $script:NoTools = [bool]$NoTools
     $script:EnabledTools = @(if ($Tools) { $Tools -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ } })
     $script:ExcludedTools = @(if ($ExcludeTools) { $ExcludeTools -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ } })
@@ -10446,11 +10540,15 @@ if (-not $LibraryOnly) {
         if (-not $agentKey -and (Test-IsLoopbackBaseUrl -Url $BaseUrl)) {
             $agentKey = 'local'
         }
-        if (-not $agentKey) {
+        if (-not $agentKey -and $script:OutputMode -ne 'json') {
             Write-Host ($script:Gm.Yellow + 'Key input is visible. Run shellossus -Setup to save settings for next time.' + $script:Gm.Reset)
             $agentKey = Read-Host 'API key'
         }
-        if (-not $agentKey) { throw 'API key is required.' }
+        if (-not $agentKey) {
+            $keyErr = 'API key is required.'
+            Write-AgentJsonEvent -EventType 'turn_end' -Payload @{ status = 'error'; error = $keyErr }
+            throw $keyErr
+        }
     }
     else {
         $config.Clear()

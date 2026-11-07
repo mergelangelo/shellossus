@@ -2008,6 +2008,51 @@ description: Optional subagent role: recon (ReadOnly search), audit (ReadOnly re
         $script:ExcludedTools = $savedSchemaExcluded
         $script:SubagentDepth = $savedSchemaDepth
     }
+
+    # Regression (Task 3): find_files expands leading **/, middle /**/, and trailing /** including multiple /**/ segments.
+    New-Item -ItemType Directory -Path (Join-Path $workspacePath 'sub/deep') -Force | Out-Null
+    Set-Content -LiteralPath (Join-Path $workspacePath 'sub/root.txt') -Value 'r' -Encoding Ascii
+    Set-Content -LiteralPath (Join-Path $workspacePath 'sub/deep/leaf.txt') -Value 'l' -Encoding Ascii
+    $findGlobRes = Invoke-AgentTool -Root $workspacePath -Call @{ id = 'f-glob1'; function = @{ name = 'find_files'; arguments = '{"path":".","pattern":"sub/**/*.txt"}' } } | ConvertFrom-Json
+    $foundGlobPaths = @($findGlobRes.matches | ForEach-Object { $_.path })
+    Assert-True ($foundGlobPaths -contains 'sub/root.txt' -and $foundGlobPaths -contains 'sub/deep/leaf.txt') 'find_files with sub/**/*.txt should match both sub/root.txt and sub/deep/leaf.txt.'
+
+    New-Item -ItemType Directory -Path (Join-Path $workspacePath 'mglob/a/b') -Force | Out-Null
+    New-Item -ItemType Directory -Path (Join-Path $workspacePath 'mglob/a/x/b') -Force | Out-Null
+    New-Item -ItemType Directory -Path (Join-Path $workspacePath 'mglob/a/b/y') -Force | Out-Null
+    New-Item -ItemType Directory -Path (Join-Path $workspacePath 'mglob/a/x/b/y') -Force | Out-Null
+    Set-Content -LiteralPath (Join-Path $workspacePath 'mglob/a/b/c.txt') -Value '1' -Encoding Ascii
+    Set-Content -LiteralPath (Join-Path $workspacePath 'mglob/a/x/b/c.txt') -Value '2' -Encoding Ascii
+    Set-Content -LiteralPath (Join-Path $workspacePath 'mglob/a/b/y/c.txt') -Value '3' -Encoding Ascii
+    Set-Content -LiteralPath (Join-Path $workspacePath 'mglob/a/x/b/y/c.txt') -Value '4' -Encoding Ascii
+    $findMultiGlob = Invoke-AgentTool -Root $workspacePath -Call @{ id = 'f-glob2'; function = @{ name = 'find_files'; arguments = '{"path":"mglob","pattern":"a/**/b/**/c.txt"}' } } | ConvertFrom-Json
+    $multiRelPaths = @($findMultiGlob.matches | ForEach-Object { $_.relative_path })
+    Assert-True ($multiRelPaths.Count -eq 4 -and ($multiRelPaths -contains 'a/b/c.txt') -and ($multiRelPaths -contains 'a/x/b/c.txt') -and ($multiRelPaths -contains 'a/b/y/c.txt') -and ($multiRelPaths -contains 'a/x/b/y/c.txt')) 'find_files with a/**/b/**/c.txt failed to match all 0-or-more subdirectory combinations.'
+    Remove-Item -LiteralPath (Join-Path $workspacePath 'mglob') -Recurse -Force
+
+    # Regression (Task 4): single-file grep_files respects include filter (with backslash normalization and /**/ expansion) and workspace .gitignore rules.
+    Set-Content -LiteralPath (Join-Path $workspacePath 'single-grep.txt') -Value 'needle_here' -Encoding Ascii
+    $singleGrepMismatch = Invoke-AgentTool -Root $workspacePath -Call @{
+        id = 'g-single-inc1'
+        function = @{ name = 'grep_files'; arguments = '{"path":"single-grep.txt","pattern":"needle_here","include":"*.ps1"}' }
+    } | ConvertFrom-Json
+    Assert-True (@($singleGrepMismatch.matches).Count -eq 0) 'Single-file grep_files should return 0 matches when include filter does not match.'
+
+    Set-Content -LiteralPath (Join-Path $workspacePath 'sub/root.txt') -Value 'needle_sub_root' -Encoding Ascii
+    $singleGrepMatch = Invoke-AgentTool -Root $workspacePath -Call @{
+        id = 'g-single-inc2'
+        function = @{ name = 'grep_files'; arguments = '{"path":"sub/root.txt","pattern":"needle_sub_root","include":"sub\\**\\*.txt"}' }
+    } | ConvertFrom-Json
+    Assert-True (@($singleGrepMatch.matches).Count -eq 1) 'Single-file grep_files should match when normalized/expanded include filter matches.'
+
+    Set-Content -LiteralPath (Join-Path $workspacePath 'sub/ignored-single.log') -Value 'needle_ignored_single' -Encoding Ascii
+    $singleGrepIgnored = Invoke-AgentTool -Root $workspacePath -Call @{
+        id = 'g-single-ig'
+        function = @{ name = 'grep_files'; arguments = '{"path":"sub/ignored-single.log","pattern":"needle_ignored_single"}' }
+    } | ConvertFrom-Json
+    Assert-True (@($singleGrepIgnored.matches).Count -eq 0) 'Single-file grep_files should return 0 matches when target file is ignored by .gitignore.'
+    Remove-Item -LiteralPath (Join-Path $workspacePath 'sub') -Recurse -Force
+    Remove-Item -LiteralPath (Join-Path $workspacePath 'single-grep.txt') -Force
 }
 finally {
     Remove-TestEnvironment -Env $envData
