@@ -253,13 +253,9 @@ if (-not $LibraryOnly) {
             }
             catch {
                 $errMsg = Format-AgentError -ErrorRecord $_
-                try {
-                    Restore-AgentTurnSnapshot -State $state -Snapshot $turnSnapshot -Writes @($script:CurrentTurnWrites)
-                }
-                catch {
-                    if ($script:OutputMode -ne 'json') {
-                        Write-Host ($script:Gm.Red + 'Rollback warning: ' + $_.Exception.Message + $script:Gm.Reset)
-                    }
+                $rollback = Invoke-AgentTurnRollback -State $state -Snapshot $turnSnapshot -Writes @($script:CurrentTurnWrites)
+                if (-not $rollback.succeeded -and $script:OutputMode -ne 'json') {
+                    Write-Host ($script:Gm.Red + 'Rollback did not succeed: ' + $rollback.error + $script:Gm.Reset)
                 }
                 Write-AgentJsonEvent -EventType 'turn_end' -Payload @{ status = 'error'; error = $errMsg }
                 throw
@@ -388,13 +384,15 @@ if (-not $LibraryOnly) {
             }
             catch {
                 $lastFailedQuestion = $question
-                try {
-                    Restore-AgentTurnSnapshot -State $state -Snapshot $turnSnapshot -Writes @($script:CurrentTurnWrites)
+                $requestErr = Format-AgentError -ErrorRecord $_
+                $rollback = Invoke-AgentTurnRollback -State $state -Snapshot $turnSnapshot -Writes @($script:CurrentTurnWrites) -UndoStack $undoStack
+                if ($rollback.succeeded) {
+                    Write-Host ($script:Gm.Red + 'Request failed; turn rolled back (use /retry to resend): ' + $requestErr + $script:Gm.Reset)
                 }
-                catch {
-                    Write-Host ($script:Gm.Red + 'Rollback warning: ' + $_.Exception.Message + $script:Gm.Reset)
+                else {
+                    $undoStack = @($rollback.undo_stack)
+                    Write-Host ($script:Gm.Red + 'Request failed; rollback did not succeed: ' + $rollback.error + $script:Gm.Reset)
                 }
-                Write-Host ($script:Gm.Red + 'Request failed; turn rolled back (use /retry to resend): ' + (Format-AgentError -ErrorRecord $_) + $script:Gm.Reset)
             }
         }
     }

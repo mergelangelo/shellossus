@@ -375,13 +375,15 @@ function Invoke-ReplContinueCommand {
         Save-AgentSession -SessionFile $SessionFile -State $State -Workspace $RootPath -Model $Model
     }
     catch {
-        try {
-            Restore-AgentTurnSnapshot -State $State -Snapshot $turnSnapshot -Writes @($script:CurrentTurnWrites)
+        $requestErr = Format-AgentError -ErrorRecord $_
+        $rollback = Invoke-AgentTurnRollback -State $State -Snapshot $turnSnapshot -Writes @($script:CurrentTurnWrites) -UndoStack $UndoStack
+        $UndoStack = @($rollback.undo_stack)
+        if ($rollback.succeeded) {
+            Write-Host ($script:Gm.Red + 'Continue failed; turn rolled back: ' + $requestErr + $script:Gm.Reset)
         }
-        catch {
-            Write-Host ($script:Gm.Red + 'Rollback warning: ' + $_.Exception.Message + $script:Gm.Reset)
+        else {
+            Write-Host ($script:Gm.Red + 'Continue failed; rollback did not succeed: ' + $rollback.error + $script:Gm.Reset)
         }
-        Write-Host ($script:Gm.Red + 'Continue failed; turn rolled back: ' + (Format-AgentError -ErrorRecord $_) + $script:Gm.Reset)
     }
     return @{ state = $State; undo_stack = @($UndoStack); last_failed_question = $LastFailedQuestion }
 }

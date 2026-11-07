@@ -43,12 +43,42 @@ function New-AgentTurnSnapshot {
 
 function Restore-AgentTurnSnapshot {
     param($State, $Snapshot, [AllowEmptyCollection()][array]$Writes = @())
-    $State.messages = @($Snapshot.messages)
     Invoke-AgentUndo -State $State -UndoEntry @{
         messages = @($Snapshot.messages)
         leaf_id = [string]$Snapshot.leaf_id
         tree_entries = @($Snapshot.tree_entries)
         writes = @($Writes)
+    }
+}
+
+function Invoke-AgentTurnRollback {
+    param($State, $Snapshot, [AllowEmptyCollection()][array]$Writes = @(), [AllowEmptyCollection()][array]$UndoStack = @())
+    try {
+        Restore-AgentTurnSnapshot -State $State -Snapshot $Snapshot -Writes $Writes
+        return @{
+            succeeded = $true
+            undo_stack = @($UndoStack)
+            error = ''
+        }
+    }
+    catch {
+        foreach ($w in @($Writes)) {
+            if ($w) { $w.preserve_backup = $true }
+        }
+        $kept = @{
+            messages = $Snapshot.messages
+            leaf_id = $Snapshot.leaf_id
+            tree_entries = $Snapshot.tree_entries
+            writes = @($Writes)
+            preserve_backups = $true
+        }
+        $stack = @($UndoStack)
+        $stack += $kept
+        return @{
+            succeeded = $false
+            undo_stack = @($stack)
+            error = (Format-AgentError -ErrorRecord $_)
+        }
     }
 }
 

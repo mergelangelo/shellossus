@@ -4,13 +4,16 @@ function Clear-AgentUndoBackups {
     param($UndoEntries, $Writes)
     foreach ($entry in @($UndoEntries)) {
         if ($null -eq $entry) { continue }
+        if ($entry.preserve_backups) { continue }
         foreach ($w in @($entry.writes)) {
+            if ($w -and $w.preserve_backup) { continue }
             if ($w -and $w.backup -and (Test-Path -LiteralPath $w.backup)) {
                 Remove-Item -LiteralPath $w.backup -Force -ErrorAction SilentlyContinue
             }
         }
     }
     foreach ($w in @($Writes)) {
+        if ($w -and $w.preserve_backup) { continue }
         if ($w -and $w.backup -and (Test-Path -LiteralPath $w.backup)) {
             Remove-Item -LiteralPath $w.backup -Force -ErrorAction SilentlyContinue
         }
