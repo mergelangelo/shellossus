@@ -153,7 +153,7 @@ try {
 
     # Exercise real startup and REPL routing with isolated config and mocked I/O.
     $savedEnvironment = @{}
-    $envNames = @('SHELLOSSUS_BASE_URL', 'SHELLOSSUS_MODEL', 'SHELLOSSUS_API_KEY', 'SHELLOSSUS_WORKSPACE', 'H_AGENT_BASE_URL', 'H_AGENT_MODEL', 'H_AGENT_API_KEY', 'H_AGENT_WORKSPACE', 'SHELLOSSUS_CONTEXT_WINDOW', 'SHELLOSSUS_COMPACT_THRESHOLD')
+    $envNames = @('SHELLOSSUS_BASE_URL', 'SHELLOSSUS_MODEL', 'SHELLOSSUS_API_KEY', 'SHELLOSSUS_WORKSPACE', 'SHELLOSSUS_CONTEXT_WINDOW', 'SHELLOSSUS_COMPACT_THRESHOLD')
     foreach ($envName in $envNames) {
         $savedEnvironment[$envName] = (Get-Item -LiteralPath ('Env:' + $envName) -ErrorAction SilentlyContinue).Value
         Remove-Item -LiteralPath ('Env:' + $envName) -ErrorAction SilentlyContinue

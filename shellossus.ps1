@@ -46,55 +46,25 @@ param(
 
 $script:RegisteredSkills = @{}
 
-function Resolve-AgentConfigPath {
-    param([string]$Path)
-    if (-not $Path) { return '' }
-    if (Test-Path -LiteralPath $Path) { return $Path }
-    $leaf = Split-Path $Path -Leaf
-    $parent = Split-Path $Path -Parent
-    if (($leaf -ieq '.env') -and $parent -and ((Split-Path $parent -Leaf) -ieq '.shellossus')) {
-        $userRoot = Split-Path $parent -Parent
-        if ($userRoot) {
-            $legacyPath = Join-Path (Join-Path $userRoot '.h-agent') '.env'
-            if (Test-Path -LiteralPath $legacyPath) { return $legacyPath }
-        }
-    }
-    return $Path
-}
-
 function Read-AgentConfig {
     param([string]$Path)
     $config = @{}
-    $legacyConfig = @{}
-    $effectivePath = Resolve-AgentConfigPath -Path $Path
-    if (-not $effectivePath -or -not (Test-Path -LiteralPath $effectivePath)) { return $config }
+    if (-not $Path -or -not (Test-Path -LiteralPath $Path)) { return $config }
     $lineNumber = 0
-    foreach ($line in @(Get-Content -LiteralPath $effectivePath -Encoding UTF8 -ErrorAction Stop)) {
+    foreach ($line in @(Get-Content -LiteralPath $Path -Encoding UTF8 -ErrorAction Stop)) {
         $lineNumber++
         $trimmed = $line.Trim()
         if (-not $trimmed -or $trimmed.StartsWith('#')) { continue }
-        if ($trimmed -notmatch '^(?:(SHELLOSSUS|H_AGENT)_(BASE_URL|MODEL|API_KEY|WORKSPACE|CONTEXT_WINDOW|COMPACT_THRESHOLD|THEME))\s*=(.*)$') {
+        if ($trimmed -notmatch '^(SHELLOSSUS_(?:BASE_URL|MODEL|API_KEY|WORKSPACE|CONTEXT_WINDOW|COMPACT_THRESHOLD|THEME))\s*=(.*)$') {
             throw "Invalid config entry at line $lineNumber. Expected a supported SHELLOSSUS_* key=value."
         }
-        $prefix = $Matches[1].ToUpper()
-        $suffix = $Matches[2].ToUpper()
-        $normalizedKey = 'SHELLOSSUS_' + $suffix
-        $value = $Matches[3].Trim()
+        $normalizedKey = $Matches[1].ToUpper()
+        $value = $Matches[2].Trim()
         if ($value.Length -ge 2 -and (($value.StartsWith('"') -and $value.EndsWith('"')) -or ($value.StartsWith("'") -and $value.EndsWith("'")))) {
             $value = $value.Substring(1, $value.Length - 2)
         }
         # Values are data. Never evaluate config as PowerShell code.
-        if ($prefix -eq 'SHELLOSSUS') {
-            $config[$normalizedKey] = $value
-        }
-        else {
-            $legacyConfig[$normalizedKey] = $value
-        }
-    }
-    foreach ($k in $legacyConfig.Keys) {
-        if (-not $config.ContainsKey($k)) {
-            $config[$k] = $legacyConfig[$k]
-        }
+        $config[$normalizedKey] = $value
     }
     return $config
 }
@@ -171,8 +141,7 @@ function Test-IsLoopbackBaseUrl {
 function Update-AgentConfigOptionalKey {
     param([string]$Path, [string]$Key, [string]$Value)
     if (-not $Path -or -not $Key) { return $false }
-    $effectivePath = Resolve-AgentConfigPath -Path $Path
-    if (-not $effectivePath -or -not (Test-Path -LiteralPath $effectivePath)) { return $false }
+    if (-not (Test-Path -LiteralPath $Path)) { return $false }
     $cfg = @{}
     try {
         $cfg = Read-AgentConfig -Path $Path
@@ -262,7 +231,7 @@ function Test-IsSecretFile {
     if ($Item.PSIsContainer) { return $false }
     $cleanName = ($Item.Name -replace ':.*$', '').TrimEnd('.', ' ')
     $cleanFull = ($Item.FullName -replace '(?<!^[a-zA-Z]):.*$', '').TrimEnd('.', ' ')
-    return ($cleanName -eq '.env' -or ($cleanName -like '.env.*' -and $cleanName -ne '.env.example') -or $cleanFull -eq $script:AgentConfigPath -or ($script:LegacyAgentConfigPath -and $cleanFull -eq $script:LegacyAgentConfigPath))
+    return ($cleanName -eq '.env' -or ($cleanName -like '.env.*' -and $cleanName -ne '.env.example') -or $cleanFull -eq $script:AgentConfigPath)
 }
 
 function Test-ValidPathSegment {
@@ -320,7 +289,7 @@ function Resolve-AgentWriteTarget {
     }
     $fullPath = Join-Path $parent $leaf
     $cleanLeaf = ($leaf -replace ':.*$', '').TrimEnd('.', ' ')
-    if ($cleanLeaf -eq '.env' -or ($cleanLeaf -like '.env.*' -and $cleanLeaf -ne '.env.example') -or $fullPath -eq $script:AgentConfigPath -or ($script:LegacyAgentConfigPath -and $fullPath -eq $script:LegacyAgentConfigPath)) {
+    if ($cleanLeaf -eq '.env' -or ($cleanLeaf -like '.env.*' -and $cleanLeaf -ne '.env.example') -or $fullPath -eq $script:AgentConfigPath) {
         throw 'Agent tools cannot write credential configuration files.'
     }
     $exists = $false
@@ -4586,7 +4555,6 @@ function Invoke-ShellCommand {
             $argList = Get-AgentCommandArguments -CommandText $wrappedCmd
             $proc = Invoke-WithProcessEnvironment -Values @{
                 SHELLOSSUS_API_KEY = $null
-                H_AGENT_API_KEY = $null
                 OPENAI_API_KEY = $null
             } -Action {
                 Start-Process -FilePath $shellExe -ArgumentList $argList -WorkingDirectory $rootFull -RedirectStandardOutput $outTemp.FullName -RedirectStandardError $errTemp.FullName -NoNewWindow -PassThru -ErrorAction Stop
@@ -5156,7 +5124,6 @@ function Invoke-AgentWebDownload {
     if ($webCommand -and $webCommand.CommandType -eq 'Function') {
         Invoke-WithProcessEnvironment -Values @{
             SHELLOSSUS_API_KEY = $null
-            H_AGENT_API_KEY = $null
             OPENAI_API_KEY = $null
         } -Action {
             try {
@@ -5196,7 +5163,6 @@ try {
             $workerArguments = Get-AgentCommandArguments -CommandText $worker
             $proc = Invoke-WithProcessEnvironment -Values @{
                 SHELLOSSUS_API_KEY = $null
-                H_AGENT_API_KEY = $null
                 OPENAI_API_KEY = $null
                 SHELLOSSUS_WEB_DOWNLOAD_URI = $Uri
                 SHELLOSSUS_WEB_DOWNLOAD_FILE = $OutFile
@@ -5961,7 +5927,6 @@ if ($env:SHELLOSSUS_SUB_REASONING_EFFORT) { $workerArgs.ReasoningEffort = $env:S
                 }
                 $proc = Invoke-WithProcessEnvironment -Values @{
                     SHELLOSSUS_API_KEY = $effKey
-                    H_AGENT_API_KEY = $null
                     OPENAI_API_KEY = $null
                     SHELLOSSUS_SUB_SCRIPT = $ScriptPath
                     SHELLOSSUS_SUB_ROOT = $Root
@@ -6843,7 +6808,6 @@ function Build-SystemPrompt {
     $sysCandidates = @()
     if ($Root) {
         $sysCandidates += (Join-Path $Root '.shellossus/SYSTEM.md')
-        $sysCandidates += (Join-Path $Root '.h-agent/SYSTEM.md')
     }
     if ($ConfigDir) { $sysCandidates += (Join-Path $ConfigDir 'SYSTEM.md') }
     foreach ($cand in $sysCandidates) {
@@ -6856,7 +6820,6 @@ function Build-SystemPrompt {
     if ($ConfigDir) { $appendCandidates += (Join-Path $ConfigDir 'APPEND_SYSTEM.md') }
     if ($Root) {
         $appendCandidates += (Join-Path $Root '.shellossus/APPEND_SYSTEM.md')
-        $appendCandidates += (Join-Path $Root '.h-agent/APPEND_SYSTEM.md')
     }
     $appendText = Get-BoundedTextFiles -Paths $appendCandidates -Tag '' -MaxChars 262144
     if ($appendText) { $basePrompt += "`n`n" + $appendText }
@@ -6894,7 +6857,6 @@ function Get-SkillsCatalog {
     if ($ConfigDir) { $dirs += (Join-Path $ConfigDir 'skills') }
     if ($Root) {
         $dirs += (Join-Path $Root '.shellossus/skills')
-        $dirs += (Join-Path $Root '.h-agent/skills')
         $dirs += (Join-Path $Root 'skills')
     }
     $entries = @()
@@ -7035,7 +6997,6 @@ function Get-AgentRolesCatalog {
     if ($ConfigDir) { $dirs += (Join-Path $ConfigDir 'agents') }
     if ($Root) {
         $dirs += (Join-Path $Root '.shellossus/agents')
-        $dirs += (Join-Path $Root '.h-agent/agents')
         $dirs += (Join-Path $Root 'agents')
     }
     $customEntries = @()
@@ -7269,7 +7230,6 @@ function Resolve-PromptTemplate {
     $dirs = @()
     if ($Root) {
         $dirs += (Join-Path $Root '.shellossus/prompts')
-        $dirs += (Join-Path $Root '.h-agent/prompts')
     }
     if ($ConfigDir) { $dirs += (Join-Path $ConfigDir 'prompts') }
     foreach ($d in $dirs) {
@@ -8558,7 +8518,7 @@ function Test-IsOwnAgentFunction {
     param($CommandInfo, [string]$PreviousShortcut, [string]$ResolvedAgent)
     if ($null -eq $CommandInfo -or [string]$CommandInfo.CommandType -ne 'Function') { return $false }
     $def = [string]$CommandInfo.Definition
-    if ($def -match '(?i)(shellossus|h-agent)\.ps1') { return $true }
+    if ($def -match '(?i)shellossus\.ps1') { return $true }
     if ($ResolvedAgent -and ($def.IndexOf($ResolvedAgent, [StringComparison]::OrdinalIgnoreCase) -ge 0)) { return $true }
     return $false
 }
@@ -8609,7 +8569,7 @@ function Get-MarkerBlockRange {
     foreach ($line in @($blockText -split '\r?\n')) {
         if ($line -match '^\s*function\s+global:([A-Za-z0-9_-]+)\s*\{') {
             $fnName = $Matches[1]
-            if (($fnName -ine 'shellossus') -and ($fnName -ine 'h-agent')) {
+            if ($fnName -ine 'shellossus') {
                 $detectedShortcut = $fnName
             }
         }
@@ -8649,7 +8609,6 @@ function Invoke-AgentProfileInstall {
     $existing = ''
     $profileExists = Test-Path -LiteralPath $ProfilePath
     $shBlock = $null
-    $haBlock = $null
     $previousShortcut = ''
 
     if ($profileExists) {
@@ -8662,18 +8621,8 @@ function Invoke-AgentProfileInstall {
             -StartRegex '(?m)^# >>> shellossus >>>\r?$' `
             -EndRegex '(?m)^# <<< shellossus <<<\r?$' `
             -Label 'shellossus'
-        $haBlock = Get-MarkerBlockRange `
-            -Content $existing `
-            -StartMarker '# >>> h-agent >>>' `
-            -EndMarker '# <<< h-agent <<<' `
-            -StartRegex '(?m)^# >>> h-agent >>>\r?$' `
-            -EndRegex '(?m)^# <<< h-agent <<<\r?$' `
-            -Label 'h-agent'
         if ($shBlock -and $shBlock.Shortcut) {
             $previousShortcut = [string]$shBlock.Shortcut
-        }
-        elseif ($haBlock -and $haBlock.Shortcut) {
-            $previousShortcut = [string]$haBlock.Shortcut
         }
     }
 
@@ -8791,32 +8740,9 @@ function Invoke-AgentProfileInstall {
     $block = $blockLines -join "`r`n"
 
     if ($profileExists) {
-        if ($shBlock -and $haBlock) {
-            # Remove legacy h-agent block first, then update shellossus block in place.
-            $haRemoveEnd = $haBlock.End
-            if (($haRemoveEnd + 1 -lt $existing.Length) -and ($existing.Substring($haRemoveEnd, 2) -eq "`r`n")) {
-                $haRemoveEnd += 2
-            }
-            elseif (($haRemoveEnd -lt $existing.Length) -and ($existing.Substring($haRemoveEnd, 1) -eq "`n")) {
-                $haRemoveEnd += 1
-            }
-            $withoutHa = $existing.Substring(0, $haBlock.Start) + $existing.Substring($haRemoveEnd)
-            $shBlockUpdated = Get-MarkerBlockRange `
-                -Content $withoutHa `
-                -StartMarker '# >>> shellossus >>>' `
-                -EndMarker '# <<< shellossus <<<' `
-                -StartRegex '(?m)^# >>> shellossus >>>\r?$' `
-                -EndRegex '(?m)^# <<< shellossus <<<\r?$' `
-                -Label 'shellossus'
-            $updated = $withoutHa.Substring(0, $shBlockUpdated.Start) + $block + $withoutHa.Substring($shBlockUpdated.End)
-        }
-        elseif ($shBlock) {
+        if ($shBlock) {
             # Use literal slicing: paths with dollar signs are never regex replacements.
             $updated = $existing.Substring(0, $shBlock.Start) + $block + $existing.Substring($shBlock.End)
-        }
-        elseif ($haBlock) {
-            # Migrate legacy h-agent block in place to shellossus block.
-            $updated = $existing.Substring(0, $haBlock.Start) + $block + $existing.Substring($haBlock.End)
         }
         else {
             $updated = $existing + "`r`n" + $block + "`r`n"
@@ -10367,9 +10293,7 @@ if (-not $LibraryOnly) {
     $doctorConfigState = 'loaded'
     try {
         $script:AgentConfigPath = Format-ConfigPath -Path $ConfigPath
-        $resolvedCfg = Resolve-AgentConfigPath -Path $ConfigPath
-        $script:LegacyAgentConfigPath = if ($resolvedCfg -and ($resolvedCfg -ne $ConfigPath)) { Format-ConfigPath -Path $resolvedCfg } else { '' }
-        if (-not (Test-Path -LiteralPath $resolvedCfg)) { $doctorConfigState = 'missing' }
+        if (-not (Test-Path -LiteralPath $ConfigPath)) { $doctorConfigState = 'missing' }
         $config = Read-AgentConfig -Path $ConfigPath
     }
     catch {
@@ -10389,13 +10313,11 @@ if (-not $LibraryOnly) {
         Write-Host ($script:Gm.OscInit + $script:Gm.Fg + "Save settings to: $ConfigPath" + $script:Gm.Reset)
         Write-Host ($script:Gm.Yellow + 'API key is stored as plain text in your user profile, outside the project.' + $script:Gm.Reset)
         $defaultUrl = $BaseUrl
-        if (-not $defaultUrl) { $defaultUrl = $env:H_AGENT_BASE_URL }
         if (-not $defaultUrl) { $defaultUrl = $config.SHELLOSSUS_BASE_URL }
         $inputUrl = Read-Host "API base URL including /v1 [$defaultUrl]"
         if (-not $inputUrl) { $inputUrl = $defaultUrl }
         if (-not (Test-ValidAgentBaseUrl -Url $inputUrl)) { throw 'An HTTPS base URL (or http://localhost / http://127.0.0.1 for local servers) is required. Run: shellossus -Setup' }
         $defaultModel = $Model
-        if (-not $defaultModel) { $defaultModel = $env:H_AGENT_MODEL }
         if (-not $defaultModel) { $defaultModel = $config.SHELLOSSUS_MODEL }
         $inputModel = Read-Host "Model ID [$defaultModel]"
         if (-not $inputModel) { $inputModel = $defaultModel }
@@ -10408,7 +10330,6 @@ if (-not $LibraryOnly) {
         $defaultWorkspace = ''
         if ($PSBoundParameters.Keys -contains 'Workspace') { $defaultWorkspace = $Workspace }
         elseif ($env:SHELLOSSUS_WORKSPACE) { $defaultWorkspace = $env:SHELLOSSUS_WORKSPACE }
-        elseif ($env:H_AGENT_WORKSPACE) { $defaultWorkspace = $env:H_AGENT_WORKSPACE }
         elseif ($config.SHELLOSSUS_WORKSPACE) { $defaultWorkspace = $config.SHELLOSSUS_WORKSPACE }
         $wsPrompt = if ($defaultWorkspace) { "Default workspace [$defaultWorkspace] (Enter keeps saved, '-' clears)" } else { 'Default workspace (Enter = current folder at each launch)' }
         $inputWorkspace = Read-Host $wsPrompt
@@ -10435,13 +10356,10 @@ if (-not $LibraryOnly) {
         if ($Mode -ine 'json') { Write-TuiMascotCard -Mode 'full' }
         return
     }
-    if (-not $BaseUrl) { $BaseUrl = $env:H_AGENT_BASE_URL }
     if (-not $BaseUrl) { $BaseUrl = $config.SHELLOSSUS_BASE_URL }
-    if (-not $Model) { $Model = $env:H_AGENT_MODEL }
     if (-not $Model) { $Model = $config.SHELLOSSUS_MODEL }
     if ($PSBoundParameters.Keys -notcontains 'Workspace') {
         if ($env:SHELLOSSUS_WORKSPACE) { $Workspace = $env:SHELLOSSUS_WORKSPACE }
-        elseif ($env:H_AGENT_WORKSPACE) { $Workspace = $env:H_AGENT_WORKSPACE }
         elseif ($config.SHELLOSSUS_WORKSPACE) { $Workspace = $config.SHELLOSSUS_WORKSPACE }
     }
     try {
@@ -10456,7 +10374,6 @@ if (-not $LibraryOnly) {
     }
     if ($Doctor) {
         $doctorKey = $env:SHELLOSSUS_API_KEY
-        if (-not $doctorKey) { $doctorKey = $env:H_AGENT_API_KEY }
         if (-not $doctorKey) { $doctorKey = $config.SHELLOSSUS_API_KEY }
         try {
             $report = Get-AgentDoctorReport -BaseUrl $BaseUrl -ModelId $Model -ApiKey $doctorKey -Workspace $Workspace -SessionDir $sessionDir -NoSession:$NoSession -ConfigState $doctorConfigState
@@ -10512,7 +10429,6 @@ if (-not $LibraryOnly) {
     if (-not $Export) {
         $endpoint = $BaseUrl.TrimEnd('/') + '/chat/completions'
         $agentKey = $env:SHELLOSSUS_API_KEY
-        if (-not $agentKey) { $agentKey = $env:H_AGENT_API_KEY }
         if (-not $agentKey) { $agentKey = $config.SHELLOSSUS_API_KEY }
         $config.Clear()
         if (-not $agentKey -and (Test-IsLoopbackBaseUrl -Url $BaseUrl)) {

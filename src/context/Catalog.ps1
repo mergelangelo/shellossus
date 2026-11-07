@@ -9,7 +9,6 @@ function Get-SkillsCatalog {
     if ($ConfigDir) { $dirs += (Join-Path $ConfigDir 'skills') }
     if ($Root) {
         $dirs += (Join-Path $Root '.shellossus/skills')
-        $dirs += (Join-Path $Root '.h-agent/skills')
         $dirs += (Join-Path $Root 'skills')
     }
     $entries = @()
@@ -150,7 +149,6 @@ function Get-AgentRolesCatalog {
     if ($ConfigDir) { $dirs += (Join-Path $ConfigDir 'agents') }
     if ($Root) {
         $dirs += (Join-Path $Root '.shellossus/agents')
-        $dirs += (Join-Path $Root '.h-agent/agents')
         $dirs += (Join-Path $Root 'agents')
     }
     $customEntries = @()

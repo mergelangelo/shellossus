@@ -401,17 +401,16 @@ try {
     $script:AgentPermission = 'Ask'
 
     # Installer: first install, reinstall, shortcuts, conflict detection (alias, function, executable),
-    # profile preservation & backup, h-agent block migration, and paths with spaces + argument forwarding.
+    # profile preservation & backup, and paths with spaces + argument forwarding.
     $profileFile = Join-Path $testRoot 'profile.ps1'
-    $legacyBlock = "# keep my settings`r`n# >>> h-agent >>>`r`nfunction global:h-agent { & 'C:\old\h-agent.ps1' @args }`r`n# <<< h-agent <<<`r`n# footer line"
-    Set-Content -LiteralPath $profileFile -Value $legacyBlock -Encoding UTF8 -NoNewline
+    $existingProfile = "# keep my settings`r`n# footer line"
+    Set-Content -LiteralPath $profileFile -Value $existingProfile -Encoding UTF8 -NoNewline
 
-    # 1. Migrate legacy h-agent block with -Install -Shortcut sss and verify backup & profile preservation.
+    # 1. Install into an existing profile with -Shortcut sss and verify backup & profile preservation.
     & "$PSScriptRoot\..\shellossus.ps1" -Install -ProfilePath $profileFile -Shortcut 'sss'
     $profileText = Get-Content -LiteralPath $profileFile -Raw -Encoding UTF8
-    Assert-True ($profileText.Contains('# keep my settings') -and $profileText.Contains('# footer line')) 'Profile user contents were lost during migration.'
-    Assert-True ((-not $profileText.Contains('# >>> h-agent >>>')) -and (-not $profileText.Contains('function global:h-agent'))) 'Legacy h-agent block was not migrated.'
-    Assert-True (((@($profileText -split '(?m)^# >>> shellossus >>>\r?$').Count - 1) -eq 1) -and $profileText.Contains('function global:shellossus') -and $profileText.Contains('function global:sss')) 'Expected shellossus and sss functions in migrated block.'
+    Assert-True ($profileText.Contains('# keep my settings') -and $profileText.Contains('# footer line')) 'Profile user contents were lost during install.'
+    Assert-True (((@($profileText -split '(?m)^# >>> shellossus >>>\r?$').Count - 1) -eq 1) -and $profileText.Contains('function global:shellossus') -and $profileText.Contains('function global:sss')) 'Expected shellossus and sss functions in installed block.'
     $backups = @(Get-ChildItem -LiteralPath $testRoot -Filter 'profile.ps1.shellossus-backup-*' -File)
     Assert-True ($backups.Count -ge 1) 'Installer did not create a profile backup before modifying existing profile.'
 
@@ -912,18 +911,12 @@ try {
 
     $savedExpEnv = @{
         SHELLOSSUS_BASE_URL = $env:SHELLOSSUS_BASE_URL
-        H_AGENT_BASE_URL = $env:H_AGENT_BASE_URL
         SHELLOSSUS_MODEL = $env:SHELLOSSUS_MODEL
-        H_AGENT_MODEL = $env:H_AGENT_MODEL
         SHELLOSSUS_API_KEY = $env:SHELLOSSUS_API_KEY
-        H_AGENT_API_KEY = $env:H_AGENT_API_KEY
     }
     $env:SHELLOSSUS_BASE_URL = $null
-    $env:H_AGENT_BASE_URL = $null
     $env:SHELLOSSUS_MODEL = $null
-    $env:H_AGENT_MODEL = $null
     $env:SHELLOSSUS_API_KEY = $null
-    $env:H_AGENT_API_KEY = $null
     function global:Read-Host {
         param($Prompt)
         throw "Unexpected Read-Host prompt during offline -Export: $Prompt"
@@ -971,11 +964,8 @@ try {
     }
     finally {
         $env:SHELLOSSUS_BASE_URL = $savedExpEnv.SHELLOSSUS_BASE_URL
-        $env:H_AGENT_BASE_URL = $savedExpEnv.H_AGENT_BASE_URL
         $env:SHELLOSSUS_MODEL = $savedExpEnv.SHELLOSSUS_MODEL
-        $env:H_AGENT_MODEL = $savedExpEnv.H_AGENT_MODEL
         $env:SHELLOSSUS_API_KEY = $savedExpEnv.SHELLOSSUS_API_KEY
-        $env:H_AGENT_API_KEY = $savedExpEnv.H_AGENT_API_KEY
         Remove-Item Function:\global:Read-Host -ErrorAction SilentlyContinue
         Remove-Item Function:\Write-Host -ErrorAction SilentlyContinue
     }

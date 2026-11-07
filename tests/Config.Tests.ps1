@@ -43,36 +43,25 @@ try {
     $errText = Format-AgentError -ErrorRecord @{ Exception = @{ Message = 'HTTP 400' }; ErrorDetails = @{ Message = '{"error":{"message":"Bad model"}}' } }
     Assert-True ($errText -eq 'HTTP 400 (Bad model)') 'Format-AgentError failed.'
 
-    # Backward compatibility with legacy H_AGENT_* keys and .h-agent/.env fallback.
-    $legacyFile = Join-Path $testRoot 'legacy.env'
-    Set-Content -LiteralPath $legacyFile -Value @(
-        'H_AGENT_BASE_URL="https://legacy.invalid/v1"',
-        'H_AGENT_MODEL="legacy-model"',
-        'H_AGENT_API_KEY="legacy-secret"',
-        'H_AGENT_WORKSPACE="C:\legacy workspace"'
-    ) -Encoding UTF8
-    $parsedLegacy = Read-AgentConfig -Path $legacyFile
-    Assert-True ($parsedLegacy.SHELLOSSUS_BASE_URL -eq 'https://legacy.invalid/v1') 'Legacy H_AGENT_BASE_URL was not mapped.'
-    Assert-True ($parsedLegacy.SHELLOSSUS_MODEL -eq 'legacy-model') 'Legacy H_AGENT_MODEL was not mapped.'
-    Assert-True ($parsedLegacy.SHELLOSSUS_API_KEY -eq 'legacy-secret') 'Legacy H_AGENT_API_KEY was not mapped.'
-    Assert-True ($parsedLegacy.SHELLOSSUS_WORKSPACE -eq 'C:\legacy workspace') 'Legacy H_AGENT_WORKSPACE was not mapped.'
-
-    $mixedFile = Join-Path $testRoot 'mixed.env'
-    Set-Content -LiteralPath $mixedFile -Value @(
-        'H_AGENT_MODEL="old-model"',
-        'SHELLOSSUS_MODEL="new-model"',
-        'H_AGENT_MODEL="old-model-later"'
-    ) -Encoding UTF8
-    $parsedMixed = Read-AgentConfig -Path $mixedFile
-    Assert-True ($parsedMixed.SHELLOSSUS_MODEL -eq 'new-model') 'SHELLOSSUS_* key must take precedence over H_AGENT_*.'
+    # Only SHELLOSSUS_* keys are configuration. An unknown key is rejected, and a missing file stays empty.
+    $badKeyFile = Join-Path $testRoot 'bad-key.env'
+    Set-Content -LiteralPath $badKeyFile -Value 'OTHER_MODEL="nope"' -Encoding UTF8
+    $badKeyThrew = $false
+    try {
+        $null = Read-AgentConfig -Path $badKeyFile
+    }
+    catch {
+        if ($_.Exception.Message -like '*Invalid config entry*') { $badKeyThrew = $true }
+    }
+    Assert-True $badKeyThrew 'Unsupported config key was accepted.'
 
     $fakeUserHome = Join-Path $testRoot 'user-home'
-    $dotHAgentDir = Join-Path $fakeUserHome '.h-agent'
-    New-Item -ItemType Directory -Path $dotHAgentDir -Force | Out-Null
-    Set-Content -LiteralPath (Join-Path $dotHAgentDir '.env') -Value 'H_AGENT_MODEL="from-dot-h-agent"' -Encoding UTF8
+    $otherCfgDir = Join-Path $fakeUserHome 'other-agent'
+    New-Item -ItemType Directory -Path $otherCfgDir -Force | Out-Null
+    Set-Content -LiteralPath (Join-Path $otherCfgDir '.env') -Value 'SHELLOSSUS_MODEL="from-other-dir"' -Encoding UTF8
     $defaultShellossusCfg = Join-Path (Join-Path $fakeUserHome '.shellossus') '.env'
-    $fallbackCfg = Read-AgentConfig -Path $defaultShellossusCfg
-    Assert-True ($fallbackCfg.SHELLOSSUS_MODEL -eq 'from-dot-h-agent') 'Fallback from .shellossus/.env to existing .h-agent/.env failed.'
+    $missingCfg = Read-AgentConfig -Path $defaultShellossusCfg
+    Assert-True ($missingCfg.Count -eq 0) 'Missing .shellossus/.env must stay empty.'
 
     # Regression: Format-ConfigPath resolves existing ancestor and strips .\ segments when intermediate directories do not exist.
     $deepUncreated = Format-ConfigPath -Path (Join-Path $workspacePath '.\uncreated-dir\nested\custom.cfg')

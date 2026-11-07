@@ -130,7 +130,6 @@ function Resolve-PromptTemplate {
     $dirs = @()
     if ($Root) {
         $dirs += (Join-Path $Root '.shellossus/prompts')
-        $dirs += (Join-Path $Root '.h-agent/prompts')
     }
     if ($ConfigDir) { $dirs += (Join-Path $ConfigDir 'prompts') }
     foreach ($d in $dirs) {
