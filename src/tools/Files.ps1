@@ -211,7 +211,12 @@ function Invoke-AgentStagedWrite {
         }
         $writtenCheck = Get-Content -LiteralPath $path -Raw -Encoding UTF8 -ErrorAction Stop
         if ($null -eq $writtenCheck) { $writtenCheck = '' }
-        if ($writtenCheck -cne $after) { throw 'Written file verification failed.' }
+        if ($writtenCheck -cne $after) {
+            if ($backupPath) {
+                throw ('Written file verification failed (backup kept at ' + $backupPath + ').')
+            }
+            throw 'Written file verification failed.'
+        }
     }
     finally {
         if (Test-Path -LiteralPath $stageFile.FullName) {

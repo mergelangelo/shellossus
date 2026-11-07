@@ -2177,6 +2177,25 @@ $script:AutoApproveCommands = $false
 $script:StartupAgentPermission = 'Ask'
 $script:StartupPermissionSpecified = $false
 
+function Get-CurrentTurnWritePathsSince {
+    param([int]$StartCount)
+    $paths = @()
+    $seen = @{}
+    $writes = @($script:CurrentTurnWrites)
+    if ($StartCount -lt 0) { $StartCount = 0 }
+    for ($i = $StartCount; $i -lt $writes.Count; $i++) {
+        $entry = $writes[$i]
+        if (-not $entry) { continue }
+        $rel = ''
+        if ($entry.rel_path) { $rel = [string]$entry.rel_path }
+        if (-not $rel) { continue }
+        if ($seen.ContainsKey($rel)) { continue }
+        $seen[$rel] = $true
+        $paths += $rel
+    }
+    return ,$paths
+}
+
 function Resolve-ToolCanonicalName {
     param([string]$Name)
     if (-not $Name) { return '' }
@@ -4035,7 +4054,12 @@ function Invoke-AgentStagedWrite {
         }
         $writtenCheck = Get-Content -LiteralPath $path -Raw -Encoding UTF8 -ErrorAction Stop
         if ($null -eq $writtenCheck) { $writtenCheck = '' }
-        if ($writtenCheck -cne $after) { throw 'Written file verification failed.' }
+        if ($writtenCheck -cne $after) {
+            if ($backupPath) {
+                throw ('Written file verification failed (backup kept at ' + $backupPath + ').')
+            }
+            throw 'Written file verification failed.'
+        }
     }
     finally {
         if (Test-Path -LiteralPath $stageFile.FullName) {
@@ -5053,6 +5077,7 @@ function Invoke-AgentUndo {
             Ensure-SessionTree -State $State
         }
     }
+    Sync-AgentMemoryContext -State $State | Out-Null
 }
 
 # --- src/tools/Web.ps1 ---
@@ -5907,6 +5932,32 @@ function Invoke-AgentAskUser {
 # --- src/tools/Memory.ps1 ---
 # Cross-session persistent long-term memory tool (memory / MEMORY.md).
 
+function Format-MemoryAppendText {
+    param([string]$Existing, [string]$Content)
+    $newBullet = $Content.Trim()
+    if (-not $newBullet.StartsWith('-') -and -not $newBullet.StartsWith('*') -and -not $newBullet.StartsWith('#')) {
+        $newBullet = "- $newBullet"
+    }
+    $trimmedExisting = $Existing.TrimEnd()
+    $updatedText = if ($trimmedExisting) {
+        $trimmedExisting + "`n" + $newBullet + "`n"
+    }
+    else {
+        "# Project Memory`n`n" + $newBullet + "`n"
+    }
+    return @{ text = $updatedText; bullet = $newBullet }
+}
+
+function Read-AgentMemoryText {
+    param([string]$TargetPath)
+    if (-not (Test-Path -LiteralPath $TargetPath)) { return '' }
+    $item = Get-Item -LiteralPath $TargetPath -Force -ErrorAction Stop
+    if ($item.PSIsContainer) { throw 'MEMORY.md path is a directory.' }
+    $text = Get-Content -LiteralPath $TargetPath -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
+    if ($null -eq $text) { return '' }
+    return [string]$text
+}
+
 function Invoke-AgentMemory {
     param([string]$Root, $Arguments)
     $toolStart = Get-Date
@@ -5982,19 +6033,10 @@ function Invoke-AgentMemory {
         $cardContent = if ($existing.Trim()) { $existing.Trim() } else { '(no memories recorded yet)' }
     }
     elseif ($action -eq 'append') {
-        $newBullet = $content.Trim()
-        if (-not $newBullet.StartsWith('-') -and -not $newBullet.StartsWith('*') -and -not $newBullet.StartsWith('#')) {
-            $newBullet = "- $newBullet"
-        }
-        $trimmedExisting = $existing.TrimEnd()
-        $updatedText = if ($trimmedExisting) {
-            $trimmedExisting + "`n" + $newBullet + "`n"
-        }
-        else {
-            "# Project Memory`n`n" + $newBullet + "`n"
-        }
+        $built = Format-MemoryAppendText -Existing $existing -Content $content
+        $updatedText = [string]$built.text
         $summaryText = "appended to $displayRel"
-        $cardContent = "+ $newBullet"
+        $cardContent = '+ ' + [string]$built.bullet
     }
     elseif ($action -eq 'set') {
         $updatedText = $content.Trim() + "`n"
@@ -6052,6 +6094,17 @@ function Invoke-AgentMemory {
             if (Test-PathHasReparsePoint -Path $targetPath -StopAt $stopRoot) {
                 throw 'Reparse points are not allowed.'
             }
+            if ($action -eq 'append') {
+                $freshExisting = Read-AgentMemoryText -TargetPath $targetPath
+                $rebuilt = Format-MemoryAppendText -Existing $freshExisting -Content $content
+                $updatedText = [string]$rebuilt.text
+            }
+            elseif ($action -eq 'set') {
+                $freshExisting = Read-AgentMemoryText -TargetPath $targetPath
+                if ($freshExisting -cne $existing) {
+                    throw 'Memory file changed during confirmation. No write performed.'
+                }
+            }
             $stageFile = New-AgentTempFile
             try {
                 Set-AgentUtf8Content -LiteralPath $stageFile.FullName -Value $updatedText
@@ -6077,6 +6130,10 @@ function Invoke-AgentMemory {
             if (Test-Path -LiteralPath $targetPath) {
                 if (Test-PathHasReparsePoint -Path $targetPath -StopAt $stopRoot) {
                     throw 'Reparse points are not allowed.'
+                }
+                $freshExisting = Read-AgentMemoryText -TargetPath $targetPath
+                if ($freshExisting -cne $existing) {
+                    throw 'Memory file changed during confirmation. No write performed.'
                 }
                 Remove-Item -LiteralPath $targetPath -Force -ErrorAction Stop
             }
@@ -6143,8 +6200,18 @@ function New-SubagentErrorResult {
         [string]$Role,
         [string]$Context,
         [string]$Message,
-        [string]$Permission = 'ReadOnly'
+        [string]$Permission = 'ReadOnly',
+        [AllowEmptyCollection()][string[]]$ModifiedFiles = @()
     )
+    $files = @()
+    $seen = @{}
+    foreach ($mf in @($ModifiedFiles)) {
+        $rel = [string]$mf
+        if (-not $rel) { continue }
+        if ($seen.ContainsKey($rel)) { continue }
+        $seen[$rel] = $true
+        $files += $rel
+    }
     $result = @{
         role = $Role
         permission = $Permission
@@ -6153,7 +6220,7 @@ function New-SubagentErrorResult {
         output = ('Subagent error: ' + $Message)
         steps_used = 0
         read_files = @()
-        modified_files = @()
+        modified_files = $files
         usage_input_tokens = 0
         usage_output_tokens = 0
     }
@@ -6572,26 +6639,35 @@ function Invoke-AgentSubagent {
         $useWorkerProcs = ($Arguments.parallel.Count -gt 1) -and (-not $isMockedHttp) -and ($ExecutionContext.SessionState.LanguageMode -ne 'ConstrainedLanguage') -and ([bool]$standaloneScript)
         $results = @()
         $readSet = @{}
+        $modSet = @{}
         if ($useWorkerProcs) {
             $results = @(Invoke-ParallelSubagentProcesses -Root $Root -Tasks @($Arguments.parallel) -MaxSteps $maxSteps -ScriptPath $standaloneScript)
             foreach ($subRes in $results) {
                 foreach ($rf in @($subRes.read_files)) {
                     if ($rf) { $readSet[[string]$rf] = $true }
                 }
+                foreach ($mf in @($subRes.modified_files)) {
+                    if ($mf) { $modSet[[string]$mf] = $true }
+                }
             }
         }
         else {
             foreach ($pt in $Arguments.parallel) {
                 $rName = if ($pt.role) { [string]$pt.role } else { 'recon' }
+                $writeStart = @($script:CurrentTurnWrites).Count
                 try {
                     $subRes = Invoke-SubagentInProcess -Root $Root -RoleName $rName -TaskPrompt ([string]$pt.prompt) -ContextMode 'clean' -MaxSteps $maxSteps -ForceReadOnly
                 }
                 catch {
-                    $subRes = New-SubagentErrorResult -Role $rName -Context 'clean' -Message $_.Exception.Message
+                    $written = Get-CurrentTurnWritePathsSince -StartCount $writeStart
+                    $subRes = New-SubagentErrorResult -Role $rName -Context 'clean' -Message $_.Exception.Message -ModifiedFiles $written
                 }
                 $results += $subRes
                 foreach ($rf in @($subRes.read_files)) {
                     if ($rf) { $readSet[[string]$rf] = $true }
+                }
+                foreach ($mf in @($subRes.modified_files)) {
+                    if ($mf) { $modSet[[string]$mf] = $true }
                 }
             }
         }
@@ -6612,7 +6688,7 @@ function Invoke-AgentSubagent {
             output = ($summaryParts -join "`n`n")
             results = $results
             read_files = @($readSet.Keys | Sort-Object)
-            modified_files = @()
+            modified_files = @($modSet.Keys | Sort-Object)
             usage_input_tokens = $totalUsageIn
             usage_output_tokens = $totalUsageOut
         } | ConvertTo-Json -Depth 10 -Compress)
@@ -6635,11 +6711,13 @@ function Invoke-AgentSubagent {
             $stepCtx = if ($ps.context) { [string]$ps.context } else { $ctxMode }
             $rawPrompt = [string]$ps.prompt
             $resolvedPrompt = $rawPrompt.Replace('{previous}', $prevOutput).Replace('$PREVIOUS', $prevOutput)
+            $writeStart = @($script:CurrentTurnWrites).Count
             try {
                 $stepRes = Invoke-SubagentInProcess -Root $Root -RoleName $rName -TaskPrompt $resolvedPrompt -ContextMode $stepCtx -MaxSteps $maxSteps
             }
             catch {
-                $stepRes = New-SubagentErrorResult -Role $rName -Context $stepCtx -Message $_.Exception.Message -Permission $script:AgentPermission
+                $written = Get-CurrentTurnWritePathsSince -StartCount $writeStart
+                $stepRes = New-SubagentErrorResult -Role $rName -Context $stepCtx -Message $_.Exception.Message -Permission $script:AgentPermission -ModifiedFiles $written
             }
             $stepResults += $stepRes
             $prevOutput = [string]$stepRes.output
@@ -6692,6 +6770,7 @@ function Invoke-AgentTool {
     param([string]$Root, $Call)
     $cardName = 'tool'
     $cardTarget = ''
+    $writesAtStart = @($script:CurrentTurnWrites).Count
     try {
         $rawName = if ($Call -and $Call.function -and $Call.function.name) { [string]$Call.function.name } else { '' }
         if ($rawName) { $cardName = $rawName }
@@ -6741,7 +6820,11 @@ function Invoke-AgentTool {
     }
     catch {
         Write-ToolCallCard -Name $cardName -Target $cardTarget -Status 'error' -Summary $_.Exception.Message
-        return (@{ error = $_.Exception.Message } | ConvertTo-Json -Compress)
+        $errPayload = @{ error = $_.Exception.Message }
+        if ($name -eq 'run_agent') {
+            $errPayload.paths = Get-CurrentTurnWritePathsSince -StartCount $writesAtStart
+        }
+        return ($errPayload | ConvertTo-Json -Compress)
     }
 }
 

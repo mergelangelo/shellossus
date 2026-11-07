@@ -215,4 +215,5 @@ function Invoke-AgentUndo {
             Ensure-SessionTree -State $State
         }
     }
+    Sync-AgentMemoryContext -State $State | Out-Null
 }

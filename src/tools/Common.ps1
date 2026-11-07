@@ -25,6 +25,25 @@ $script:AutoApproveCommands = $false
 $script:StartupAgentPermission = 'Ask'
 $script:StartupPermissionSpecified = $false
 
+function Get-CurrentTurnWritePathsSince {
+    param([int]$StartCount)
+    $paths = @()
+    $seen = @{}
+    $writes = @($script:CurrentTurnWrites)
+    if ($StartCount -lt 0) { $StartCount = 0 }
+    for ($i = $StartCount; $i -lt $writes.Count; $i++) {
+        $entry = $writes[$i]
+        if (-not $entry) { continue }
+        $rel = ''
+        if ($entry.rel_path) { $rel = [string]$entry.rel_path }
+        if (-not $rel) { continue }
+        if ($seen.ContainsKey($rel)) { continue }
+        $seen[$rel] = $true
+        $paths += $rel
+    }
+    return ,$paths
+}
+
 function Resolve-ToolCanonicalName {
     param([string]$Name)
     if (-not $Name) { return '' }

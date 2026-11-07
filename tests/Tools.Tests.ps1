@@ -2563,6 +2563,315 @@ description: Optional subagent role: recon (ReadOnly search), audit (ReadOnly re
         $script:AutoApproveWeb = $task5DirectWeb
         $script:OutputMode = $task5DirectMode
     }
+
+    # Task 11: a failed run_agent names only the workspace paths written during that call.
+    $task11Perm = $script:AgentPermission
+    $task11Mode = $script:OutputMode
+    $task11Writes = @($script:CurrentTurnWrites)
+    $task11Depth = $script:SubagentDepth
+    $task11State = $script:ActiveState
+    $task11SubFile = Join-Path $workspacePath 'task11-sub-wrote.txt'
+    try {
+        $script:AgentPermission = 'AutoEdit'
+        $script:OutputMode = 'json'
+        $script:SubagentDepth = 0
+        $script:ActiveState = $null
+        $script:CurrentTurnWrites = @(
+            @{
+                action = 'created'
+                root = $workspacePath
+                full_path = (Join-Path $workspacePath 'task11-earlier.txt')
+                rel_path = 'task11-earlier.txt'
+            }
+        )
+        $script:task11SubStep = 0
+        function Invoke-WebRequest {
+            param($Uri, $Method, $Headers, $ContentType, $Body, $TimeoutSec, $ErrorAction, [switch]$UseBasicParsing, $OutFile)
+            $script:task11SubStep++
+            if ($script:task11SubStep -eq 1) {
+                $r = @{ choices = @(@{ finish_reason = 'tool_calls'; message = @{
+                    content = ''
+                    tool_calls = @(@{ id = 't11-w'; type = 'function'; function = @{ name = 'write_file'; arguments = '{"path":"task11-sub-wrote.txt","content":"from-subagent"}' } })
+                } }) } | ConvertTo-Json -Depth 10 -Compress
+                Set-Content -LiteralPath $OutFile -Value $r -Encoding UTF8 -NoNewline
+                return
+            }
+            throw 'Subagent failed after write'
+        }
+        $task11Fail = Invoke-AgentTool -Root $workspacePath -Call @{
+            id = 'task11-sub-fail'
+            function = @{ name = 'run_agent'; arguments = '{"role":"craft","prompt":"Write task11-sub-wrote.txt"}' }
+        } | ConvertFrom-Json
+        Assert-True ((Get-Content -LiteralPath $task11SubFile -Raw -Encoding UTF8) -ceq 'from-subagent') 'Subagent did not write the file before failing.'
+        Assert-True ($task11Fail.error -like '*Subagent failed after write*') "run_agent failure did not return the error: $($task11Fail.error)"
+        $task11Paths = @($task11Fail.paths)
+        Assert-True (($task11Paths -contains 'task11-sub-wrote.txt') -and ($task11Paths -notcontains 'task11-earlier.txt')) "run_agent error paths were '$($task11Paths -join ',')'."
+
+        function Invoke-WebRequest {
+            param($Uri, $Method, $Headers, $ContentType, $Body, $TimeoutSec, $ErrorAction, [switch]$UseBasicParsing, $OutFile)
+            throw 'Subagent failed before write'
+        }
+        $task11Early = Invoke-AgentTool -Root $workspacePath -Call @{
+            id = 'task11-sub-early'
+            function = @{ name = 'run_agent'; arguments = '{"role":"craft","prompt":"Fail immediately"}' }
+        } | ConvertFrom-Json
+        Assert-True ($task11Early.error -like '*Subagent failed before write*') "Pre-write run_agent failure did not return the error: $($task11Early.error)"
+        Assert-True ($null -ne $task11Early.PSObject.Properties['paths']) 'Pre-write run_agent error omitted the path list.'
+        Assert-True (@($task11Early.paths).Count -eq 0) "Pre-write run_agent failure reported paths: $(@($task11Early.paths) -join ',')."
+    }
+    finally {
+        Remove-Item Function:\Invoke-WebRequest -ErrorAction SilentlyContinue
+        $script:AgentPermission = $task11Perm
+        $script:OutputMode = $task11Mode
+        $script:SubagentDepth = $task11Depth
+        $script:ActiveState = $task11State
+        $script:CurrentTurnWrites = @($task11Writes)
+        if (Test-Path -LiteralPath $task11SubFile) { Remove-Item -LiteralPath $task11SubFile -Force -ErrorAction SilentlyContinue }
+    }
+
+    # Task 11: a subagent error result keeps the paths written before the failure.
+    $task11PipePerm = $script:AgentPermission
+    $task11PipeMode = $script:OutputMode
+    $task11PipeWrites = @($script:CurrentTurnWrites)
+    $task11PipeDepth = $script:SubagentDepth
+    $task11PipeState = $script:ActiveState
+    $task11PipeFile = Join-Path $workspacePath 'task11-pipe-wrote.txt'
+    try {
+        $script:AgentPermission = 'AutoEdit'
+        $script:OutputMode = 'json'
+        $script:SubagentDepth = 0
+        $script:ActiveState = $null
+        $script:CurrentTurnWrites = @(
+            @{
+                action = 'created'
+                root = $workspacePath
+                full_path = (Join-Path $workspacePath 'task11-earlier.txt')
+                rel_path = 'task11-earlier.txt'
+            }
+        )
+        $script:task11PipeStep = 0
+        function Invoke-WebRequest {
+            param($Uri, $Method, $Headers, $ContentType, $Body, $TimeoutSec, $ErrorAction, [switch]$UseBasicParsing, $OutFile)
+            $script:task11PipeStep++
+            if ($script:task11PipeStep -eq 1) {
+                $r = @{ choices = @(@{ finish_reason = 'tool_calls'; message = @{
+                    content = ''
+                    tool_calls = @(@{ id = 't11-p'; type = 'function'; function = @{ name = 'write_file'; arguments = '{"path":"task11-pipe-wrote.txt","content":"from-pipeline"}' } })
+                } }) } | ConvertTo-Json -Depth 10 -Compress
+                Set-Content -LiteralPath $OutFile -Value $r -Encoding UTF8 -NoNewline
+                return
+            }
+            throw 'Pipeline failed after write'
+        }
+        $task11Pipe = Invoke-AgentTool -Root $workspacePath -Call @{
+            id = 'task11-pipe-fail'
+            function = @{ name = 'run_agent'; arguments = '{"pipeline":[{"role":"craft","prompt":"Write task11-pipe-wrote.txt"}]}' }
+        } | ConvertFrom-Json
+        Assert-True ((Get-Content -LiteralPath $task11PipeFile -Raw -Encoding UTF8) -ceq 'from-pipeline') 'Pipeline subagent did not write the file before failing.'
+        Assert-True ($task11Pipe.status -eq 'error' -and $task11Pipe.steps_count -eq 1) "Pipeline error result did not stop on the failed step: status=$($task11Pipe.status) steps=$($task11Pipe.steps_count)."
+        $task11PipeChild = $task11Pipe.results[0]
+        Assert-True ($task11PipeChild.status -eq 'error' -and $task11PipeChild.output -like '*Pipeline failed after write*') "Pipeline error result dropped the failure: $($task11PipeChild.output)"
+        $task11PipeMods = @($task11PipeChild.modified_files)
+        Assert-True (($task11PipeMods -contains 'task11-pipe-wrote.txt') -and ($task11PipeMods -notcontains 'task11-earlier.txt')) "Pipeline error result paths were '$($task11PipeMods -join ',')'."
+        $task11PipeAgg = @($task11Pipe.modified_files)
+        Assert-True (($task11PipeAgg -contains 'task11-pipe-wrote.txt') -and ($task11PipeAgg -notcontains 'task11-earlier.txt')) "Pipeline aggregate dropped the written path: '$($task11PipeAgg -join ',')'."
+    }
+    finally {
+        Remove-Item Function:\Invoke-WebRequest -ErrorAction SilentlyContinue
+        $script:AgentPermission = $task11PipePerm
+        $script:OutputMode = $task11PipeMode
+        $script:SubagentDepth = $task11PipeDepth
+        $script:ActiveState = $task11PipeState
+        $script:CurrentTurnWrites = @($task11PipeWrites)
+        if (Test-Path -LiteralPath $task11PipeFile) { Remove-Item -LiteralPath $task11PipeFile -Force -ErrorAction SilentlyContinue }
+    }
+
+    # Task 11: a post-Move-Item mismatch names the backup taken in that call and leaves the file.
+    $task11MisPerm = $script:AgentPermission
+    $task11MisMode = $script:OutputMode
+    $task11MisWrites = @($script:CurrentTurnWrites)
+    $task11MisFile = Join-Path $workspacePath 'task11-mismatch.txt'
+    $task11FakeBackup = Join-Path $testRoot 'task11-not-this-backup.tmp'
+    try {
+        Set-Content -LiteralPath $task11MisFile -Value 'original-bytes' -Encoding UTF8 -NoNewline
+        Set-Content -LiteralPath $task11FakeBackup -Value 'older-backup' -Encoding UTF8 -NoNewline
+        $script:AgentPermission = 'AutoEdit'
+        $script:OutputMode = 'json'
+        $script:CurrentTurnWrites = @(
+            @{
+                action = 'modified'
+                root = $workspacePath
+                full_path = (Join-Path $workspacePath 'task11-other.txt')
+                rel_path = 'task11-other.txt'
+                backup = $task11FakeBackup
+                before_content = 'older-backup'
+                after_content = 'older-after'
+            }
+        )
+        function Move-Item {
+            param($LiteralPath, $Destination, [switch]$Force, $ErrorAction, $Path)
+            $target = if ($Destination) { [string]$Destination } else { [string]$Path }
+            Set-Content -LiteralPath $target -Value 'tampered-bytes' -Encoding UTF8 -NoNewline
+        }
+        $task11Mis = Invoke-AgentTool -Root $workspacePath -Call @{
+            id = 'task11-mismatch'
+            function = @{ name = 'write_file'; arguments = '{"path":"task11-mismatch.txt","content":"staged-bytes","overwrite":true}' }
+        } | ConvertFrom-Json
+        Assert-True ($task11Mis.error -like '*Written file verification failed*') "Post-move mismatch did not fail verification: $($task11Mis.error)"
+        $task11MisWrite = $script:CurrentTurnWrites[-1]
+        Assert-True ([string]$task11MisWrite.rel_path -eq 'task11-mismatch.txt') 'Post-move mismatch did not record the write from that call.'
+        Assert-True (([string]$task11Mis.error).Contains([string]$task11MisWrite.backup) -and -not ([string]$task11Mis.error).Contains($task11FakeBackup)) "Post-move mismatch named the wrong backup: $($task11Mis.error)"
+        Assert-True ((Test-Path -LiteralPath $task11MisWrite.backup) -and ((Get-Content -LiteralPath $task11MisWrite.backup -Raw -Encoding UTF8) -ceq 'original-bytes')) 'Post-move mismatch removed or rewrote the backup from that call.'
+    }
+    finally {
+        Remove-Item Function:\Move-Item -ErrorAction SilentlyContinue
+        $script:AgentPermission = $task11MisPerm
+        $script:OutputMode = $task11MisMode
+        $script:CurrentTurnWrites = @($task11MisWrites)
+        if (Test-Path -LiteralPath $task11MisFile) { Remove-Item -LiteralPath $task11MisFile -Force -ErrorAction SilentlyContinue }
+        if (Test-Path -LiteralPath $task11FakeBackup) { Remove-Item -LiteralPath $task11FakeBackup -Force -ErrorAction SilentlyContinue }
+    }
+
+    # Task 11: memory append rereads MEMORY.md after confirmation and keeps the fresh text.
+    $task11MemPerm = $script:AgentPermission
+    $task11MemMode = $script:OutputMode
+    $task11MemState = $script:ActiveState
+    $task11MemWs = Join-Path $testRoot 'task11-mem-ws'
+    $task11MemFile = Join-Path $task11MemWs 'MEMORY.md'
+    try {
+        New-Item -ItemType Directory -Path $task11MemWs -Force | Out-Null
+        Set-Content -LiteralPath $task11MemFile -Value "# Project Memory`n`n- original note`n" -Encoding UTF8 -NoNewline
+        $script:AgentPermission = 'Ask'
+        $script:OutputMode = 'text'
+        $script:ActiveState = @{ workspace = $task11MemWs; messages = @(@{ role = 'system'; content = 'sys' }) }
+        function Read-Host {
+            param($Prompt)
+            Set-Content -LiteralPath $task11MemFile -Value "# Project Memory`n`n- original note`n- concurrent note`n" -Encoding UTF8 -NoNewline
+            return 'y'
+        }
+        $task11MemRes = Invoke-AgentMemory -Root $task11MemWs -Arguments @{ action = 'append'; content = 'appended note' } | ConvertFrom-Json
+        $task11MemNow = Get-Content -LiteralPath $task11MemFile -Raw -Encoding UTF8
+        Assert-True ($task11MemRes.success -and $task11MemNow.Contains('- original note') -and $task11MemNow.Contains('- concurrent note') -and $task11MemNow.Contains('- appended note')) "Memory append dropped the fresh file contents: $task11MemNow"
+    }
+    finally {
+        function Read-Host {
+            param($Prompt)
+            $script:prompts++
+            if ($script:approval -is [array]) {
+                $next = $script:approval[0]
+                if ($script:approval.Count -le 1) { $script:approval = '' }
+                else { $script:approval = @($script:approval[1..($script:approval.Count - 1)]) }
+                return $next
+            }
+            return $script:approval
+        }
+        $script:AgentPermission = $task11MemPerm
+        $script:OutputMode = $task11MemMode
+        $script:ActiveState = $task11MemState
+        if (Test-Path -LiteralPath $task11MemWs) { Remove-Item -LiteralPath $task11MemWs -Recurse -Force -ErrorAction SilentlyContinue }
+    }
+
+    # Task 11: memory set refuses when MEMORY.md changes during confirmation.
+    $task11SetPerm = $script:AgentPermission
+    $task11SetMode = $script:OutputMode
+    $task11SetState = $script:ActiveState
+    $task11SetWs = Join-Path $testRoot 'task11-set-ws'
+    $task11SetFile = Join-Path $task11SetWs 'MEMORY.md'
+    try {
+        New-Item -ItemType Directory -Path $task11SetWs -Force | Out-Null
+        Set-Content -LiteralPath $task11SetFile -Value "# Project Memory`n`n- alpha`n" -Encoding UTF8 -NoNewline
+        $script:AgentPermission = 'Ask'
+        $script:OutputMode = 'text'
+        $script:ActiveState = @{ workspace = $task11SetWs; messages = @(@{ role = 'system'; content = 'sys' }) }
+        function Read-Host {
+            param($Prompt)
+            Set-Content -LiteralPath $task11SetFile -Value "# Project Memory`n`n- beta`n" -Encoding UTF8 -NoNewline
+            return 'y'
+        }
+        $task11SetThrew = $false
+        $task11SetErr = ''
+        try {
+            $null = Invoke-AgentMemory -Root $task11SetWs -Arguments @{ action = 'set'; content = 'gamma' }
+        }
+        catch {
+            $task11SetThrew = $true
+            $task11SetErr = [string]$_.Exception.Message
+        }
+        $task11SetNow = Get-Content -LiteralPath $task11SetFile -Raw -Encoding UTF8
+        Assert-True ($task11SetThrew -and $task11SetNow.Contains('- beta') -and -not $task11SetNow.Contains('gamma')) "Memory set overwrote a file that changed during confirmation: $task11SetNow ($task11SetErr)"
+    }
+    finally {
+        function Read-Host {
+            param($Prompt)
+            $script:prompts++
+            if ($script:approval -is [array]) {
+                $next = $script:approval[0]
+                if ($script:approval.Count -le 1) { $script:approval = '' }
+                else { $script:approval = @($script:approval[1..($script:approval.Count - 1)]) }
+                return $next
+            }
+            return $script:approval
+        }
+        $script:AgentPermission = $task11SetPerm
+        $script:OutputMode = $task11SetMode
+        $script:ActiveState = $task11SetState
+        if (Test-Path -LiteralPath $task11SetWs) { Remove-Item -LiteralPath $task11SetWs -Recurse -Force -ErrorAction SilentlyContinue }
+    }
+
+    # Task 11: successful /undo after a memory append keeps the file, refreshes the prompt, and does not claim memory was rolled back.
+    $task11UndoPerm = $script:AgentPermission
+    $task11UndoMode = $script:OutputMode
+    $task11UndoActive = $script:ActiveState
+    $task11UndoWs = Join-Path $testRoot 'task11-undo-ws'
+    try {
+        New-Item -ItemType Directory -Path $task11UndoWs -Force | Out-Null
+        $script:AgentPermission = 'Auto'
+        $script:OutputMode = 'json'
+        $task11UndoBefore = Build-SystemPrompt -Root $task11UndoWs -ConfigDir ''
+        $task11UndoState = @{
+            workspace = $task11UndoWs
+            messages = @(@{ role = 'system'; content = $task11UndoBefore })
+        }
+        Assert-True (-not ([string]$task11UndoBefore).Contains('undo memory note')) 'Undo fixture prompt already contained the memory note.'
+        $script:ActiveState = $task11UndoState
+        $task11UndoAppend = Invoke-AgentMemory -Root $task11UndoWs -Arguments @{ action = 'append'; content = 'undo memory note' } | ConvertFrom-Json
+        $task11UndoMem = Join-Path $task11UndoWs '.shellossus/MEMORY.md'
+        Assert-True ($task11UndoAppend.success -and (Test-Path -LiteralPath $task11UndoMem)) 'Undo fixture did not append workspace memory.'
+        $script:task11UndoHost = @()
+        function Write-Host {
+            param([Parameter(Position = 0, ValueFromRemainingArguments = $true)]$Object, [switch]$NoNewline, $ForegroundColor, $BackgroundColor)
+            $text = ($Object | ForEach-Object { [string]$_ }) -join ' '
+            $script:task11UndoHost += $text
+        }
+        $task11UndoStack = @(@{
+            messages = @(@{ role = 'system'; content = $task11UndoBefore })
+            writes = @()
+        })
+        $null = Invoke-ReplUndoCommand -State $task11UndoState -RootPath $task11UndoWs -UndoStack $task11UndoStack
+        $task11UndoHostText = $script:task11UndoHost -join "`n"
+        $task11UndoDisk = Get-Content -LiteralPath $task11UndoMem -Raw -Encoding UTF8
+        $task11UndoPrompt = [string]$task11UndoState.messages[0].content
+        Assert-True ($task11UndoDisk.Contains('undo memory note')) "Undo rewrote the memory file: $task11UndoDisk"
+        Assert-True ($task11UndoPrompt.Contains('undo memory note')) "Undo left the system prompt without the memory still on disk: $task11UndoPrompt"
+        Assert-True (($task11UndoHostText -like '*Reverted last turn*') -and ($task11UndoHostText -notlike '*memory was rolled back*')) "Undo text claimed memory was rolled back: $task11UndoHostText"
+
+        $task11UndoState.messages[0].content = $task11UndoBefore
+        $task11Rollback = Invoke-AgentTurnRollback -State $task11UndoState -Snapshot @{
+            messages = @(@{ role = 'system'; content = $task11UndoBefore })
+            leaf_id = ''
+            tree_entries = @()
+        } -Writes @()
+        Assert-True ($task11Rollback.succeeded) "Automatic rollback did not succeed: $($task11Rollback.error)"
+        Assert-True (([string]$task11UndoState.messages[0].content).Contains('undo memory note')) 'Automatic rollback left the system prompt without the memory still on disk.'
+        Assert-True ((Get-Content -LiteralPath $task11UndoMem -Raw -Encoding UTF8).Contains('undo memory note')) 'Automatic rollback rewrote the memory file.'
+    }
+    finally {
+        Remove-Item Function:\Write-Host -ErrorAction SilentlyContinue
+        $script:AgentPermission = $task11UndoPerm
+        $script:OutputMode = $task11UndoMode
+        $script:ActiveState = $task11UndoActive
+        if (Test-Path -LiteralPath $task11UndoWs) { Remove-Item -LiteralPath $task11UndoWs -Recurse -Force -ErrorAction SilentlyContinue }
+    }
 }
 finally {
     Remove-TestEnvironment -Env $envData

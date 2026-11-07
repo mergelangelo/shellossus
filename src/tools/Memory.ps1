@@ -1,5 +1,31 @@
 # Cross-session persistent long-term memory tool (memory / MEMORY.md).
 
+function Format-MemoryAppendText {
+    param([string]$Existing, [string]$Content)
+    $newBullet = $Content.Trim()
+    if (-not $newBullet.StartsWith('-') -and -not $newBullet.StartsWith('*') -and -not $newBullet.StartsWith('#')) {
+        $newBullet = "- $newBullet"
+    }
+    $trimmedExisting = $Existing.TrimEnd()
+    $updatedText = if ($trimmedExisting) {
+        $trimmedExisting + "`n" + $newBullet + "`n"
+    }
+    else {
+        "# Project Memory`n`n" + $newBullet + "`n"
+    }
+    return @{ text = $updatedText; bullet = $newBullet }
+}
+
+function Read-AgentMemoryText {
+    param([string]$TargetPath)
+    if (-not (Test-Path -LiteralPath $TargetPath)) { return '' }
+    $item = Get-Item -LiteralPath $TargetPath -Force -ErrorAction Stop
+    if ($item.PSIsContainer) { throw 'MEMORY.md path is a directory.' }
+    $text = Get-Content -LiteralPath $TargetPath -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
+    if ($null -eq $text) { return '' }
+    return [string]$text
+}
+
 function Invoke-AgentMemory {
     param([string]$Root, $Arguments)
     $toolStart = Get-Date
@@ -75,19 +101,10 @@ function Invoke-AgentMemory {
         $cardContent = if ($existing.Trim()) { $existing.Trim() } else { '(no memories recorded yet)' }
     }
     elseif ($action -eq 'append') {
-        $newBullet = $content.Trim()
-        if (-not $newBullet.StartsWith('-') -and -not $newBullet.StartsWith('*') -and -not $newBullet.StartsWith('#')) {
-            $newBullet = "- $newBullet"
-        }
-        $trimmedExisting = $existing.TrimEnd()
-        $updatedText = if ($trimmedExisting) {
-            $trimmedExisting + "`n" + $newBullet + "`n"
-        }
-        else {
-            "# Project Memory`n`n" + $newBullet + "`n"
-        }
+        $built = Format-MemoryAppendText -Existing $existing -Content $content
+        $updatedText = [string]$built.text
         $summaryText = "appended to $displayRel"
-        $cardContent = "+ $newBullet"
+        $cardContent = '+ ' + [string]$built.bullet
     }
     elseif ($action -eq 'set') {
         $updatedText = $content.Trim() + "`n"
@@ -145,6 +162,17 @@ function Invoke-AgentMemory {
             if (Test-PathHasReparsePoint -Path $targetPath -StopAt $stopRoot) {
                 throw 'Reparse points are not allowed.'
             }
+            if ($action -eq 'append') {
+                $freshExisting = Read-AgentMemoryText -TargetPath $targetPath
+                $rebuilt = Format-MemoryAppendText -Existing $freshExisting -Content $content
+                $updatedText = [string]$rebuilt.text
+            }
+            elseif ($action -eq 'set') {
+                $freshExisting = Read-AgentMemoryText -TargetPath $targetPath
+                if ($freshExisting -cne $existing) {
+                    throw 'Memory file changed during confirmation. No write performed.'
+                }
+            }
             $stageFile = New-AgentTempFile
             try {
                 Set-AgentUtf8Content -LiteralPath $stageFile.FullName -Value $updatedText
@@ -170,6 +198,10 @@ function Invoke-AgentMemory {
             if (Test-Path -LiteralPath $targetPath) {
                 if (Test-PathHasReparsePoint -Path $targetPath -StopAt $stopRoot) {
                     throw 'Reparse points are not allowed.'
+                }
+                $freshExisting = Read-AgentMemoryText -TargetPath $targetPath
+                if ($freshExisting -cne $existing) {
+                    throw 'Memory file changed during confirmation. No write performed.'
                 }
                 Remove-Item -LiteralPath $targetPath -Force -ErrorAction Stop
             }

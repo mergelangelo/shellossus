@@ -180,26 +180,35 @@ function Invoke-AgentSubagent {
         $useWorkerProcs = ($Arguments.parallel.Count -gt 1) -and (-not $isMockedHttp) -and ($ExecutionContext.SessionState.LanguageMode -ne 'ConstrainedLanguage') -and ([bool]$standaloneScript)
         $results = @()
         $readSet = @{}
+        $modSet = @{}
         if ($useWorkerProcs) {
             $results = @(Invoke-ParallelSubagentProcesses -Root $Root -Tasks @($Arguments.parallel) -MaxSteps $maxSteps -ScriptPath $standaloneScript)
             foreach ($subRes in $results) {
                 foreach ($rf in @($subRes.read_files)) {
                     if ($rf) { $readSet[[string]$rf] = $true }
                 }
+                foreach ($mf in @($subRes.modified_files)) {
+                    if ($mf) { $modSet[[string]$mf] = $true }
+                }
             }
         }
         else {
             foreach ($pt in $Arguments.parallel) {
                 $rName = if ($pt.role) { [string]$pt.role } else { 'recon' }
+                $writeStart = @($script:CurrentTurnWrites).Count
                 try {
                     $subRes = Invoke-SubagentInProcess -Root $Root -RoleName $rName -TaskPrompt ([string]$pt.prompt) -ContextMode 'clean' -MaxSteps $maxSteps -ForceReadOnly
                 }
                 catch {
-                    $subRes = New-SubagentErrorResult -Role $rName -Context 'clean' -Message $_.Exception.Message
+                    $written = Get-CurrentTurnWritePathsSince -StartCount $writeStart
+                    $subRes = New-SubagentErrorResult -Role $rName -Context 'clean' -Message $_.Exception.Message -ModifiedFiles $written
                 }
                 $results += $subRes
                 foreach ($rf in @($subRes.read_files)) {
                     if ($rf) { $readSet[[string]$rf] = $true }
+                }
+                foreach ($mf in @($subRes.modified_files)) {
+                    if ($mf) { $modSet[[string]$mf] = $true }
                 }
             }
         }
@@ -220,7 +229,7 @@ function Invoke-AgentSubagent {
             output = ($summaryParts -join "`n`n")
             results = $results
             read_files = @($readSet.Keys | Sort-Object)
-            modified_files = @()
+            modified_files = @($modSet.Keys | Sort-Object)
             usage_input_tokens = $totalUsageIn
             usage_output_tokens = $totalUsageOut
         } | ConvertTo-Json -Depth 10 -Compress)
@@ -243,11 +252,13 @@ function Invoke-AgentSubagent {
             $stepCtx = if ($ps.context) { [string]$ps.context } else { $ctxMode }
             $rawPrompt = [string]$ps.prompt
             $resolvedPrompt = $rawPrompt.Replace('{previous}', $prevOutput).Replace('$PREVIOUS', $prevOutput)
+            $writeStart = @($script:CurrentTurnWrites).Count
             try {
                 $stepRes = Invoke-SubagentInProcess -Root $Root -RoleName $rName -TaskPrompt $resolvedPrompt -ContextMode $stepCtx -MaxSteps $maxSteps
             }
             catch {
-                $stepRes = New-SubagentErrorResult -Role $rName -Context $stepCtx -Message $_.Exception.Message -Permission $script:AgentPermission
+                $written = Get-CurrentTurnWritePathsSince -StartCount $writeStart
+                $stepRes = New-SubagentErrorResult -Role $rName -Context $stepCtx -Message $_.Exception.Message -Permission $script:AgentPermission -ModifiedFiles $written
             }
             $stepResults += $stepRes
             $prevOutput = [string]$stepRes.output

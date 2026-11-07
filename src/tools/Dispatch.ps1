@@ -4,6 +4,7 @@ function Invoke-AgentTool {
     param([string]$Root, $Call)
     $cardName = 'tool'
     $cardTarget = ''
+    $writesAtStart = @($script:CurrentTurnWrites).Count
     try {
         $rawName = if ($Call -and $Call.function -and $Call.function.name) { [string]$Call.function.name } else { '' }
         if ($rawName) { $cardName = $rawName }
@@ -53,6 +54,10 @@ function Invoke-AgentTool {
     }
     catch {
         Write-ToolCallCard -Name $cardName -Target $cardTarget -Status 'error' -Summary $_.Exception.Message
-        return (@{ error = $_.Exception.Message } | ConvertTo-Json -Compress)
+        $errPayload = @{ error = $_.Exception.Message }
+        if ($name -eq 'run_agent') {
+            $errPayload.paths = Get-CurrentTurnWritePathsSince -StartCount $writesAtStart
+        }
+        return ($errPayload | ConvertTo-Json -Compress)
     }
 }

@@ -37,8 +37,18 @@ function New-SubagentErrorResult {
         [string]$Role,
         [string]$Context,
         [string]$Message,
-        [string]$Permission = 'ReadOnly'
+        [string]$Permission = 'ReadOnly',
+        [AllowEmptyCollection()][string[]]$ModifiedFiles = @()
     )
+    $files = @()
+    $seen = @{}
+    foreach ($mf in @($ModifiedFiles)) {
+        $rel = [string]$mf
+        if (-not $rel) { continue }
+        if ($seen.ContainsKey($rel)) { continue }
+        $seen[$rel] = $true
+        $files += $rel
+    }
     $result = @{
         role = $Role
         permission = $Permission
@@ -47,7 +57,7 @@ function New-SubagentErrorResult {
         output = ('Subagent error: ' + $Message)
         steps_used = 0
         read_files = @()
-        modified_files = @()
+        modified_files = $files
         usage_input_tokens = 0
         usage_output_tokens = 0
     }
