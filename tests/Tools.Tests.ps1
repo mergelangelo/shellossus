@@ -1731,6 +1731,280 @@ try {
     )
     Clear-AgentUndoBackups -UndoEntries $mockUndoEntries -Writes $mockWrites
     Assert-True ((-not (Test-Path -LiteralPath $tmpBak1.FullName)) -and (-not (Test-Path -LiteralPath $tmpBak2.FullName)) -and (-not (Test-Path -LiteralPath $tmpBak3.FullName))) 'Clear-AgentUndoBackups did not remove all backup files in UndoEntries and Writes.'
+
+    # Characterization captured from the tool schema before the single-table refactor.
+    # Serializes Get-AgentTools to JSON, then locks tool order plus every property name and description.
+    function Compare-OrdinalSchemaPath {
+        param([string]$Left, [string]$Right)
+        $n = $Left.Length
+        if ($Right.Length -lt $n) { $n = $Right.Length }
+        for ($i = 0; $i -lt $n; $i++) {
+            $lc = [int][char]$Left[$i]
+            $rc = [int][char]$Right[$i]
+            if ($lc -lt $rc) { return -1 }
+            if ($lc -gt $rc) { return 1 }
+        }
+        if ($Left.Length -lt $Right.Length) { return -1 }
+        if ($Left.Length -gt $Right.Length) { return 1 }
+        return 0
+    }
+    function Sort-SchemaPropertyRecords {
+        param($Records)
+        $items = @($Records)
+        for ($i = 0; $i -lt $items.Count; $i++) {
+            for ($j = $i + 1; $j -lt $items.Count; $j++) {
+                $cmp = Compare-OrdinalSchemaPath -Left ([string]$items[$j].path) -Right ([string]$items[$i].path)
+                if ($cmp -lt 0) {
+                    $tmp = $items[$i]
+                    $items[$i] = $items[$j]
+                    $items[$j] = $tmp
+                }
+            }
+        }
+        foreach ($item in $items) { Write-Output $item }
+    }
+    function Get-CapturedSchemaProperties {
+        param($Node, [string]$Prefix)
+        $found = @()
+        if ($null -eq $Node) { return }
+        $nodeNames = @($Node.PSObject.Properties.Name)
+        if ($nodeNames -notcontains 'properties' -or $null -eq $Node.properties) { return }
+        $propNames = @($Node.properties.PSObject.Properties.Name)
+        foreach ($propName in $propNames) {
+            $child = $Node.properties.$propName
+            $path = if ($Prefix) { $Prefix + '.' + $propName } else { [string]$propName }
+            $desc = ''
+            $childNames = @()
+            if ($null -ne $child) { $childNames = @($child.PSObject.Properties.Name) }
+            if ($childNames -contains 'description' -and $null -ne $child.description) {
+                $desc = [string]$child.description
+            }
+            $found += @{ path = $path; description = $desc }
+            if ($childNames -contains 'items') {
+                $nested = @(Get-CapturedSchemaProperties -Node $child.items -Prefix ($path + '.items'))
+                foreach ($nestedItem in $nested) { $found += $nestedItem }
+            }
+        }
+        foreach ($foundItem in $found) { Write-Output $foundItem }
+    }
+    function Get-CapturedToolSchemaText {
+        param($Tools)
+        $toolsJson = @($Tools) | ConvertTo-Json -Depth 30
+        $parsed = @($toolsJson | ConvertFrom-Json)
+        $lines = @()
+        foreach ($tool in $parsed) {
+            if ($lines.Count -gt 0) { $lines += '' }
+            $lines += ('tool: ' + [string]$tool.function.name)
+            $lines += ('description: ' + [string]$tool.function.description)
+            $records = @(Get-CapturedSchemaProperties -Node $tool.function.parameters -Prefix '')
+            $records = @(Sort-SchemaPropertyRecords -Records $records)
+            foreach ($rec in $records) {
+                $lines += ('property: ' + [string]$rec.path)
+                if ($rec.description) {
+                    $lines += ('description: ' + [string]$rec.description)
+                }
+                else {
+                    $lines += 'description:'
+                }
+            }
+        }
+        return ($lines -join "`n")
+    }
+    $savedSchemaPerm = $script:AgentPermission
+    $savedSchemaNoTools = $script:NoTools
+    $savedSchemaEnabled = @($script:EnabledTools)
+    $savedSchemaExcluded = @($script:ExcludedTools)
+    $savedSchemaDepth = $script:SubagentDepth
+    try {
+        $script:AgentPermission = 'Ask'
+        $script:NoTools = $false
+        $script:EnabledTools = @()
+        $script:ExcludedTools = @()
+        $script:SubagentDepth = 0
+        $actualSchemaText = [string](Get-CapturedToolSchemaText -Tools @(Get-AgentTools))
+        $expectedSchemaText = @'
+tool: list_files
+description: List up to 200 entries in a directory. Names only; no file contents.
+property: limit
+description: Optional maximum number of entries to return (1..500, default 200).
+property: path
+description: Workspace-relative path; . means the root.
+
+tool: read_file
+description: Read a UTF-8 text file: up to 300 lines and 20000 characters, maximum file size 1 MiB. Returns total_lines and pagination metadata.
+property: limit
+description: Optional alias for max_lines (1..300).
+property: max_lines
+description: Optional maximum number of lines to read (1..300, default 300).
+property: offset
+description: Optional alias for start_line (1-based line offset).
+property: path
+description: Workspace-relative path; . means the root.
+property: start_char
+description: Optional 1-based character offset within start_line for reading long lines (default 1).
+property: start_line
+description: Optional 1-based first line to read (default 1).
+
+tool: find_files
+description: Find files or directories recursively by wildcard pattern (e.g. *.sql, src/*.ps1), respecting .gitignore/.ignore.
+property: limit
+description: Optional maximum number of results (1..1000, default 200).
+property: path
+description: Workspace-relative directory path; . means the root.
+property: pattern
+description: File name or relative path wildcard pattern, e.g. *.sql or src/*.ps1.
+
+tool: grep_files
+description: Search UTF-8 text files for a regex or literal pattern (respecting .gitignore/.ignore), returning matching paths, line numbers, and lines.
+property: case_sensitive
+description: Set true for case-sensitive matching.
+property: context_lines
+description: Optional surrounding context lines (0..5).
+property: file_offset
+description: Optional 0-based file offset. To continue, use next_file_offset together with next_start_line from the previous result (default 0).
+property: glob
+description: Optional alias for include wildcard filter.
+property: include
+description: Optional file name wildcard filter, e.g. *.sql or *.ps1.
+property: limit
+description: Optional maximum number of matches to return (1..500, default 100).
+property: literal
+description: Set true for literal substring match instead of regex.
+property: path
+description: Workspace-relative file or directory path; . means the root.
+property: pattern
+description: Regex or literal search pattern.
+property: start_line
+description: Optional 1-based first matching line to include in the file at file_offset; later files start at line 1 (default 1).
+
+tool: fetch_url
+description: Fetch an HTTP/HTTPS URL and return readable text, Markdown, or JSON content (up to 20000 characters by default).
+property: max_chars
+description: Optional maximum characters to return (500..50000, default 20000).
+property: raw
+description: Optional: set true to return raw HTML without tag stripping.
+property: url
+description: HTTP or HTTPS URL to fetch.
+
+tool: web_search
+description: Search the web for a query and return matching result titles, URLs, and snippets.
+property: limit
+description: Optional maximum number of results (1..20, default 8).
+property: query
+description: Search query text.
+
+tool: todo
+description: Track task plan and progress during multi-step work. Call this to initialize or update the active todo list (replaces entire list on each call).
+property: todos
+description: Complete ordered list of task items: array of {content, status}. Status must be pending, in_progress, or completed.
+property: todos.items.content
+description: Clear, concise description of the task.
+property: todos.items.status
+description: Task status: pending, in_progress, or completed.
+
+tool: ask_user
+description: Ask the user a concise question, request an architectural decision, or present a Markdown implementation plan for explicit review and approval before making changes.
+property: allow_custom
+description: Whether the user can provide custom free-text feedback if none of the options fit (default true).
+property: intent
+description: Presentation intent: 'question' for architectural/decision choices (default), or 'plan-review' for reviewing a Markdown plan before modifying files.
+property: options
+description: Optional choices to show the user (list of strings or objects with label and description). Put recommended choice first.
+property: plan
+description: Markdown text of the plan under review (used when intent is 'plan-review').
+property: question
+description: The question or plan summary to present to the user.
+
+tool: memory
+description: Record, view, or manage persistent long-term memories, user preferences, and project invariants that survive across CLI sessions in MEMORY.md.
+property: action
+description: Action to perform: 'append' to add a new memory note (default), 'view' to read memory, 'set' to replace memory content, or 'clear' to reset.
+property: content
+description: The fact, preference, or architectural invariant to record (required for 'append' and 'set').
+property: scope
+description: Storage scope: 'workspace' (default, stored in .shellossus/MEMORY.md) or 'global' (stored in global config MEMORY.md).
+
+tool: write_file
+description: Create a UTF-8 text file (or overwrite when overwrite=true).
+property: content
+description: Complete file contents, up to 1 MiB.
+property: overwrite
+description: Set true to overwrite an existing file (saves a backup).
+property: path
+description: Workspace-relative text file path. Parent directory must exist.
+
+tool: edit_file
+description: Replace one or more unique blocks in a UTF-8 text file (supports single old_text/new_text or batch edits[] array; saves a backup).
+property: edits
+description: Optional batch of non-overlapping edits: array of {old_text, new_text} objects.
+property: edits.items.new_text
+description:
+property: edits.items.old_text
+description:
+property: new_text
+description: Single edit: replacement text.
+property: old_text
+description: Single edit: nonempty text occurring once in the file.
+property: path
+description: Workspace-relative text file path. Parent directory must exist.
+
+tool: run_command
+description: Execute a PowerShell command in the workspace directory.
+property: command
+description: PowerShell command to execute.
+property: timeout_sec
+description: Optional timeout in seconds (1..600, default 60).
+
+tool: run_agent
+description: Delegate a task, parallel fan-out, or sequential pipeline to isolated subagents (roles: recon [ReadOnly], audit [ReadOnly], craft [inherits permission]). Keeps main context clean.
+property: context
+description: Optional context mode for single/pipeline tasks: clean (default, fresh context) or fork (clones parent conversation history).
+property: max_steps
+description: Optional step budget per subagent run (1..50, default 15).
+property: parallel
+description: Concurrent ReadOnly fan-out tasks (1..8 items of {role, prompt}).
+property: parallel.items.prompt
+description:
+property: parallel.items.role
+description:
+property: pipeline
+description: Sequential pipeline steps (1..8 items of {role, prompt, context}); use {previous} or $PREVIOUS in prompt to reference prior step output.
+property: pipeline.items.context
+description:
+property: pipeline.items.prompt
+description:
+property: pipeline.items.role
+description:
+property: prompt
+description: Single-task instruction for the subagent (mutually exclusive with parallel and pipeline).
+property: role
+description: Optional subagent role: recon (ReadOnly search), audit (ReadOnly review), craft (inherits permission), or custom role name.
+'@
+        $actualSchemaText = $actualSchemaText.TrimEnd("`r", "`n")
+        $expectedSchemaText = $expectedSchemaText.TrimEnd("`r", "`n")
+        if ($actualSchemaText -cne $expectedSchemaText) {
+            $actualLines = @($actualSchemaText -split "`n")
+            $expectedLines = @($expectedSchemaText -split "`n")
+            $maxLines = $actualLines.Count
+            if ($expectedLines.Count -gt $maxLines) { $maxLines = $expectedLines.Count }
+            $diffAt = -1
+            for ($lineIdx = 0; $lineIdx -lt $maxLines; $lineIdx++) {
+                $actualLine = if ($lineIdx -lt $actualLines.Count) { [string]$actualLines[$lineIdx] } else { '<missing>' }
+                $expectedLine = if ($lineIdx -lt $expectedLines.Count) { [string]$expectedLines[$lineIdx] } else { '<missing>' }
+                if ($actualLine -cne $expectedLine) { $diffAt = $lineIdx; break }
+            }
+            $shownActual = if ($diffAt -ge 0 -and $diffAt -lt $actualLines.Count) { [string]$actualLines[$diffAt] } else { '<missing>' }
+            $shownExpected = if ($diffAt -ge 0 -and $diffAt -lt $expectedLines.Count) { [string]$expectedLines[$diffAt] } else { '<missing>' }
+            throw ("Tool schema names or descriptions drifted at line {0}. Actual: [{1}] Expected: [{2}]" -f ($diffAt + 1), $shownActual, $shownExpected)
+        }
+    }
+    finally {
+        $script:AgentPermission = $savedSchemaPerm
+        $script:NoTools = $savedSchemaNoTools
+        $script:EnabledTools = $savedSchemaEnabled
+        $script:ExcludedTools = $savedSchemaExcluded
+        $script:SubagentDepth = $savedSchemaDepth
+    }
 }
 finally {
     Remove-TestEnvironment -Env $envData
