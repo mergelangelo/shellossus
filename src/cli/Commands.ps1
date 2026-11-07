@@ -248,6 +248,7 @@ function Invoke-ReplUndoCommand {
     $lastUndo = $UndoStack[$UndoStack.Count - 1]
     try {
         Invoke-AgentUndo -State $State -UndoEntry $lastUndo
+        Restore-AgentTurnPermission -Frame $lastUndo -State $State
         if ($UndoStack.Count -eq 1) { $UndoStack = @() }
         else { $UndoStack = @($UndoStack[0..($UndoStack.Count - 2)]) }
         Save-AgentSession -SessionFile $SessionFile -State $State -Workspace $RootPath -Model $Model
@@ -393,7 +394,7 @@ function Invoke-ReplContinueCommand {
     try {
         Invoke-AgentContinue -State $State -Endpoint $Endpoint -ModelId $Model -ApiKey $ApiKey -Root $RootPath -Steps $contSteps | Out-Null
         $LastFailedQuestion = ''
-        $UndoStack += @{ messages = $turnSnapshot.messages; leaf_id = $turnSnapshot.leaf_id; tree_entries = $turnSnapshot.tree_entries; writes = @($script:CurrentTurnWrites) }
+        $UndoStack += (New-AgentUndoFrame -Snapshot $turnSnapshot -Writes @($script:CurrentTurnWrites))
         Save-AgentSession -SessionFile $SessionFile -State $State -Workspace $RootPath -Model $Model
     }
     catch {

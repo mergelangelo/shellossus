@@ -6547,9 +6547,6 @@ function Invoke-SubagentInProcess {
         $script:ActiveState = $savedState
         $script:ActiveSessionTodos = $savedTodos
         if ($null -ne $savedState -and $savedState.messages -and $savedState.messages.Count -gt 0) {
-            if ($script:AgentPermission -ne $savedPerm) {
-                Sync-AgentCapabilities -State $savedState -Root $Root | Out-Null
-            }
             Sync-AgentMemoryContext -State $savedState -Root $Root -ConfigDir $configDir | Out-Null
         }
     }
@@ -7874,6 +7871,35 @@ function Switch-SessionBranch {
 # --- src/context/Session.ps1 ---
 # JSONL session persistence, metadata lookup, resume/fork lifecycle, and standalone HTML export.
 
+function Test-CapabilityNoteInsideOpenToolCalls {
+    param([array]$Messages, [int]$NoteIndex)
+    $msgs = @($Messages)
+    if ($NoteIndex -lt 0 -or $NoteIndex -ge $msgs.Count) { return $false }
+    $pending = $null
+    for ($i = 0; $i -le $NoteIndex; $i++) {
+        if ($i -eq $NoteIndex) {
+            return ($null -ne $pending -and $pending.Count -gt 0)
+        }
+        $m = $msgs[$i]
+        if ($null -ne $pending) {
+            if ($m.role -eq 'tool' -and $m.tool_call_id) {
+                $answeredId = [string]$m.tool_call_id
+                if ($pending.ContainsKey($answeredId)) { $pending.Remove($answeredId) | Out-Null }
+                if ($pending.Count -eq 0) { $pending = $null }
+            }
+            continue
+        }
+        if ($m.role -eq 'assistant' -and $m.tool_calls -and @($m.tool_calls).Count -gt 0) {
+            $pending = @{}
+            foreach ($tc in @($m.tool_calls)) {
+                if ($tc -and $tc.id) { $pending[[string]$tc.id] = $true }
+            }
+            if ($pending.Count -eq 0) { $pending = $null }
+        }
+    }
+    return $false
+}
+
 function Save-AgentSession {
     param([string]$SessionFile, $State, [string]$Workspace = '', [string]$Model = '', [string]$SessionId = '')
     if (-not $SessionFile) { return }
@@ -7913,8 +7939,13 @@ function Save-AgentSession {
     }
     $lines = @($meta | ConvertTo-Json -Depth 5 -Compress)
     $activeIds = @{}
-    foreach ($m in @($State.messages)) {
-        if ($m.role -eq 'user' -and $m.content -is [string] -and $m.content.StartsWith('[Capability State Change]')) { continue }
+    $sessionMessages = @($State.messages)
+    for ($mi = 0; $mi -lt $sessionMessages.Count; $mi++) {
+        $m = $sessionMessages[$mi]
+        $isCapNote = ($m.role -eq 'user' -and $m.content -is [string] -and $m.content.StartsWith('[Capability State Change]'))
+        if ($isCapNote -and (Test-CapabilityNoteInsideOpenToolCalls -Messages $sessionMessages -NoteIndex $mi)) {
+            continue
+        }
         if ($m.id) { $activeIds[[string]$m.id] = $true }
         $lines += ($m | ConvertTo-Json -Depth 20 -Compress)
     }
@@ -9314,17 +9345,52 @@ function New-AgentTurnSnapshot {
         messages = $messages
         leaf_id = $leafId
         tree_entries = $treeEntries
+        agent_permission = [string]$script:AgentPermission
+        auto_approve_commands = [bool]$script:AutoApproveCommands
+        auto_approve_web = [bool]$script:AutoApproveWeb
     }
 }
 
-function Restore-AgentTurnSnapshot {
-    param($State, $Snapshot, [AllowEmptyCollection()][array]$Writes = @())
-    Invoke-AgentUndo -State $State -UndoEntry @{
+function Test-AgentTurnFrameHasPermission {
+    param($Frame)
+    if ($null -eq $Frame) { return $false }
+    foreach ($name in @(Get-ObjectPropertyNames -InputObject $Frame)) {
+        if ($name -eq 'agent_permission') { return $true }
+    }
+    return $false
+}
+
+function Restore-AgentTurnPermission {
+    param($Frame, $State)
+    if (-not (Test-AgentTurnFrameHasPermission -Frame $Frame)) { return }
+    $script:AgentPermission = [string]$Frame.agent_permission
+    $script:AutoApproveCommands = [bool]$Frame.auto_approve_commands
+    $script:AutoApproveWeb = [bool]$Frame.auto_approve_web
+    if ($State) {
+        Sync-AgentCapabilities -State $State | Out-Null
+    }
+}
+
+function New-AgentUndoFrame {
+    param($Snapshot, [AllowEmptyCollection()][array]$Writes = @())
+    $frame = @{
         messages = @($Snapshot.messages)
         leaf_id = [string]$Snapshot.leaf_id
         tree_entries = @($Snapshot.tree_entries)
         writes = @($Writes)
     }
+    if (Test-AgentTurnFrameHasPermission -Frame $Snapshot) {
+        $frame.agent_permission = [string]$Snapshot.agent_permission
+        $frame.auto_approve_commands = [bool]$Snapshot.auto_approve_commands
+        $frame.auto_approve_web = [bool]$Snapshot.auto_approve_web
+    }
+    return $frame
+}
+
+function Restore-AgentTurnSnapshot {
+    param($State, $Snapshot, [AllowEmptyCollection()][array]$Writes = @())
+    Invoke-AgentUndo -State $State -UndoEntry (New-AgentUndoFrame -Snapshot $Snapshot -Writes @($Writes))
+    Restore-AgentTurnPermission -Frame $Snapshot -State $State
 }
 
 function Invoke-AgentTurnRollback {
@@ -9341,13 +9407,8 @@ function Invoke-AgentTurnRollback {
         foreach ($w in @($Writes)) {
             if ($w) { $w.preserve_backup = $true }
         }
-        $kept = @{
-            messages = $Snapshot.messages
-            leaf_id = $Snapshot.leaf_id
-            tree_entries = $Snapshot.tree_entries
-            writes = @($Writes)
-            preserve_backups = $true
-        }
+        $kept = New-AgentUndoFrame -Snapshot $Snapshot -Writes @($Writes)
+        $kept.preserve_backups = $true
         $stack = @($UndoStack)
         $stack += $kept
         return @{
@@ -9528,6 +9589,7 @@ function Invoke-AgentTurn {
             return
         }
         $loopAborted = $false
+        $ranSubagent = $false
         # Only instructions visible before this model response count as received.
         $scopedMessages = @($State.messages)
         $scopedTreeToolContents = @()
@@ -9678,6 +9740,7 @@ function Invoke-AgentTurn {
                 catch {}
             }
             elseif ($canonToolName -eq 'run_agent') {
+                $ranSubagent = $true
                 try {
                     $parsedOut = $output | ConvertFrom-Json -ErrorAction Stop
                     if ($parsedOut.modified_files -and @($parsedOut.modified_files).Count -gt 0) {
@@ -9697,6 +9760,9 @@ function Invoke-AgentTurn {
                 }
                 catch {}
             }
+        }
+        if ($ranSubagent -and (Test-ValidConversationBoundary -Messages @($State.messages))) {
+            Sync-AgentCapabilities -State $State -Root $Root | Out-Null
         }
         if ($loopAborted) {
             if ($script:OutputMode -ne 'json') {
@@ -10502,6 +10568,7 @@ function Invoke-ReplUndoCommand {
     $lastUndo = $UndoStack[$UndoStack.Count - 1]
     try {
         Invoke-AgentUndo -State $State -UndoEntry $lastUndo
+        Restore-AgentTurnPermission -Frame $lastUndo -State $State
         if ($UndoStack.Count -eq 1) { $UndoStack = @() }
         else { $UndoStack = @($UndoStack[0..($UndoStack.Count - 2)]) }
         Save-AgentSession -SessionFile $SessionFile -State $State -Workspace $RootPath -Model $Model
@@ -10647,7 +10714,7 @@ function Invoke-ReplContinueCommand {
     try {
         Invoke-AgentContinue -State $State -Endpoint $Endpoint -ModelId $Model -ApiKey $ApiKey -Root $RootPath -Steps $contSteps | Out-Null
         $LastFailedQuestion = ''
-        $UndoStack += @{ messages = $turnSnapshot.messages; leaf_id = $turnSnapshot.leaf_id; tree_entries = $turnSnapshot.tree_entries; writes = @($script:CurrentTurnWrites) }
+        $UndoStack += (New-AgentUndoFrame -Snapshot $turnSnapshot -Writes @($script:CurrentTurnWrites))
         Save-AgentSession -SessionFile $SessionFile -State $State -Workspace $RootPath -Model $Model
     }
     catch {
@@ -11069,7 +11136,7 @@ if (-not $LibraryOnly) {
             try {
                 Invoke-AgentTurn -State $state -Endpoint $endpoint -ModelId $Model -ApiKey $agentKey -Root $rootPath -Steps $MaxSteps
                 $lastFailedQuestion = ''
-                $undoStack += @{ messages = $turnSnapshot.messages; leaf_id = $turnSnapshot.leaf_id; tree_entries = $turnSnapshot.tree_entries; writes = @($script:CurrentTurnWrites) }
+                $undoStack += (New-AgentUndoFrame -Snapshot $turnSnapshot -Writes @($script:CurrentTurnWrites))
                 Save-AgentSession -SessionFile $sessionFile -State $state -Workspace $rootPath -Model $Model
             }
             catch {

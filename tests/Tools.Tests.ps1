@@ -2338,6 +2338,231 @@ description: Optional subagent role: recon (ReadOnly search), audit (ReadOnly re
         if (Test-Path -LiteralPath $maxRedirOut) { Remove-Item -LiteralPath $maxRedirOut -Force -ErrorAction SilentlyContinue }
     }
     Assert-True ($script:seenMaxRedir -eq 0) "Host download did not pass MaximumRedirection 0 (got '$script:seenMaxRedir')."
+
+    # Task 5: a craft subagent that raises permission records the capability note after the
+    # run_agent tool result, and Save-AgentSession writes that note.
+    $task5SavedPerm = $script:AgentPermission
+    $task5SavedCmd = $script:AutoApproveCommands
+    $task5SavedWeb = $script:AutoApproveWeb
+    $task5SavedMode = $script:OutputMode
+    $task5SavedApproval = $script:approval
+    $task5SavedState = $script:ActiveState
+    $task5SavedDepth = $script:SubagentDepth
+    $task5SavedWrites = @($script:CurrentTurnWrites)
+    $task5EditPath = Join-Path $workspacePath 'task5-edit.txt'
+    $task5Session = Join-Path $testRoot 'task5-capability.jsonl'
+    Set-Content -LiteralPath $task5EditPath -Value 'before' -Encoding UTF8 -NoNewline
+    $script:AgentPermission = 'Ask'
+    $script:AutoApproveCommands = $false
+    $script:AutoApproveWeb = $false
+    $script:OutputMode = 'text'
+    $script:SubagentDepth = 0
+    $script:CurrentTurnWrites = @()
+    $script:WebDownloadUseHostCommand = $true
+    $script:approval = @('a', 'a', 'a')
+    function Write-Host {
+        param([Parameter(Position = 0, ValueFromRemainingArguments = $true)]$Object, [switch]$NoNewline, $Separator, $ForegroundColor, $BackgroundColor)
+    }
+    function Invoke-WebRequest {
+        param($Uri, $Method, $Headers, $ContentType, $Body, $TimeoutSec, $ErrorAction, [switch]$UseBasicParsing, $OutFile, $MaximumRedirection)
+        if (-not $Body) {
+            if ($OutFile) { Set-Content -LiteralPath $OutFile -Value 'task5-web' -Encoding ASCII -NoNewline }
+            return
+        }
+        $payload = $Body | ConvertFrom-Json
+        $msgs = @($payload.messages)
+        $sysText = if ($msgs.Count -gt 0 -and $msgs[0].content) { [string]$msgs[0].content } else { '' }
+        $isChild = $sysText.Contains('[Subagent Role: craft]')
+        $toolCount = @($msgs | Where-Object { $_.role -eq 'tool' }).Count
+        $reply = $null
+        if ($isChild) {
+            if ($toolCount -eq 0) {
+                $reply = @{ choices = @(@{ finish_reason = 'tool_calls'; message = @{
+                    content = ''
+                    tool_calls = @(@{ id = 't5-web'; type = 'function'; function = @{ name = 'fetch_url'; arguments = '{"url":"https://example.com/task5"}' } })
+                } }) }
+            }
+            elseif ($toolCount -eq 1) {
+                $reply = @{ choices = @(@{ finish_reason = 'tool_calls'; message = @{
+                    content = ''
+                    tool_calls = @(@{ id = 't5-cmd'; type = 'function'; function = @{ name = 'run_command'; arguments = '{"command":"Write-Output task5-ok"}' } })
+                } }) }
+            }
+            elseif ($toolCount -eq 2) {
+                $reply = @{ choices = @(@{ finish_reason = 'tool_calls'; message = @{
+                    content = ''
+                    tool_calls = @(@{ id = 't5-edit'; type = 'function'; function = @{ name = 'edit_file'; arguments = '{"path":"task5-edit.txt","old_text":"before","new_text":"after"}' } })
+                } }) }
+            }
+            else {
+                $reply = @{ choices = @(@{ finish_reason = 'stop'; message = @{ content = 'Raised session approvals.' } }) }
+            }
+        }
+        elseif ($toolCount -eq 0) {
+            $reply = @{ choices = @(@{ finish_reason = 'tool_calls'; message = @{
+                content = ''
+                tool_calls = @(@{ id = 't5-agent'; type = 'function'; function = @{ name = 'run_agent'; arguments = '{"prompt":"Raise the session approvals.","role":"craft","max_steps":8}' } })
+            } }) }
+        }
+        else {
+            $reply = @{ choices = @(@{ finish_reason = 'stop'; message = @{ content = 'Subagent finished.' } }) }
+        }
+        Set-Content -LiteralPath $OutFile -Value ($reply | ConvertTo-Json -Depth 12 -Compress) -Encoding UTF8 -NoNewline
+    }
+    try {
+        $task5Sys = Build-SystemPrompt -Root $workspacePath -ConfigDir ''
+        $task5State = @{
+            session_id = 'task5-parent'
+            workspace = $workspacePath
+            model = 'test-model'
+            messages = @(
+                @{ role = 'system'; content = $task5Sys },
+                @{ role = 'user'; content = 'Delegate the approval changes.' }
+            )
+            tree_entries = @()
+        }
+        $script:ActiveState = $task5State
+        $task5Snap = New-AgentTurnSnapshot -State $task5State
+        Assert-True ([string]$task5Snap.agent_permission -eq 'Ask') "Turn snapshot did not record AgentPermission (got '$($task5Snap.agent_permission)')."
+        Assert-True ($task5Snap.auto_approve_commands -eq $false) "Turn snapshot did not record AutoApproveCommands (got '$($task5Snap.auto_approve_commands)')."
+        Assert-True ($task5Snap.auto_approve_web -eq $false) "Turn snapshot did not record AutoApproveWeb (got '$($task5Snap.auto_approve_web)')."
+        Invoke-AgentTurn -State $task5State -Endpoint 'https://example.invalid/v1/chat/completions' -ModelId 'test-model' -ApiKey 'test-key' -Root $workspacePath -Steps 6
+        Assert-True ($script:AgentPermission -eq 'AutoEdit') "Craft subagent did not keep the raised permission (got '$($script:AgentPermission)')."
+        Assert-True ($script:AutoApproveCommands -eq $true) 'Craft subagent did not set AutoApproveCommands.'
+        Assert-True ($script:AutoApproveWeb -eq $true) 'Craft subagent did not set AutoApproveWeb.'
+        $task5Seq = @()
+        foreach ($task5Msg in @($task5State.messages)) {
+            $task5Tag = [string]$task5Msg.role
+            if ($task5Msg.role -eq 'user' -and $task5Msg.content -is [string] -and $task5Msg.content.StartsWith('[Capability State Change]')) {
+                $task5Tag = 'capability'
+            }
+            elseif ($task5Msg.role -eq 'assistant' -and $task5Msg.tool_calls -and @($task5Msg.tool_calls).Count -gt 0) {
+                $task5Tag = 'assistant_calls'
+            }
+            $task5Seq += $task5Tag
+        }
+        $task5SeqText = $task5Seq -join ','
+        Assert-True ($task5SeqText -match 'assistant_calls,tool,capability') "Capability note was not recorded after the run_agent tool result: $task5SeqText"
+        Save-AgentSession -SessionFile $task5Session -State $task5State -Workspace $workspacePath -Model 'test-model' -SessionId 'task5-parent'
+        $task5SavedRaw = Get-Content -LiteralPath $task5Session -Raw -Encoding UTF8
+        Assert-True ($task5SavedRaw.Contains('[Capability State Change]')) 'Save-AgentSession dropped the capability note that sits after the tool result.'
+        Assert-True (@($script:CurrentTurnWrites).Count -ge 1 -and $script:CurrentTurnWrites[0].backup) 'Craft edit did not record an undo backup.'
+        $task5Backup = [string]$script:CurrentTurnWrites[0].backup
+        $task5BackupOriginal = Get-Content -LiteralPath $task5Backup -Raw -Encoding UTF8
+        $task5RaisedSig = [string]$task5State.capabilities_signature
+        Set-Content -LiteralPath $task5Backup -Value 'damaged' -Encoding UTF8 -NoNewline
+        $task5PreflightThrew = $false
+        $task5PreflightError = ''
+        try {
+            Restore-AgentTurnSnapshot -State $task5State -Snapshot $task5Snap -Writes @($script:CurrentTurnWrites)
+        }
+        catch {
+            $task5PreflightThrew = $true
+            $task5PreflightError = [string]$_.Exception.Message
+        }
+        Assert-True ($task5PreflightThrew -and $task5PreflightError -like '*Backup verification failed*') "Failed preflight did not throw: $task5PreflightError"
+        Assert-True ($script:AgentPermission -eq 'AutoEdit' -and $script:AutoApproveCommands -eq $true -and $script:AutoApproveWeb -eq $true) 'Failed preflight changed permission or approval flags.'
+        Assert-True ([string]$task5State.capabilities_signature -eq $task5RaisedSig) 'Failed preflight changed the capability signature.'
+        $task5DiskDuringFail = Get-Content -LiteralPath $task5EditPath -Raw -Encoding UTF8
+        Assert-True ($task5DiskDuringFail -ceq 'after') "Failed preflight changed the edited file (got '$task5DiskDuringFail')."
+        Set-Content -LiteralPath $task5Backup -Value $task5BackupOriginal -Encoding UTF8 -NoNewline
+        $task5Frame = New-AgentUndoFrame -Snapshot $task5Snap -Writes @($script:CurrentTurnWrites)
+        Assert-True ([string]$task5Frame.agent_permission -eq 'Ask' -and $task5Frame.auto_approve_commands -eq $false -and $task5Frame.auto_approve_web -eq $false) 'Undo frame did not keep the pre-turn permission and approval flags.'
+        $task5Undo = Invoke-ReplUndoCommand -State $task5State -SessionFile $task5Session -RootPath $workspacePath -Model 'test-model' -UndoStack @($task5Frame)
+        Assert-True (@($task5Undo.undo_stack).Count -eq 0) 'Successful /undo left the frame on the stack.'
+        Assert-True ($script:AgentPermission -eq 'Ask') "Successful /undo did not restore permission (got '$($script:AgentPermission)')."
+        Assert-True ($script:AutoApproveCommands -eq $false) 'Successful /undo did not restore AutoApproveCommands.'
+        Assert-True ($script:AutoApproveWeb -eq $false) 'Successful /undo did not restore AutoApproveWeb.'
+        Assert-True (([string]$task5State.capabilities_signature).StartsWith('Ask|')) "Successful /undo did not sync capabilities (signature '$($task5State.capabilities_signature)')."
+        Assert-True (([string]$task5State.messages[0].content).Contains('Permission mode: Ask.')) 'Successful /undo left the system prompt on the raised permission.'
+        $task5RestoredFile = Get-Content -LiteralPath $task5EditPath -Raw -Encoding UTF8
+        Assert-True ($task5RestoredFile -ceq 'before') "Successful /undo did not restore the edited file (got '$task5RestoredFile')."
+    }
+    finally {
+        Remove-Item Function:\Invoke-WebRequest -ErrorAction SilentlyContinue
+        Remove-Item Function:\Write-Host -ErrorAction SilentlyContinue
+        Remove-Variable -Name WebDownloadUseHostCommand -Scope Script -ErrorAction SilentlyContinue
+        if (Test-Path -LiteralPath $task5Session) { Remove-Item -LiteralPath $task5Session -Force -ErrorAction SilentlyContinue }
+        $script:AgentPermission = $task5SavedPerm
+        $script:AutoApproveCommands = $task5SavedCmd
+        $script:AutoApproveWeb = $task5SavedWeb
+        $script:OutputMode = $task5SavedMode
+        $script:approval = $task5SavedApproval
+        $script:ActiveState = $task5SavedState
+        $script:SubagentDepth = $task5SavedDepth
+        $script:CurrentTurnWrites = @($task5SavedWrites)
+    }
+
+    # Task 5: a capability note still stuck inside an open tool_calls sequence is not written.
+    # A note after the matching tool result is written.
+    $task5OpenFile = Join-Path $testRoot 'task5-open-sequence.jsonl'
+    $task5OpenState = @{
+        session_id = 'task5-open'
+        workspace = $workspacePath
+        model = 'test-model'
+        messages = @(
+            @{ role = 'system'; content = 'sys' },
+            @{ role = 'user'; content = 'go' },
+            @{ role = 'assistant'; content = ''; tool_calls = @(
+                @{ id = 'c1'; type = 'function'; function = @{ name = 'run_agent'; arguments = '{}' } },
+                @{ id = 'c2'; type = 'function'; function = @{ name = 'read_file'; arguments = '{}' } }
+            ) },
+            @{ role = 'user'; content = "[Capability State Change]`nPermission mode is now AutoEdit." },
+            @{ role = 'tool'; tool_call_id = 'c1'; content = '{"status":"completed"}' },
+            @{ role = 'user'; content = "[Capability State Change]`nPermission mode is now between results." },
+            @{ role = 'tool'; tool_call_id = 'c2'; content = '{"status":"ok"}' },
+            @{ role = 'user'; content = "[Capability State Change]`nPermission mode is now Ask." }
+        )
+        tree_entries = @()
+    }
+    Save-AgentSession -SessionFile $task5OpenFile -State $task5OpenState -Workspace $workspacePath -Model 'test-model' -SessionId 'task5-open'
+    $task5OpenRaw = Get-Content -LiteralPath $task5OpenFile -Raw -Encoding UTF8
+    Assert-True (-not $task5OpenRaw.Contains('Permission mode is now AutoEdit.')) 'Save-AgentSession wrote a capability note that sits inside an open tool_calls sequence.'
+    Assert-True (-not $task5OpenRaw.Contains('Permission mode is now between results.')) 'Save-AgentSession wrote a capability note that sits between tool results.'
+    Assert-True ($task5OpenRaw.Contains('Permission mode is now Ask.')) 'Save-AgentSession dropped a capability note that sits after the tool result.'
+    Remove-Item -LiteralPath $task5OpenFile -Force -ErrorAction SilentlyContinue
+
+    # Task 5: successful Restore-AgentTurnSnapshot puts permission and both flags back, then syncs.
+    $task5DirectPerm = $script:AgentPermission
+    $task5DirectCmd = $script:AutoApproveCommands
+    $task5DirectWeb = $script:AutoApproveWeb
+    $task5DirectMode = $script:OutputMode
+    try {
+        $script:AgentPermission = 'Ask'
+        $script:AutoApproveCommands = $false
+        $script:AutoApproveWeb = $false
+        $script:OutputMode = 'text'
+        $task5DirectSys = Build-SystemPrompt -Root $workspacePath -ConfigDir ''
+        $task5DirectState = @{
+            session_id = 'task5-restore'
+            workspace = $workspacePath
+            model = 'test-model'
+            messages = @(
+                @{ role = 'system'; content = $task5DirectSys },
+                @{ role = 'assistant'; content = 'Earlier reply.' }
+            )
+            tree_entries = @()
+        }
+        Sync-AgentCapabilities -State $task5DirectState | Out-Null
+        $task5DirectSnap = New-AgentTurnSnapshot -State $task5DirectState
+        $script:AgentPermission = 'AutoEdit'
+        $script:AutoApproveCommands = $true
+        $script:AutoApproveWeb = $true
+        Sync-AgentCapabilities -State $task5DirectState -RecordTransition | Out-Null
+        Assert-True (([string]$task5DirectState.messages[0].content).Contains('Permission mode: AutoEdit.')) 'Restore fixture did not apply the raised permission.'
+        Restore-AgentTurnSnapshot -State $task5DirectState -Snapshot $task5DirectSnap -Writes @()
+        Assert-True ($script:AgentPermission -eq 'Ask') "Restore-AgentTurnSnapshot did not restore permission (got '$($script:AgentPermission)')."
+        Assert-True ($script:AutoApproveCommands -eq $false) 'Restore-AgentTurnSnapshot did not restore AutoApproveCommands.'
+        Assert-True ($script:AutoApproveWeb -eq $false) 'Restore-AgentTurnSnapshot did not restore AutoApproveWeb.'
+        Assert-True (([string]$task5DirectState.capabilities_signature).StartsWith('Ask|')) "Restore-AgentTurnSnapshot did not sync capabilities (signature '$($task5DirectState.capabilities_signature)')."
+        Assert-True (([string]$task5DirectState.messages[0].content).Contains('Permission mode: Ask.')) 'Restore-AgentTurnSnapshot left the system prompt on the raised permission.'
+    }
+    finally {
+        $script:AgentPermission = $task5DirectPerm
+        $script:AutoApproveCommands = $task5DirectCmd
+        $script:AutoApproveWeb = $task5DirectWeb
+        $script:OutputMode = $task5DirectMode
+    }
 }
 finally {
     Remove-TestEnvironment -Env $envData

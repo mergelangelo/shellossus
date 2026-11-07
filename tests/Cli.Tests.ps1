@@ -1423,7 +1423,8 @@ try {
         Assert-True ($script:crSawFile) 'Continue failure did not write the file before the exception.'
         Assert-True (-not (Test-Path -LiteralPath $script:crTargetFile)) 'Exception did not undo the file written during the turn.'
         $crRoles = @($crState.messages | ForEach-Object { [string]$_.role })
-        Assert-True ($crRoles.Count -eq 2 -and $crRoles[0] -eq 'system' -and $crRoles[1] -eq 'user' -and [string]$crState.messages[0].content -eq 'sys-keep' -and [string]$crState.messages[1].content -eq 'user-keep') 'Exception did not restore pre-turn messages.'
+        $crSys = [string]$crState.messages[0].content
+        Assert-True ($crRoles.Count -eq 2 -and $crRoles[0] -eq 'system' -and $crRoles[1] -eq 'user' -and $crSys.StartsWith('sys-keep') -and $crSys.Contains('Permission mode: AutoEdit.') -and [string]$crState.messages[1].content -eq 'user-keep') 'Exception did not restore pre-turn messages.'
         Assert-True ([string]$crState.leaf_id -eq 'e0001' -and @($crState.tree_entries).Count -eq 1 -and [string]$crState.tree_entries[0].id -eq 'e0001') 'Exception did not restore pre-turn leaf_id and tree_entries.'
         Assert-True ($null -ne $crResult.undo_stack -and @($crResult.undo_stack).Count -eq 0) 'Failed continue pushed an undo-stack entry.'
 

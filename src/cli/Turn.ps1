@@ -38,17 +38,52 @@ function New-AgentTurnSnapshot {
         messages = $messages
         leaf_id = $leafId
         tree_entries = $treeEntries
+        agent_permission = [string]$script:AgentPermission
+        auto_approve_commands = [bool]$script:AutoApproveCommands
+        auto_approve_web = [bool]$script:AutoApproveWeb
     }
 }
 
-function Restore-AgentTurnSnapshot {
-    param($State, $Snapshot, [AllowEmptyCollection()][array]$Writes = @())
-    Invoke-AgentUndo -State $State -UndoEntry @{
+function Test-AgentTurnFrameHasPermission {
+    param($Frame)
+    if ($null -eq $Frame) { return $false }
+    foreach ($name in @(Get-ObjectPropertyNames -InputObject $Frame)) {
+        if ($name -eq 'agent_permission') { return $true }
+    }
+    return $false
+}
+
+function Restore-AgentTurnPermission {
+    param($Frame, $State)
+    if (-not (Test-AgentTurnFrameHasPermission -Frame $Frame)) { return }
+    $script:AgentPermission = [string]$Frame.agent_permission
+    $script:AutoApproveCommands = [bool]$Frame.auto_approve_commands
+    $script:AutoApproveWeb = [bool]$Frame.auto_approve_web
+    if ($State) {
+        Sync-AgentCapabilities -State $State | Out-Null
+    }
+}
+
+function New-AgentUndoFrame {
+    param($Snapshot, [AllowEmptyCollection()][array]$Writes = @())
+    $frame = @{
         messages = @($Snapshot.messages)
         leaf_id = [string]$Snapshot.leaf_id
         tree_entries = @($Snapshot.tree_entries)
         writes = @($Writes)
     }
+    if (Test-AgentTurnFrameHasPermission -Frame $Snapshot) {
+        $frame.agent_permission = [string]$Snapshot.agent_permission
+        $frame.auto_approve_commands = [bool]$Snapshot.auto_approve_commands
+        $frame.auto_approve_web = [bool]$Snapshot.auto_approve_web
+    }
+    return $frame
+}
+
+function Restore-AgentTurnSnapshot {
+    param($State, $Snapshot, [AllowEmptyCollection()][array]$Writes = @())
+    Invoke-AgentUndo -State $State -UndoEntry (New-AgentUndoFrame -Snapshot $Snapshot -Writes @($Writes))
+    Restore-AgentTurnPermission -Frame $Snapshot -State $State
 }
 
 function Invoke-AgentTurnRollback {
@@ -65,13 +100,8 @@ function Invoke-AgentTurnRollback {
         foreach ($w in @($Writes)) {
             if ($w) { $w.preserve_backup = $true }
         }
-        $kept = @{
-            messages = $Snapshot.messages
-            leaf_id = $Snapshot.leaf_id
-            tree_entries = $Snapshot.tree_entries
-            writes = @($Writes)
-            preserve_backups = $true
-        }
+        $kept = New-AgentUndoFrame -Snapshot $Snapshot -Writes @($Writes)
+        $kept.preserve_backups = $true
         $stack = @($UndoStack)
         $stack += $kept
         return @{
@@ -252,6 +282,7 @@ function Invoke-AgentTurn {
             return
         }
         $loopAborted = $false
+        $ranSubagent = $false
         # Only instructions visible before this model response count as received.
         $scopedMessages = @($State.messages)
         $scopedTreeToolContents = @()
@@ -402,6 +433,7 @@ function Invoke-AgentTurn {
                 catch {}
             }
             elseif ($canonToolName -eq 'run_agent') {
+                $ranSubagent = $true
                 try {
                     $parsedOut = $output | ConvertFrom-Json -ErrorAction Stop
                     if ($parsedOut.modified_files -and @($parsedOut.modified_files).Count -gt 0) {
@@ -421,6 +453,9 @@ function Invoke-AgentTurn {
                 }
                 catch {}
             }
+        }
+        if ($ranSubagent -and (Test-ValidConversationBoundary -Messages @($State.messages))) {
+            Sync-AgentCapabilities -State $State -Root $Root | Out-Null
         }
         if ($loopAborted) {
             if ($script:OutputMode -ne 'json') {

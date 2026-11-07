@@ -1,5 +1,34 @@
 # JSONL session persistence, metadata lookup, resume/fork lifecycle, and standalone HTML export.
 
+function Test-CapabilityNoteInsideOpenToolCalls {
+    param([array]$Messages, [int]$NoteIndex)
+    $msgs = @($Messages)
+    if ($NoteIndex -lt 0 -or $NoteIndex -ge $msgs.Count) { return $false }
+    $pending = $null
+    for ($i = 0; $i -le $NoteIndex; $i++) {
+        if ($i -eq $NoteIndex) {
+            return ($null -ne $pending -and $pending.Count -gt 0)
+        }
+        $m = $msgs[$i]
+        if ($null -ne $pending) {
+            if ($m.role -eq 'tool' -and $m.tool_call_id) {
+                $answeredId = [string]$m.tool_call_id
+                if ($pending.ContainsKey($answeredId)) { $pending.Remove($answeredId) | Out-Null }
+                if ($pending.Count -eq 0) { $pending = $null }
+            }
+            continue
+        }
+        if ($m.role -eq 'assistant' -and $m.tool_calls -and @($m.tool_calls).Count -gt 0) {
+            $pending = @{}
+            foreach ($tc in @($m.tool_calls)) {
+                if ($tc -and $tc.id) { $pending[[string]$tc.id] = $true }
+            }
+            if ($pending.Count -eq 0) { $pending = $null }
+        }
+    }
+    return $false
+}
+
 function Save-AgentSession {
     param([string]$SessionFile, $State, [string]$Workspace = '', [string]$Model = '', [string]$SessionId = '')
     if (-not $SessionFile) { return }
@@ -39,8 +68,13 @@ function Save-AgentSession {
     }
     $lines = @($meta | ConvertTo-Json -Depth 5 -Compress)
     $activeIds = @{}
-    foreach ($m in @($State.messages)) {
-        if ($m.role -eq 'user' -and $m.content -is [string] -and $m.content.StartsWith('[Capability State Change]')) { continue }
+    $sessionMessages = @($State.messages)
+    for ($mi = 0; $mi -lt $sessionMessages.Count; $mi++) {
+        $m = $sessionMessages[$mi]
+        $isCapNote = ($m.role -eq 'user' -and $m.content -is [string] -and $m.content.StartsWith('[Capability State Change]'))
+        if ($isCapNote -and (Test-CapabilityNoteInsideOpenToolCalls -Messages $sessionMessages -NoteIndex $mi)) {
+            continue
+        }
         if ($m.id) { $activeIds[[string]$m.id] = $true }
         $lines += ($m | ConvertTo-Json -Depth 20 -Compress)
     }

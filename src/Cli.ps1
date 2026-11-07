@@ -381,7 +381,7 @@ if (-not $LibraryOnly) {
             try {
                 Invoke-AgentTurn -State $state -Endpoint $endpoint -ModelId $Model -ApiKey $agentKey -Root $rootPath -Steps $MaxSteps
                 $lastFailedQuestion = ''
-                $undoStack += @{ messages = $turnSnapshot.messages; leaf_id = $turnSnapshot.leaf_id; tree_entries = $turnSnapshot.tree_entries; writes = @($script:CurrentTurnWrites) }
+                $undoStack += (New-AgentUndoFrame -Snapshot $turnSnapshot -Writes @($script:CurrentTurnWrites))
                 Save-AgentSession -SessionFile $sessionFile -State $state -Workspace $rootPath -Model $Model
             }
             catch {

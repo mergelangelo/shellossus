@@ -155,9 +155,6 @@ function Invoke-SubagentInProcess {
         $script:ActiveState = $savedState
         $script:ActiveSessionTodos = $savedTodos
         if ($null -ne $savedState -and $savedState.messages -and $savedState.messages.Count -gt 0) {
-            if ($script:AgentPermission -ne $savedPerm) {
-                Sync-AgentCapabilities -State $savedState -Root $Root | Out-Null
-            }
             Sync-AgentMemoryContext -State $savedState -Root $Root -ConfigDir $configDir | Out-Null
         }
     }
