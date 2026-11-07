@@ -920,6 +920,96 @@ tools: list_files
     Assert-True ($script:AgentRolesByName.ContainsKey('frontmatter-role') -and (-not $script:AgentRolesByName.ContainsKey('body-spoofed-role'))) 'Get-AgentRolesCatalog matched name: in Markdown body instead of frontmatter.'
     Assert-True ($script:AgentRolesByName['frontmatter-role'].permission -ceq 'inherit' -and @($script:AgentRolesByName['frontmatter-role'].tools).Count -eq 0) 'Get-AgentRolesCatalog matched permission: or tools: in Markdown body.'
     Assert-True ($rolesCat18.Contains('frontmatter-role')) 'Get-AgentRolesCatalog output did not contain frontmatter-role.'
+
+    # Task 6: after a successful resume, reread AGENTS.md, SOUL.md, and MEMORY.md from disk.
+    $task6Ws = Join-Path $testRoot 'task6-workspace'
+    $task6Cfg = Split-Path -Path ([string]$script:AgentConfigPath) -Parent
+    New-Item -ItemType Directory -Path $task6Ws -Force | Out-Null
+    Set-Content -LiteralPath (Join-Path $task6Ws 'AGENTS.md') -Value 'TASK6-OLD-AGENTS' -Encoding UTF8
+    Set-Content -LiteralPath (Join-Path $task6Ws 'SOUL.md') -Value 'TASK6-OLD-SOUL' -Encoding UTF8
+    Set-Content -LiteralPath (Join-Path $task6Ws 'MEMORY.md') -Value 'TASK6-OLD-MEMORY' -Encoding UTF8
+    Set-Content -LiteralPath (Join-Path $task6Cfg 'AGENTS.md') -Value 'TASK6-OLD-CONFIG-AGENTS' -Encoding UTF8
+    $task6SessDir = Join-Path $testRoot 'task6-sessions'
+    $task6SessFile = Join-Path $task6SessDir 'task6.jsonl'
+    $task6Saved = @{
+        messages = @(
+            @{ role = 'system'; content = 'STALE TASK6-OLD-AGENTS TASK6-OLD-SOUL TASK6-OLD-MEMORY TASK6-OLD-CONFIG-AGENTS' },
+            @{ role = 'user'; content = 'TASK6-USER-KEEP' },
+            @{ role = 'assistant'; content = 'TASK6-ASSISTANT-KEEP' }
+        )
+    }
+    Save-AgentSession -SessionFile $task6SessFile -State $task6Saved -Workspace $task6Ws -Model 'task6-model' -SessionId 'sess-task6'
+    Set-Content -LiteralPath (Join-Path $task6Ws 'AGENTS.md') -Value 'TASK6-NEW-AGENTS' -Encoding UTF8
+    Set-Content -LiteralPath (Join-Path $task6Ws 'SOUL.md') -Value 'TASK6-NEW-SOUL' -Encoding UTF8
+    Set-Content -LiteralPath (Join-Path $task6Ws 'MEMORY.md') -Value 'TASK6-NEW-MEMORY' -Encoding UTF8
+    Set-Content -LiteralPath (Join-Path $task6Cfg 'AGENTS.md') -Value 'TASK6-NEW-CONFIG-AGENTS' -Encoding UTF8
+    $script:AgentPermission = 'Ask'
+    $task6Live = @{
+        messages = @(
+            @{ role = 'system'; content = 'TASK6-LIVE-SYSTEM' },
+            @{ role = 'user'; content = 'TASK6-LIVE-USER' }
+        )
+    }
+    Invoke-SessionResume -SessionFile $task6SessFile -State $task6Live -CurrentWorkspace $task6Ws | Out-Null
+    $task6Sys = [string]$task6Live.messages[0].content
+    Assert-True ($task6Sys.Contains('TASK6-NEW-AGENTS') -and $task6Sys.Contains('TASK6-NEW-SOUL') -and $task6Sys.Contains('TASK6-NEW-MEMORY') -and $task6Sys.Contains('TASK6-NEW-CONFIG-AGENTS')) 'Resume did not load current AGENTS.md, SOUL.md, and MEMORY.md into the system message.'
+    Assert-True ((-not $task6Sys.Contains('TASK6-OLD-AGENTS')) -and (-not $task6Sys.Contains('TASK6-OLD-SOUL')) -and (-not $task6Sys.Contains('TASK6-OLD-MEMORY')) -and (-not $task6Sys.Contains('TASK6-OLD-CONFIG-AGENTS'))) 'Resume kept a stale copy of AGENTS.md, SOUL.md, or MEMORY.md as the system prompt.'
+    $task6Users = @($task6Live.messages | Where-Object { $_.role -eq 'user' -and [string]$_.content -eq 'TASK6-USER-KEEP' })
+    $task6Asst = @($task6Live.messages | Where-Object { $_.role -eq 'assistant' -and [string]$_.content -eq 'TASK6-ASSISTANT-KEEP' })
+    Assert-True ($task6Users.Count -eq 1 -and $task6Asst.Count -eq 1) 'Resume dropped the saved user or assistant message.'
+    $task6LiveLeft = @($task6Live.messages | Where-Object { [string]$_.content -eq 'TASK6-LIVE-USER' })
+    Assert-True ($task6LiveLeft.Count -eq 0) 'Resume kept the pre-load live user message.'
+    Assert-True ($task6Sys.Contains('Permission mode: Ask.')) 'Resume system prompt is missing the current capabilities permission.'
+
+    # A resume that fails before load must leave the current system message alone.
+    $task6OtherWs = Join-Path $testRoot 'task6-other-ws'
+    New-Item -ItemType Directory -Path $task6OtherWs -Force | Out-Null
+    $task6ForeignFile = Join-Path $task6SessDir 'foreign.jsonl'
+    $task6Foreign = @{
+        messages = @(
+            @{ role = 'system'; content = 'TASK6-FOREIGN-SYSTEM' },
+            @{ role = 'user'; content = 'TASK6-FOREIGN-USER' }
+        )
+    }
+    Save-AgentSession -SessionFile $task6ForeignFile -State $task6Foreign -Workspace $task6OtherWs -Model 'task6-model' -SessionId 'sess-task6-foreign'
+    $task6FailState = @{
+        messages = @(
+            @{ role = 'system'; content = 'TASK6-CURRENT-SYSTEM' },
+            @{ role = 'user'; content = 'TASK6-CURRENT-USER' }
+        )
+    }
+    $task6FailThrew = $false
+    try {
+        Invoke-SessionResume -SessionFile $task6ForeignFile -State $task6FailState -CurrentWorkspace $task6Ws | Out-Null
+    }
+    catch {
+        if ($_.Exception.Message -like '*different workspace*') { $task6FailThrew = $true }
+    }
+    Assert-True $task6FailThrew 'Resume of a different workspace should fail before load.'
+    Assert-True (([string]$task6FailState.messages[0].content -eq 'TASK6-CURRENT-SYSTEM') -and ([string]$task6FailState.messages[1].content -eq 'TASK6-CURRENT-USER')) 'Failed resume replaced the current system message.'
+
+    # A loaded transcript with no system message must not gain a freshly built one.
+    $task6NoSysWs = Join-Path $testRoot 'task6-nosys-workspace'
+    New-Item -ItemType Directory -Path $task6NoSysWs -Force | Out-Null
+    Set-Content -LiteralPath (Join-Path $task6NoSysWs 'AGENTS.md') -Value 'TASK6-NOSYS-AGENTS' -Encoding UTF8
+    Set-Content -LiteralPath (Join-Path $task6NoSysWs 'SOUL.md') -Value 'TASK6-NOSYS-SOUL' -Encoding UTF8
+    Set-Content -LiteralPath (Join-Path $task6NoSysWs 'MEMORY.md') -Value 'TASK6-NOSYS-MEMORY' -Encoding UTF8
+    $task6NoSysFile = Join-Path $task6SessDir 'nosys.jsonl'
+    $task6NoSysSaved = @{
+        messages = @(
+            @{ role = 'user'; content = 'TASK6-NOSYS-USER' },
+            @{ role = 'assistant'; content = 'TASK6-NOSYS-ASSISTANT' }
+        )
+    }
+    Save-AgentSession -SessionFile $task6NoSysFile -State $task6NoSysSaved -Workspace $task6NoSysWs -Model 'task6-model' -SessionId 'sess-task6-nosys'
+    $task6NoSysState = @{ messages = @() }
+    Invoke-SessionResume -SessionFile $task6NoSysFile -State $task6NoSysState -CurrentWorkspace $task6NoSysWs | Out-Null
+    $task6NoSysJoined = (@($task6NoSysState.messages | ForEach-Object { [string]$_.content }) -join "`n")
+    Assert-True ((-not $task6NoSysJoined.Contains('TASK6-NOSYS-AGENTS')) -and (-not $task6NoSysJoined.Contains('TASK6-NOSYS-SOUL')) -and (-not $task6NoSysJoined.Contains('TASK6-NOSYS-MEMORY'))) 'Resume invented a system prompt for a transcript that had no system message.'
+    $task6NoSysUsers = @($task6NoSysState.messages | Where-Object { $_.role -eq 'user' -and [string]$_.content -eq 'TASK6-NOSYS-USER' })
+    $task6NoSysAsst = @($task6NoSysState.messages | Where-Object { $_.role -eq 'assistant' -and [string]$_.content -eq 'TASK6-NOSYS-ASSISTANT' })
+    Assert-True ($task6NoSysUsers.Count -eq 1 -and $task6NoSysAsst.Count -eq 1) 'Resume of a transcript without a system message dropped user or assistant text.'
+    Remove-Item -LiteralPath (Join-Path $task6Cfg 'AGENTS.md') -Force -ErrorAction SilentlyContinue
 }
 finally {
     Remove-TestEnvironment -Env $envData

@@ -223,6 +223,13 @@ function Invoke-SessionResume {
     $State.usage_output_tokens = 0
     $State.scoped_instr_cache = @{}
     $loadedMessages = @(Read-AgentSession -SessionFile $SessionFile -State $State)
+    $loadedHadSystem = $false
+    foreach ($loadedMsg in @($loadedMessages)) {
+        if ($loadedMsg.role -eq 'system') {
+            $loadedHadSystem = $true
+            break
+        }
+    }
     $State.messages = $loadedMessages
     Ensure-SessionTree -State $State
     if ($State.leaf_id -and $State.tree_entries.Count -gt 0) {
@@ -243,6 +250,15 @@ function Invoke-SessionResume {
     $State.last_prompt_chars = 0
     $State.step_limit_reached = $false
     $State.loop_detected = $false
+    if ($loadedHadSystem -and $State.messages -and @($State.messages).Count -gt 0 -and $State.messages[0].role -eq 'system') {
+        $refreshRoot = if ($State.workspace) { [string]$State.workspace } else { '' }
+        $refreshConfig = ''
+        if ($script:AgentConfigPath) {
+            $refreshConfig = [string](Split-Path -Path ([string]$script:AgentConfigPath) -Parent)
+        }
+        if (-not $refreshConfig) { $refreshConfig = '.' }
+        $State.messages[0].content = Build-SystemPrompt -Root $refreshRoot -ConfigDir $refreshConfig
+    }
     Sync-AgentCapabilities -State $State | Out-Null
     return $State
 }
