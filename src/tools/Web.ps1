@@ -308,6 +308,7 @@ function Invoke-AgentWebDownload {
         $stderr = New-AgentTempFile
         $workerFile = $null
         $proc = $null
+        $procId = 0
         try {
             $classifierBody = (Get-Command -Name 'Test-BlockedWebAddress' -CommandType Function).Definition
             $workerHead = @'
@@ -383,37 +384,40 @@ try {
             } -Action {
                 Start-Process -FilePath (Get-AgentEnvironment).shell_exe -ArgumentList $workerArguments -RedirectStandardOutput $stdout.FullName -RedirectStandardError $stderr.FullName -NoNewWindow -PassThru -ErrorAction Stop
             }
+            $procId = 0
+            try { $procId = [int]$proc.Id } catch { $procId = 0 }
             $started = Get-Date
-            while (-not $proc.HasExited) {
+            while ($procId -gt 0 -and (Get-Process -Id $procId -ErrorAction SilentlyContinue)) {
                 if (Test-Path -LiteralPath $OutFile) {
                     $file = Get-Item -LiteralPath $OutFile -Force -ErrorAction Stop
-                    if ($file.Length -gt $MaxBytes) { throw "Web response exceeds $MaxBytes bytes." }
+                    if ($file.Length -gt $MaxBytes) {
+                        Stop-Process -Id $procId -Force -ErrorAction SilentlyContinue
+                        throw "Web response exceeds $MaxBytes bytes."
+                    }
                 }
-                if (((Get-Date) - $started).TotalSeconds -gt 35) { throw 'Web request timed out.' }
+                if (((Get-Date) - $started).TotalSeconds -gt 35) {
+                    Stop-Process -Id $procId -Force -ErrorAction SilentlyContinue
+                    throw 'Web request timed out.'
+                }
                 Start-Sleep -Milliseconds 100
             }
-            Wait-Process -InputObject $proc -ErrorAction SilentlyContinue
-            $workerFailed = ($null -eq $proc.ExitCode) -or ($proc.ExitCode -ne 0) -or (-not (Test-Path -LiteralPath $OutFile))
-            if ($workerFailed) {
-                $errOut = ''
-                if (Test-Path -LiteralPath $stdout.FullName) {
-                    $errOut = Get-Content -LiteralPath $stdout.FullName -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
-                }
-                if ((-not $errOut -or -not $errOut.Trim()) -and (Test-Path -LiteralPath $stderr.FullName)) {
-                    $errOut = Get-Content -LiteralPath $stderr.FullName -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
-                }
-                $errDetail = if ($errOut -and $errOut.Trim()) { ($errOut -replace '[\r\n]+', ' ').Trim() } else { '' }
-                if ($errDetail.Length -gt 240) { $errDetail = $errDetail.Substring(0, 240) + '...' }
-                if ($errDetail) {
-                    throw "Web request failed: $errDetail"
-                }
+            $errOut = ''
+            if (Test-Path -LiteralPath $stdout.FullName) {
+                $errOut = Get-Content -LiteralPath $stdout.FullName -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
+            }
+            if ((-not $errOut -or -not $errOut.Trim()) -and (Test-Path -LiteralPath $stderr.FullName)) {
+                $errOut = Get-Content -LiteralPath $stderr.FullName -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
+            }
+            $errDetail = if ($errOut -and $errOut.Trim()) { ($errOut -replace '[\r\n]+', ' ').Trim() } else { '' }
+            if ($errDetail.Length -gt 240) { $errDetail = $errDetail.Substring(0, 240) + '...' }
+            if ($errDetail -or -not (Test-Path -LiteralPath $OutFile)) {
+                if ($errDetail) { throw "Web request failed: $errDetail" }
                 throw 'Web request failed.'
             }
         }
         finally {
-            if ($proc -and -not $proc.HasExited) {
-                Stop-Process -InputObject $proc -Force -ErrorAction SilentlyContinue
-                Wait-Process -InputObject $proc -Timeout 2 -ErrorAction SilentlyContinue
+            if ($procId -gt 0 -and (Get-Process -Id $procId -ErrorAction SilentlyContinue)) {
+                Stop-Process -Id $procId -Force -ErrorAction SilentlyContinue
             }
             Remove-Item -LiteralPath $stdout.FullName, $stderr.FullName -Force -ErrorAction SilentlyContinue
             if ($workerFile) {
