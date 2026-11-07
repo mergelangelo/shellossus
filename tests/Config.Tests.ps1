@@ -146,6 +146,22 @@ try {
     Assert-True (-not (Test-IsLoopbackBaseUrl -Url 'https://api.openai.com/v1')) 'Test-IsLoopbackBaseUrl accepted non-loopback https://api.openai.com/v1.'
     Assert-True (-not (Test-IsLoopbackBaseUrl -Url 'http://example.invalid/v1')) 'Test-IsLoopbackBaseUrl accepted invalid remote HTTP URL.'
 
+    # Task 22: Get-AgentUserRoot is the shared home directory. Test-IsLoopbackHost is the shared loopback host check.
+    Assert-True ([bool](Get-AgentUserRoot)) 'Get-AgentUserRoot returned an empty path.'
+    Assert-True (Test-IsLoopbackHost -HostName 'localhost') 'Test-IsLoopbackHost rejected localhost.'
+    Assert-True (Test-IsLoopbackHost -HostName '127.0.0.1') 'Test-IsLoopbackHost rejected 127.0.0.1.'
+    Assert-True (Test-IsLoopbackHost -HostName '::1') 'Test-IsLoopbackHost rejected ::1.'
+    Assert-True (Test-IsLoopbackHost -HostName '[::1]') 'Test-IsLoopbackHost rejected bracketed ::1.'
+    Assert-True (Test-IsLoopbackHost -HostName '0:0:0:0:0:0:0:1') 'Test-IsLoopbackHost rejected expanded IPv6 loopback.'
+    Assert-True (Test-IsLoopbackHost -HostName 'LOCALHOST') 'Test-IsLoopbackHost rejected LOCALHOST.'
+    Assert-True (-not (Test-IsLoopbackHost -HostName 'example.com')) 'Test-IsLoopbackHost accepted example.com.'
+    Assert-True (-not (Test-IsLoopbackHost -HostName '0.0.0.0')) 'Test-IsLoopbackHost accepted 0.0.0.0.'
+    Assert-True (-not (Test-IsLoopbackHost -HostName 'foo.localhost')) 'Test-IsLoopbackHost accepted foo.localhost.'
+    Assert-True (-not (Test-IsLoopbackHost -HostName 'printer.local')) 'Test-IsLoopbackHost accepted printer.local.'
+    Assert-True (-not (Test-IsLoopbackHost -HostName 'metadata.google.internal')) 'Test-IsLoopbackHost accepted metadata.google.internal.'
+    Assert-True (Test-ValidAgentBaseUrl -Url 'http://127.0.0.1:11434/v1') 'Test-ValidAgentBaseUrl rejected http://127.0.0.1:11434/v1.'
+    Assert-True (-not (Test-ValidAgentBaseUrl -Url 'http://example.com')) 'Test-ValidAgentBaseUrl accepted http://example.com.'
+
     # Set-AgentUtf8Content writes BOM-less UTF-8 for empty, pure ASCII, and non-ASCII Unicode strings.
     $utf8Path = Join-Path $testRoot 'utf8-nobom.txt'
     Set-AgentUtf8Content -LiteralPath $utf8Path -Value ''

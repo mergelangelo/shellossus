@@ -109,7 +109,7 @@ function Sync-AgentMemoryContext {
         Split-Path $script:AgentConfigPath -Parent
     }
     else {
-        Join-Path (if ($env:USERPROFILE) { $env:USERPROFILE } else { $HOME }) '.shellossus'
+        Join-Path (Get-AgentUserRoot) '.shellossus'
     }
     $newMem = Get-MemoryContext -Root $effRoot -ConfigDir $effConfigDir
     $sysContent = [string]$effState.messages[0].content

@@ -78,6 +78,17 @@ function Save-AgentConfig {
     Set-Content -LiteralPath $Path -Value $lines -Encoding UTF8 -ErrorAction Stop
 }
 
+function Get-AgentUserRoot {
+    if ($env:USERPROFILE) { $env:USERPROFILE } else { $HOME }
+}
+
+function Test-IsLoopbackHost {
+    param([string]$HostName)
+    if (-not $HostName) { return $false }
+    $h = ($HostName -replace '^\[|\]$', '').Trim().ToLower()
+    return ($h -eq 'localhost' -or $h -eq '127.0.0.1' -or $h -match '^(?:::1|(?:0{1,4}:){7}0{0,3}1)$')
+}
+
 function Test-ValidAgentBaseUrl {
     param([string]$Url)
     if (-not $Url -or ($Url -notmatch '^https?://[^\s]+$')) { return $false }
@@ -93,8 +104,7 @@ function Test-ValidAgentBaseUrl {
             return $true
         }
         if ($uri.Scheme -ieq 'http') {
-            $h = ($uri.Host -replace '^\[|\]$', '').Trim().ToLower()
-            if ($h -eq 'localhost' -or $h -eq '127.0.0.1' -or $h -match '^(?:::1|(?:0{1,4}:){7}0{0,3}1)$') {
+            if (Test-IsLoopbackHost -HostName $uri.Host) {
                 return $true
             }
         }
@@ -108,8 +118,7 @@ function Test-IsLoopbackBaseUrl {
     if (-not (Test-ValidAgentBaseUrl -Url $Url)) { return $false }
     try {
         $uri = [uri]$Url
-        $h = ($uri.Host -replace '^\[|\]$', '').Trim().ToLower()
-        return ($h -eq 'localhost' -or $h -eq '127.0.0.1' -or $h -match '^(?:::1|(?:0{1,4}:){7}0{0,3}1)$')
+        return (Test-IsLoopbackHost -HostName $uri.Host)
     }
     catch {
         return $false
