@@ -10,7 +10,7 @@ function Test-IsOwnAgentFunction {
     param($CommandInfo, [string]$PreviousShortcut, [string]$ResolvedAgent)
     if ($null -eq $CommandInfo -or [string]$CommandInfo.CommandType -ne 'Function') { return $false }
     $def = [string]$CommandInfo.Definition
-    if ($def -match '(?i)(shellossus|h-agent)\.ps1') { return $true }
+    if ($def -match '(?i)shellossus\.ps1') { return $true }
     if ($ResolvedAgent -and ($def.IndexOf($ResolvedAgent, [StringComparison]::OrdinalIgnoreCase) -ge 0)) { return $true }
     return $false
 }
@@ -61,7 +61,7 @@ function Get-MarkerBlockRange {
     foreach ($line in @($blockText -split '\r?\n')) {
         if ($line -match '^\s*function\s+global:([A-Za-z0-9_-]+)\s*\{') {
             $fnName = $Matches[1]
-            if (($fnName -ine 'shellossus') -and ($fnName -ine 'h-agent')) {
+            if ($fnName -ine 'shellossus') {
                 $detectedShortcut = $fnName
             }
         }
@@ -101,7 +101,6 @@ function Invoke-AgentProfileInstall {
     $existing = ''
     $profileExists = Test-Path -LiteralPath $ProfilePath
     $shBlock = $null
-    $haBlock = $null
     $previousShortcut = ''
 
     if ($profileExists) {
@@ -114,18 +113,8 @@ function Invoke-AgentProfileInstall {
             -StartRegex '(?m)^# >>> shellossus >>>\r?$' `
             -EndRegex '(?m)^# <<< shellossus <<<\r?$' `
             -Label 'shellossus'
-        $haBlock = Get-MarkerBlockRange `
-            -Content $existing `
-            -StartMarker '# >>> h-agent >>>' `
-            -EndMarker '# <<< h-agent <<<' `
-            -StartRegex '(?m)^# >>> h-agent >>>\r?$' `
-            -EndRegex '(?m)^# <<< h-agent <<<\r?$' `
-            -Label 'h-agent'
         if ($shBlock -and $shBlock.Shortcut) {
             $previousShortcut = [string]$shBlock.Shortcut
-        }
-        elseif ($haBlock -and $haBlock.Shortcut) {
-            $previousShortcut = [string]$haBlock.Shortcut
         }
     }
 
@@ -243,32 +232,9 @@ function Invoke-AgentProfileInstall {
     $block = $blockLines -join "`r`n"
 
     if ($profileExists) {
-        if ($shBlock -and $haBlock) {
-            # Remove legacy h-agent block first, then update shellossus block in place.
-            $haRemoveEnd = $haBlock.End
-            if (($haRemoveEnd + 1 -lt $existing.Length) -and ($existing.Substring($haRemoveEnd, 2) -eq "`r`n")) {
-                $haRemoveEnd += 2
-            }
-            elseif (($haRemoveEnd -lt $existing.Length) -and ($existing.Substring($haRemoveEnd, 1) -eq "`n")) {
-                $haRemoveEnd += 1
-            }
-            $withoutHa = $existing.Substring(0, $haBlock.Start) + $existing.Substring($haRemoveEnd)
-            $shBlockUpdated = Get-MarkerBlockRange `
-                -Content $withoutHa `
-                -StartMarker '# >>> shellossus >>>' `
-                -EndMarker '# <<< shellossus <<<' `
-                -StartRegex '(?m)^# >>> shellossus >>>\r?$' `
-                -EndRegex '(?m)^# <<< shellossus <<<\r?$' `
-                -Label 'shellossus'
-            $updated = $withoutHa.Substring(0, $shBlockUpdated.Start) + $block + $withoutHa.Substring($shBlockUpdated.End)
-        }
-        elseif ($shBlock) {
+        if ($shBlock) {
             # Use literal slicing: paths with dollar signs are never regex replacements.
             $updated = $existing.Substring(0, $shBlock.Start) + $block + $existing.Substring($shBlock.End)
-        }
-        elseif ($haBlock) {
-            # Migrate legacy h-agent block in place to shellossus block.
-            $updated = $existing.Substring(0, $haBlock.Start) + $block + $existing.Substring($haBlock.End)
         }
         else {
             $updated = $existing + "`r`n" + $block + "`r`n"

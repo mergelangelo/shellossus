@@ -11,9 +11,7 @@ if (-not $LibraryOnly) {
     $doctorConfigState = 'loaded'
     try {
         $script:AgentConfigPath = Format-ConfigPath -Path $ConfigPath
-        $resolvedCfg = Resolve-AgentConfigPath -Path $ConfigPath
-        $script:LegacyAgentConfigPath = if ($resolvedCfg -and ($resolvedCfg -ne $ConfigPath)) { Format-ConfigPath -Path $resolvedCfg } else { '' }
-        if (-not (Test-Path -LiteralPath $resolvedCfg)) { $doctorConfigState = 'missing' }
+        if (-not (Test-Path -LiteralPath $ConfigPath)) { $doctorConfigState = 'missing' }
         $config = Read-AgentConfig -Path $ConfigPath
     }
     catch {
@@ -33,13 +31,11 @@ if (-not $LibraryOnly) {
         Write-Host ($script:Gm.OscInit + $script:Gm.Fg + "Save settings to: $ConfigPath" + $script:Gm.Reset)
         Write-Host ($script:Gm.Yellow + 'API key is stored as plain text in your user profile, outside the project.' + $script:Gm.Reset)
         $defaultUrl = $BaseUrl
-        if (-not $defaultUrl) { $defaultUrl = $env:H_AGENT_BASE_URL }
         if (-not $defaultUrl) { $defaultUrl = $config.SHELLOSSUS_BASE_URL }
         $inputUrl = Read-Host "API base URL including /v1 [$defaultUrl]"
         if (-not $inputUrl) { $inputUrl = $defaultUrl }
         if (-not (Test-ValidAgentBaseUrl -Url $inputUrl)) { throw 'An HTTPS base URL (or http://localhost / http://127.0.0.1 for local servers) is required. Run: shellossus -Setup' }
         $defaultModel = $Model
-        if (-not $defaultModel) { $defaultModel = $env:H_AGENT_MODEL }
         if (-not $defaultModel) { $defaultModel = $config.SHELLOSSUS_MODEL }
         $inputModel = Read-Host "Model ID [$defaultModel]"
         if (-not $inputModel) { $inputModel = $defaultModel }
@@ -52,7 +48,6 @@ if (-not $LibraryOnly) {
         $defaultWorkspace = ''
         if ($PSBoundParameters.Keys -contains 'Workspace') { $defaultWorkspace = $Workspace }
         elseif ($env:SHELLOSSUS_WORKSPACE) { $defaultWorkspace = $env:SHELLOSSUS_WORKSPACE }
-        elseif ($env:H_AGENT_WORKSPACE) { $defaultWorkspace = $env:H_AGENT_WORKSPACE }
         elseif ($config.SHELLOSSUS_WORKSPACE) { $defaultWorkspace = $config.SHELLOSSUS_WORKSPACE }
         $wsPrompt = if ($defaultWorkspace) { "Default workspace [$defaultWorkspace] (Enter keeps saved, '-' clears)" } else { 'Default workspace (Enter = current folder at each launch)' }
         $inputWorkspace = Read-Host $wsPrompt
@@ -79,13 +74,10 @@ if (-not $LibraryOnly) {
         if ($Mode -ine 'json') { Write-TuiMascotCard -Mode 'full' }
         return
     }
-    if (-not $BaseUrl) { $BaseUrl = $env:H_AGENT_BASE_URL }
     if (-not $BaseUrl) { $BaseUrl = $config.SHELLOSSUS_BASE_URL }
-    if (-not $Model) { $Model = $env:H_AGENT_MODEL }
     if (-not $Model) { $Model = $config.SHELLOSSUS_MODEL }
     if ($PSBoundParameters.Keys -notcontains 'Workspace') {
         if ($env:SHELLOSSUS_WORKSPACE) { $Workspace = $env:SHELLOSSUS_WORKSPACE }
-        elseif ($env:H_AGENT_WORKSPACE) { $Workspace = $env:H_AGENT_WORKSPACE }
         elseif ($config.SHELLOSSUS_WORKSPACE) { $Workspace = $config.SHELLOSSUS_WORKSPACE }
     }
     try {
@@ -100,7 +92,6 @@ if (-not $LibraryOnly) {
     }
     if ($Doctor) {
         $doctorKey = $env:SHELLOSSUS_API_KEY
-        if (-not $doctorKey) { $doctorKey = $env:H_AGENT_API_KEY }
         if (-not $doctorKey) { $doctorKey = $config.SHELLOSSUS_API_KEY }
         try {
             $report = Get-AgentDoctorReport -BaseUrl $BaseUrl -ModelId $Model -ApiKey $doctorKey -Workspace $Workspace -SessionDir $sessionDir -NoSession:$NoSession -ConfigState $doctorConfigState
@@ -156,7 +147,6 @@ if (-not $LibraryOnly) {
     if (-not $Export) {
         $endpoint = $BaseUrl.TrimEnd('/') + '/chat/completions'
         $agentKey = $env:SHELLOSSUS_API_KEY
-        if (-not $agentKey) { $agentKey = $env:H_AGENT_API_KEY }
         if (-not $agentKey) { $agentKey = $config.SHELLOSSUS_API_KEY }
         $config.Clear()
         if (-not $agentKey -and (Test-IsLoopbackBaseUrl -Url $BaseUrl)) {

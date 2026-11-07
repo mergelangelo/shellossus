@@ -379,7 +379,6 @@ try {
     $savedChildModel = $env:SHELLOSSUS_MODEL
     $savedChildReason = $env:SHELLOSSUS_REASONING_LEVEL
     $savedChildSKey = $env:SHELLOSSUS_API_KEY
-    $savedChildHKey = $env:H_AGENT_API_KEY
     $savedChildOKey = $env:OPENAI_API_KEY
     $savedScriptSessionId = $script:ActiveSessionId
     $savedScriptSessionFile = $script:ActiveSessionFile
@@ -412,11 +411,10 @@ try {
         Assert-True ($env:SHELLOSSUS_SESSION_ID -eq 'stale' -and $env:SHELLOSSUS_SESSION_FILE -eq 'stale-file' -and $env:SHELLOSSUS_MODEL -eq 'stale-model' -and $env:SHELLOSSUS_REASONING_LEVEL -eq 'stale-reason') 'Parent session environment changed while publishing current session values.'
 
         $env:SHELLOSSUS_API_KEY = 'sec-s'
-        $env:H_AGENT_API_KEY = 'sec-h'
         $env:OPENAI_API_KEY = 'sec-o'
-        $keyChild = Invoke-ShellCommand -Root $workspacePath -Command 'Write-Output $env:SHELLOSSUS_API_KEY; Write-Output $env:H_AGENT_API_KEY; Write-Output $env:OPENAI_API_KEY'
+        $keyChild = Invoke-ShellCommand -Root $workspacePath -Command 'Write-Output $env:SHELLOSSUS_API_KEY; Write-Output $env:OPENAI_API_KEY'
         Assert-True (([string]$keyChild.output).Trim() -eq '') 'Invoke-ShellCommand did not scrub API keys from the child environment.'
-        Assert-True ($env:SHELLOSSUS_API_KEY -eq 'sec-s' -and $env:H_AGENT_API_KEY -eq 'sec-h' -and $env:OPENAI_API_KEY -eq 'sec-o') 'Invoke-ShellCommand did not restore API keys after the command.'
+        Assert-True ($env:SHELLOSSUS_API_KEY -eq 'sec-s' -and $env:OPENAI_API_KEY -eq 'sec-o') 'Invoke-ShellCommand did not restore API keys after the command.'
     }
     finally {
         $env:SHELLOSSUS_SESSION_ID = $savedChildSessionId
@@ -424,7 +422,6 @@ try {
         $env:SHELLOSSUS_MODEL = $savedChildModel
         $env:SHELLOSSUS_REASONING_LEVEL = $savedChildReason
         $env:SHELLOSSUS_API_KEY = $savedChildSKey
-        $env:H_AGENT_API_KEY = $savedChildHKey
         $env:OPENAI_API_KEY = $savedChildOKey
         $script:ActiveSessionId = $savedScriptSessionId
         $script:ActiveSessionFile = $savedScriptSessionFile
@@ -1507,18 +1504,6 @@ try {
     Assert-True ($rulesV3.Count -eq 0) 'Read-DirectoryIgnoreRules did not invalidate cache when .gitignore was deleted.'
     Remove-Item -LiteralPath $cacheIgDir -Recurse -Force
 
-    # Regression: Invoke-AgentWrite blocks writing to $script:LegacyAgentConfigPath.
-    $savedLegacyCfg = $script:LegacyAgentConfigPath
-    try {
-        $script:LegacyAgentConfigPath = Format-ConfigPath -Path (Join-Path $workspacePath '.\legacy-uncreated.cfg')
-        $legacyWriteCall = @{ id = 'w-leg-cfg'; function = @{ name = 'write_file'; arguments = '{"path":"legacy-uncreated.cfg","content":"bad"}' } }
-        $legacyWriteRes = Invoke-AgentTool -Root $workspacePath -Call $legacyWriteCall | ConvertFrom-Json
-        Assert-True ($legacyWriteRes.error -like '*credential*') 'Invoke-AgentWrite did not block writing to $script:LegacyAgentConfigPath.'
-    }
-    finally {
-        $script:LegacyAgentConfigPath = $savedLegacyCfg
-    }
-
     # Regression: Format-AskUserArguments and Format-MemoryArguments preserve unknown arguments and non-string types for validation.
     $unknownAskRes = Invoke-AgentTool -Root $workspacePath -Call @{ id = 'ask-unk'; function = @{ name = 'ask_user'; arguments = '{"question":"Continue?","unexpected_param":123}' } } | ConvertFrom-Json
     Assert-True ($unknownAskRes.error -like '*Unknown argument*unexpected_param*') "ask_user did not reject unknown argument: $($unknownAskRes.error)"
@@ -1574,28 +1559,25 @@ try {
         Assert-True $v6Blocked "Test-SafeWebUrl failed to block IPv6 SSRF URL: $ipv6SsrfUrl"
     }
 
-    # Regression: Invoke-AgentWebDownload scrubs SHELLOSSUS_API_KEY, H_AGENT_API_KEY, and OPENAI_API_KEY during download and restores them in finally.
+    # Regression: Invoke-AgentWebDownload scrubs SHELLOSSUS_API_KEY and OPENAI_API_KEY during download and restores them in finally.
     $savedEnvS = $env:SHELLOSSUS_API_KEY
-    $savedEnvH = $env:H_AGENT_API_KEY
     $savedEnvO = $env:OPENAI_API_KEY
     $script:leakedKeysDuringWeb = $true
     function Invoke-WebRequest {
         param($Uri, $Method, $Headers, $ContentType, $Body, $TimeoutSec, $ErrorAction, [switch]$UseBasicParsing, $OutFile)
-        $script:leakedKeysDuringWeb = ([bool]$env:SHELLOSSUS_API_KEY -or [bool]$env:H_AGENT_API_KEY -or [bool]$env:OPENAI_API_KEY)
+        $script:leakedKeysDuringWeb = ([bool]$env:SHELLOSSUS_API_KEY -or [bool]$env:OPENAI_API_KEY)
         Set-Content -LiteralPath $OutFile -Value 'ok' -Encoding UTF8 -NoNewline
     }
     $dlTmp = New-AgentTempFile
     try {
         $env:SHELLOSSUS_API_KEY = 'sec-s'
-        $env:H_AGENT_API_KEY = 'sec-h'
         $env:OPENAI_API_KEY = 'sec-o'
         Invoke-AgentWebDownload -Uri 'https://example.com/test' -OutFile $dlTmp.FullName
         Assert-True (-not $script:leakedKeysDuringWeb) 'Invoke-AgentWebDownload did not scrub API keys from environment during download.'
-        Assert-True ($env:SHELLOSSUS_API_KEY -eq 'sec-s' -and $env:H_AGENT_API_KEY -eq 'sec-h' -and $env:OPENAI_API_KEY -eq 'sec-o') 'Invoke-AgentWebDownload did not restore API keys after download.'
+        Assert-True ($env:SHELLOSSUS_API_KEY -eq 'sec-s' -and $env:OPENAI_API_KEY -eq 'sec-o') 'Invoke-AgentWebDownload did not restore API keys after download.'
     }
     finally {
         $env:SHELLOSSUS_API_KEY = $savedEnvS
-        $env:H_AGENT_API_KEY = $savedEnvH
         $env:OPENAI_API_KEY = $savedEnvO
         Remove-Item Function:\Invoke-WebRequest -ErrorAction SilentlyContinue
         Remove-Item -LiteralPath $dlTmp.FullName -Force -ErrorAction SilentlyContinue

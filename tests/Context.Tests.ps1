@@ -746,17 +746,19 @@ try {
     Assert-True ($globalPrompt.Contains('global-system-eligible') -and $globalPrompt.Contains('global-append-eligible') -and $globalPrompt.Contains('global-soul-eligible') -and $globalPrompt.Contains('<soul source=') -and $globalPrompt.Contains('global-memory-eligible') -and $globalPrompt.Contains('global-agents-eligible') -and $globalPrompt.Contains('Project instructions from ')) 'A user config directory outside the workspace was dropped.'
 
     $longSysRoot = Join-Path $testRoot 'bounded-long-sys'
-    New-Item -ItemType Directory -Path (Join-Path $longSysRoot '.shellossus'), (Join-Path $longSysRoot '.h-agent') -Force | Out-Null
+    $longSysCfg = Join-Path $testRoot 'bounded-long-sys-cfg'
+    New-Item -ItemType Directory -Path (Join-Path $longSysRoot '.shellossus'), $longSysCfg -Force | Out-Null
     Set-AgentUtf8Content -LiteralPath (Join-Path $longSysRoot '.shellossus/SYSTEM.md') -Value ('Q' * 9000)
-    Set-AgentUtf8Content -LiteralPath (Join-Path $longSysRoot '.h-agent/SYSTEM.md') -Value 'SECOND-SYSTEM-BODY'
-    $longSysPrompt = Build-SystemPrompt -Root $longSysRoot -ConfigDir ''
+    Set-AgentUtf8Content -LiteralPath (Join-Path $longSysCfg 'SYSTEM.md') -Value 'SECOND-SYSTEM-BODY'
+    $longSysPrompt = Build-SystemPrompt -Root $longSysRoot -ConfigDir $longSysCfg
     Assert-True ($longSysPrompt.StartsWith('Q' * 9000) -and (-not $longSysPrompt.Contains('...(truncated)')) -and (-not $longSysPrompt.Contains('SECOND-SYSTEM-BODY')) -and (-not $longSysPrompt.Contains('Project instructions from ')) -and (-not $longSysPrompt.Contains('You are Shellossus'))) 'SYSTEM.md changed shape, truncated at 8000 chars, or lost first-file precedence.'
 
     $longAppendRoot = Join-Path $testRoot 'bounded-long-append'
-    New-Item -ItemType Directory -Path (Join-Path $longAppendRoot '.shellossus'), (Join-Path $longAppendRoot '.h-agent') -Force | Out-Null
-    Set-AgentUtf8Content -LiteralPath (Join-Path $longAppendRoot '.shellossus/APPEND_SYSTEM.md') -Value ('A' * 9000)
-    Set-AgentUtf8Content -LiteralPath (Join-Path $longAppendRoot '.h-agent/APPEND_SYSTEM.md') -Value 'APPEND-SECOND-BODY'
-    $longAppendPrompt = Build-SystemPrompt -Root $longAppendRoot -ConfigDir ''
+    $longAppendCfg = Join-Path $testRoot 'bounded-long-append-cfg'
+    New-Item -ItemType Directory -Path (Join-Path $longAppendRoot '.shellossus'), $longAppendCfg -Force | Out-Null
+    Set-AgentUtf8Content -LiteralPath (Join-Path $longAppendCfg 'APPEND_SYSTEM.md') -Value ('A' * 9000)
+    Set-AgentUtf8Content -LiteralPath (Join-Path $longAppendRoot '.shellossus/APPEND_SYSTEM.md') -Value 'APPEND-SECOND-BODY'
+    $longAppendPrompt = Build-SystemPrompt -Root $longAppendRoot -ConfigDir $longAppendCfg
     $longAppendAt = $longAppendPrompt.IndexOf('A' * 9000)
     $longAppendSecond = $longAppendPrompt.IndexOf('APPEND-SECOND-BODY')
     Assert-True ($longAppendPrompt.Contains('You are Shellossus') -and ($longAppendAt -ge 0) -and ($longAppendSecond -gt $longAppendAt) -and (-not $longAppendPrompt.Contains('...(truncated)')) -and (-not $longAppendPrompt.Contains('Project instructions from '))) 'APPEND_SYSTEM.md changed shape or truncated at 8000 chars.'

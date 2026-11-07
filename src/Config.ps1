@@ -3,55 +3,25 @@
 
 $script:RegisteredSkills = @{}
 
-function Resolve-AgentConfigPath {
-    param([string]$Path)
-    if (-not $Path) { return '' }
-    if (Test-Path -LiteralPath $Path) { return $Path }
-    $leaf = Split-Path $Path -Leaf
-    $parent = Split-Path $Path -Parent
-    if (($leaf -ieq '.env') -and $parent -and ((Split-Path $parent -Leaf) -ieq '.shellossus')) {
-        $userRoot = Split-Path $parent -Parent
-        if ($userRoot) {
-            $legacyPath = Join-Path (Join-Path $userRoot '.h-agent') '.env'
-            if (Test-Path -LiteralPath $legacyPath) { return $legacyPath }
-        }
-    }
-    return $Path
-}
-
 function Read-AgentConfig {
     param([string]$Path)
     $config = @{}
-    $legacyConfig = @{}
-    $effectivePath = Resolve-AgentConfigPath -Path $Path
-    if (-not $effectivePath -or -not (Test-Path -LiteralPath $effectivePath)) { return $config }
+    if (-not $Path -or -not (Test-Path -LiteralPath $Path)) { return $config }
     $lineNumber = 0
-    foreach ($line in @(Get-Content -LiteralPath $effectivePath -Encoding UTF8 -ErrorAction Stop)) {
+    foreach ($line in @(Get-Content -LiteralPath $Path -Encoding UTF8 -ErrorAction Stop)) {
         $lineNumber++
         $trimmed = $line.Trim()
         if (-not $trimmed -or $trimmed.StartsWith('#')) { continue }
-        if ($trimmed -notmatch '^(?:(SHELLOSSUS|H_AGENT)_(BASE_URL|MODEL|API_KEY|WORKSPACE|CONTEXT_WINDOW|COMPACT_THRESHOLD|THEME))\s*=(.*)$') {
+        if ($trimmed -notmatch '^(SHELLOSSUS_(?:BASE_URL|MODEL|API_KEY|WORKSPACE|CONTEXT_WINDOW|COMPACT_THRESHOLD|THEME))\s*=(.*)$') {
             throw "Invalid config entry at line $lineNumber. Expected a supported SHELLOSSUS_* key=value."
         }
-        $prefix = $Matches[1].ToUpper()
-        $suffix = $Matches[2].ToUpper()
-        $normalizedKey = 'SHELLOSSUS_' + $suffix
-        $value = $Matches[3].Trim()
+        $normalizedKey = $Matches[1].ToUpper()
+        $value = $Matches[2].Trim()
         if ($value.Length -ge 2 -and (($value.StartsWith('"') -and $value.EndsWith('"')) -or ($value.StartsWith("'") -and $value.EndsWith("'")))) {
             $value = $value.Substring(1, $value.Length - 2)
         }
         # Values are data. Never evaluate config as PowerShell code.
-        if ($prefix -eq 'SHELLOSSUS') {
-            $config[$normalizedKey] = $value
-        }
-        else {
-            $legacyConfig[$normalizedKey] = $value
-        }
-    }
-    foreach ($k in $legacyConfig.Keys) {
-        if (-not $config.ContainsKey($k)) {
-            $config[$k] = $legacyConfig[$k]
-        }
+        $config[$normalizedKey] = $value
     }
     return $config
 }
@@ -128,8 +98,7 @@ function Test-IsLoopbackBaseUrl {
 function Update-AgentConfigOptionalKey {
     param([string]$Path, [string]$Key, [string]$Value)
     if (-not $Path -or -not $Key) { return $false }
-    $effectivePath = Resolve-AgentConfigPath -Path $Path
-    if (-not $effectivePath -or -not (Test-Path -LiteralPath $effectivePath)) { return $false }
+    if (-not (Test-Path -LiteralPath $Path)) { return $false }
     $cfg = @{}
     try {
         $cfg = Read-AgentConfig -Path $Path
@@ -219,7 +188,7 @@ function Test-IsSecretFile {
     if ($Item.PSIsContainer) { return $false }
     $cleanName = ($Item.Name -replace ':.*$', '').TrimEnd('.', ' ')
     $cleanFull = ($Item.FullName -replace '(?<!^[a-zA-Z]):.*$', '').TrimEnd('.', ' ')
-    return ($cleanName -eq '.env' -or ($cleanName -like '.env.*' -and $cleanName -ne '.env.example') -or $cleanFull -eq $script:AgentConfigPath -or ($script:LegacyAgentConfigPath -and $cleanFull -eq $script:LegacyAgentConfigPath))
+    return ($cleanName -eq '.env' -or ($cleanName -like '.env.*' -and $cleanName -ne '.env.example') -or $cleanFull -eq $script:AgentConfigPath)
 }
 
 function Test-ValidPathSegment {
@@ -277,7 +246,7 @@ function Resolve-AgentWriteTarget {
     }
     $fullPath = Join-Path $parent $leaf
     $cleanLeaf = ($leaf -replace ':.*$', '').TrimEnd('.', ' ')
-    if ($cleanLeaf -eq '.env' -or ($cleanLeaf -like '.env.*' -and $cleanLeaf -ne '.env.example') -or $fullPath -eq $script:AgentConfigPath -or ($script:LegacyAgentConfigPath -and $fullPath -eq $script:LegacyAgentConfigPath)) {
+    if ($cleanLeaf -eq '.env' -or ($cleanLeaf -like '.env.*' -and $cleanLeaf -ne '.env.example') -or $fullPath -eq $script:AgentConfigPath) {
         throw 'Agent tools cannot write credential configuration files.'
     }
     $exists = $false

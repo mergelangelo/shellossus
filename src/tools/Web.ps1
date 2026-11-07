@@ -196,7 +196,6 @@ function Invoke-AgentWebDownload {
     if ($webCommand -and $webCommand.CommandType -eq 'Function') {
         Invoke-WithProcessEnvironment -Values @{
             SHELLOSSUS_API_KEY = $null
-            H_AGENT_API_KEY = $null
             OPENAI_API_KEY = $null
         } -Action {
             try {
@@ -236,7 +235,6 @@ try {
             $workerArguments = Get-AgentCommandArguments -CommandText $worker
             $proc = Invoke-WithProcessEnvironment -Values @{
                 SHELLOSSUS_API_KEY = $null
-                H_AGENT_API_KEY = $null
                 OPENAI_API_KEY = $null
                 SHELLOSSUS_WEB_DOWNLOAD_URI = $Uri
                 SHELLOSSUS_WEB_DOWNLOAD_FILE = $OutFile

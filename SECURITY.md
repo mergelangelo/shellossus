@@ -40,7 +40,7 @@ By default, `shellossus` operates in **`Ask`** mode:
 
 ### 3. Credential & Environment Protection
 - `.env`, `.env.*` (excluding `.env.example`), and user profile configuration files are strictly forbidden from agent tools (`read_file`, `find_files`, `grep_files`, `@file`, `write_file`).
-- Before executing commands, `SHELLOSSUS_API_KEY`, `H_AGENT_API_KEY`, and `OPENAI_API_KEY` are stripped from the child environment. This does not prevent commands from reading credentials on disk or in other environment variables allowed by the OS.
+- Before executing commands, `SHELLOSSUS_API_KEY` and `OPENAI_API_KEY` are stripped from the child environment. This does not prevent commands from reading credentials on disk or in other environment variables allowed by the OS.
 
 ### 4. Transactional Edits & Conflict-Aware `/undo`
 - `write_file` / `edit_file` modifications are staged to temporary files and verified prior to replacing target files on disk.

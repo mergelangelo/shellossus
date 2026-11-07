@@ -129,7 +129,6 @@ function Invoke-ShellCommand {
             $argList = Get-AgentCommandArguments -CommandText $wrappedCmd
             $proc = Invoke-WithProcessEnvironment -Values @{
                 SHELLOSSUS_API_KEY = $null
-                H_AGENT_API_KEY = $null
                 OPENAI_API_KEY = $null
             } -Action {
                 Start-Process -FilePath $shellExe -ArgumentList $argList -WorkingDirectory $rootFull -RedirectStandardOutput $outTemp.FullName -RedirectStandardError $errTemp.FullName -NoNewWindow -PassThru -ErrorAction Stop

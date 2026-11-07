@@ -357,7 +357,6 @@ function Build-SystemPrompt {
     $sysCandidates = @()
     if ($Root) {
         $sysCandidates += (Join-Path $Root '.shellossus/SYSTEM.md')
-        $sysCandidates += (Join-Path $Root '.h-agent/SYSTEM.md')
     }
     if ($ConfigDir) { $sysCandidates += (Join-Path $ConfigDir 'SYSTEM.md') }
     foreach ($cand in $sysCandidates) {
@@ -370,7 +369,6 @@ function Build-SystemPrompt {
     if ($ConfigDir) { $appendCandidates += (Join-Path $ConfigDir 'APPEND_SYSTEM.md') }
     if ($Root) {
         $appendCandidates += (Join-Path $Root '.shellossus/APPEND_SYSTEM.md')
-        $appendCandidates += (Join-Path $Root '.h-agent/APPEND_SYSTEM.md')
     }
     $appendText = Get-BoundedTextFiles -Paths $appendCandidates -Tag '' -MaxChars 262144
     if ($appendText) { $basePrompt += "`n`n" + $appendText }

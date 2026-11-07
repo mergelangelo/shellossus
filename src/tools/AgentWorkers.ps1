@@ -108,7 +108,6 @@ if ($env:SHELLOSSUS_SUB_REASONING_EFFORT) { $workerArgs.ReasoningEffort = $env:S
                 }
                 $proc = Invoke-WithProcessEnvironment -Values @{
                     SHELLOSSUS_API_KEY = $effKey
-                    H_AGENT_API_KEY = $null
                     OPENAI_API_KEY = $null
                     SHELLOSSUS_SUB_SCRIPT = $ScriptPath
                     SHELLOSSUS_SUB_ROOT = $Root
