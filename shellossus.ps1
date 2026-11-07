@@ -2537,237 +2537,173 @@ function Invoke-WithProcessEnvironment {
 }
 
 # --- src/tools/Schemas.ps1 ---
-# Canonical tool definitions, OpenAI function-calling JSON schemas, and capability descriptors.
+# Canonical tool definitions. Get-AgentToolSpecifications is the single table
+# for OpenAI function schemas and argument validation.
 
-function Get-AgentCapabilities {
-    param([string]$Root = '')
-    $envInfo = Get-AgentEnvironment -Root $Root
-    $perm = if ($script:AgentPermission -in @('ReadOnly', 'Ask', 'AutoEdit', 'Auto')) { $script:AgentPermission } else { 'Ask' }
-    $tools = @()
-    $toolNames = @()
-    foreach ($name in @('list_files', 'read_file')) {
-        if (-not (Test-IsToolEnabled -Name $name)) { continue }
-        $description = 'List up to 200 entries in a directory. Names only; no file contents.'
-        $properties = @{
-            path = @{ type = 'string'; description = 'Workspace-relative path; . means the root.' }
-        }
-        if ($name -eq 'list_files') {
-            $properties.limit = @{ type = 'integer'; description = 'Optional maximum number of entries to return (1..500, default 200).' }
-        }
-        if ($name -eq 'read_file') {
-            $description = 'Read a UTF-8 text file: up to 300 lines and 20000 characters, maximum file size 1 MiB. Returns total_lines and pagination metadata.'
-            $properties.start_line = @{ type = 'integer'; description = 'Optional 1-based first line to read (default 1).' }
-            $properties.max_lines = @{ type = 'integer'; description = 'Optional maximum number of lines to read (1..300, default 300).' }
-            $properties.start_char = @{ type = 'integer'; description = 'Optional 1-based character offset within start_line for reading long lines (default 1).' }
-            $properties.offset = @{ type = 'integer'; description = 'Optional alias for start_line (1-based line offset).' }
-            $properties.limit = @{ type = 'integer'; description = 'Optional alias for max_lines (1..300).' }
-        }
-        $toolNames += $name
-        $tools += @{
-            type = 'function'
-            function = @{
-                name = $name
-                description = $description
-                parameters = @{
-                    type = 'object'
-                    properties = $properties
-                    required = @('path')
-                }
+function Get-AgentToolSpecifications {
+    # Ordered as Get-AgentCapabilities emits tools when every tool is enabled.
+    # required is the top-level required list. extra names a validator in Validation.ps1.
+    $specs = @(
+        @{
+            name = 'list_files'
+            description = 'List up to 200 entries in a directory. Names only; no file contents.'
+            required = @('path')
+            properties = @{
+                path = @{ type = 'string'; description = 'Workspace-relative path; . means the root.' }
+                limit = @{ type = 'integer'; description = 'Optional maximum number of entries to return (1..500, default 200).' }
             }
-        }
-    }
-    if (Test-IsToolEnabled -Name 'find_files') {
-        $toolNames += 'find_files'
-        $tools += @{
-            type = 'function'
-            function = @{
-                name = 'find_files'
-                description = 'Find files or directories recursively by wildcard pattern (e.g. *.sql, src/*.ps1), respecting .gitignore/.ignore.'
-                parameters = @{
-                    type = 'object'
-                    properties = @{
-                        path = @{ type = 'string'; description = 'Workspace-relative directory path; . means the root.' }
-                        pattern = @{ type = 'string'; description = 'File name or relative path wildcard pattern, e.g. *.sql or src/*.ps1.' }
-                        limit = @{ type = 'integer'; description = 'Optional maximum number of results (1..1000, default 200).' }
-                    }
-                    required = @('path', 'pattern')
-                }
+        },
+        @{
+            name = 'read_file'
+            description = 'Read a UTF-8 text file: up to 300 lines and 20000 characters, maximum file size 1 MiB. Returns total_lines and pagination metadata.'
+            required = @('path')
+            properties = @{
+                path = @{ type = 'string'; description = 'Workspace-relative path; . means the root.' }
+                start_line = @{ type = 'integer'; description = 'Optional 1-based first line to read (default 1).' }
+                max_lines = @{ type = 'integer'; description = 'Optional maximum number of lines to read (1..300, default 300).' }
+                start_char = @{ type = 'integer'; description = 'Optional 1-based character offset within start_line for reading long lines (default 1).' }
+                offset = @{ type = 'integer'; description = 'Optional alias for start_line (1-based line offset).' }
+                limit = @{ type = 'integer'; description = 'Optional alias for max_lines (1..300).' }
             }
-        }
-    }
-    if (Test-IsToolEnabled -Name 'grep_files') {
-        $toolNames += 'grep_files'
-        $tools += @{
-            type = 'function'
-            function = @{
-                name = 'grep_files'
-                description = 'Search UTF-8 text files for a regex or literal pattern (respecting .gitignore/.ignore), returning matching paths, line numbers, and lines.'
-                parameters = @{
-                    type = 'object'
-                    properties = @{
-                        path = @{ type = 'string'; description = 'Workspace-relative file or directory path; . means the root.' }
-                        pattern = @{ type = 'string'; description = 'Regex or literal search pattern.' }
-                        literal = @{ type = 'boolean'; description = 'Set true for literal substring match instead of regex.' }
-                        case_sensitive = @{ type = 'boolean'; description = 'Set true for case-sensitive matching.' }
-                        include = @{ type = 'string'; description = 'Optional file name wildcard filter, e.g. *.sql or *.ps1.' }
-                        glob = @{ type = 'string'; description = 'Optional alias for include wildcard filter.' }
-                        context_lines = @{ type = 'integer'; description = 'Optional surrounding context lines (0..5).' }
-                        limit = @{ type = 'integer'; description = 'Optional maximum number of matches to return (1..500, default 100).' }
-                        file_offset = @{ type = 'integer'; description = 'Optional 0-based file offset. To continue, use next_file_offset together with next_start_line from the previous result (default 0).' }
-                        start_line = @{ type = 'integer'; description = 'Optional 1-based first matching line to include in the file at file_offset; later files start at line 1 (default 1).' }
-                    }
-                    required = @('path', 'pattern')
-                }
+        },
+        @{
+            name = 'find_files'
+            description = 'Find files or directories recursively by wildcard pattern (e.g. *.sql, src/*.ps1), respecting .gitignore/.ignore.'
+            required = @('path', 'pattern')
+            properties = @{
+                path = @{ type = 'string'; description = 'Workspace-relative directory path; . means the root.' }
+                pattern = @{ type = 'string'; description = 'File name or relative path wildcard pattern, e.g. *.sql or src/*.ps1.' }
+                limit = @{ type = 'integer'; description = 'Optional maximum number of results (1..1000, default 200).' }
             }
-        }
-    }
-    if (Test-IsToolEnabled -Name 'fetch_url') {
-        $toolNames += 'fetch_url'
-        $tools += @{
-            type = 'function'
-            function = @{
-                name = 'fetch_url'
-                description = 'Fetch an HTTP/HTTPS URL and return readable text, Markdown, or JSON content (up to 20000 characters by default).'
-                parameters = @{
-                    type = 'object'
-                    properties = @{
-                        url = @{ type = 'string'; description = 'HTTP or HTTPS URL to fetch.' }
-                        max_chars = @{ type = 'integer'; description = 'Optional maximum characters to return (500..50000, default 20000).' }
-                        raw = @{ type = 'boolean'; description = 'Optional: set true to return raw HTML without tag stripping.' }
-                    }
-                    required = @('url')
-                }
+        },
+        @{
+            name = 'grep_files'
+            description = 'Search UTF-8 text files for a regex or literal pattern (respecting .gitignore/.ignore), returning matching paths, line numbers, and lines.'
+            required = @('path', 'pattern')
+            properties = @{
+                path = @{ type = 'string'; description = 'Workspace-relative file or directory path; . means the root.' }
+                pattern = @{ type = 'string'; description = 'Regex or literal search pattern.' }
+                literal = @{ type = 'boolean'; description = 'Set true for literal substring match instead of regex.' }
+                case_sensitive = @{ type = 'boolean'; description = 'Set true for case-sensitive matching.' }
+                include = @{ type = 'string'; description = 'Optional file name wildcard filter, e.g. *.sql or *.ps1.' }
+                glob = @{ type = 'string'; description = 'Optional alias for include wildcard filter.' }
+                context_lines = @{ type = 'integer'; description = 'Optional surrounding context lines (0..5).' }
+                limit = @{ type = 'integer'; description = 'Optional maximum number of matches to return (1..500, default 100).' }
+                file_offset = @{ type = 'integer'; description = 'Optional 0-based file offset. To continue, use next_file_offset together with next_start_line from the previous result (default 0).' }
+                start_line = @{ type = 'integer'; description = 'Optional 1-based first matching line to include in the file at file_offset; later files start at line 1 (default 1).' }
             }
-        }
-    }
-    if (Test-IsToolEnabled -Name 'web_search') {
-        $toolNames += 'web_search'
-        $tools += @{
-            type = 'function'
-            function = @{
-                name = 'web_search'
-                description = 'Search the web for a query and return matching result titles, URLs, and snippets.'
-                parameters = @{
-                    type = 'object'
-                    properties = @{
-                        query = @{ type = 'string'; description = 'Search query text.' }
-                        limit = @{ type = 'integer'; description = 'Optional maximum number of results (1..20, default 8).' }
-                    }
-                    required = @('query')
-                }
+        },
+        @{
+            name = 'fetch_url'
+            description = 'Fetch an HTTP/HTTPS URL and return readable text, Markdown, or JSON content (up to 20000 characters by default).'
+            required = @('url')
+            properties = @{
+                url = @{ type = 'string'; description = 'HTTP or HTTPS URL to fetch.' }
+                max_chars = @{ type = 'integer'; description = 'Optional maximum characters to return (500..50000, default 20000).' }
+                raw = @{ type = 'boolean'; description = 'Optional: set true to return raw HTML without tag stripping.' }
             }
-        }
-    }
-    if (Test-IsToolEnabled -Name 'todo') {
-        $toolNames += 'todo'
-        $tools += @{
-            type = 'function'
-            function = @{
-                name = 'todo'
-                description = 'Track task plan and progress during multi-step work. Call this to initialize or update the active todo list (replaces entire list on each call).'
-                parameters = @{
-                    type = 'object'
-                    properties = @{
-                        todos = @{
-                            type = 'array'
-                            description = 'Complete ordered list of task items: array of {content, status}. Status must be pending, in_progress, or completed.'
-                            items = @{
-                                type = 'object'
-                                properties = @{
-                                    content = @{ type = 'string'; description = 'Clear, concise description of the task.' }
-                                    status = @{ type = 'string'; description = 'Task status: pending, in_progress, or completed.' }
-                                }
-                                required = @('content', 'status')
-                            }
-                        }
-                    }
-                    required = @('todos')
-                }
+        },
+        @{
+            name = 'web_search'
+            description = 'Search the web for a query and return matching result titles, URLs, and snippets.'
+            required = @('query')
+            properties = @{
+                query = @{ type = 'string'; description = 'Search query text.' }
+                limit = @{ type = 'integer'; description = 'Optional maximum number of results (1..20, default 8).' }
             }
-        }
-    }
-    if (Test-IsToolEnabled -Name 'ask_user') {
-        $toolNames += 'ask_user'
-        $tools += @{
-            type = 'function'
-            function = @{
-                name = 'ask_user'
-                description = 'Ask the user a concise question, request an architectural decision, or present a Markdown implementation plan for explicit review and approval before making changes.'
-                parameters = @{
-                    type = 'object'
-                    properties = @{
-                        question = @{
-                            type = 'string'
-                            description = 'The question or plan summary to present to the user.'
+        },
+        @{
+            name = 'todo'
+            description = 'Track task plan and progress during multi-step work. Call this to initialize or update the active todo list (replaces entire list on each call).'
+            required = @('todos')
+            extra = 'Test-AgentTodoArguments'
+            properties = @{
+                todos = @{
+                    type = 'array'
+                    description = 'Complete ordered list of task items: array of {content, status}. Status must be pending, in_progress, or completed.'
+                    items = @{
+                        type = 'object'
+                        properties = @{
+                            content = @{ type = 'string'; description = 'Clear, concise description of the task.' }
+                            status = @{ type = 'string'; description = 'Task status: pending, in_progress, or completed.' }
                         }
-                        options = @{
-                            type = 'array'
-                            description = 'Optional choices to show the user (list of strings or objects with label and description). Put recommended choice first.'
-                            items = @{ type = 'string' }
-                        }
-                        intent = @{
-                            type = 'string'
-                            description = "Presentation intent: 'question' for architectural/decision choices (default), or 'plan-review' for reviewing a Markdown plan before modifying files."
-                            enum = @('question', 'plan-review')
-                        }
-                        plan = @{
-                            type = 'string'
-                            description = "Markdown text of the plan under review (used when intent is 'plan-review')."
-                        }
-                        allow_custom = @{
-                            type = 'boolean'
-                            description = 'Whether the user can provide custom free-text feedback if none of the options fit (default true).'
-                        }
-                    }
-                    required = @('question')
-                }
-            }
-        }
-    }
-    if (Test-IsToolEnabled -Name 'memory') {
-        $toolNames += 'memory'
-        $tools += @{
-            type = 'function'
-            function = @{
-                name = 'memory'
-                description = 'Record, view, or manage persistent long-term memories, user preferences, and project invariants that survive across CLI sessions in MEMORY.md.'
-                parameters = @{
-                    type = 'object'
-                    properties = @{
-                        action = @{
-                            type = 'string'
-                            description = "Action to perform: 'append' to add a new memory note (default), 'view' to read memory, 'set' to replace memory content, or 'clear' to reset."
-                            enum = @('append', 'view', 'set', 'clear')
-                        }
-                        content = @{
-                            type = 'string'
-                            description = "The fact, preference, or architectural invariant to record (required for 'append' and 'set')."
-                        }
-                        scope = @{
-                            type = 'string'
-                            description = "Storage scope: 'workspace' (default, stored in .shellossus/MEMORY.md) or 'global' (stored in global config MEMORY.md)."
-                            enum = @('workspace', 'global')
-                        }
+                        required = @('content', 'status')
                     }
                 }
             }
-        }
-    }
-    if ($perm -ne 'ReadOnly') {
-        foreach ($name in @('write_file', 'edit_file')) {
-            if (-not (Test-IsToolEnabled -Name $name)) { continue }
-            $properties = @{ path = @{ type = 'string'; description = 'Workspace-relative text file path. Parent directory must exist.' } }
-            if ($name -eq 'write_file') {
-                $description = 'Create a UTF-8 text file (or overwrite when overwrite=true).'
-                $properties.content = @{ type = 'string'; description = 'Complete file contents, up to 1 MiB.' }
-                $properties.overwrite = @{ type = 'boolean'; description = 'Set true to overwrite an existing file (saves a backup).' }
-                $required = @('path', 'content')
+        },
+        @{
+            name = 'ask_user'
+            description = 'Ask the user a concise question, request an architectural decision, or present a Markdown implementation plan for explicit review and approval before making changes.'
+            required = @('question')
+            extra = 'Test-AgentAskUserArguments'
+            properties = @{
+                question = @{
+                    type = 'string'
+                    description = 'The question or plan summary to present to the user.'
+                }
+                options = @{
+                    type = 'array'
+                    description = 'Optional choices to show the user (list of strings or objects with label and description). Put recommended choice first.'
+                    items = @{ type = 'string' }
+                }
+                intent = @{
+                    type = 'string'
+                    description = "Presentation intent: 'question' for architectural/decision choices (default), or 'plan-review' for reviewing a Markdown plan before modifying files."
+                    enum = @('question', 'plan-review')
+                }
+                plan = @{
+                    type = 'string'
+                    description = "Markdown text of the plan under review (used when intent is 'plan-review')."
+                }
+                allow_custom = @{
+                    type = 'boolean'
+                    description = 'Whether the user can provide custom free-text feedback if none of the options fit (default true).'
+                }
             }
-            else {
-                $description = 'Replace one or more unique blocks in a UTF-8 text file (supports single old_text/new_text or batch edits[] array; saves a backup).'
-                $properties.old_text = @{ type = 'string'; description = 'Single edit: nonempty text occurring once in the file.' }
-                $properties.new_text = @{ type = 'string'; description = 'Single edit: replacement text.' }
-                $properties.edits = @{
+        },
+        @{
+            name = 'memory'
+            description = 'Record, view, or manage persistent long-term memories, user preferences, and project invariants that survive across CLI sessions in MEMORY.md.'
+            required = @()
+            extra = 'Test-AgentMemoryArguments'
+            properties = @{
+                action = @{
+                    type = 'string'
+                    description = "Action to perform: 'append' to add a new memory note (default), 'view' to read memory, 'set' to replace memory content, or 'clear' to reset."
+                    enum = @('append', 'view', 'set', 'clear')
+                }
+                content = @{
+                    type = 'string'
+                    description = "The fact, preference, or architectural invariant to record (required for 'append' and 'set')."
+                }
+                scope = @{
+                    type = 'string'
+                    description = "Storage scope: 'workspace' (default, stored in .shellossus/MEMORY.md) or 'global' (stored in global config MEMORY.md)."
+                    enum = @('workspace', 'global')
+                }
+            }
+        },
+        @{
+            name = 'write_file'
+            description = 'Create a UTF-8 text file (or overwrite when overwrite=true).'
+            required = @('path', 'content')
+            properties = @{
+                path = @{ type = 'string'; description = 'Workspace-relative text file path. Parent directory must exist.' }
+                content = @{ type = 'string'; description = 'Complete file contents, up to 1 MiB.' }
+                overwrite = @{ type = 'boolean'; description = 'Set true to overwrite an existing file (saves a backup).' }
+            }
+        },
+        @{
+            name = 'edit_file'
+            description = 'Replace one or more unique blocks in a UTF-8 text file (supports single old_text/new_text or batch edits[] array; saves a backup).'
+            required = @('path')
+            extra = 'Test-AgentEditFileArguments'
+            properties = @{
+                path = @{ type = 'string'; description = 'Workspace-relative text file path. Parent directory must exist.' }
+                old_text = @{ type = 'string'; description = 'Single edit: nonempty text occurring once in the file.' }
+                new_text = @{ type = 'string'; description = 'Single edit: replacement text.' }
+                edits = @{
                     type = 'array'
                     description = 'Optional batch of non-overlapping edits: array of {old_text, new_text} objects.'
                     items = @{
@@ -2779,71 +2715,83 @@ function Get-AgentCapabilities {
                         required = @('old_text', 'new_text')
                     }
                 }
-                $required = @('path')
             }
-            $toolNames += $name
-            $tools += @{ type = 'function'; function = @{ name = $name; description = $description; parameters = @{ type = 'object'; properties = $properties; required = $required } } }
-        }
-        if (Test-IsToolEnabled -Name 'run_command') {
-            $toolNames += 'run_command'
-            $tools += @{
-                type = 'function'
-                function = @{
-                    name = 'run_command'
-                    description = 'Execute a PowerShell command in the workspace directory.'
-                    parameters = @{
+        },
+        @{
+            name = 'run_command'
+            description = 'Execute a PowerShell command in the workspace directory.'
+            required = @('command')
+            properties = @{
+                command = @{ type = 'string'; description = 'PowerShell command to execute.' }
+                timeout_sec = @{ type = 'integer'; description = 'Optional timeout in seconds (1..600, default 60).' }
+            }
+        },
+        @{
+            name = 'run_agent'
+            description = 'Delegate a task, parallel fan-out, or sequential pipeline to isolated subagents (roles: recon [ReadOnly], audit [ReadOnly], craft [inherits permission]). Keeps main context clean.'
+            required = @()
+            extra = 'Test-AgentRunAgentArguments'
+            properties = @{
+                role = @{ type = 'string'; description = 'Optional subagent role: recon (ReadOnly search), audit (ReadOnly review), craft (inherits permission), or custom role name.' }
+                prompt = @{ type = 'string'; description = 'Single-task instruction for the subagent (mutually exclusive with parallel and pipeline).' }
+                context = @{ type = 'string'; description = 'Optional context mode for single/pipeline tasks: clean (default, fresh context) or fork (clones parent conversation history).' }
+                max_steps = @{ type = 'integer'; description = 'Optional step budget per subagent run (1..50, default 15).' }
+                parallel = @{
+                    type = 'array'
+                    description = 'Concurrent ReadOnly fan-out tasks (1..8 items of {role, prompt}).'
+                    items = @{
                         type = 'object'
                         properties = @{
-                            command = @{ type = 'string'; description = 'PowerShell command to execute.' }
-                            timeout_sec = @{ type = 'integer'; description = 'Optional timeout in seconds (1..600, default 60).' }
+                            role = @{ type = 'string' }
+                            prompt = @{ type = 'string' }
                         }
-                        required = @('command')
+                        required = @('prompt')
+                    }
+                }
+                pipeline = @{
+                    type = 'array'
+                    description = 'Sequential pipeline steps (1..8 items of {role, prompt, context}); use {previous} or $PREVIOUS in prompt to reference prior step output.'
+                    items = @{
+                        type = 'object'
+                        properties = @{
+                            role = @{ type = 'string' }
+                            prompt = @{ type = 'string' }
+                            context = @{ type = 'string' }
+                        }
+                        required = @('prompt')
                     }
                 }
             }
         }
-    }
-    if (Test-IsToolEnabled -Name 'run_agent') {
-        $toolNames += 'run_agent'
+    )
+    return $specs
+}
+
+function Get-AgentCapabilities {
+    param([string]$Root = '')
+    $envInfo = Get-AgentEnvironment -Root $Root
+    $perm = if ($script:AgentPermission -in @('ReadOnly', 'Ask', 'AutoEdit', 'Auto')) { $script:AgentPermission } else { 'Ask' }
+    $tools = @()
+    $toolNames = @()
+    $readOnlyBlocked = @('write_file', 'edit_file', 'run_command')
+    foreach ($spec in @(Get-AgentToolSpecifications)) {
+        $name = [string]$spec.name
+        if ($perm -eq 'ReadOnly' -and ($readOnlyBlocked -contains $name)) { continue }
+        if (-not (Test-IsToolEnabled -Name $name)) { continue }
+        $requiredNames = @()
+        foreach ($reqName in @($spec.required)) {
+            if ($reqName) { $requiredNames += [string]$reqName }
+        }
+        $toolNames += $name
         $tools += @{
             type = 'function'
             function = @{
-                name = 'run_agent'
-                description = 'Delegate a task, parallel fan-out, or sequential pipeline to isolated subagents (roles: recon [ReadOnly], audit [ReadOnly], craft [inherits permission]). Keeps main context clean.'
+                name = $name
+                description = [string]$spec.description
                 parameters = @{
                     type = 'object'
-                    properties = @{
-                        role = @{ type = 'string'; description = 'Optional subagent role: recon (ReadOnly search), audit (ReadOnly review), craft (inherits permission), or custom role name.' }
-                        prompt = @{ type = 'string'; description = 'Single-task instruction for the subagent (mutually exclusive with parallel and pipeline).' }
-                        context = @{ type = 'string'; description = 'Optional context mode for single/pipeline tasks: clean (default, fresh context) or fork (clones parent conversation history).' }
-                        max_steps = @{ type = 'integer'; description = 'Optional step budget per subagent run (1..50, default 15).' }
-                        parallel = @{
-                            type = 'array'
-                            description = 'Concurrent ReadOnly fan-out tasks (1..8 items of {role, prompt}).'
-                            items = @{
-                                type = 'object'
-                                properties = @{
-                                    role = @{ type = 'string' }
-                                    prompt = @{ type = 'string' }
-                                }
-                                required = @('prompt')
-                            }
-                        }
-                        pipeline = @{
-                            type = 'array'
-                            description = 'Sequential pipeline steps (1..8 items of {role, prompt, context}); use {previous} or $PREVIOUS in prompt to reference prior step output.'
-                            items = @{
-                                type = 'object'
-                                properties = @{
-                                    role = @{ type = 'string' }
-                                    prompt = @{ type = 'string' }
-                                    context = @{ type = 'string' }
-                                }
-                                required = @('prompt')
-                            }
-                        }
-                    }
-                    required = @()
+                    properties = $spec.properties
+                    required = $requiredNames
                 }
             }
         }
@@ -3302,75 +3250,193 @@ function Format-AgentToolArguments {
 
 # --- src/tools/Validation.ps1 ---
 # Strict schema and type validation for all agent tool calls.
+# Extra checks stay in named functions. Test-AgentToolArguments calls the spec extra name.
+
+function Test-AgentEditFileArguments {
+    param($Arguments, $PropNames)
+    $propNames = @($PropNames)
+    $hasEdits = ($propNames -contains 'edits' -and $null -ne $Arguments.edits)
+    $hasSingle = ($propNames -contains 'old_text' -or $propNames -contains 'new_text')
+    if ($hasEdits -and $hasSingle) {
+        throw 'Provide either old_text/new_text or edits[], not both.'
+    }
+    if ($hasEdits) {
+        if ($Arguments.edits.Count -eq 0) { throw 'edits array must not be empty.' }
+        foreach ($ed in $Arguments.edits) {
+            if ($null -eq $ed -or $ed -is [string] -or $ed -is [ValueType] -or $ed -is [array]) {
+                throw 'Each edit in edits[] must be an object.'
+            }
+            $edProps = @(Get-ObjectPropertyNames -InputObject $ed)
+            foreach ($ep in $edProps) {
+                if ($ep -notin @('old_text', 'new_text')) {
+                    throw "Unknown property '$ep' in edits[] item."
+                }
+            }
+            if ($edProps -notcontains 'old_text' -or $edProps -notcontains 'new_text' -or $ed.old_text -isnot [string] -or -not $ed.old_text -or $ed.new_text -isnot [string]) {
+                throw 'Each edit must have nonempty string old_text and string new_text.'
+            }
+        }
+    }
+    else {
+        if ($propNames -notcontains 'old_text' -or $propNames -notcontains 'new_text' -or $Arguments.old_text -isnot [string] -or -not $Arguments.old_text -or $Arguments.new_text -isnot [string]) {
+            throw 'Expected nonempty old_text and string new_text.'
+        }
+    }
+}
+
+function Test-AgentRunAgentArguments {
+    param($Arguments, $PropNames)
+    $propNames = @($PropNames)
+    $hasPrompt = ($propNames -contains 'prompt' -and $null -ne $Arguments.prompt)
+    $hasParallel = ($propNames -contains 'parallel' -and $null -ne $Arguments.parallel)
+    $hasPipeline = ($propNames -contains 'pipeline' -and $null -ne $Arguments.pipeline)
+    $modeCount = ($(if ($hasPrompt) { 1 } else { 0 }) + $(if ($hasParallel) { 1 } else { 0 }) + $(if ($hasPipeline) { 1 } else { 0 }))
+    if ($modeCount -eq 0) {
+        throw 'run_agent requires one of: prompt, parallel[], or pipeline[].'
+    }
+    if ($modeCount -gt 1) {
+        throw 'Provide only one execution mode: prompt, parallel[], or pipeline[].'
+    }
+    if ($propNames -contains 'context' -and $null -ne $Arguments.context) {
+        if ($Arguments.context -notin @('clean', 'fork')) {
+            throw "Argument 'context' must be 'clean' or 'fork'."
+        }
+        if ($hasParallel -and $Arguments.context -eq 'fork') {
+            throw "Argument 'context' cannot be 'fork' when using parallel[]."
+        }
+    }
+    if ($propNames -contains 'max_steps' -and $null -ne $Arguments.max_steps) {
+        if ($Arguments.max_steps -lt 1 -or $Arguments.max_steps -gt 50) {
+            throw 'max_steps must be between 1 and 50.'
+        }
+    }
+    if ($hasPrompt) {
+        if (-not $Arguments.prompt.Trim()) {
+            throw 'prompt must be a nonempty string.'
+        }
+    }
+    if ($hasParallel) {
+        if ($Arguments.parallel.Count -lt 1 -or $Arguments.parallel.Count -gt 8) {
+            throw 'parallel[] must contain between 1 and 8 tasks.'
+        }
+        foreach ($pt in $Arguments.parallel) {
+            if ($null -eq $pt -or $pt -is [string] -or $pt -is [ValueType] -or $pt -is [array]) {
+                throw 'Each task in parallel[] must be an object.'
+            }
+            $ptProps = @(Get-ObjectPropertyNames -InputObject $pt)
+            foreach ($pp in $ptProps) {
+                if ($pp -notin @('role', 'prompt')) {
+                    throw "Unknown property '$pp' in parallel[] item."
+                }
+            }
+            if ($ptProps -notcontains 'prompt' -or $pt.prompt -isnot [string] -or -not $pt.prompt.Trim()) {
+                throw 'Each task in parallel[] must have a nonempty string prompt.'
+            }
+            if ($ptProps -contains 'role' -and $null -ne $pt.role -and $pt.role -isnot [string]) {
+                throw "Property 'role' in parallel[] item must be a string."
+            }
+        }
+    }
+    if ($hasPipeline) {
+        if ($Arguments.pipeline.Count -lt 1 -or $Arguments.pipeline.Count -gt 8) {
+            throw 'pipeline[] must contain between 1 and 8 steps.'
+        }
+        foreach ($ps in $Arguments.pipeline) {
+            if ($null -eq $ps -or $ps -is [string] -or $ps -is [ValueType] -or $ps -is [array]) {
+                throw 'Each step in pipeline[] must be an object.'
+            }
+            $psProps = @(Get-ObjectPropertyNames -InputObject $ps)
+            foreach ($sp in $psProps) {
+                if ($sp -notin @('role', 'prompt', 'context')) {
+                    throw "Unknown property '$sp' in pipeline[] item."
+                }
+            }
+            if ($psProps -notcontains 'prompt' -or $ps.prompt -isnot [string] -or -not $ps.prompt.Trim()) {
+                throw 'Each step in pipeline[] must have a nonempty string prompt.'
+            }
+            if ($psProps -contains 'role' -and $null -ne $ps.role -and $ps.role -isnot [string]) {
+                throw "Property 'role' in pipeline[] item must be a string."
+            }
+            if ($psProps -contains 'context' -and $null -ne $ps.context) {
+                if ($ps.context -isnot [string] -or $ps.context -notin @('clean', 'fork')) {
+                    throw "Property 'context' in pipeline[] item must be 'clean' or 'fork'."
+                }
+            }
+        }
+    }
+}
+
+function Test-AgentTodoArguments {
+    param($Arguments, $PropNames)
+    if ($null -eq $Arguments.todos -or $Arguments.todos -isnot [array]) {
+        throw 'todos must be an array.'
+    }
+    foreach ($item in $Arguments.todos) {
+        if ($null -eq $item -or $item -is [string] -or $item -is [ValueType] -or $item -is [array]) {
+            throw 'Each item in todos[] must be an object with content and status.'
+        }
+        $itemProps = @(Get-ObjectPropertyNames -InputObject $item)
+        foreach ($ip in $itemProps) {
+            if ($ip -notin @('content', 'status')) {
+                throw "Unknown property '$ip' in todo item."
+            }
+        }
+        if ($itemProps -notcontains 'content' -or $item.content -isnot [string] -or -not $item.content.Trim()) {
+            throw 'Each todo item must have a nonempty string content.'
+        }
+        if ($itemProps -notcontains 'status' -or $item.status -isnot [string] -or $item.status.ToLower() -notin @('pending', 'in_progress', 'completed')) {
+            throw "Each todo item must have status 'pending', 'in_progress', or 'completed'."
+        }
+    }
+}
+
+function Test-AgentAskUserArguments {
+    param($Arguments, $PropNames)
+    if (-not $Arguments.question -or -not $Arguments.question.Trim()) {
+        throw 'question must be a nonempty string.'
+    }
+    if ($Arguments.intent -and $Arguments.intent.ToLower() -notin @('question', 'plan-review')) {
+        throw "intent must be 'question' or 'plan-review'."
+    }
+}
+
+function Test-AgentMemoryArguments {
+    param($Arguments, $PropNames)
+    $act = if ($Arguments.action) { ([string]$Arguments.action).Trim().ToLower() } else { 'append' }
+    if ($act -notin @('append', 'view', 'set', 'clear')) {
+        throw "action must be 'append', 'view', 'set', or 'clear'."
+    }
+    $scope = if ($Arguments.scope) { ([string]$Arguments.scope).Trim().ToLower() } else { 'workspace' }
+    if ($scope -notin @('workspace', 'global')) {
+        throw "scope must be 'workspace' or 'global'."
+    }
+    if (($act -eq 'append' -or $act -eq 'set') -and (-not $Arguments.content -or -not [string]$Arguments.content.Trim())) {
+        throw "content must be a nonempty string for action '$act'."
+    }
+}
 
 function Test-AgentToolArguments {
     param([string]$Name, $Arguments)
     if ($null -eq $Arguments -or $Arguments -is [string] -or $Arguments -is [ValueType] -or $Arguments -is [array]) {
         throw 'Tool arguments must be a JSON object.'
     }
-    $schemas = @{
-        list_files = @{
-            required = @('path')
-            types = @{ path = 'string'; limit = 'integer' }
-        }
-        read_file = @{
-            required = @('path')
-            types = @{ path = 'string'; start_line = 'integer'; max_lines = 'integer'; start_char = 'integer'; offset = 'integer'; limit = 'integer' }
-        }
-        find_files = @{
-            required = @('path', 'pattern')
-            types = @{ path = 'string'; pattern = 'string'; limit = 'integer' }
-        }
-        grep_files = @{
-            required = @('path', 'pattern')
-            types = @{ path = 'string'; pattern = 'string'; literal = 'boolean'; case_sensitive = 'boolean'; include = 'string'; glob = 'string'; context_lines = 'integer'; limit = 'integer'; file_offset = 'integer'; start_line = 'integer' }
-        }
-        write_file = @{
-            required = @('path', 'content')
-            types = @{ path = 'string'; content = 'string'; overwrite = 'boolean' }
-        }
-        edit_file = @{
-            required = @('path')
-            types = @{ path = 'string'; old_text = 'string'; new_text = 'string'; edits = 'array' }
-        }
-        run_command = @{
-            required = @('command')
-            types = @{ command = 'string'; timeout_sec = 'integer' }
-        }
-        run_agent = @{
-            required = @()
-            types = @{ role = 'string'; prompt = 'string'; context = 'string'; max_steps = 'integer'; parallel = 'array'; pipeline = 'array' }
-        }
-        fetch_url = @{
-            required = @('url')
-            types = @{ url = 'string'; max_chars = 'integer'; raw = 'boolean' }
-        }
-        web_search = @{
-            required = @('query')
-            types = @{ query = 'string'; limit = 'integer' }
-        }
-        todo = @{
-            required = @('todos')
-            types = @{ todos = 'array' }
-        }
-        ask_user = @{
-            required = @('question')
-            types = @{ question = 'string'; options = 'array'; intent = 'string'; plan = 'string'; allow_custom = 'boolean' }
-        }
-        memory = @{
-            required = @()
-            types = @{ action = 'string'; content = 'string'; scope = 'string' }
+    $schema = $null
+    foreach ($spec in @(Get-AgentToolSpecifications)) {
+        if ([string]$spec.name -eq $Name) {
+            $schema = $spec
+            break
         }
     }
-    $schema = $schemas[$Name]
     if (-not $schema) { throw 'Unknown tool.' }
     $propNames = @(Get-ObjectPropertyNames -InputObject $Arguments)
+    $knownNames = @($schema.properties.Keys)
     foreach ($p in $propNames) {
-        if ($schema.types.Keys -notcontains $p) {
+        if ($knownNames -notcontains $p) {
             throw "Unknown argument '$p' for tool '$Name'."
         }
     }
-    foreach ($req in $schema.required) {
+    foreach ($req in @($schema.required)) {
+        if (-not $req) { continue }
         if ($propNames -notcontains $req -or $null -eq $Arguments.$req) {
             throw "Missing required argument '$req' for tool '$Name'."
         }
@@ -3378,7 +3444,7 @@ function Test-AgentToolArguments {
     foreach ($p in $propNames) {
         $val = $Arguments.$p
         if ($null -eq $val) { continue }
-        $expectedType = $schema.types[$p]
+        $expectedType = [string]$schema.properties[$p].type
         if ($expectedType -eq 'string') {
             if ($val -isnot [string]) { throw "Argument '$p' must be a string." }
         }
@@ -3394,156 +3460,9 @@ function Test-AgentToolArguments {
             if ($val -isnot [array]) { throw "Argument '$p' must be an array." }
         }
     }
-    if ($Name -eq 'edit_file') {
-        $hasEdits = ($propNames -contains 'edits' -and $null -ne $Arguments.edits)
-        $hasSingle = ($propNames -contains 'old_text' -or $propNames -contains 'new_text')
-        if ($hasEdits -and $hasSingle) {
-            throw 'Provide either old_text/new_text or edits[], not both.'
-        }
-        if ($hasEdits) {
-            if ($Arguments.edits.Count -eq 0) { throw 'edits array must not be empty.' }
-            foreach ($ed in $Arguments.edits) {
-                if ($null -eq $ed -or $ed -is [string] -or $ed -is [ValueType] -or $ed -is [array]) {
-                    throw 'Each edit in edits[] must be an object.'
-                }
-                $edProps = @(Get-ObjectPropertyNames -InputObject $ed)
-                foreach ($ep in $edProps) {
-                    if ($ep -notin @('old_text', 'new_text')) {
-                        throw "Unknown property '$ep' in edits[] item."
-                    }
-                }
-                if ($edProps -notcontains 'old_text' -or $edProps -notcontains 'new_text' -or $ed.old_text -isnot [string] -or -not $ed.old_text -or $ed.new_text -isnot [string]) {
-                    throw 'Each edit must have nonempty string old_text and string new_text.'
-                }
-            }
-        }
-        else {
-            if ($propNames -notcontains 'old_text' -or $propNames -notcontains 'new_text' -or $Arguments.old_text -isnot [string] -or -not $Arguments.old_text -or $Arguments.new_text -isnot [string]) {
-                throw 'Expected nonempty old_text and string new_text.'
-            }
-        }
-    }
-    if ($Name -eq 'run_agent') {
-        $hasPrompt = ($propNames -contains 'prompt' -and $null -ne $Arguments.prompt)
-        $hasParallel = ($propNames -contains 'parallel' -and $null -ne $Arguments.parallel)
-        $hasPipeline = ($propNames -contains 'pipeline' -and $null -ne $Arguments.pipeline)
-        $modeCount = ($(if ($hasPrompt) { 1 } else { 0 }) + $(if ($hasParallel) { 1 } else { 0 }) + $(if ($hasPipeline) { 1 } else { 0 }))
-        if ($modeCount -eq 0) {
-            throw 'run_agent requires one of: prompt, parallel[], or pipeline[].'
-        }
-        if ($modeCount -gt 1) {
-            throw 'Provide only one execution mode: prompt, parallel[], or pipeline[].'
-        }
-        if ($propNames -contains 'context' -and $null -ne $Arguments.context) {
-            if ($Arguments.context -notin @('clean', 'fork')) {
-                throw "Argument 'context' must be 'clean' or 'fork'."
-            }
-            if ($hasParallel -and $Arguments.context -eq 'fork') {
-                throw "Argument 'context' cannot be 'fork' when using parallel[]."
-            }
-        }
-        if ($propNames -contains 'max_steps' -and $null -ne $Arguments.max_steps) {
-            if ($Arguments.max_steps -lt 1 -or $Arguments.max_steps -gt 50) {
-                throw 'max_steps must be between 1 and 50.'
-            }
-        }
-        if ($hasPrompt) {
-            if (-not $Arguments.prompt.Trim()) {
-                throw 'prompt must be a nonempty string.'
-            }
-        }
-        if ($hasParallel) {
-            if ($Arguments.parallel.Count -lt 1 -or $Arguments.parallel.Count -gt 8) {
-                throw 'parallel[] must contain between 1 and 8 tasks.'
-            }
-            foreach ($pt in $Arguments.parallel) {
-                if ($null -eq $pt -or $pt -is [string] -or $pt -is [ValueType] -or $pt -is [array]) {
-                    throw 'Each task in parallel[] must be an object.'
-                }
-                $ptProps = @(Get-ObjectPropertyNames -InputObject $pt)
-                foreach ($pp in $ptProps) {
-                    if ($pp -notin @('role', 'prompt')) {
-                        throw "Unknown property '$pp' in parallel[] item."
-                    }
-                }
-                if ($ptProps -notcontains 'prompt' -or $pt.prompt -isnot [string] -or -not $pt.prompt.Trim()) {
-                    throw 'Each task in parallel[] must have a nonempty string prompt.'
-                }
-                if ($ptProps -contains 'role' -and $null -ne $pt.role -and $pt.role -isnot [string]) {
-                    throw "Property 'role' in parallel[] item must be a string."
-                }
-            }
-        }
-        if ($hasPipeline) {
-            if ($Arguments.pipeline.Count -lt 1 -or $Arguments.pipeline.Count -gt 8) {
-                throw 'pipeline[] must contain between 1 and 8 steps.'
-            }
-            foreach ($ps in $Arguments.pipeline) {
-                if ($null -eq $ps -or $ps -is [string] -or $ps -is [ValueType] -or $ps -is [array]) {
-                    throw 'Each step in pipeline[] must be an object.'
-                }
-                $psProps = @(Get-ObjectPropertyNames -InputObject $ps)
-                foreach ($sp in $psProps) {
-                    if ($sp -notin @('role', 'prompt', 'context')) {
-                        throw "Unknown property '$sp' in pipeline[] item."
-                    }
-                }
-                if ($psProps -notcontains 'prompt' -or $ps.prompt -isnot [string] -or -not $ps.prompt.Trim()) {
-                    throw 'Each step in pipeline[] must have a nonempty string prompt.'
-                }
-                if ($psProps -contains 'role' -and $null -ne $ps.role -and $ps.role -isnot [string]) {
-                    throw "Property 'role' in pipeline[] item must be a string."
-                }
-                if ($psProps -contains 'context' -and $null -ne $ps.context) {
-                    if ($ps.context -isnot [string] -or $ps.context -notin @('clean', 'fork')) {
-                        throw "Property 'context' in pipeline[] item must be 'clean' or 'fork'."
-                    }
-                }
-            }
-        }
-    }
-    if ($Name -eq 'todo') {
-        if ($null -eq $Arguments.todos -or $Arguments.todos -isnot [array]) {
-            throw 'todos must be an array.'
-        }
-        foreach ($item in $Arguments.todos) {
-            if ($null -eq $item -or $item -is [string] -or $item -is [ValueType] -or $item -is [array]) {
-                throw 'Each item in todos[] must be an object with content and status.'
-            }
-            $itemProps = @(Get-ObjectPropertyNames -InputObject $item)
-            foreach ($ip in $itemProps) {
-                if ($ip -notin @('content', 'status')) {
-                    throw "Unknown property '$ip' in todo item."
-                }
-            }
-            if ($itemProps -notcontains 'content' -or $item.content -isnot [string] -or -not $item.content.Trim()) {
-                throw 'Each todo item must have a nonempty string content.'
-            }
-            if ($itemProps -notcontains 'status' -or $item.status -isnot [string] -or $item.status.ToLower() -notin @('pending', 'in_progress', 'completed')) {
-                throw "Each todo item must have status 'pending', 'in_progress', or 'completed'."
-            }
-        }
-    }
-    if ($Name -eq 'ask_user') {
-        if (-not $Arguments.question -or -not $Arguments.question.Trim()) {
-            throw 'question must be a nonempty string.'
-        }
-        if ($Arguments.intent -and $Arguments.intent.ToLower() -notin @('question', 'plan-review')) {
-            throw "intent must be 'question' or 'plan-review'."
-        }
-    }
-    if ($Name -eq 'memory') {
-        $act = if ($Arguments.action) { ([string]$Arguments.action).Trim().ToLower() } else { 'append' }
-        if ($act -notin @('append', 'view', 'set', 'clear')) {
-            throw "action must be 'append', 'view', 'set', or 'clear'."
-        }
-        $scope = if ($Arguments.scope) { ([string]$Arguments.scope).Trim().ToLower() } else { 'workspace' }
-        if ($scope -notin @('workspace', 'global')) {
-            throw "scope must be 'workspace' or 'global'."
-        }
-        if (($act -eq 'append' -or $act -eq 'set') -and (-not $Arguments.content -or -not [string]$Arguments.content.Trim())) {
-            throw "content must be a nonempty string for action '$act'."
-        }
+    $extraName = [string]$schema['extra']
+    if ($extraName) {
+        & $extraName -Arguments $Arguments -PropNames $propNames
     }
 }
 
