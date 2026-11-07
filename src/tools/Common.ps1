@@ -379,3 +379,54 @@ function Get-AgentEnvironment {
         workspace = [string]$effRoot
     }
 }
+
+function Get-AgentCommandArguments {
+    param([string]$CommandText)
+    # Windows is one argument string. Elsewhere the raw command is the fourth element.
+    # Never adds -ExecutionPolicy.
+    if ($env:OS -eq 'Windows_NT') {
+        $escaped = ($CommandText -replace '(\\*)"', '$1$1\"') -replace '(\\*)$', '$1$1'
+        return "-NoProfile -NonInteractive -Command `"$escaped`""
+    }
+    return @('-NoProfile', '-NonInteractive', '-Command', $CommandText)
+}
+
+function Invoke-WithProcessEnvironment {
+    param([hashtable]$Values, [scriptblock]$Action)
+    # A null value removes that name for the action. Any other value is set.
+    # A name that was present is restored with Set-Item. A name that was absent is removed.
+    $names = @($Values.Keys)
+    $present = @{}
+    $prior = @{}
+    foreach ($name in $names) {
+        $item = Get-Item -LiteralPath ('Env:' + $name) -ErrorAction SilentlyContinue
+        if ($null -eq $item) {
+            $present[$name] = $false
+        }
+        else {
+            $present[$name] = $true
+            $prior[$name] = [string]$item.Value
+        }
+    }
+    try {
+        foreach ($name in $names) {
+            if ($null -eq $Values[$name]) {
+                Remove-Item -LiteralPath ('Env:' + $name) -ErrorAction SilentlyContinue
+            }
+            else {
+                Set-Item -LiteralPath ('Env:' + $name) -Value ([string]$Values[$name])
+            }
+        }
+        & $Action
+    }
+    finally {
+        foreach ($name in $names) {
+            if ($present[$name]) {
+                Set-Item -LiteralPath ('Env:' + $name) -Value $prior[$name]
+            }
+            else {
+                Remove-Item -LiteralPath ('Env:' + $name) -ErrorAction SilentlyContinue
+            }
+        }
+    }
+}

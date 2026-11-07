@@ -62,30 +62,7 @@ if ($env:SHELLOSSUS_SUB_NO_CONTEXT -eq '1') { $workerArgs.NoContextFiles = $true
 if ($env:SHELLOSSUS_SUB_REASONING_EFFORT) { $workerArgs.ReasoningEffort = $env:SHELLOSSUS_SUB_REASONING_EFFORT }
 & $env:SHELLOSSUS_SUB_SCRIPT @workerArgs
 '@
-    $argList = if ($env:OS -eq 'Windows_NT') {
-        $escaped = ($workerCmd -replace '(\\*)"', '$1$1\"') -replace '(\\*)$', '$1$1'
-        "-NoProfile -NonInteractive -Command `"$escaped`""
-    }
-    else {
-        @('-NoProfile', '-NonInteractive', '-Command', $workerCmd)
-    }
-    $workerEnvNames = @(
-        'SHELLOSSUS_SUB_SCRIPT',
-        'SHELLOSSUS_SUB_ROOT',
-        'SHELLOSSUS_SUB_BASEURL',
-        'SHELLOSSUS_SUB_MODEL',
-        'SHELLOSSUS_SUB_STEPS',
-        'SHELLOSSUS_SUB_PROMPT',
-        'SHELLOSSUS_SUB_TOOLS',
-        'SHELLOSSUS_SUB_NO_TOOLS',
-        'SHELLOSSUS_SUB_CONFIG',
-        'SHELLOSSUS_SUB_NO_SKILLS',
-        'SHELLOSSUS_SUB_NO_TEMPLATES',
-        'SHELLOSSUS_SUB_NO_CONTEXT',
-        'SHELLOSSUS_SUB_REASONING_EFFORT',
-        'SHELLOSSUS_SUB_ROLE',
-        'SHELLOSSUS_SUB_ROLE_PROMPT'
-    )
+    $argList = Get-AgentCommandArguments -CommandText $workerCmd
     $allResults = @()
     $batchSize = 4
     for ($offset = 0; $offset -lt $Tasks.Count; $offset += $batchSize) {
@@ -107,37 +84,27 @@ if ($env:SHELLOSSUS_SUB_REASONING_EFFORT) { $workerArgs.ReasoningEffort = $env:S
                 if ($script:OutputMode -ne 'json') {
                     Write-Host ($script:Gm.Aqua + ("  [run_agent:{0}] (parallel ReadOnly) " -f $roleObj.name) + $script:Gm.Grey1 + (Invoke-TruncateLine -Line ([string]$t.prompt) -MaxChars 90).text + $script:Gm.Reset)
                 }
-                $proc = $null
-                $savedSKey = $env:SHELLOSSUS_API_KEY
-                $savedWorkerEnv = @{}
-                foreach ($envName in $workerEnvNames) {
-                    $savedWorkerEnv[$envName] = (Get-Item -LiteralPath ("Env:" + $envName) -ErrorAction SilentlyContinue).Value
-                }
-                try {
-                    $env:SHELLOSSUS_API_KEY = $effKey
-                    $env:SHELLOSSUS_SUB_SCRIPT = $ScriptPath
-                    $env:SHELLOSSUS_SUB_ROOT = $Root
-                    $env:SHELLOSSUS_SUB_BASEURL = $baseUrl
-                    $env:SHELLOSSUS_SUB_MODEL = $effModel
-                    $env:SHELLOSSUS_SUB_STEPS = [string]$MaxSteps
-                    $env:SHELLOSSUS_SUB_PROMPT = $promptTemp.FullName
-                    $env:SHELLOSSUS_SUB_TOOLS = $childTools -join ','
-                    $env:SHELLOSSUS_SUB_NO_TOOLS = if ($childTools.Count -eq 0) { '1' } else { '0' }
-                    $env:SHELLOSSUS_SUB_CONFIG = $script:AgentConfigPath
-                    $env:SHELLOSSUS_SUB_NO_SKILLS = if ($script:NoSkills) { '1' } else { '0' }
-                    $env:SHELLOSSUS_SUB_NO_TEMPLATES = if ($script:NoPromptTemplates) { '1' } else { '0' }
-                    $env:SHELLOSSUS_SUB_NO_CONTEXT = if ($script:NoContextFiles) { '1' } else { '0' }
-                    $env:SHELLOSSUS_SUB_REASONING_EFFORT = if ($script:ReasoningEffort) { [string]$script:ReasoningEffort } else { '' }
-                    $env:SHELLOSSUS_SUB_ROLE = [string]$roleObj.name
-                    $env:SHELLOSSUS_SUB_ROLE_PROMPT = [string]$roleObj.system_prompt
-                    $proc = Start-Process -FilePath $shellExe -ArgumentList $argList -WorkingDirectory $Root -RedirectStandardOutput $outTemp.FullName -RedirectStandardError $errTemp.FullName -NoNewWindow -PassThru -ErrorAction Stop
-                }
-                finally {
-                    $env:SHELLOSSUS_API_KEY = $savedSKey
-                    foreach ($envName in $savedWorkerEnv.Keys) {
-                        if ($null -eq $savedWorkerEnv[$envName]) { Remove-Item -LiteralPath ("Env:" + $envName) -ErrorAction SilentlyContinue }
-                        else { Set-Item -LiteralPath ("Env:" + $envName) -Value $savedWorkerEnv[$envName] }
-                    }
+                $proc = Invoke-WithProcessEnvironment -Values @{
+                    SHELLOSSUS_API_KEY = $effKey
+                    H_AGENT_API_KEY = $null
+                    OPENAI_API_KEY = $null
+                    SHELLOSSUS_SUB_SCRIPT = $ScriptPath
+                    SHELLOSSUS_SUB_ROOT = $Root
+                    SHELLOSSUS_SUB_BASEURL = $baseUrl
+                    SHELLOSSUS_SUB_MODEL = $effModel
+                    SHELLOSSUS_SUB_STEPS = [string]$MaxSteps
+                    SHELLOSSUS_SUB_PROMPT = $promptTemp.FullName
+                    SHELLOSSUS_SUB_TOOLS = ($childTools -join ',')
+                    SHELLOSSUS_SUB_NO_TOOLS = $(if ($childTools.Count -eq 0) { '1' } else { '0' })
+                    SHELLOSSUS_SUB_CONFIG = $script:AgentConfigPath
+                    SHELLOSSUS_SUB_NO_SKILLS = $(if ($script:NoSkills) { '1' } else { '0' })
+                    SHELLOSSUS_SUB_NO_TEMPLATES = $(if ($script:NoPromptTemplates) { '1' } else { '0' })
+                    SHELLOSSUS_SUB_NO_CONTEXT = $(if ($script:NoContextFiles) { '1' } else { '0' })
+                    SHELLOSSUS_SUB_REASONING_EFFORT = $(if ($script:ReasoningEffort) { [string]$script:ReasoningEffort } else { '' })
+                    SHELLOSSUS_SUB_ROLE = [string]$roleObj.name
+                    SHELLOSSUS_SUB_ROLE_PROMPT = [string]$roleObj.system_prompt
+                } -Action {
+                    Start-Process -FilePath $shellExe -ArgumentList $argList -WorkingDirectory $Root -RedirectStandardOutput $outTemp.FullName -RedirectStandardError $errTemp.FullName -NoNewWindow -PassThru -ErrorAction Stop
                 }
                 $workers += @{
                     role = $roleObj.name

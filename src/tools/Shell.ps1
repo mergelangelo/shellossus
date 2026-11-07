@@ -108,9 +108,6 @@ function Invoke-ShellCommand {
     $shellExe = $envInfo.shell_exe
     $outTemp = New-AgentTempFile
     $errTemp = New-AgentTempFile
-    $savedSKey = $env:SHELLOSSUS_API_KEY
-    $savedHKey = $env:H_AGENT_API_KEY
-    $savedOKey = $env:OPENAI_API_KEY
     $savedSSess = $env:SHELLOSSUS_SESSION_ID
     $savedSFile = $env:SHELLOSSUS_SESSION_FILE
     $savedSMod = $env:SHELLOSSUS_MODEL
@@ -124,22 +121,19 @@ function Invoke-ShellCommand {
     $startTime = Get-Date
     try {
         try {
-            $env:SHELLOSSUS_API_KEY = $null
-            $env:H_AGENT_API_KEY = $null
-            $env:OPENAI_API_KEY = $null
             $env:SHELLOSSUS_SESSION_ID = if ($script:ActiveSessionId) { [string]$script:ActiveSessionId } else { '' }
             $env:SHELLOSSUS_SESSION_FILE = if ($script:ActiveSessionFile) { [string]$script:ActiveSessionFile } else { '' }
             $env:SHELLOSSUS_MODEL = if ($script:ActiveModelId) { [string]$script:ActiveModelId } else { '' }
             $env:SHELLOSSUS_REASONING_LEVEL = if ($script:ReasoningEffort) { [string]$script:ReasoningEffort } else { '' }
             $wrappedCmd = "try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch {}`n" + $Command
-            $argList = if ($env:OS -eq 'Windows_NT') {
-                $escaped = ($wrappedCmd -replace '(\\*)"', '$1$1\"') -replace '(\\*)$', '$1$1'
-                "-NoProfile -NonInteractive -Command `"$escaped`""
+            $argList = Get-AgentCommandArguments -CommandText $wrappedCmd
+            $proc = Invoke-WithProcessEnvironment -Values @{
+                SHELLOSSUS_API_KEY = $null
+                H_AGENT_API_KEY = $null
+                OPENAI_API_KEY = $null
+            } -Action {
+                Start-Process -FilePath $shellExe -ArgumentList $argList -WorkingDirectory $rootFull -RedirectStandardOutput $outTemp.FullName -RedirectStandardError $errTemp.FullName -NoNewWindow -PassThru -ErrorAction Stop
             }
-            else {
-                @('-NoProfile', '-NonInteractive', '-Command', $wrappedCmd)
-            }
-            $proc = Start-Process -FilePath $shellExe -ArgumentList $argList -WorkingDirectory $rootFull -RedirectStandardOutput $outTemp.FullName -RedirectStandardError $errTemp.FullName -NoNewWindow -PassThru -ErrorAction Stop
             if (-not $proc.HasExited) {
                 try {
                     $trackedProcesses[[string]$proc.Id] = @{ id = $proc.Id; start_ticks = $proc.StartTime.Ticks; depth = 0 }
@@ -168,9 +162,6 @@ function Invoke-ShellCommand {
             }
         }
         finally {
-            $env:SHELLOSSUS_API_KEY = $savedSKey
-            $env:H_AGENT_API_KEY = $savedHKey
-            $env:OPENAI_API_KEY = $savedOKey
             $env:SHELLOSSUS_SESSION_ID = $savedSSess
             $env:SHELLOSSUS_SESSION_FILE = $savedSFile
             $env:SHELLOSSUS_MODEL = $savedSMod
