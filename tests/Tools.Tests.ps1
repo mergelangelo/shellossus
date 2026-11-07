@@ -1790,7 +1790,9 @@ try {
     function Get-CapturedToolSchemaText {
         param($Tools)
         $toolsJson = @($Tools) | ConvertTo-Json -Depth 30
-        $parsed = @($toolsJson | ConvertFrom-Json)
+        # Windows PowerShell 5.1 returns a JSON array as one object.
+        # Wrapping that object in @() nests it, and [string] then joins every tool name.
+        $parsed = $toolsJson | ConvertFrom-Json
         $lines = @()
         foreach ($tool in $parsed) {
             if ($lines.Count -gt 0) { $lines += '' }
