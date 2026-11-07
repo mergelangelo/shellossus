@@ -2218,6 +2218,72 @@ description: Optional subagent role: recon (ReadOnly search), audit (ReadOnly re
     )) {
         Assert-True (Test-SafeWebUrl -Url $goodIpv6Url15) "Expected $goodIpv6Url15 to be allowed by Test-SafeWebUrl."
     }
+
+    # Task 2: canonical address classification, independent of host-text denylist.
+    foreach ($blockedAddr in @(
+        '10.0.0.1',
+        '127.0.0.1',
+        '169.254.169.254',
+        '100.64.0.1',
+        '0.0.0.0',
+        '192.168.1.1',
+        '172.16.0.1',
+        '224.0.0.1',
+        '::1',
+        'fe80::1',
+        'fe80::1%lo0',
+        'fd00::1',
+        '::ffff:10.0.0.1',
+        '64:ff9b::8.8.8.8',
+        '64:ff9b:1::127.0.0.1',
+        '64:ff9b:1::7f00:1',
+        '::ffff:0:7f00:1',
+        '::ffff:0:10.0.0.1'
+    )) {
+        Assert-True (Test-BlockedWebAddress -Address $blockedAddr) "Test-BlockedWebAddress did not block $blockedAddr."
+    }
+    foreach ($publicAddr in @(
+        '8.8.8.8',
+        '1.1.1.1',
+        '2001:db8::1',
+        '::ffff:8.8.8.8'
+    )) {
+        Assert-True (-not (Test-BlockedWebAddress -Address $publicAddr)) "Test-BlockedWebAddress blocked public address $publicAddr."
+    }
+
+    # Task 2: the download worker blocks resolved local addresses before Invoke-WebRequest.
+    # Do not define function Invoke-WebRequest here; that branch skips the worker.
+    Remove-Item Function:\Invoke-WebRequest -ErrorAction SilentlyContinue
+    $downloadCmd = Get-Command -Name 'Invoke-WebRequest' -ErrorAction SilentlyContinue
+    Assert-True ($downloadCmd -and $downloadCmd.CommandType -ne 'Function') 'Invoke-WebRequest was a function, so the download worker did not run.'
+    foreach ($blockedUri in @(
+        'http://10.0.0.1/',
+        'http://127.0.0.1/',
+        'http://169.254.169.254/',
+        'http://100.64.0.1/',
+        'http://localhost/'
+    )) {
+        $blockedOut = Join-Path $testRoot ('blocked-web-' + ($blockedUri -replace '[^0-9A-Za-z]', '-') + '.tmp')
+        if (Test-Path -LiteralPath $blockedOut) { Remove-Item -LiteralPath $blockedOut -Force }
+        $blockedThrew = $false
+        $blockedMsg = ''
+        try {
+            Invoke-AgentWebDownload -Uri $blockedUri -OutFile $blockedOut
+        }
+        catch {
+            $blockedThrew = $true
+            $blockedMsg = [string]$_
+        }
+        Assert-True $blockedThrew "Invoke-AgentWebDownload did not throw for $blockedUri."
+        Assert-True ($blockedMsg -like '*Blocked request*') "Invoke-AgentWebDownload for $blockedUri did not report Blocked request: $blockedMsg"
+        $blockedExists = Test-Path -LiteralPath $blockedOut
+        $blockedEmpty = $false
+        if ($blockedExists) {
+            $blockedEmpty = ((Get-Item -LiteralPath $blockedOut -Force).Length -eq 0)
+        }
+        Assert-True ((-not $blockedExists) -or $blockedEmpty) "Invoke-AgentWebDownload wrote a response body for $blockedUri."
+        if ($blockedExists) { Remove-Item -LiteralPath $blockedOut -Force -ErrorAction SilentlyContinue }
+    }
 }
 finally {
     Remove-TestEnvironment -Env $envData

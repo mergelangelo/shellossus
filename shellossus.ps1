@@ -5052,6 +5052,116 @@ function Invoke-AgentUndo {
 # --- src/tools/Web.ps1 ---
 # SSRF validation, outbound web confirmation, HTML-to-text conversion, and HTTP page fetching.
 
+function Test-BlockedWebAddress {
+    param([string]$Address)
+    # Operators only. This runs in ConstrainedLanguage and is copied into the download worker.
+    if (-not $Address) { return $false }
+    $addr = $Address -replace '%.*$', ''
+    $addr = $addr -replace '^\s+|\s+$', ''
+    $addr = $addr -replace '^\[|\]$', ''
+    if (-not $addr) { return $false }
+    $o1 = -1
+    $o2 = -1
+    $o3 = -1
+    $o4 = -1
+    $haveV4 = $false
+    if ($addr -match '^(?i)(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$') {
+        $g1 = $Matches[1]
+        $g2 = $Matches[2]
+        $g3 = $Matches[3]
+        $g4 = $Matches[4]
+        $o1 = [int]($g1 -replace '^0+(?=\d)', '')
+        $o2 = [int]($g2 -replace '^0+(?=\d)', '')
+        $o3 = [int]($g3 -replace '^0+(?=\d)', '')
+        $o4 = [int]($g4 -replace '^0+(?=\d)', '')
+        $haveV4 = $true
+    }
+    elseif ($addr -match ':') {
+        if ($addr -match '(?i):(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$') {
+            $e1 = [int]($Matches[1] -replace '^0+(?=\d)', '')
+            $e2 = [int]($Matches[2] -replace '^0+(?=\d)', '')
+            $e3 = [int]($Matches[3] -replace '^0+(?=\d)', '')
+            $e4 = [int]($Matches[4] -replace '^0+(?=\d)', '')
+            if ($e1 -gt 255 -or $e2 -gt 255 -or $e3 -gt 255 -or $e4 -gt 255) { return $false }
+            $hiHex = '{0:x}' -f (($e1 * 256) + $e2)
+            $loHex = '{0:x}' -f (($e3 * 256) + $e4)
+            $addr = $addr -replace '(?i):\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$', (':' + $hiHex + ':' + $loHex)
+        }
+        $chunks = @($addr -split '::', 3)
+        if ($chunks.Count -gt 2) { return $false }
+        $left = @()
+        $right = @()
+        $compressed = $false
+        if ($chunks.Count -eq 2) {
+            $compressed = $true
+            if ($chunks[0] -ne '') { $left = @($chunks[0] -split ':') }
+            if ($chunks[1] -ne '') { $right = @($chunks[1] -split ':') }
+        }
+        else {
+            if ($chunks[0] -eq '') { return $false }
+            $left = @($chunks[0] -split ':')
+        }
+        foreach ($part in $left) {
+            if ($part -notmatch '^(?i)[0-9a-f]{1,4}$') { return $false }
+        }
+        foreach ($part in $right) {
+            if ($part -notmatch '^(?i)[0-9a-f]{1,4}$') { return $false }
+        }
+        $have = @($left).Count + @($right).Count
+        $zeros = 0
+        if ($compressed) {
+            if ($have -gt 7) { return $false }
+            $zeros = 8 - $have
+        }
+        else {
+            if ($have -ne 8) { return $false }
+        }
+        $hextets = @()
+        foreach ($part in $left) { $hextets += [int]('0x' + $part) }
+        for ($zi = 0; $zi -lt $zeros; $zi++) { $hextets += 0 }
+        foreach ($part in $right) { $hextets += [int]('0x' + $part) }
+        if (@($hextets).Count -ne 8) { return $false }
+        $h0 = $hextets[0]
+        $h1 = $hextets[1]
+        $h2 = $hextets[2]
+        $h3 = $hextets[3]
+        $h4 = $hextets[4]
+        $h5 = $hextets[5]
+        $h6 = $hextets[6]
+        $h7 = $hextets[7]
+        if ($h0 -eq 0 -and $h1 -eq 0 -and $h2 -eq 0 -and $h3 -eq 0 -and $h4 -eq 0 -and $h5 -eq 0 -and $h6 -eq 0 -and $h7 -eq 0) { return $true }
+        if ($h0 -eq 0 -and $h1 -eq 0 -and $h2 -eq 0 -and $h3 -eq 0 -and $h4 -eq 0 -and $h5 -eq 0 -and $h6 -eq 0 -and $h7 -eq 1) { return $true }
+        if ($h0 -ge 0xFE80 -and $h0 -le 0xFEBF) { return $true }
+        if ($h0 -ge 0xFC00 -and $h0 -le 0xFDFF) { return $true }
+        if ($h0 -ge 0xFF00) { return $true }
+        if ($h0 -eq 0x64 -and $h1 -eq 0xFF9B) { return $true }
+        $tail1 = [int](($h6 - ($h6 % 256)) / 256)
+        $tail2 = [int]($h6 % 256)
+        $tailPrivate = ($tail1 -eq 0) -or ($tail1 -eq 10) -or ($tail1 -eq 127) -or ($tail1 -eq 169 -and $tail2 -eq 254) -or ($tail1 -eq 172 -and $tail2 -ge 16 -and $tail2 -le 31) -or ($tail1 -eq 192 -and $tail2 -eq 168) -or ($tail1 -eq 100 -and $tail2 -ge 64 -and $tail2 -le 127) -or ($tail1 -ge 224)
+        if ($tailPrivate) {
+            $prefixPlain = $true
+            for ($hx = 0; $hx -le 5; $hx++) {
+                if ($hextets[$hx] -ne 0 -and $hextets[$hx] -ne 0xFFFF) { $prefixPlain = $false }
+            }
+            if ($prefixPlain) { return $true }
+        }
+        $embedded = ($h0 -eq 0 -and $h1 -eq 0 -and $h2 -eq 0 -and $h3 -eq 0 -and $h4 -eq 0 -and ($h5 -eq 0 -or $h5 -eq 0xFFFF))
+        if (-not $embedded) { return $false }
+        $o1 = [int](($h6 - ($h6 % 256)) / 256)
+        $o2 = [int]($h6 % 256)
+        $o3 = [int](($h7 - ($h7 % 256)) / 256)
+        $o4 = [int]($h7 % 256)
+        $haveV4 = $true
+    }
+    else {
+        return $false
+    }
+    if (-not $haveV4) { return $false }
+    if ($o1 -lt 0 -or $o1 -gt 255 -or $o2 -lt 0 -or $o2 -gt 255 -or $o3 -lt 0 -or $o3 -gt 255 -or $o4 -lt 0 -or $o4 -gt 255) { return $false }
+    if ($o1 -eq 0 -or $o1 -eq 10 -or $o1 -eq 127 -or ($o1 -eq 169 -and $o2 -eq 254) -or ($o1 -eq 172 -and $o2 -ge 16 -and $o2 -le 31) -or ($o1 -eq 192 -and $o2 -eq 168) -or ($o1 -eq 100 -and $o2 -ge 64 -and $o2 -le 127) -or ($o1 -ge 224)) { return $true }
+    return $false
+}
+
 function Test-SafeWebUrl {
     param([string]$Url)
     if (-not $Url -or $Url -notmatch '^https?://[^\s]+$') {
@@ -5107,12 +5217,7 @@ function Test-SafeWebUrl {
             throw "Blocked request to local or private host: $hostName"
         }
         if ($hostName.Contains(':')) {
-            if ($hostName -match '^[0:]+0*1(?:%.*)?$' -or
-                $hostName -match '^[0:]+(?:%.*)?$' -or
-                $hostName -match '^(?:fe[89ab][0-9a-f]:|f[cd][0-9a-f]{2}:|ff[0-9a-f]{2}:|[0:]*:ffff:)' -or
-                $hostName -match '^(?:0+:){0,6}(?:::(?:ffff:(?:0:+)?)?|ffff:)?(?:127\.|10\.|192\.168\.|169\.254\.|172\.(?:1[6-9]|2\d|3[01])\.|100\.(?:6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.|(?:22[4-9]|23\d|24\d|25[0-5])\.|0\.)' -or
-                $hostName -match '^(?:0+:){0,6}(?:::(?:ffff:(?:0:+)?)?|ffff:)?(?:7f[0-9a-f]{2}|0?a[0-9a-f]{2}|c0a8|a9fe|ac1[0-9a-f]|64[4-7][0-9a-f]|[ef][0-9a-f]{3}|0{1,2}[0-9a-f]{2}):[0-9a-f]{1,4}$' -or
-                $hostName -match '^64:ff9b:') {
+            if (Test-BlockedWebAddress -Address $hostName) {
                 throw "Blocked request to local or private IPv6 address: $hostName"
             }
         }
@@ -5127,15 +5232,7 @@ function Test-SafeWebUrl {
             if ($o1 -gt 255 -or $o2 -gt 255 -or $o3 -gt 255 -or $o4 -gt 255) {
                 throw "Invalid IPv4 address in URL: $hostName"
             }
-            $isPrivate = ($o1 -eq 0) -or
-                ($o1 -eq 10) -or
-                ($o1 -eq 127) -or
-                ($o1 -eq 169 -and $o2 -eq 254) -or
-                ($o1 -eq 172 -and $o2 -ge 16 -and $o2 -le 31) -or
-                ($o1 -eq 192 -and $o2 -eq 168) -or
-                ($o1 -eq 100 -and $o2 -ge 64 -and $o2 -le 127) -or
-                ($o1 -ge 224)
-            if ($isPrivate) {
+            if (Test-BlockedWebAddress -Address $hostName) {
                 throw "Blocked request to local or private IPv4 address: $hostName"
             }
         }
@@ -5263,9 +5360,46 @@ function Invoke-AgentWebDownload {
         $stderr = New-AgentTempFile
         $proc = $null
         try {
-            $worker = @'
+            $classifierBody = (Get-Command -Name 'Test-BlockedWebAddress' -CommandType Function).Definition
+            $workerHead = @'
 $ErrorActionPreference = 'Stop'
+function Test-BlockedWebAddress {
+'@
+            $workerTail = @'
+}
 try {
+    $downloadUri = $env:SHELLOSSUS_WEB_DOWNLOAD_URI
+    $targetHost = ''
+    try {
+        $parsedUri = [uri]$downloadUri
+        $targetHost = $parsedUri.DnsSafeHost
+        if (-not $targetHost) { $targetHost = $parsedUri.Host }
+        $targetHost = $targetHost -replace '^\[|\]$', ''
+    } catch {
+        $targetHost = ''
+    }
+    if (-not $targetHost) {
+        Write-Output 'Blocked request to local or private network address'
+        exit 1
+    }
+    $resolved = @()
+    try {
+        $resolved = @([System.Net.Dns]::GetHostAddresses($targetHost))
+    } catch {
+        Write-Output 'Blocked request to local or private network address'
+        exit 1
+    }
+    if (-not $resolved -or @($resolved).Count -eq 0) {
+        Write-Output 'Blocked request to local or private network address'
+        exit 1
+    }
+    foreach ($oneAddr in @($resolved)) {
+        $canon = [string]$oneAddr
+        if (-not $canon -or (Test-BlockedWebAddress -Address $canon)) {
+            Write-Output 'Blocked request to local or private network address'
+            exit 1
+        }
+    }
     Invoke-WebRequest -Uri $env:SHELLOSSUS_WEB_DOWNLOAD_URI -Method Get -Headers @{ 'User-Agent' = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Shellossus/1.0' } -MaximumRedirection 0 -TimeoutSec 30 -UseBasicParsing -OutFile $env:SHELLOSSUS_WEB_DOWNLOAD_FILE -ErrorAction Stop
 } catch {
     $code = 0
@@ -5276,14 +5410,16 @@ try {
     } catch {}
     $msg = if ($_.Exception -and $_.Exception.Message) { [string]$_.Exception.Message } else { [string]$_ }
     $msg = ($msg -replace '[\r\n]+', ' ').Trim()
-    if ($code -gt 0 -and ($msg -notmatch "\b$code\b")) {
-        Write-Output "HTTP ${code}: $msg"
+    $codeText = [string]$code
+    if ($code -gt 0 -and ($msg -notmatch ('\b' + $codeText + '\b'))) {
+        Write-Output ('HTTP ' + $codeText + ': ' + $msg)
     } else {
         Write-Output $msg
     }
     exit 1
 }
 '@
+            $worker = $workerHead + $classifierBody + $workerTail
             $workerArguments = Get-AgentCommandArguments -CommandText $worker
             $proc = Invoke-WithProcessEnvironment -Values @{
                 SHELLOSSUS_API_KEY = $null
@@ -5295,8 +5431,10 @@ try {
             }
             $started = Get-Date
             while (-not $proc.HasExited) {
-                $file = Get-Item -LiteralPath $OutFile -Force -ErrorAction Stop
-                if ($file.Length -gt $MaxBytes) { throw "Web response exceeds $MaxBytes bytes." }
+                if (Test-Path -LiteralPath $OutFile) {
+                    $file = Get-Item -LiteralPath $OutFile -Force -ErrorAction Stop
+                    if ($file.Length -gt $MaxBytes) { throw "Web response exceeds $MaxBytes bytes." }
+                }
                 if (((Get-Date) - $started).TotalSeconds -gt 35) { throw 'Web request timed out.' }
                 Start-Sleep -Milliseconds 100
             }

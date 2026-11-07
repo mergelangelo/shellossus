@@ -372,6 +372,10 @@ try {
     }
     Assert-True ((Test-SafeWebUrl -Url 'https://[2001:db8::1]/') -and (Test-SafeWebUrl -Url 'https://[2002::1]/') -and (Test-SafeWebUrl -Url 'https://[100::1]/')) 'ConstrainedLanguage Test-SafeWebUrl blocked valid IPv6 URL.'
 
+    # Task 2: address classifier has no .NET calls and must run in ConstrainedLanguage.
+    Assert-True (Test-BlockedWebAddress -Address '10.0.0.1') 'ConstrainedLanguage Test-BlockedWebAddress did not block 10.0.0.1.'
+    Assert-True (-not (Test-BlockedWebAddress -Address '8.8.8.8')) 'ConstrainedLanguage Test-BlockedWebAddress blocked 8.8.8.8.'
+
     # Task 9: Normalizer alias dropping in ConstrainedLanguage
     $clNormRead = Format-AgentToolArguments -Name 'read_file' -Arguments @{ path = 'a.txt'; file_path = 'a.txt' }
     Test-AgentToolArguments -Name 'read_file' -Arguments $clNormRead
