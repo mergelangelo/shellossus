@@ -81,70 +81,19 @@ function ConvertTo-ExistingLineEndings {
     return $Content
 }
 
-function Invoke-AgentWrite {
-    param([string]$Root, [string]$Name, $Arguments)
-    $before = $null
-    $editsApplied = 1
-    $firstChangedLine = 1
-    if ($Name -eq 'write_file') {
-        $writeTarget = Resolve-AgentWriteTarget -Root $Root -RelativePath $Arguments.path
-        $path = [string]$writeTarget.full_path
-        $leaf = [string]$writeTarget.leaf
-        $parent = [string]$writeTarget.parent
-        $dirsToCreate = @($writeTarget.dirs_to_create)
-        if ($Arguments.content -isnot [string]) { throw 'content must be a string.' }
-        $allowOverwrite = ($Arguments.overwrite -eq $true)
-        if (Test-Path -LiteralPath $path) {
-            if (-not $allowOverwrite) { throw 'File already exists. Use edit_file or set overwrite=true.' }
-            $path = Resolve-AgentPath -Root $Root -RelativePath $Arguments.path
-            $existingItem = Get-Item -LiteralPath $path -Force
-            if ($existingItem.PSIsContainer -or $existingItem.Length -gt 1MB) { throw 'Expected a text file up to 1 MiB.' }
-            $before = Get-Content -LiteralPath $path -Raw -Encoding UTF8 -ErrorAction Stop
-            if ($null -eq $before) { $before = '' }
-        }
-        $after = if ($null -ne $before) {
-            ConvertTo-ExistingLineEndings -Content $Arguments.content -Original $before
-        }
-        else { $Arguments.content }
-    }
-    else {
-        $path = Resolve-AgentPath -Root $Root -RelativePath $Arguments.path
-        $item = Get-Item -LiteralPath $path -Force
-        if ($item.PSIsContainer -or $item.Length -gt 1MB) { throw 'Expected a text file up to 1 MiB.' }
-        $before = Get-Content -LiteralPath $path -Raw -Encoding UTF8 -ErrorAction Stop
-        if ($null -eq $before) { $before = '' }
-        $rawEdits = if ($null -ne $Arguments.edits) {
-            @($Arguments.edits)
-        }
-        else {
-            @(@{ old_text = $Arguments.old_text; new_text = $Arguments.new_text })
-        }
-        $resolvedEdits = @()
-        foreach ($ed in $rawEdits) {
-            if ($ed.old_text -isnot [string] -or -not $ed.old_text -or $ed.new_text -isnot [string]) { throw 'Each edit must have nonempty old_text and string new_text.' }
-            $m = Find-EditMatch -Content $before -OldText $ed.old_text
-            $repText = ConvertTo-ExistingLineEndings -Content $ed.new_text -Original $before
-            $resolvedEdits += @{ index = $m.index; length = $m.length; matched_text = $m.matched_text; new_text = $repText }
-        }
-        for ($i = 0; $i -lt $resolvedEdits.Count; $i++) {
-            for ($j = $i + 1; $j -lt $resolvedEdits.Count; $j++) {
-                $a = $resolvedEdits[$i]
-                $b = $resolvedEdits[$j]
-                if ($a.index -lt ($b.index + $b.length) -and $b.index -lt ($a.index + $a.length)) {
-                    throw 'Batch edits overlap. Provide non-overlapping edit blocks.'
-                }
-            }
-        }
-        $sortedAsc = @($resolvedEdits | Sort-Object { $_.index })
-        $minIdx = $sortedAsc[0].index
-        $firstChangedLine = (@($before.Substring(0, $minIdx) -split "`n")).Count
-        $editsApplied = $resolvedEdits.Count
-        $after = $before
-        foreach ($ed in @($resolvedEdits | Sort-Object { $_.index } -Descending)) {
-            $after = $after.Substring(0, $ed.index) + $ed.new_text + $after.Substring($ed.index + $ed.length)
-        }
-        if ($after -ceq $before) { return (@{ status = 'unchanged' } | ConvertTo-Json -Compress) }
-    }
+function Invoke-AgentStagedWrite {
+    param(
+        [string]$Root,
+        [string]$Name,
+        $Arguments,
+        $before,
+        [string]$after,
+        [int]$editsApplied,
+        [int]$firstChangedLine,
+        [string]$parent,
+        [string]$leaf,
+        [string[]]$dirsToCreate
+    )
     if ($after.Length -gt 1MB -or ($null -ne $before -and $before.Length -gt 1MB)) { throw 'File content exceeds 1 MiB limit.' }
     if ($after -match '\x00' -or ($null -ne $before -and $before -match '\x00')) { throw 'Binary content is not supported.' }
     if ($script:OutputMode -ne 'json') {
@@ -259,4 +208,80 @@ function Invoke-AgentWrite {
         }
     }
     return (@{ status = 'written'; path = $Arguments.path; backup = $backupPath; edits_applied = $editsApplied; first_changed_line = $firstChangedLine } | ConvertTo-Json -Compress)
+}
+
+function Invoke-AgentCreateOrOverwrite {
+    param([string]$Root, $Arguments)
+    $before = $null
+    $editsApplied = 1
+    $firstChangedLine = 1
+    $writeTarget = Resolve-AgentWriteTarget -Root $Root -RelativePath $Arguments.path
+    $path = [string]$writeTarget.full_path
+    $leaf = [string]$writeTarget.leaf
+    $parent = [string]$writeTarget.parent
+    $dirsToCreate = @($writeTarget.dirs_to_create)
+    if ($Arguments.content -isnot [string]) { throw 'content must be a string.' }
+    $allowOverwrite = ($Arguments.overwrite -eq $true)
+    if (Test-Path -LiteralPath $path) {
+        if (-not $allowOverwrite) { throw 'File already exists. Use edit_file or set overwrite=true.' }
+        $path = Resolve-AgentPath -Root $Root -RelativePath $Arguments.path
+        $existingItem = Get-Item -LiteralPath $path -Force
+        if ($existingItem.PSIsContainer -or $existingItem.Length -gt 1MB) { throw 'Expected a text file up to 1 MiB.' }
+        $before = Get-Content -LiteralPath $path -Raw -Encoding UTF8 -ErrorAction Stop
+        if ($null -eq $before) { $before = '' }
+    }
+    $after = if ($null -ne $before) {
+        ConvertTo-ExistingLineEndings -Content $Arguments.content -Original $before
+    }
+    else { $Arguments.content }
+    return (Invoke-AgentStagedWrite -Root $Root -Name 'write_file' -Arguments $Arguments -before $before -after $after -editsApplied $editsApplied -firstChangedLine $firstChangedLine -parent $parent -leaf $leaf -dirsToCreate $dirsToCreate)
+}
+
+function Invoke-AgentEditFile {
+    param([string]$Root, $Arguments)
+    $path = Resolve-AgentPath -Root $Root -RelativePath $Arguments.path
+    $item = Get-Item -LiteralPath $path -Force
+    if ($item.PSIsContainer -or $item.Length -gt 1MB) { throw 'Expected a text file up to 1 MiB.' }
+    $before = Get-Content -LiteralPath $path -Raw -Encoding UTF8 -ErrorAction Stop
+    if ($null -eq $before) { $before = '' }
+    $rawEdits = if ($null -ne $Arguments.edits) {
+        @($Arguments.edits)
+    }
+    else {
+        @(@{ old_text = $Arguments.old_text; new_text = $Arguments.new_text })
+    }
+    $resolvedEdits = @()
+    foreach ($ed in $rawEdits) {
+        if ($ed.old_text -isnot [string] -or -not $ed.old_text -or $ed.new_text -isnot [string]) { throw 'Each edit must have nonempty old_text and string new_text.' }
+        $m = Find-EditMatch -Content $before -OldText $ed.old_text
+        $repText = ConvertTo-ExistingLineEndings -Content $ed.new_text -Original $before
+        $resolvedEdits += @{ index = $m.index; length = $m.length; matched_text = $m.matched_text; new_text = $repText }
+    }
+    for ($i = 0; $i -lt $resolvedEdits.Count; $i++) {
+        for ($j = $i + 1; $j -lt $resolvedEdits.Count; $j++) {
+            $a = $resolvedEdits[$i]
+            $b = $resolvedEdits[$j]
+            if ($a.index -lt ($b.index + $b.length) -and $b.index -lt ($a.index + $a.length)) {
+                throw 'Batch edits overlap. Provide non-overlapping edit blocks.'
+            }
+        }
+    }
+    $sortedAsc = @($resolvedEdits | Sort-Object { $_.index })
+    $minIdx = $sortedAsc[0].index
+    $firstChangedLine = (@($before.Substring(0, $minIdx) -split "`n")).Count
+    $editsApplied = $resolvedEdits.Count
+    $after = $before
+    foreach ($ed in @($resolvedEdits | Sort-Object { $_.index } -Descending)) {
+        $after = $after.Substring(0, $ed.index) + $ed.new_text + $after.Substring($ed.index + $ed.length)
+    }
+    if ($after -ceq $before) { return (@{ status = 'unchanged' } | ConvertTo-Json -Compress) }
+    return (Invoke-AgentStagedWrite -Root $Root -Name 'edit_file' -Arguments $Arguments -before $before -after $after -editsApplied $editsApplied -firstChangedLine $firstChangedLine)
+}
+
+function Invoke-AgentWrite {
+    param([string]$Root, [string]$Name, $Arguments)
+    if ($Name -eq 'write_file') {
+        return (Invoke-AgentCreateOrOverwrite -Root $Root -Arguments $Arguments)
+    }
+    return (Invoke-AgentEditFile -Root $Root -Arguments $Arguments)
 }
