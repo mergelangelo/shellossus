@@ -863,12 +863,42 @@ try {
             function = @{ name = 'run_agent'; arguments = '{"parallel":[{"role":"recon","prompt":"Fail task"}]}' }
         } | ConvertFrom-Json
         Assert-True ($parErrRes.status -eq 'error') "Expected parallel status=error when child task threw error, got $($parErrRes.status)."
+        $parChild = $parErrRes.results[0]
+        Assert-True ($parChild.role -eq 'recon' -and $parChild.permission -eq 'ReadOnly' -and $parChild.context -eq 'clean' -and $parChild.status -eq 'error') 'Parallel in-process error result did not keep role, ReadOnly permission, clean context, and error status.'
+        Assert-True ($parChild.output -eq 'Subagent error: Child subagent failure') "Parallel error output prefix changed: $($parChild.output)"
+        Assert-True ([int]$parChild.steps_used -eq 0 -and [int]$parChild.usage_input_tokens -eq 0 -and [int]$parChild.usage_output_tokens -eq 0) 'Parallel error result did not zero steps and usage.'
+        Assert-True ($parChild.read_files -is [array] -and $parChild.read_files.Count -eq 0 -and $parChild.modified_files -is [array] -and $parChild.modified_files.Count -eq 0) 'Parallel error result file lists were not empty arrays.'
 
         $pipeErrRes = Invoke-AgentTool -Root $workspacePath -Call @{
             id = 'sub-pipe-err'
             function = @{ name = 'run_agent'; arguments = '{"pipeline":[{"role":"recon","prompt":"Fail step 1"},{"role":"recon","prompt":"Should not run"}]}' }
         } | ConvertFrom-Json
         Assert-True ($pipeErrRes.status -eq 'error' -and $pipeErrRes.steps_count -eq 1) "Expected pipeline status=error and early stop when step 1 failed, got status=$($pipeErrRes.status) steps=$($pipeErrRes.steps_count)."
+        $pipeChild = $pipeErrRes.results[0]
+        Assert-True ($pipeChild.role -eq 'recon' -and $pipeChild.permission -eq 'AutoEdit' -and $pipeChild.context -eq 'clean' -and $pipeChild.status -eq 'error') 'Pipeline error result did not pass the current AutoEdit permission and clean step context.'
+        Assert-True ($pipeChild.output -eq 'Subagent error: Child subagent failure') "Pipeline error output prefix changed: $($pipeChild.output)"
+        Assert-True ([int]$pipeChild.steps_used -eq 0 -and [int]$pipeChild.usage_input_tokens -eq 0 -and [int]$pipeChild.usage_output_tokens -eq 0) 'Pipeline error result did not zero steps and usage.'
+        Assert-True ($pipeChild.read_files -is [array] -and $pipeChild.read_files.Count -eq 0 -and $pipeChild.modified_files -is [array] -and $pipeChild.modified_files.Count -eq 0) 'Pipeline error result file lists were not empty arrays.'
+
+        $script:AgentPermission = 'Ask'
+        $pipeForkRes = Invoke-AgentTool -Root $workspacePath -Call @{
+            id = 'sub-pipe-err-fork'
+            function = @{ name = 'run_agent'; arguments = '{"pipeline":[{"role":"audit","prompt":"Fail fork step","context":"fork"}]}' }
+        } | ConvertFrom-Json
+        $pipeForkChild = $pipeForkRes.results[0]
+        Assert-True ($pipeForkRes.status -eq 'error' -and $pipeForkRes.steps_count -eq 1) 'Pipeline fork error did not stop at the failing step.'
+        Assert-True ($pipeForkChild.role -eq 'audit' -and $pipeForkChild.permission -eq 'Ask' -and $pipeForkChild.context -eq 'fork' -and $pipeForkChild.output -eq 'Subagent error: Child subagent failure') 'Pipeline error result did not pass the current permission and step context.'
+        $script:AgentPermission = 'AutoEdit'
+
+        $directErr = @(New-SubagentErrorResult -Role 'recon' -Context 'clean' -Message 'Child subagent failure')
+        Assert-True ($directErr.Count -eq 1) 'New-SubagentErrorResult unrolled its result.'
+        $directOne = $directErr[0]
+        $directKeys = @($directOne.Keys | Sort-Object) -join ','
+        Assert-True ($directKeys -eq 'context,modified_files,output,permission,read_files,role,status,steps_used,usage_input_tokens,usage_output_tokens') "New-SubagentErrorResult keys changed: $directKeys"
+        Assert-True ($directOne.permission -eq 'ReadOnly' -and $directOne.status -eq 'error' -and $directOne.output -eq 'Subagent error: Child subagent failure' -and $directOne.steps_used -eq 0 -and $directOne.usage_input_tokens -eq 0 -and $directOne.usage_output_tokens -eq 0) 'New-SubagentErrorResult default shape changed.'
+        Assert-True ($directOne.read_files -is [array] -and $directOne.read_files.Count -eq 0 -and $directOne.modified_files -is [array] -and $directOne.modified_files.Count -eq 0) 'New-SubagentErrorResult did not return real empty arrays.'
+        $explicitErr = New-SubagentErrorResult -Role 'audit' -Context 'fork' -Message 'Child subagent failure' -Permission 'Ask'
+        Assert-True ($explicitErr.role -eq 'audit' -and $explicitErr.permission -eq 'Ask' -and $explicitErr.context -eq 'fork' -and $explicitErr.output -eq 'Subagent error: Child subagent failure') 'New-SubagentErrorResult did not keep explicit permission and context.'
 
         $slowWorkerScript = Join-Path $testRoot 'slow-subagent.ps1'
         Set-Content -LiteralPath $slowWorkerScript -Value 'param([Parameter(ValueFromRemainingArguments = $true)]$Remaining) Start-Sleep -Seconds 30' -Encoding Ascii

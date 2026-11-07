@@ -5907,7 +5907,7 @@ function Invoke-AgentMemory {
 }
 
 # --- src/tools/AgentWorkers.ps1 ---
-# Standalone script resolution, subagent aggregate status, and parallel ReadOnly worker process pool.
+# Standalone script resolution, subagent aggregate status, shared subagent error results, and parallel ReadOnly worker process pool.
 
 function Resolve-StandaloneScriptPath {
     if ($script:StandaloneScriptPath -and (Test-Path -LiteralPath $script:StandaloneScriptPath)) {
@@ -5939,6 +5939,28 @@ function Resolve-SubagentAggregateStatus {
         if ($st -and $st -ne 'completed') { return $st }
     }
     return 'completed'
+}
+
+function New-SubagentErrorResult {
+    param(
+        [string]$Role,
+        [string]$Context,
+        [string]$Message,
+        [string]$Permission = 'ReadOnly'
+    )
+    $result = @{
+        role = $Role
+        permission = $Permission
+        context = $Context
+        status = 'error'
+        output = ('Subagent error: ' + $Message)
+        steps_used = 0
+        read_files = @()
+        modified_files = @()
+        usage_input_tokens = 0
+        usage_output_tokens = 0
+    }
+    return $result
 }
 
 function Invoke-ParallelSubagentProcesses {
@@ -6359,18 +6381,7 @@ function Invoke-AgentSubagent {
                     $subRes = Invoke-SubagentInProcess -Root $Root -RoleName $rName -TaskPrompt ([string]$pt.prompt) -ContextMode 'clean' -MaxSteps $maxSteps -ForceReadOnly
                 }
                 catch {
-                    $subRes = @{
-                        role = $rName
-                        permission = 'ReadOnly'
-                        context = 'clean'
-                        status = 'error'
-                        output = ('Subagent error: ' + $_.Exception.Message)
-                        steps_used = 0
-                        read_files = @()
-                        modified_files = @()
-                        usage_input_tokens = 0
-                        usage_output_tokens = 0
-                    }
+                    $subRes = New-SubagentErrorResult -Role $rName -Context 'clean' -Message $_.Exception.Message
                 }
                 $results += $subRes
                 foreach ($rf in @($subRes.read_files)) {
@@ -6422,18 +6433,7 @@ function Invoke-AgentSubagent {
                 $stepRes = Invoke-SubagentInProcess -Root $Root -RoleName $rName -TaskPrompt $resolvedPrompt -ContextMode $stepCtx -MaxSteps $maxSteps
             }
             catch {
-                $stepRes = @{
-                    role = $rName
-                    permission = $script:AgentPermission
-                    context = $stepCtx
-                    status = 'error'
-                    output = ('Subagent error: ' + $_.Exception.Message)
-                    steps_used = 0
-                    read_files = @()
-                    modified_files = @()
-                    usage_input_tokens = 0
-                    usage_output_tokens = 0
-                }
+                $stepRes = New-SubagentErrorResult -Role $rName -Context $stepCtx -Message $_.Exception.Message -Permission $script:AgentPermission
             }
             $stepResults += $stepRes
             $prevOutput = [string]$stepRes.output

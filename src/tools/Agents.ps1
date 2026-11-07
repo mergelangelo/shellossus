@@ -186,18 +186,7 @@ function Invoke-AgentSubagent {
                     $subRes = Invoke-SubagentInProcess -Root $Root -RoleName $rName -TaskPrompt ([string]$pt.prompt) -ContextMode 'clean' -MaxSteps $maxSteps -ForceReadOnly
                 }
                 catch {
-                    $subRes = @{
-                        role = $rName
-                        permission = 'ReadOnly'
-                        context = 'clean'
-                        status = 'error'
-                        output = ('Subagent error: ' + $_.Exception.Message)
-                        steps_used = 0
-                        read_files = @()
-                        modified_files = @()
-                        usage_input_tokens = 0
-                        usage_output_tokens = 0
-                    }
+                    $subRes = New-SubagentErrorResult -Role $rName -Context 'clean' -Message $_.Exception.Message
                 }
                 $results += $subRes
                 foreach ($rf in @($subRes.read_files)) {
@@ -249,18 +238,7 @@ function Invoke-AgentSubagent {
                 $stepRes = Invoke-SubagentInProcess -Root $Root -RoleName $rName -TaskPrompt $resolvedPrompt -ContextMode $stepCtx -MaxSteps $maxSteps
             }
             catch {
-                $stepRes = @{
-                    role = $rName
-                    permission = $script:AgentPermission
-                    context = $stepCtx
-                    status = 'error'
-                    output = ('Subagent error: ' + $_.Exception.Message)
-                    steps_used = 0
-                    read_files = @()
-                    modified_files = @()
-                    usage_input_tokens = 0
-                    usage_output_tokens = 0
-                }
+                $stepRes = New-SubagentErrorResult -Role $rName -Context $stepCtx -Message $_.Exception.Message -Permission $script:AgentPermission
             }
             $stepResults += $stepRes
             $prevOutput = [string]$stepRes.output
