@@ -4575,6 +4575,19 @@ function Invoke-AgentReadFile {
 # Process tree management, child process termination, and shell command execution.
 
 function Get-AgentProcessParents {
+    # The wait loop asks for this table many times a second. Reuse one snapshot
+    # for one second so stopping a command still sees the latest descendants.
+    $now = Get-Date
+    if ($null -ne $script:AgentProcessParentsCachedAt) {
+        $ageSeconds = ($now - $script:AgentProcessParentsCachedAt).TotalSeconds
+        if ($ageSeconds -ge 0 -and $ageSeconds -lt 1) {
+            foreach ($cachedRow in @($script:AgentProcessParentsCache)) { $cachedRow }
+            return
+        }
+    }
+    $rows = @()
+    if (-not $script:AgentProcessParentCollections) { $script:AgentProcessParentCollections = 0 }
+    $script:AgentProcessParentCollections = $script:AgentProcessParentCollections + 1
     if ($env:OS -eq 'Windows_NT') {
         # Built-in CIM cmdlets work in Windows PowerShell 5.1/ConstrainedLanguage.
         # Get-Process only exposes Parent in newer PowerShell versions.
@@ -4588,7 +4601,7 @@ function Get-AgentProcessParents {
         foreach ($p in @(Get-CimInstance -ClassName Win32_Process -Property ProcessId, ParentProcessId -OperationTimeoutSec 2 -ErrorAction Stop)) {
             $key = [string]$p.ProcessId
             if ($startTimes.ContainsKey($key)) {
-                @{ id = [int]$p.ProcessId; parent_id = [int]$p.ParentProcessId; start_ticks = $startTimes[$key] }
+                $rows += ,@{ id = [int]$p.ProcessId; parent_id = [int]$p.ParentProcessId; start_ticks = $startTimes[$key] }
             }
         }
     }
@@ -4596,11 +4609,14 @@ function Get-AgentProcessParents {
         foreach ($p in @(Get-Process -ErrorAction Stop)) {
             try {
                 $parent = $p.Parent
-                if ($parent) { @{ id = [int]$p.Id; parent_id = [int]$parent.Id; start_ticks = $p.StartTime.Ticks } }
+                if ($parent) { $rows += ,@{ id = [int]$p.Id; parent_id = [int]$parent.Id; start_ticks = $p.StartTime.Ticks } }
             }
             catch { } # Processes can exit while the snapshot is being collected.
         }
     }
+    $script:AgentProcessParentsCache = @($rows)
+    $script:AgentProcessParentsCachedAt = $now
+    foreach ($cachedRow in @($script:AgentProcessParentsCache)) { $cachedRow }
 }
 
 function Update-AgentProcessTree {
@@ -10698,9 +10714,31 @@ function Invoke-ReplSaveCommand {
         if ($nameArg -notmatch '\.jsonl$') { $nameArg += '.jsonl' }
         $SessionFile = Join-Path $SessionDir (Split-Path $nameArg -Leaf)
     }
+    if (-not $SessionFile -or -not $SessionFile.Trim()) {
+        Write-Host ($script:Gm.Yellow + '  Session not saved. Provide a name, or sessions are disabled (-NoSession).' + $script:Gm.Reset)
+        return @{ session_file = '' }
+    }
     Save-AgentSession -SessionFile $SessionFile -State $State -Workspace $RootPath -Model $Model
     Write-Host ($script:Gm.Green + "  Saved session: $SessionFile" + $script:Gm.Reset)
     return @{ session_file = $SessionFile }
+}
+
+function Test-UndoDropsLaterShellMessage {
+    param($State, $UndoEntry)
+    $kept = @{}
+    if ($UndoEntry -and $UndoEntry.messages) {
+        foreach ($s in @($UndoEntry.messages)) {
+            if ($s -and $s.role -eq 'user' -and $s.content -is [string] -and $s.content.StartsWith('[Shell command')) {
+                $kept[$s.content] = $true
+            }
+        }
+    }
+    if (-not $State -or -not $State.messages) { return $false }
+    foreach ($m in @($State.messages)) {
+        if (-not $m -or $m.role -ne 'user' -or $m.content -isnot [string]) { continue }
+        if ($m.content.StartsWith('[Shell command') -and -not $kept.ContainsKey($m.content)) { return $true }
+    }
+    return $false
 }
 
 function Invoke-ReplUndoCommand {
@@ -10710,12 +10748,16 @@ function Invoke-ReplUndoCommand {
         return @{ state = $State; undo_stack = @() }
     }
     $lastUndo = $UndoStack[$UndoStack.Count - 1]
+    $dropsLaterShell = Test-UndoDropsLaterShellMessage -State $State -UndoEntry $lastUndo
     try {
         Invoke-AgentUndo -State $State -UndoEntry $lastUndo
         Restore-AgentTurnPermission -Frame $lastUndo -State $State
         if ($UndoStack.Count -eq 1) { $UndoStack = @() }
         else { $UndoStack = @($UndoStack[0..($UndoStack.Count - 2)]) }
         Save-AgentSession -SessionFile $SessionFile -State $State -Workspace $RootPath -Model $Model
+        if ($dropsLaterShell) {
+            Write-Host ($script:Gm.Yellow + '  Warning: a later shell message is dropped from the transcript. The shell effect is not undone.' + $script:Gm.Reset)
+        }
         Write-Host ($script:Gm.Green + '  Reverted last turn and restored disk state.' + $script:Gm.Reset)
     }
     catch {

@@ -726,6 +726,29 @@ Start-Sleep -Seconds 30
         $stillRunning = -not $p.HasExited
     }
     Assert-True (-not $stillRunning) 'A monitoring exception leaked the command process.'
+
+    # Task 13: a process snapshot is collected at most once per second. A later
+    # call in that second reuses it, including when a command is stopped.
+    $script:AgentProcessParentsCachedAt = $null
+    $script:AgentProcessParentsCache = $null
+    $script:AgentProcessParentCollections = 0
+    $task13First = @(Get-AgentProcessParents)
+    $task13Second = @(Get-AgentProcessParents)
+    $task13FirstIds = (@($task13First | ForEach-Object { [string]$_.id }) -join ',')
+    $task13SecondIds = (@($task13Second | ForEach-Object { [string]$_.id }) -join ',')
+    Assert-True ($script:AgentProcessParentCollections -eq 1) "Two process snapshots inside one second collected the full process table $($script:AgentProcessParentCollections) times."
+    Assert-True (($task13FirstIds -eq $task13SecondIds) -and ($task13FirstIds.Length -gt 0)) "Second snapshot did not reuse the first process table."
+    $script:AgentProcessParentsCachedAt = (Get-Date).AddSeconds(-2)
+    $null = @(Get-AgentProcessParents)
+    Assert-True ($script:AgentProcessParentCollections -eq 2) "A snapshot older than one second did not collect a new process table (collections=$($script:AgentProcessParentCollections))."
+    $task13Tracked = @{}
+    $task13Tracked['420000010'] = @{ id = 420000010; start_ticks = 1; depth = 0 }
+    $task13StopErrors = @(Stop-AgentProcessTree -Tracked $task13Tracked)
+    Assert-True ($task13StopErrors.Count -eq 0) "Stop failed while reusing the process snapshot: $($task13StopErrors -join '; ')"
+    Assert-True ($script:AgentProcessParentCollections -eq 2) "Stopping a command collected a new full process table inside the same second (collections=$($script:AgentProcessParentCollections))."
+    $script:AgentProcessParentsCachedAt = $null
+    $script:AgentProcessParentsCache = $null
+    $script:AgentProcessParentCollections = 0
 }
 finally {
     Remove-Item Function:\Invoke-WebRequest -ErrorAction SilentlyContinue

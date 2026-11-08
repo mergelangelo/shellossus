@@ -240,9 +240,31 @@ function Invoke-ReplSaveCommand {
         if ($nameArg -notmatch '\.jsonl$') { $nameArg += '.jsonl' }
         $SessionFile = Join-Path $SessionDir (Split-Path $nameArg -Leaf)
     }
+    if (-not $SessionFile -or -not $SessionFile.Trim()) {
+        Write-Host ($script:Gm.Yellow + '  Session not saved. Provide a name, or sessions are disabled (-NoSession).' + $script:Gm.Reset)
+        return @{ session_file = '' }
+    }
     Save-AgentSession -SessionFile $SessionFile -State $State -Workspace $RootPath -Model $Model
     Write-Host ($script:Gm.Green + "  Saved session: $SessionFile" + $script:Gm.Reset)
     return @{ session_file = $SessionFile }
+}
+
+function Test-UndoDropsLaterShellMessage {
+    param($State, $UndoEntry)
+    $kept = @{}
+    if ($UndoEntry -and $UndoEntry.messages) {
+        foreach ($s in @($UndoEntry.messages)) {
+            if ($s -and $s.role -eq 'user' -and $s.content -is [string] -and $s.content.StartsWith('[Shell command')) {
+                $kept[$s.content] = $true
+            }
+        }
+    }
+    if (-not $State -or -not $State.messages) { return $false }
+    foreach ($m in @($State.messages)) {
+        if (-not $m -or $m.role -ne 'user' -or $m.content -isnot [string]) { continue }
+        if ($m.content.StartsWith('[Shell command') -and -not $kept.ContainsKey($m.content)) { return $true }
+    }
+    return $false
 }
 
 function Invoke-ReplUndoCommand {
@@ -252,12 +274,16 @@ function Invoke-ReplUndoCommand {
         return @{ state = $State; undo_stack = @() }
     }
     $lastUndo = $UndoStack[$UndoStack.Count - 1]
+    $dropsLaterShell = Test-UndoDropsLaterShellMessage -State $State -UndoEntry $lastUndo
     try {
         Invoke-AgentUndo -State $State -UndoEntry $lastUndo
         Restore-AgentTurnPermission -Frame $lastUndo -State $State
         if ($UndoStack.Count -eq 1) { $UndoStack = @() }
         else { $UndoStack = @($UndoStack[0..($UndoStack.Count - 2)]) }
         Save-AgentSession -SessionFile $SessionFile -State $State -Workspace $RootPath -Model $Model
+        if ($dropsLaterShell) {
+            Write-Host ($script:Gm.Yellow + '  Warning: a later shell message is dropped from the transcript. The shell effect is not undone.' + $script:Gm.Reset)
+        }
         Write-Host ($script:Gm.Green + '  Reverted last turn and restored disk state.' + $script:Gm.Reset)
     }
     catch {

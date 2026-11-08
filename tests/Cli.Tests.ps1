@@ -2208,6 +2208,45 @@ try {
             Assert-True $task9SawPromptError "Expected a JSONL turn_end error naming -Prompt. stdout: $task9OutText stderr: $task9ErrText"
         }
     }
+
+    # Task 13: an empty session path must not claim the session was saved.
+    # A /save that writes a real file still prints that path.
+    $task13Dir = Join-Path $testRoot 'task13-save'
+    New-Item -ItemType Directory -Path $task13Dir -Force | Out-Null
+    $task13State = @{
+        session_id = 'task13-empty'
+        workspace = $workspacePath
+        model = 'task13-model'
+        messages = @(
+            @{ role = 'system'; content = 'sys' },
+            @{ role = 'user'; content = 'unsaved' }
+        )
+    }
+    $script:task13SaveHost = @()
+    function Write-Host {
+        param([Parameter(Position = 0, ValueFromRemainingArguments = $true)]$Object, [switch]$NoNewline, $Separator, $ForegroundColor, $BackgroundColor)
+        $text = ($Object | ForEach-Object { [string]$_ }) -join ' '
+        $script:task13SaveHost += $text
+    }
+    try {
+        $task13Empty = Invoke-ReplSaveCommand -State $task13State -SessionDir $task13Dir -SessionFile '' -RootPath $workspacePath -Model 'task13-model' -SaveArg ''
+        $task13EmptyText = $script:task13SaveHost -join "`n"
+        Assert-True ($task13EmptyText -notlike '*Saved session*') "Empty /save printed Saved session: $task13EmptyText"
+        Assert-True ([string]$task13Empty.session_file -eq '') 'Empty /save returned a session path.'
+        $task13Files = @(Get-ChildItem -LiteralPath $task13Dir -Filter '*.jsonl' -File -ErrorAction SilentlyContinue)
+        Assert-True ($task13Files.Count -eq 0) 'Empty /save wrote a session file.'
+        $script:task13SaveHost = @()
+        $task13NamedPath = Join-Path $task13Dir 'kept-name.jsonl'
+        $task13Named = Invoke-ReplSaveCommand -State $task13State -SessionDir $task13Dir -SessionFile '' -RootPath $workspacePath -Model 'task13-model' -SaveArg 'kept-name'
+        $task13NamedText = $script:task13SaveHost -join "`n"
+        Assert-True (Test-Path -LiteralPath $task13NamedPath) 'Named /save did not write the session file.'
+        Assert-True (($task13NamedText -like '*Saved session*') -and $task13NamedText.Contains($task13NamedPath)) "Named /save did not print the saved path: $task13NamedText"
+        Assert-True ([string]$task13Named.session_file -eq $task13NamedPath) 'Named /save did not return the written path.'
+    }
+    finally {
+        Remove-Item Function:\Write-Host -ErrorAction SilentlyContinue
+        Remove-Variable -Name task13SaveHost -Scope Script -ErrorAction SilentlyContinue
+    }
 }
 finally {
     Remove-TestEnvironment -Env $envData

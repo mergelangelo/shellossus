@@ -2872,6 +2872,59 @@ description: Optional subagent role: recon (ReadOnly search), audit (ReadOnly re
         $script:ActiveState = $task11UndoActive
         if (Test-Path -LiteralPath $task11UndoWs) { Remove-Item -LiteralPath $task11UndoWs -Recurse -Force -ErrorAction SilentlyContinue }
     }
+
+    # Task 13: /undo after a later !cmd warns that the shell message is dropped
+    # and does not claim the shell effect was reversed.
+    $task13Marker = Join-Path $workspacePath 'task13-shell-effect.txt'
+    if (Test-Path -LiteralPath $task13Marker) { Remove-Item -LiteralPath $task13Marker -Force }
+    $task13UndoState = @{
+        workspace = $workspacePath
+        messages = @(
+            @{ role = 'system'; content = 'sys' },
+            @{ role = 'user'; content = 'before shell' },
+            @{ role = 'assistant'; content = 'noted' }
+        )
+    }
+    $task13Snap = New-AgentTurnSnapshot -State $task13UndoState
+    $task13Frame = New-AgentUndoFrame -Snapshot $task13Snap -Writes @()
+    $task13Bang = "!Set-Content -LiteralPath '$task13Marker' -Value kept -Encoding ascii"
+    Invoke-ReplBangCommand -State $task13UndoState -InputText $task13Bang -RootPath $workspacePath -SessionFile '' -Model 'task13-model'
+    Assert-True (Test-Path -LiteralPath $task13Marker) 'Undo fixture !cmd did not create the shell effect file.'
+    $task13SawShell = $false
+    foreach ($task13Msg in @($task13UndoState.messages)) {
+        if ($task13Msg.role -eq 'user' -and $task13Msg.content -is [string] -and $task13Msg.content.StartsWith('[Shell command')) {
+            $task13SawShell = $true
+        }
+    }
+    Assert-True $task13SawShell 'Undo fixture !cmd did not append a shell message.'
+    $script:task13UndoHost = @()
+    function Write-Host {
+        param([Parameter(Position = 0, ValueFromRemainingArguments = $true)]$Object, [switch]$NoNewline, $Separator, $ForegroundColor, $BackgroundColor)
+        $text = ($Object | ForEach-Object { [string]$_ }) -join ' '
+        $script:task13UndoHost += $text
+    }
+    try {
+        $null = Invoke-ReplUndoCommand -State $task13UndoState -SessionFile '' -RootPath $workspacePath -Model 'task13-model' -UndoStack @($task13Frame)
+        $task13UndoText = $script:task13UndoHost -join "`n"
+        $task13Warns = @($script:task13UndoHost | Where-Object { $_ -like '*not undone*' })
+        Assert-True ($task13Warns.Count -eq 1 -and $task13UndoText -like '*dropped*' -and $task13UndoText -like '*not undone*') "Undo after a later !cmd did not warn once that the shell message is dropped and the shell effect is not undone: $task13UndoText"
+        Assert-True ($task13UndoText -notlike '*was reversed*' -and $task13UndoText -notlike '*has been undone*' -and $task13UndoText -notlike '*shell effect is undone*') "Undo claimed the shell effect was reversed: $task13UndoText"
+        $task13KeptShell = $false
+        foreach ($task13Msg in @($task13UndoState.messages)) {
+            if ($task13Msg.role -eq 'user' -and $task13Msg.content -is [string] -and $task13Msg.content.StartsWith('[Shell command')) {
+                $task13KeptShell = $true
+            }
+        }
+        Assert-True (-not $task13KeptShell) 'Undo kept the later shell message in the transcript.'
+        $task13Disk = ''
+        if (Test-Path -LiteralPath $task13Marker) { $task13Disk = ([string](Get-Content -LiteralPath $task13Marker -Raw -Encoding ascii)).Trim() }
+        Assert-True ($task13Disk -eq 'kept') "Undo reversed the shell effect (file contents '$task13Disk')."
+    }
+    finally {
+        Remove-Item Function:\Write-Host -ErrorAction SilentlyContinue
+        Remove-Variable -Name task13UndoHost -Scope Script -ErrorAction SilentlyContinue
+        if (Test-Path -LiteralPath $task13Marker) { Remove-Item -LiteralPath $task13Marker -Force -ErrorAction SilentlyContinue }
+    }
 }
 finally {
     Remove-TestEnvironment -Env $envData
