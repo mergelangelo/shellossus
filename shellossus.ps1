@@ -7455,15 +7455,31 @@ function Get-AgentRolesCatalog {
     return ("Custom subagent roles (invoke via run_agent role=<name>):`n" + ($customEntries -join "`n") + "`n<available_agents>`n" + ($xmlAgents -join "`n") + "`n</available_agents>")
 }
 
-function Resolve-AgentRole {
-    param([string]$Name, [string]$Root = '', [string]$ConfigDir = '')
+function Get-CatalogAgentRole {
+    param([string]$Name, [string]$Root, [string]$ConfigDir)
     if (-not $script:AgentRolesByName -or $script:AgentRolesByName.Count -eq 0) {
         $null = Get-AgentRolesCatalog -Root $Root -ConfigDir $ConfigDir
     }
+    $exact = ''
+    if ($Name) { $exact = $Name.Trim().ToLower() }
+    if ($exact -and $script:AgentRolesByName.ContainsKey($exact)) {
+        return $script:AgentRolesByName[$exact]
+    }
+    $null = Get-AgentRolesCatalog -Root $Root -ConfigDir $ConfigDir
+    if ($exact -and $script:AgentRolesByName.ContainsKey($exact)) {
+        return $script:AgentRolesByName[$exact]
+    }
     $canon = Resolve-AgentRoleCanonicalName -Name $Name
-    if ($script:AgentRolesByName.ContainsKey($canon)) {
+    if ($canon -and $script:AgentRolesByName.ContainsKey($canon)) {
         return $script:AgentRolesByName[$canon]
     }
+    return $null
+}
+
+function Resolve-AgentRole {
+    param([string]$Name, [string]$Root = '', [string]$ConfigDir = '')
+    $role = Get-CatalogAgentRole -Name $Name -Root $Root -ConfigDir $ConfigDir
+    if ($null -ne $role) { return $role }
     $avail = @($script:AgentRolesByName.Keys | Sort-Object) -join ', '
     throw "Unknown agent role '$Name'. Available roles: $avail."
 }
@@ -7473,12 +7489,8 @@ function Resolve-AgentRoleCommand {
     if ($InputText -notmatch '^/agent:([a-zA-Z0-9_-]+)(?:\s+(.*))?$') { return $null }
     $rawRole = $Matches[1]
     $roleArgs = if ($Matches[2]) { $Matches[2].Trim() } else { '' }
-    if (-not $script:AgentRolesByName -or $script:AgentRolesByName.Count -eq 0) {
-        $null = Get-AgentRolesCatalog -Root $Root -ConfigDir $ConfigDir
-    }
-    $canonRole = Resolve-AgentRoleCanonicalName -Name $rawRole
-    if (-not $script:AgentRolesByName.ContainsKey($canonRole)) { return $null }
-    $roleInfo = $script:AgentRolesByName[$canonRole]
+    $roleInfo = Get-CatalogAgentRole -Name $rawRole -Root $Root -ConfigDir $ConfigDir
+    if ($null -eq $roleInfo) { return $null }
     $expanded = Expand-TemplateArgs -Content $roleInfo.system_prompt -ArgsString $roleArgs
     $escapedRoleName = Escape-XmlText -Text $roleInfo.name
     $escapedRolePerm = Escape-XmlText -Text $roleInfo.permission

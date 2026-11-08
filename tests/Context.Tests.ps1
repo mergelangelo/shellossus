@@ -1010,6 +1010,101 @@ tools: list_files
     $task6NoSysAsst = @($task6NoSysState.messages | Where-Object { $_.role -eq 'assistant' -and [string]$_.content -eq 'TASK6-NOSYS-ASSISTANT' })
     Assert-True ($task6NoSysUsers.Count -eq 1 -and $task6NoSysAsst.Count -eq 1) 'Resume of a transcript without a system message dropped user or assistant text.'
     Remove-Item -LiteralPath (Join-Path $task6Cfg 'AGENTS.md') -Force -ErrorAction SilentlyContinue
+
+    # Task 12: an exact catalog role named coder is used before the coder-to-craft alias.
+    $task12CoderWs = Join-Path $testRoot 'task12-coder-ws'
+    $task12CoderDir = Join-Path $task12CoderWs 'agents'
+    New-Item -ItemType Directory -Path $task12CoderDir -Force | Out-Null
+    Set-Content -LiteralPath (Join-Path $task12CoderDir 'coder.md') -Value "---`nname: coder`ndescription: Custom coder role`n---`nTASK12_CUSTOM_CODER_PROMPT" -Encoding UTF8
+    $task12SavedRoles = $script:AgentRolesByName
+    $task12SavedPerm = $script:AgentPermission
+    $task12SavedMode = $script:OutputMode
+    $task12SavedDepth = $script:SubagentDepth
+    $task12SavedTools = $script:EnabledTools
+    $task12SavedNoTools = $script:NoTools
+    $task12SavedState = $script:ActiveState
+    $script:AgentRolesByName = @{}
+    $script:AgentPermission = 'Ask'
+    $script:OutputMode = 'text'
+    $script:SubagentDepth = 0
+    $script:EnabledTools = @()
+    $script:NoTools = $false
+    $script:ActiveState = $null
+    $script:task12CoderSys = ''
+    function Invoke-WebRequest {
+        param($Uri, $Method, $Headers, $ContentType, $Body, $TimeoutSec, $ErrorAction, [switch]$UseBasicParsing, $OutFile)
+        $task12Req = $Body | ConvertFrom-Json
+        foreach ($task12Msg in @($task12Req.messages)) {
+            if ($task12Msg.role -eq 'system') { $script:task12CoderSys = [string]$task12Msg.content }
+        }
+        $task12Resp = @{ choices = @(@{ finish_reason = 'stop'; message = @{ content = 'custom coder finished' } }) } | ConvertTo-Json -Depth 10 -Compress
+        Set-Content -LiteralPath $OutFile -Value $task12Resp -Encoding UTF8 -NoNewline
+    }
+    try {
+        $task12Res = Invoke-AgentTool -Root $task12CoderWs -Call @{
+            id = 'task12-coder'
+            function = @{ name = 'run_agent'; arguments = '{"role":"coder","prompt":"Use the custom coder role"}' }
+        } | ConvertFrom-Json
+        Assert-True ($task12Res.status -eq 'completed' -and $task12Res.role -eq 'coder') "run_agent role=coder status=$($task12Res.status) role=$($task12Res.role) output=$($task12Res.output)"
+        Assert-True ($script:task12CoderSys.Contains('[Subagent Role: coder]') -and $script:task12CoderSys.Contains('TASK12_CUSTOM_CODER_PROMPT')) 'run_agent role=coder did not use the custom coder prompt.'
+        Assert-True (-not $script:task12CoderSys.Contains('You are a Shellossus craft subagent.')) 'run_agent role=coder used the builtin craft prompt.'
+        $task12Trimmed = Resolve-AgentRole -Name ' Coder ' -Root $task12CoderWs -ConfigDir ''
+        Assert-True ($task12Trimmed.name -eq 'coder' -and $task12Trimmed.system_prompt.Contains('TASK12_CUSTOM_CODER_PROMPT')) 'Trimmed exact role name was not matched before the coder alias.'
+        $task12Cmd = Resolve-AgentRoleCommand -Root $task12CoderWs -ConfigDir '' -InputText '/agent:coder'
+        Assert-True ($task12Cmd -and $task12Cmd.Contains('<agent_role name="coder"') -and $task12Cmd.Contains('TASK12_CUSTOM_CODER_PROMPT') -and -not $task12Cmd.Contains('You are a Shellossus craft subagent.')) '/agent:coder did not use the exact custom role.'
+    }
+    finally {
+        Remove-Item Function:\Invoke-WebRequest -ErrorAction SilentlyContinue
+        $script:AgentRolesByName = $task12SavedRoles
+        $script:AgentPermission = $task12SavedPerm
+        $script:OutputMode = $task12SavedMode
+        $script:SubagentDepth = $task12SavedDepth
+        $script:EnabledTools = $task12SavedTools
+        $script:NoTools = $task12SavedNoTools
+        $script:ActiveState = $task12SavedState
+    }
+
+    # Task 12: with no custom coder role, coder still resolves to builtin craft and the other aliases stay.
+    $task12AliasWs = Join-Path $testRoot 'task12-alias-ws'
+    New-Item -ItemType Directory -Path $task12AliasWs -Force | Out-Null
+    $script:AgentRolesByName = @{}
+    $task12CoderAlias = Resolve-AgentRole -Name 'coder' -Root $task12AliasWs -ConfigDir ''
+    Assert-True ($task12CoderAlias.name -eq 'craft' -and $task12CoderAlias.builtin -and $task12CoderAlias.system_prompt.Contains('You are a Shellossus craft subagent.')) 'role=coder did not resolve to builtin craft when no custom coder role exists.'
+    Assert-True ((Resolve-AgentRole -Name 'worker' -Root $task12AliasWs).name -eq 'craft' -and (Resolve-AgentRole -Name 'builder' -Root $task12AliasWs).name -eq 'craft' -and (Resolve-AgentRole -Name 'self' -Root $task12AliasWs).name -eq 'craft' -and (Resolve-AgentRole -Name 'default' -Root $task12AliasWs).name -eq 'craft') 'Craft aliases were removed.'
+    Assert-True ((Resolve-AgentRole -Name 'scout' -Root $task12AliasWs).name -eq 'recon' -and (Resolve-AgentRole -Name 'explore' -Root $task12AliasWs).name -eq 'recon' -and (Resolve-AgentRole -Name 'reviewer' -Root $task12AliasWs).name -eq 'audit' -and (Resolve-AgentRole -Name 'auditor' -Root $task12AliasWs).name -eq 'audit') 'Recon or audit aliases were removed.'
+    $task12LateCoderDir = Join-Path $task12AliasWs 'agents'
+    New-Item -ItemType Directory -Path $task12LateCoderDir -Force | Out-Null
+    Set-Content -LiteralPath (Join-Path $task12LateCoderDir 'coder.md') -Value "---`nname: coder`ndescription: Late custom coder`n---`nTASK12_LATE_CODER_PROMPT" -Encoding UTF8
+    $task12LateCoder = Resolve-AgentRole -Name 'coder' -Root $task12AliasWs -ConfigDir ''
+    Assert-True ($task12LateCoder.name -eq 'coder' -and $task12LateCoder.system_prompt.Contains('TASK12_LATE_CODER_PROMPT') -and -not $task12LateCoder.builtin) 'A coder.md added after the catalog was cached still resolved to craft.'
+
+    # Task 12: a role file added after the catalog was loaded is found on the next resolve.
+    # The third resolve uses that refresh and does not reread.
+    $task12LateWs = Join-Path $testRoot 'task12-late-ws'
+    $task12LateDir = Join-Path $task12LateWs 'agents'
+    New-Item -ItemType Directory -Path $task12LateDir -Force | Out-Null
+    $script:AgentRolesByName = @{}
+    $task12FirstResolve = Resolve-AgentRole -Name 'craft' -Root $task12LateWs -ConfigDir ''
+    Assert-True ($task12FirstResolve.name -eq 'craft' -and -not $script:AgentRolesByName.ContainsKey('late-role')) 'Catalog preload did not keep the builtin craft role.'
+    Set-Content -LiteralPath (Join-Path $task12LateDir 'late-role.md') -Value "---`nname: late-role`ndescription: Added after catalog load`n---`nLATE_ROLE_V1" -Encoding UTF8
+    $task12SecondResolve = Resolve-AgentRole -Name 'late-role' -Root $task12LateWs -ConfigDir ''
+    Assert-True ($task12SecondResolve.name -eq 'late-role' -and $task12SecondResolve.system_prompt -eq 'LATE_ROLE_V1') 'A role file added after the catalog was loaded was not found on the next resolve.'
+    Set-Content -LiteralPath (Join-Path $task12LateDir 'late-role.md') -Value "---`nname: late-role`ndescription: Added after catalog load`n---`nLATE_ROLE_V2" -Encoding UTF8
+    Set-Content -LiteralPath (Join-Path $task12LateDir 'later-role.md') -Value "---`nname: later-role`ndescription: Second late role`n---`nLATER_ROLE_BODY" -Encoding UTF8
+    $task12ThirdResolve = Resolve-AgentRole -Name 'late-role' -Root $task12LateWs -ConfigDir ''
+    Assert-True ($task12ThirdResolve.system_prompt -eq 'LATE_ROLE_V1' -and -not $script:AgentRolesByName.ContainsKey('later-role')) 'The third resolve reread the catalog after the refresh.'
+    $task12Later = Resolve-AgentRole -Name 'later-role' -Root $task12LateWs -ConfigDir ''
+    Assert-True ($task12Later.name -eq 'later-role' -and $task12Later.system_prompt -eq 'LATER_ROLE_BODY' -and $script:AgentRolesByName['late-role'].system_prompt -eq 'LATE_ROLE_V2') 'A later miss did not reread the catalog once.'
+    $task12UnknownThrew = $false
+    $task12UnknownErr = ''
+    try {
+        $null = Resolve-AgentRole -Name 'missing-role' -Root $task12LateWs -ConfigDir ''
+    }
+    catch {
+        $task12UnknownThrew = $true
+        $task12UnknownErr = [string]$_.Exception.Message
+    }
+    Assert-True ($task12UnknownThrew -and ($task12UnknownErr -like "Unknown agent role 'missing-role'*")) "Unknown role error changed: $task12UnknownErr"
 }
 finally {
     Remove-TestEnvironment -Env $envData
