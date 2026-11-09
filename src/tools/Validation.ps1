@@ -1,6 +1,58 @@
 # Strict schema and type validation for all agent tool calls.
 # Extra checks stay in named functions. Test-AgentToolArguments calls the spec extra name.
 
+function Get-AgentToolCallIdSet {
+    param([array]$Calls)
+    $ids = [hashtable]::new([StringComparer]::Ordinal)
+    foreach ($call in $Calls) {
+        if (-not (Test-IsJsonObject $call)) { return $null }
+        $id = $call.id
+        if ($id -isnot [string] -or -not $id.Trim() -or $ids.ContainsKey($id)) { return $null }
+        $ids[$id] = $true
+    }
+    return $ids
+}
+
+function Assert-AgentToolCallBatch {
+    param($Message, [string]$FinishReason)
+    if (-not (Test-IsJsonObject $Message) -or
+        ($null -ne $Message.role -and ($Message.role -isnot [string] -or $Message.role -cne 'assistant')) -or
+        ($null -ne $Message.content -and $Message.content -isnot [string]) -or
+        ($null -ne $Message.reasoning_content -and $Message.reasoning_content -isnot [string]) -or
+        $null -ne $Message.tool_call_id -or $null -ne $Message.function_call) {
+        throw 'API returned an invalid assistant message.'
+    }
+
+    $calls = $Message.tool_calls
+    if ($null -ne $calls -and $calls -isnot [array]) {
+        throw 'Invalid tool_calls batch. Expected an array.'
+    }
+    if (($FinishReason -eq 'tool_calls' -and $calls.Count -eq 0) -or
+        ($FinishReason -eq 'stop' -and $calls.Count -gt 0)) {
+        throw 'Invalid tool_calls batch. The call list does not match finish_reason.'
+    }
+    $limit = 64
+    if ($calls.Count -gt $limit) {
+        throw "Invalid tool_calls batch. A response may contain at most $limit calls."
+    }
+    if ($calls.Count -eq 0) { return }
+    if ($null -eq (Get-AgentToolCallIdSet -Calls $calls)) {
+        throw 'Invalid tool_calls batch. Each call needs a unique nonempty string ID.'
+    }
+    for ($i = 0; $i -lt $calls.Count; $i++) {
+        $call = $calls[$i]
+        if ($call.type -isnot [string] -or $call.type -cne 'function') {
+            throw "Invalid tool_calls batch. Call $($i + 1) must have type 'function'."
+        }
+        if (-not (Test-IsJsonObject $call.function) -or
+            $call.function.name -isnot [string] -or -not $call.function.name.Trim() -or
+            $call.function.arguments -isnot [string]) {
+            throw "Invalid tool_calls batch. Call $($i + 1) needs a function object with a name and string arguments."
+        }
+    }
+    # Argument JSON and tool schema errors are reported by the dispatcher for each call.
+}
+
 function Test-AgentEditFileArguments {
     param($Arguments, $PropNames)
     $propNames = @($PropNames)

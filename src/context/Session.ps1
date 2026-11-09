@@ -19,7 +19,7 @@ function Test-CapabilityNoteInsideOpenToolCalls {
             continue
         }
         if ($m.role -eq 'assistant' -and $m.tool_calls -and @($m.tool_calls).Count -gt 0) {
-            $pending = @{}
+            $pending = [hashtable]::new([StringComparer]::Ordinal)
             foreach ($tc in @($m.tool_calls)) {
                 if ($tc -and $tc.id) { $pending[[string]$tc.id] = $true }
             }

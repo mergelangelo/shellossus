@@ -179,7 +179,7 @@ function Get-CompactionFileOperations {
     param([array]$Messages)
     $readSet = @{}
     $modSet = @{}
-    $toolResultsById = @{}
+    $toolResultsById = [hashtable]::new([StringComparer]::Ordinal)
     foreach ($m in $Messages) {
         if ($m -and $m.role -eq 'tool' -and $m.tool_call_id -and $m.content -is [string]) {
             $toolResultsById[[string]$m.tool_call_id] = [string]$m.content

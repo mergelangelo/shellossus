@@ -44,24 +44,18 @@ function Test-ValidConversationBoundary {
     $i = 0
     while ($i -lt $Messages.Count) {
         $m = $Messages[$i]
-        if ($m.role -eq 'assistant' -and $m.tool_calls -and @($m.tool_calls).Count -gt 0) {
-            $requiredIds = @()
-            foreach ($tc in @($m.tool_calls)) {
-                if ($tc -and $tc.id) { $requiredIds += [string]$tc.id }
-            }
-            $answeredIds = @{}
+        if ($m.role -eq 'assistant' -and $null -ne $m.tool_calls) {
+            if ($m.tool_calls -isnot [array]) { return $false }
+            $pendingIds = Get-AgentToolCallIdSet -Calls $m.tool_calls
+            if ($null -eq $pendingIds) { return $false }
             $j = $i + 1
             while ($j -lt $Messages.Count -and $Messages[$j].role -eq 'tool') {
-                if ($Messages[$j].tool_call_id) {
-                    $answeredIds[[string]$Messages[$j].tool_call_id] = $true
-                }
+                $id = $Messages[$j].tool_call_id
+                if ($id -isnot [string] -or -not $pendingIds.ContainsKey($id)) { return $false }
+                $pendingIds.Remove($id)
                 $j++
             }
-            foreach ($reqId in $requiredIds) {
-                if (-not $answeredIds.ContainsKey($reqId)) {
-                    return $false
-                }
-            }
+            if ($pendingIds.Count -gt 0) { return $false }
             $i = $j
             continue
         }
@@ -246,7 +240,7 @@ function Switch-SessionBranch {
     if (-not $TargetId) { throw 'Target entry ID is required.' }
     $rebuilt = @(Build-BranchContextMessages -State $State -LeafId $TargetId)
     if (-not (Test-ValidConversationBoundary -Messages $rebuilt)) {
-        throw "Cannot switch branch or fork at entry '$TargetId': incomplete tool_calls sequence (missing tool result)."
+        throw "Cannot switch branch or fork at entry '$TargetId': incomplete tool_calls sequence (missing or mismatched tool results)."
     }
     $effectiveLeaf = $TargetId
     foreach ($te in @($State.tree_entries)) {

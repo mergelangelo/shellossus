@@ -140,6 +140,9 @@ function Invoke-ThresholdAutoCompact {
 
 function Invoke-AgentTurn {
     param($State, [string]$Endpoint, [string]$ModelId, [string]$ApiKey, [string]$Root, [int]$Steps = 50, [int]$MaxRepeatCalls = 0)
+    if (-not (Test-ValidConversationBoundary -Messages $State.messages)) {
+        throw 'Cannot send conversation with inconsistent tool calls or results.'
+    }
     $overflowRetried = $false
     $script:ActiveModelId = $ModelId
     $script:ActiveEndpoint = $Endpoint
@@ -242,17 +245,24 @@ function Invoke-AgentTurn {
             Remove-Item -LiteralPath $tempResponse.FullName -Force -ErrorAction SilentlyContinue
         }
         if ($null -eq $reply) { continue }
-        if ($reply.usage) {
-            if ($reply.usage.prompt_tokens) { $State.usage_input_tokens = [int]$State.usage_input_tokens + [int]$reply.usage.prompt_tokens }
-            if ($reply.usage.completion_tokens) { $State.usage_output_tokens = [int]$State.usage_output_tokens + [int]$reply.usage.completion_tokens }
+        if ($reply.choices -isnot [array] -or $reply.choices.Count -eq 0) {
+            throw 'API returned no assistant choice array.'
         }
         $choice = $reply.choices[0]
-        if (-not $choice -or -not $choice.message) { throw 'API returned no assistant message.' }
+        if (-not (Test-IsJsonObject $choice) -or -not $choice.message) { throw 'API returned no assistant message.' }
+        if ($null -ne $choice.finish_reason -and $choice.finish_reason -isnot [string]) {
+            throw 'API returned an invalid finish_reason.'
+        }
         $finishReason = [string]$choice.finish_reason
         if ($finishReason -and ($finishReason -notin @('stop', 'tool_calls'))) {
             throw "Incomplete model response (finish_reason=$finishReason)."
         }
         $message = $choice.message
+        Assert-AgentToolCallBatch -Message $message -FinishReason $finishReason
+        if ($reply.usage) {
+            if ($reply.usage.prompt_tokens) { $State.usage_input_tokens = [int]$State.usage_input_tokens + [int]$reply.usage.prompt_tokens }
+            if ($reply.usage.completion_tokens) { $State.usage_output_tokens = [int]$State.usage_output_tokens + [int]$reply.usage.completion_tokens }
+        }
         $assistant = @{ role = 'assistant'; content = $message.content }
         if ($message.reasoning_content) {
             $assistant.reasoning_content = $message.reasoning_content

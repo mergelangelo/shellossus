@@ -14,6 +14,96 @@ $script:AgentPermission = 'AutoEdit'
 $testBackups = @()
 $testProcesses = @()
 try {
+    & {
+        # A valid write at the front of an invalid batch must never run.
+        $savedWrites = $script:CurrentTurnWrites
+        $script:CurrentTurnWrites = @()
+        $mock = @{ posts = 0; events = @(); message = $null; finish = 'tool_calls' }
+        function Invoke-WebRequest {
+            param($Uri, $Method, $Headers, $ContentType, $Body, $TimeoutSec, $ErrorAction, [switch]$UseBasicParsing, $OutFile)
+            $mock.posts++
+            $reply = if ($mock.posts -eq 1) {
+                @{ finish_reason = $mock.finish; message = $mock.message }
+            }
+            else {
+                @{ finish_reason = 'stop'; message = @{ content = 'Tools finished.' } }
+            }
+            @{ choices = @($reply) } | ConvertTo-Json -Depth 15 -Compress |
+                Set-Content -LiteralPath $OutFile -Encoding UTF8 -NoNewline
+        }
+        function Write-Host {
+            param($Object)
+            $mock.events += [string]$Object
+        }
+        $write = @{ id = 'Call'; type = 'function'; function = @{ name = 'write_file'; arguments = '{"path":"batch-write.txt","content":"written"}' } }
+        $read = @{ id = 'call'; type = 'function'; function = @{ name = 'read_file'; arguments = '{"path":"batch-write.txt"}' } }
+        $path = Join-Path $workspacePath 'batch-write.txt'
+        $turnArgs = @{ Endpoint = 'https://example.invalid/v1/chat/completions'; ModelId = 'test-model'; ApiKey = 'fake'; Root = $workspacePath; Steps = 2 }
+        try {
+            $oversized = @($write) + @(1..64 | ForEach-Object { @{ id = "read-$_"; type = 'function'; function = $read.function } })
+            $cases = @(
+                @{ calls = @($write, $write); error = '*unique nonempty string ID*' },
+                @{ calls = @($write, @{ id = '  '; type = 'function'; function = $read.function }); error = '*unique nonempty string ID*' },
+                @{ calls = @($write, @{ id = 42; type = 'function'; function = $read.function }); error = '*unique nonempty string ID*' },
+                @{ calls = @($write, @($read)); error = '*unique nonempty string ID*' },
+                @{ calls = @($write, $null); error = '*unique nonempty string ID*' },
+                @{ calls = @($write, @{ id = 'other'; type = 'custom'; function = $read.function }); error = "*type 'function'*" },
+                @{ calls = @($write, @{ id = 'other'; type = 'function'; function = @($read.function) }); error = '*needs a function object*' },
+                @{ calls = @($write, @{ id = 'other'; type = 'function'; function = @{ name = 'read_file'; arguments = @{ path = '.' } } }); error = '*string arguments*' },
+                @{ calls = $write; error = '*Expected an array*' },
+                @{ calls = $oversized; error = '*at most 64 calls*' },
+                @{ calls = @(); error = '*does not match finish_reason*' },
+                @{ calls = @($write); finish = 'stop'; error = '*does not match finish_reason*' }
+            )
+            foreach ($case in $cases) {
+                $mock.posts = 0
+                $mock.events = @()
+                $mock.finish = if ($case.finish) { $case.finish } else { 'tool_calls' }
+                $mock.message = @{ role = 'assistant'; content = 'Model output'; tool_calls = $case.calls }
+                $state = @{ messages = @(@{ role = 'user'; content = 'Run tools.' }) }
+                $rejected = $false
+                try { Invoke-AgentTurn @turnArgs -State $state }
+                catch {
+                    if ($_.Exception.Message -notlike $case.error) { throw }
+                    $rejected = $true
+                }
+                Assert-True ($rejected -and $mock.posts -eq 1 -and $state.messages.Count -eq 1 -and -not $state.ContainsKey('tree_entries')) "Malformed batch was accepted or entered history ($($case.error))."
+                Assert-True (-not (Test-Path -LiteralPath $path) -and @($script:CurrentTurnWrites).Count -eq 0) 'A tool ran before the whole batch passed validation.'
+                Assert-True (($mock.events -join "`n") -notmatch '"type":"(?:message_end|tool_execution_start|tool_execution_end)"') 'Malformed batch emitted accepted-message or tool execution events.'
+            }
+
+            $mock.posts = 0
+            $assistantCalls = @{ role = 'assistant'; tool_calls = @($write, $read) }
+            $firstResult = @{ role = 'tool'; tool_call_id = $write.id; content = '{}' }
+            foreach ($badId in @($write.id, 'other', '', 42)) {
+                $state = @{ messages = @($assistantCalls, $firstResult, @{ role = 'tool'; tool_call_id = $badId; content = '{}' }) }
+                $rejected = $false
+                try { Invoke-AgentTurn @turnArgs -State $state }
+                catch {
+                    if ($_.Exception.Message -notlike '*inconsistent tool calls or results*') { throw }
+                    $rejected = $true
+                }
+                Assert-True ($rejected -and $mock.posts -eq 0) 'An inconsistent tool result was sent to the API.'
+            }
+
+            $mock.finish = 'tool_calls'
+            $invalidArgs = @{ id = 'bad-args'; type = 'function'; function = @{ name = 'read_file'; arguments = '{"path":false}' } }
+            $mock.message = @{ role = 'assistant'; tool_calls = @($write, $invalidArgs, $read) }
+            $state = @{ messages = @(@{ role = 'user'; content = 'Run tools.' }) }
+            Invoke-AgentTurn @turnArgs -State $state
+            $toolResults = @($state.messages | Where-Object { $_.role -eq 'tool' })
+            $writeResult = $toolResults[0].content | ConvertFrom-Json
+            $badResult = $toolResults[1].content | ConvertFrom-Json
+            $readResult = $toolResults[2].content | ConvertFrom-Json
+            Assert-True ($mock.posts -eq 2 -and (Test-ValidConversationBoundary -Messages $state.messages)) 'A valid batch did not produce a complete conversation.'
+            Assert-True ($toolResults.Count -eq 3 -and ($toolResults.tool_call_id -join ',') -ceq 'Call,bad-args,call') 'Tool results lost the order or exact IDs of the calls.'
+            Assert-True ($writeResult.status -eq 'written' -and $badResult.error -like '*path*must be a string*' -and $readResult.text -eq 'written') 'An argument schema error prevented a valid sibling call or lost its own error result.'
+        }
+        finally {
+            $script:CurrentTurnWrites = $savedWrites
+        }
+    }
+
     # Fixed worker code survives multiline launch in CLM and request data stays separate.
     $shellName = if ($PSVersionTable.PSEdition -eq 'Desktop') { 'powershell.exe' } elseif ($IsWindows) { 'pwsh.exe' } else { 'pwsh' }
     $installedShell = Join-Path $PSHOME $shellName

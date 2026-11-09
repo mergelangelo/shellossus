@@ -3305,6 +3305,58 @@ function Format-AgentToolArguments {
 # Strict schema and type validation for all agent tool calls.
 # Extra checks stay in named functions. Test-AgentToolArguments calls the spec extra name.
 
+function Get-AgentToolCallIdSet {
+    param([array]$Calls)
+    $ids = [hashtable]::new([StringComparer]::Ordinal)
+    foreach ($call in $Calls) {
+        if (-not (Test-IsJsonObject $call)) { return $null }
+        $id = $call.id
+        if ($id -isnot [string] -or -not $id.Trim() -or $ids.ContainsKey($id)) { return $null }
+        $ids[$id] = $true
+    }
+    return $ids
+}
+
+function Assert-AgentToolCallBatch {
+    param($Message, [string]$FinishReason)
+    if (-not (Test-IsJsonObject $Message) -or
+        ($null -ne $Message.role -and ($Message.role -isnot [string] -or $Message.role -cne 'assistant')) -or
+        ($null -ne $Message.content -and $Message.content -isnot [string]) -or
+        ($null -ne $Message.reasoning_content -and $Message.reasoning_content -isnot [string]) -or
+        $null -ne $Message.tool_call_id -or $null -ne $Message.function_call) {
+        throw 'API returned an invalid assistant message.'
+    }
+
+    $calls = $Message.tool_calls
+    if ($null -ne $calls -and $calls -isnot [array]) {
+        throw 'Invalid tool_calls batch. Expected an array.'
+    }
+    if (($FinishReason -eq 'tool_calls' -and $calls.Count -eq 0) -or
+        ($FinishReason -eq 'stop' -and $calls.Count -gt 0)) {
+        throw 'Invalid tool_calls batch. The call list does not match finish_reason.'
+    }
+    $limit = 64
+    if ($calls.Count -gt $limit) {
+        throw "Invalid tool_calls batch. A response may contain at most $limit calls."
+    }
+    if ($calls.Count -eq 0) { return }
+    if ($null -eq (Get-AgentToolCallIdSet -Calls $calls)) {
+        throw 'Invalid tool_calls batch. Each call needs a unique nonempty string ID.'
+    }
+    for ($i = 0; $i -lt $calls.Count; $i++) {
+        $call = $calls[$i]
+        if ($call.type -isnot [string] -or $call.type -cne 'function') {
+            throw "Invalid tool_calls batch. Call $($i + 1) must have type 'function'."
+        }
+        if (-not (Test-IsJsonObject $call.function) -or
+            $call.function.name -isnot [string] -or -not $call.function.name.Trim() -or
+            $call.function.arguments -isnot [string]) {
+            throw "Invalid tool_calls batch. Call $($i + 1) needs a function object with a name and string arguments."
+        }
+    }
+    # Argument JSON and tool schema errors are reported by the dispatcher for each call.
+}
+
 function Test-AgentEditFileArguments {
     param($Arguments, $PropNames)
     $propNames = @($PropNames)
@@ -6505,7 +6557,7 @@ if ($env:SHELLOSSUS_SUB_REASONING_EFFORT) { $workerArgs.ReasoningEffort = $env:S
                 $replyText = ''
                 $stepsUsed = 0
                 $wReadSet = @{}
-                $pendingReadsById = @{}
+                $pendingReadsById = [hashtable]::new([StringComparer]::Ordinal)
                 $untrackedReads = @()
                 $sawToolExecEnd = $false
                 $sawTurnEnd = $false
@@ -7929,24 +7981,18 @@ function Test-ValidConversationBoundary {
     $i = 0
     while ($i -lt $Messages.Count) {
         $m = $Messages[$i]
-        if ($m.role -eq 'assistant' -and $m.tool_calls -and @($m.tool_calls).Count -gt 0) {
-            $requiredIds = @()
-            foreach ($tc in @($m.tool_calls)) {
-                if ($tc -and $tc.id) { $requiredIds += [string]$tc.id }
-            }
-            $answeredIds = @{}
+        if ($m.role -eq 'assistant' -and $null -ne $m.tool_calls) {
+            if ($m.tool_calls -isnot [array]) { return $false }
+            $pendingIds = Get-AgentToolCallIdSet -Calls $m.tool_calls
+            if ($null -eq $pendingIds) { return $false }
             $j = $i + 1
             while ($j -lt $Messages.Count -and $Messages[$j].role -eq 'tool') {
-                if ($Messages[$j].tool_call_id) {
-                    $answeredIds[[string]$Messages[$j].tool_call_id] = $true
-                }
+                $id = $Messages[$j].tool_call_id
+                if ($id -isnot [string] -or -not $pendingIds.ContainsKey($id)) { return $false }
+                $pendingIds.Remove($id)
                 $j++
             }
-            foreach ($reqId in $requiredIds) {
-                if (-not $answeredIds.ContainsKey($reqId)) {
-                    return $false
-                }
-            }
+            if ($pendingIds.Count -gt 0) { return $false }
             $i = $j
             continue
         }
@@ -8131,7 +8177,7 @@ function Switch-SessionBranch {
     if (-not $TargetId) { throw 'Target entry ID is required.' }
     $rebuilt = @(Build-BranchContextMessages -State $State -LeafId $TargetId)
     if (-not (Test-ValidConversationBoundary -Messages $rebuilt)) {
-        throw "Cannot switch branch or fork at entry '$TargetId': incomplete tool_calls sequence (missing tool result)."
+        throw "Cannot switch branch or fork at entry '$TargetId': incomplete tool_calls sequence (missing or mismatched tool results)."
     }
     $effectiveLeaf = $TargetId
     foreach ($te in @($State.tree_entries)) {
@@ -8171,7 +8217,7 @@ function Test-CapabilityNoteInsideOpenToolCalls {
             continue
         }
         if ($m.role -eq 'assistant' -and $m.tool_calls -and @($m.tool_calls).Count -gt 0) {
-            $pending = @{}
+            $pending = [hashtable]::new([StringComparer]::Ordinal)
             foreach ($tc in @($m.tool_calls)) {
                 if ($tc -and $tc.id) { $pending[[string]$tc.id] = $true }
             }
@@ -8771,7 +8817,7 @@ function Get-CompactionFileOperations {
     param([array]$Messages)
     $readSet = @{}
     $modSet = @{}
-    $toolResultsById = @{}
+    $toolResultsById = [hashtable]::new([StringComparer]::Ordinal)
     foreach ($m in $Messages) {
         if ($m -and $m.role -eq 'tool' -and $m.tool_call_id -and $m.content -is [string]) {
             $toolResultsById[[string]$m.tool_call_id] = [string]$m.content
@@ -9771,6 +9817,9 @@ function Invoke-ThresholdAutoCompact {
 
 function Invoke-AgentTurn {
     param($State, [string]$Endpoint, [string]$ModelId, [string]$ApiKey, [string]$Root, [int]$Steps = 50, [int]$MaxRepeatCalls = 0)
+    if (-not (Test-ValidConversationBoundary -Messages $State.messages)) {
+        throw 'Cannot send conversation with inconsistent tool calls or results.'
+    }
     $overflowRetried = $false
     $script:ActiveModelId = $ModelId
     $script:ActiveEndpoint = $Endpoint
@@ -9873,17 +9922,24 @@ function Invoke-AgentTurn {
             Remove-Item -LiteralPath $tempResponse.FullName -Force -ErrorAction SilentlyContinue
         }
         if ($null -eq $reply) { continue }
-        if ($reply.usage) {
-            if ($reply.usage.prompt_tokens) { $State.usage_input_tokens = [int]$State.usage_input_tokens + [int]$reply.usage.prompt_tokens }
-            if ($reply.usage.completion_tokens) { $State.usage_output_tokens = [int]$State.usage_output_tokens + [int]$reply.usage.completion_tokens }
+        if ($reply.choices -isnot [array] -or $reply.choices.Count -eq 0) {
+            throw 'API returned no assistant choice array.'
         }
         $choice = $reply.choices[0]
-        if (-not $choice -or -not $choice.message) { throw 'API returned no assistant message.' }
+        if (-not (Test-IsJsonObject $choice) -or -not $choice.message) { throw 'API returned no assistant message.' }
+        if ($null -ne $choice.finish_reason -and $choice.finish_reason -isnot [string]) {
+            throw 'API returned an invalid finish_reason.'
+        }
         $finishReason = [string]$choice.finish_reason
         if ($finishReason -and ($finishReason -notin @('stop', 'tool_calls'))) {
             throw "Incomplete model response (finish_reason=$finishReason)."
         }
         $message = $choice.message
+        Assert-AgentToolCallBatch -Message $message -FinishReason $finishReason
+        if ($reply.usage) {
+            if ($reply.usage.prompt_tokens) { $State.usage_input_tokens = [int]$State.usage_input_tokens + [int]$reply.usage.prompt_tokens }
+            if ($reply.usage.completion_tokens) { $State.usage_output_tokens = [int]$State.usage_output_tokens + [int]$reply.usage.completion_tokens }
+        }
         $assistant = @{ role = 'assistant'; content = $message.content }
         if ($message.reasoning_content) {
             $assistant.reasoning_content = $message.reasoning_content
