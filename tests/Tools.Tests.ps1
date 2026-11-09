@@ -957,6 +957,8 @@ try {
         }
     }
     $script:WebDownloadUseHostCommand = $true
+    $savedWebDownloadApproval = $script:AutoApproveWeb
+    $script:AutoApproveWeb = $true
     try {
         $fetchRes = Invoke-AgentTool -Root $workspacePath -Call @{ id = 'w-fetch'; function = @{ name = 'fetch_url'; arguments = '{"url":"https://example.com/docs"}' } } | ConvertFrom-Json
         Assert-True ($fetchRes.url -eq 'https://example.com/docs' -and $fetchRes.content.Contains('PowerShell 5.1 guide text.')) 'fetch_url failed to return cleaned page content.'
@@ -998,6 +1000,7 @@ try {
         Assert-True ($utf8SearchRes.count -eq 1 -and $utf8SearchRes.results[0].url -eq ('https://ru.wikipedia.org/wiki/' + $expectedCyrillicWord)) 'web_search corrupted multi-byte UTF-8 URL in DuckDuckGo redirect.'
     }
     finally {
+        $script:AutoApproveWeb = $savedWebDownloadApproval
         Remove-Variable -Name WebDownloadUseHostCommand -Scope Script -ErrorAction SilentlyContinue
         Remove-Item Function:\Invoke-WebRequest -ErrorAction SilentlyContinue
     }
@@ -1033,7 +1036,7 @@ try {
         Assert-True ($null -ne $ssrfFetch.error -and $ssrfFetch.error.Length -gt 0) "fetch_url did not block unsafe SSRF URL: $unsafeUrl"
     }
 
-    # Regression (Item 12d): fetch_url and web_search require confirmation in Ask and ReadOnly modes, and cancel in non-interactive JSON mode.
+    # Web approval is independent of file approval and cancels without prompting in JSON mode.
     $savedApprovalWeb = $script:approval
     $savedPermWeb = $script:AgentPermission
     $savedModeWeb = $script:OutputMode
@@ -1049,11 +1052,19 @@ try {
         $roCancelFetch = Invoke-AgentTool -Root $workspacePath -Call @{ id = 'w-ro-no'; function = @{ name = 'fetch_url'; arguments = '{"url":"https://example.com/docs"}' } } | ConvertFrom-Json
         Assert-True ($roCancelFetch.status -eq 'cancelled') 'fetch_url in ReadOnly mode did not require confirmation.'
 
-        $script:AgentPermission = 'Ask'
+        $script:AgentPermission = 'AutoEdit'
+        $webConfirm = Request-AgentWebConfirmation -ToolName 'fetch_url' -Target 'https://example.com/docs'
+        Assert-True (-not $webConfirm.approved -and ($webConfirm.response | ConvertFrom-Json).status -eq 'cancelled') 'AutoEdit bypassed web confirmation.'
         $script:OutputMode = 'json'
         $script:approval = $null
-        $jsonCancelFetch = Invoke-AgentTool -Root $workspacePath -Call @{ id = 'w-json-no'; function = @{ name = 'fetch_url'; arguments = '{"url":"https://example.com/docs"}' } } | ConvertFrom-Json
-        Assert-True ($jsonCancelFetch.status -eq 'cancelled') 'fetch_url in JSON mode under Ask permission did not cancel immediately.'
+        $promptCount = $script:prompts
+        foreach ($mode in @('Ask', 'AutoEdit')) {
+            $script:AgentPermission = $mode
+            $webConfirm = Request-AgentWebConfirmation -ToolName 'fetch_url' -Target 'https://example.com/docs'
+            Assert-True (-not $webConfirm.approved -and ($webConfirm.response | ConvertFrom-Json).status -eq 'cancelled' -and $script:prompts -eq $promptCount) "Web confirmation in JSON mode under $mode did not cancel immediately."
+        }
+        $script:AgentPermission = 'Auto'
+        Assert-True ((Request-AgentWebConfirmation -ToolName 'fetch_url' -Target 'https://example.com/docs').approved) 'Auto mode did not approve a web request.'
     }
     finally {
         $script:approval = $savedApprovalWeb

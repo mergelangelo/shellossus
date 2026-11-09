@@ -316,9 +316,9 @@ function Invoke-ReplPermissionCommand {
     if (-not $ReqPerm) {
         $permItems = @(
             @{ label = 'ReadOnly'; value = 'ReadOnly'; description = 'Read/search only; no file writes or shell commands'; active = ($script:AgentPermission -eq 'ReadOnly') },
-            @{ label = 'Ask'; value = 'Ask'; description = 'Preview and confirm both file writes (WRITE) and commands (RUN)'; active = ($script:AgentPermission -eq 'Ask') },
-            @{ label = 'AutoEdit'; value = 'AutoEdit'; description = 'Auto-approve file edits; still confirm shell commands (RUN)'; active = ($script:AgentPermission -eq 'AutoEdit') },
-            @{ label = 'Auto'; value = 'Auto'; description = 'Auto-approve all workspace file writes and shell commands'; active = ($script:AgentPermission -eq 'Auto') }
+            @{ label = 'Ask'; value = 'Ask'; description = 'Confirm file writes, shell commands, and web requests'; active = ($script:AgentPermission -eq 'Ask') },
+            @{ label = 'AutoEdit'; value = 'AutoEdit'; description = 'Auto-approve file edits. Confirm shell commands and web requests'; active = ($script:AgentPermission -eq 'AutoEdit') },
+            @{ label = 'Auto'; value = 'Auto'; description = 'Auto-approve file writes, shell commands, and web requests'; active = ($script:AgentPermission -eq 'Auto') }
         )
         $pickedPerm = Invoke-TuiSelector -Title "Permission Mode (current: $($script:AgentPermission))" -Items $permItems
         if ($pickedPerm) { $ReqPerm = [string]$pickedPerm }
@@ -326,6 +326,13 @@ function Invoke-ReplPermissionCommand {
     if ($ReqPerm) {
         $matchedPerm = @('ReadOnly', 'Ask', 'AutoEdit', 'Auto') | Where-Object { $_ -ieq $ReqPerm } | Select-Object -First 1
         if ($matchedPerm) {
+            $rank = @{ ReadOnly = 0; Ask = 1; AutoEdit = 2; Auto = 3 }
+            if ($matchedPerm -ne 'Auto' -and $rank[$matchedPerm] -le $rank[[string]$script:AgentPermission]) {
+                $script:AutoApproveCommands = $false
+                $script:AutoApproveWeb = $false
+            }
+            # Older turns cannot restore approvals across an explicit permission selection.
+            $script:PermissionRevision++
             $script:AgentPermission = $matchedPerm
             $syncRes = Sync-AgentCapabilities -State $State -RecordTransition
             $toolsInfo = if ($syncRes.tools.Count -gt 0) { $syncRes.tools -join ', ' } else { 'none' }

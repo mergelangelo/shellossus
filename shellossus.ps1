@@ -2189,6 +2189,7 @@ $script:MaxSubagentDepth = 1
 $script:ActiveSessionTodos = @()
 $script:AutoApproveWeb = $false
 $script:AutoApproveCommands = $false
+$script:PermissionRevision = 0
 $script:StartupAgentPermission = 'Ask'
 $script:StartupPermissionSpecified = $false
 
@@ -5441,9 +5442,14 @@ function Assert-SafeWebResolution {
     }
 }
 
+function Test-AgentWebAutoApproval {
+    param([string]$Permission = $script:AgentPermission)
+    return ($Permission -eq 'Auto' -or $script:AutoApproveWeb)
+}
+
 function Request-AgentWebConfirmation {
     param([string]$ToolName, [string]$Target)
-    if ($script:AgentPermission -in @('AutoEdit', 'Auto') -or $script:AutoApproveWeb) {
+    if (Test-AgentWebAutoApproval) {
         return @{ approved = $true; response = $null }
     }
     if ($script:OutputMode -eq 'json') {
@@ -5451,7 +5457,7 @@ function Request-AgentWebConfirmation {
             approved = $false
             response = (@{
                 status = 'cancelled'
-                message = 'Interactive confirmation is disabled in JSON mode. Use -Permission AutoEdit or Auto to allow outbound web requests.'
+                message = 'Interactive confirmation is disabled in JSON mode. Use -Permission Auto to allow outbound web requests.'
             } | ConvertTo-Json -Compress)
         }
     }
@@ -7222,7 +7228,7 @@ function Format-CapabilitiesPromptBlock {
         $lines += '- Persistent project memory: call memory tool to record, view, or update long-term knowledge, user preferences, and architectural invariants across sessions.'
     }
     if (($cap.tool_names -contains 'fetch_url') -or ($cap.tool_names -contains 'web_search')) {
-        if ($cap.permission -in @('AutoEdit', 'Auto') -or $script:AutoApproveWeb) {
+        if (Test-AgentWebAutoApproval -Permission $cap.permission) {
             $lines += '- Web tools (fetch_url, web_search): network requests are automatically approved without confirmation.'
         }
         else {
@@ -9627,6 +9633,7 @@ function New-AgentTurnSnapshot {
         todos = @(Copy-SessionHashtableArray -Items $State.todos)
         active_session_todos = @(Copy-SessionHashtableArray -Items $script:ActiveSessionTodos)
         agent_permission = [string]$script:AgentPermission
+        permission_revision = $script:PermissionRevision
         auto_approve_commands = [bool]$script:AutoApproveCommands
         auto_approve_web = [bool]$script:AutoApproveWeb
     }
@@ -9644,9 +9651,11 @@ function Test-AgentTurnFrameHasPermission {
 function Restore-AgentTurnPermission {
     param($Frame, $State)
     if (-not (Test-AgentTurnFrameHasPermission -Frame $Frame)) { return }
-    $script:AgentPermission = [string]$Frame.agent_permission
-    $script:AutoApproveCommands = [bool]$Frame.auto_approve_commands
-    $script:AutoApproveWeb = [bool]$Frame.auto_approve_web
+    if ([long]$Frame.permission_revision -eq $script:PermissionRevision) {
+        $script:AgentPermission = [string]$Frame.agent_permission
+        $script:AutoApproveCommands = [bool]$Frame.auto_approve_commands
+        $script:AutoApproveWeb = [bool]$Frame.auto_approve_web
+    }
     if ($State) {
         Sync-AgentCapabilities -State $State | Out-Null
     }
@@ -9664,6 +9673,7 @@ function New-AgentUndoFrame {
     if ($null -ne $Snapshot.active_session_todos) { $frame.active_session_todos = @($Snapshot.active_session_todos) }
     if (Test-AgentTurnFrameHasPermission -Frame $Snapshot) {
         $frame.agent_permission = [string]$Snapshot.agent_permission
+        $frame.permission_revision = [long]$Snapshot.permission_revision
         $frame.auto_approve_commands = [bool]$Snapshot.auto_approve_commands
         $frame.auto_approve_web = [bool]$Snapshot.auto_approve_web
     }
@@ -10406,9 +10416,9 @@ function Invoke-ReplPermissionCommand {
     if (-not $ReqPerm) {
         $permItems = @(
             @{ label = 'ReadOnly'; value = 'ReadOnly'; description = 'Read/search only; no file writes or shell commands'; active = ($script:AgentPermission -eq 'ReadOnly') },
-            @{ label = 'Ask'; value = 'Ask'; description = 'Preview and confirm both file writes (WRITE) and commands (RUN)'; active = ($script:AgentPermission -eq 'Ask') },
-            @{ label = 'AutoEdit'; value = 'AutoEdit'; description = 'Auto-approve file edits; still confirm shell commands (RUN)'; active = ($script:AgentPermission -eq 'AutoEdit') },
-            @{ label = 'Auto'; value = 'Auto'; description = 'Auto-approve all workspace file writes and shell commands'; active = ($script:AgentPermission -eq 'Auto') }
+            @{ label = 'Ask'; value = 'Ask'; description = 'Confirm file writes, shell commands, and web requests'; active = ($script:AgentPermission -eq 'Ask') },
+            @{ label = 'AutoEdit'; value = 'AutoEdit'; description = 'Auto-approve file edits. Confirm shell commands and web requests'; active = ($script:AgentPermission -eq 'AutoEdit') },
+            @{ label = 'Auto'; value = 'Auto'; description = 'Auto-approve file writes, shell commands, and web requests'; active = ($script:AgentPermission -eq 'Auto') }
         )
         $pickedPerm = Invoke-TuiSelector -Title "Permission Mode (current: $($script:AgentPermission))" -Items $permItems
         if ($pickedPerm) { $ReqPerm = [string]$pickedPerm }
@@ -10416,6 +10426,13 @@ function Invoke-ReplPermissionCommand {
     if ($ReqPerm) {
         $matchedPerm = @('ReadOnly', 'Ask', 'AutoEdit', 'Auto') | Where-Object { $_ -ieq $ReqPerm } | Select-Object -First 1
         if ($matchedPerm) {
+            $rank = @{ ReadOnly = 0; Ask = 1; AutoEdit = 2; Auto = 3 }
+            if ($matchedPerm -ne 'Auto' -and $rank[$matchedPerm] -le $rank[[string]$script:AgentPermission]) {
+                $script:AutoApproveCommands = $false
+                $script:AutoApproveWeb = $false
+            }
+            # Older turns cannot restore approvals across an explicit permission selection.
+            $script:PermissionRevision++
             $script:AgentPermission = $matchedPerm
             $syncRes = Sync-AgentCapabilities -State $State -RecordTransition
             $toolsInfo = if ($syncRes.tools.Count -gt 0) { $syncRes.tools -join ', ' } else { 'none' }

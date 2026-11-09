@@ -451,6 +451,15 @@ try {
     }
     $clRebuiltComp = @(Build-BranchContextMessages -State $clTwoCompState -LeafId 'e2')
     Assert-True ($clRebuiltComp[1].content -like '*Second*') 'ConstrainedLanguage Build-BranchContextMessages failed to attach second child compaction.'
+
+    $script:AgentPermission = 'AutoEdit'
+    $script:AutoApproveCommands = $true
+    $script:AutoApproveWeb = $true
+    $clPermissionState = @{ messages = @(@{ role = 'system'; content = 'sys' }); workspace = $workspacePath }
+    $clPermissionFrame = New-AgentUndoFrame -Snapshot (New-AgentTurnSnapshot -State $clPermissionState)
+    Invoke-ReplPermissionCommand -State $clPermissionState -ReqPerm 'Ask'
+    Restore-AgentTurnPermission -State $clPermissionState -Frame $clPermissionFrame
+    Assert-True ($script:AgentPermission -eq 'Ask' -and -not $script:AutoApproveCommands -and -not $script:AutoApproveWeb) 'ConstrainedLanguage undo restored revoked approvals.'
 }
 finally {
     Remove-TestEnvironment -Env $envData

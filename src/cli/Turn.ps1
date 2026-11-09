@@ -41,6 +41,7 @@ function New-AgentTurnSnapshot {
         todos = @(Copy-SessionHashtableArray -Items $State.todos)
         active_session_todos = @(Copy-SessionHashtableArray -Items $script:ActiveSessionTodos)
         agent_permission = [string]$script:AgentPermission
+        permission_revision = $script:PermissionRevision
         auto_approve_commands = [bool]$script:AutoApproveCommands
         auto_approve_web = [bool]$script:AutoApproveWeb
     }
@@ -58,9 +59,11 @@ function Test-AgentTurnFrameHasPermission {
 function Restore-AgentTurnPermission {
     param($Frame, $State)
     if (-not (Test-AgentTurnFrameHasPermission -Frame $Frame)) { return }
-    $script:AgentPermission = [string]$Frame.agent_permission
-    $script:AutoApproveCommands = [bool]$Frame.auto_approve_commands
-    $script:AutoApproveWeb = [bool]$Frame.auto_approve_web
+    if ([long]$Frame.permission_revision -eq $script:PermissionRevision) {
+        $script:AgentPermission = [string]$Frame.agent_permission
+        $script:AutoApproveCommands = [bool]$Frame.auto_approve_commands
+        $script:AutoApproveWeb = [bool]$Frame.auto_approve_web
+    }
     if ($State) {
         Sync-AgentCapabilities -State $State | Out-Null
     }
@@ -78,6 +81,7 @@ function New-AgentUndoFrame {
     if ($null -ne $Snapshot.active_session_todos) { $frame.active_session_todos = @($Snapshot.active_session_todos) }
     if (Test-AgentTurnFrameHasPermission -Frame $Snapshot) {
         $frame.agent_permission = [string]$Snapshot.agent_permission
+        $frame.permission_revision = [long]$Snapshot.permission_revision
         $frame.auto_approve_commands = [bool]$Snapshot.auto_approve_commands
         $frame.auto_approve_web = [bool]$Snapshot.auto_approve_web
     }

@@ -1652,6 +1652,7 @@ try {
     $task4SavedStartupSpecified = $script:StartupPermissionSpecified
     $task4SavedStartupPerm = $script:StartupAgentPermission
     $task4SavedCmd = $script:AutoApproveCommands
+    $task4SavedRevision = $script:PermissionRevision
     $task4Dir = Join-Path $testRoot 'task4-sessions'
     New-Item -ItemType Directory -Path $task4Dir -Force | Out-Null
     $global:task4Host = @()
@@ -1680,6 +1681,41 @@ try {
     }
     try {
         $script:OutputMode = 'text'
+        foreach ($transition in @(
+            @{ from = 'AutoEdit'; to = 'Ask' }
+            @{ from = 'Ask'; to = 'Ask'; pick = '2' }
+            @{ from = 'Ask'; to = 'ReadOnly' }
+            @{ from = 'Auto'; to = 'AutoEdit' }
+        )) {
+            $script:AgentPermission = $transition.from
+            $script:AutoApproveWeb = $true
+            $script:AutoApproveCommands = $true
+            $permState = @{ messages = @(@{ role = 'system'; content = 'sys' }); workspace = $workspacePath }
+            $null = Sync-AgentCapabilities -State $permState
+            $frame = New-AgentUndoFrame -Snapshot (New-AgentTurnSnapshot -State $permState)
+            if ($transition.pick) {
+                $script:approval = $transition.pick
+                Invoke-ReplPermissionCommand -State $permState
+            }
+            else { Invoke-ReplPermissionCommand -State $permState -ReqPerm $transition.to }
+            $label = "$($transition.from) -> $($transition.to)"
+            Assert-True ($script:AgentPermission -eq $transition.to -and -not $script:AutoApproveCommands -and -not $script:AutoApproveWeb) "Temporary approvals survived $label."
+
+            $undo = Invoke-ReplUndoCommand -State $permState -RootPath $workspacePath -UndoStack @($frame)
+            Assert-True ($undo.undo_stack.Count -eq 0 -and $script:AgentPermission -eq $transition.to -and -not $script:AutoApproveCommands -and -not $script:AutoApproveWeb) "Undo revived permissions or approvals from before $label."
+            Assert-True ($permState.messages[0].content -like "*Permission mode: $($transition.to).*" -and $permState.messages[0].content -like '*network requests require explicit user confirmation*') "The system prompt still advertised old permissions after $label and undo."
+
+            $script:approval = 'n'
+            $webConfirm = Request-AgentWebConfirmation -ToolName 'fetch_url' -Target 'https://example.com/permission-reset'
+            Assert-True (-not $webConfirm.approved) "Web confirmation was bypassed after $label."
+            if ($transition.to -ne 'ReadOnly') {
+                $command = Invoke-AgentTool -Root $workspacePath -Call @{ function = @{
+                    name = 'run_command'; arguments = '{"command":"Write-Output permission-reset"}'
+                } } | ConvertFrom-Json
+                Assert-True ($command.status -eq 'cancelled') "Command confirmation was bypassed after $label."
+            }
+        }
+
         $script:AgentPermission = 'Ask'
         $script:StartupPermissionSpecified = $false
         $script:StartupAgentPermission = 'Ask'
@@ -1906,6 +1942,7 @@ try {
         $script:StartupPermissionSpecified = $task4SavedStartupSpecified
         $script:StartupAgentPermission = $task4SavedStartupPerm
         $script:AutoApproveCommands = $task4SavedCmd
+        $script:PermissionRevision = $task4SavedRevision
         $script:approval = ''
         $script:task4UseApproval = $false
         $global:task4Queue = @()

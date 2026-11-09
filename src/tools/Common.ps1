@@ -22,6 +22,7 @@ $script:MaxSubagentDepth = 1
 $script:ActiveSessionTodos = @()
 $script:AutoApproveWeb = $false
 $script:AutoApproveCommands = $false
+$script:PermissionRevision = 0
 $script:StartupAgentPermission = 'Ask'
 $script:StartupPermissionSpecified = $false
 

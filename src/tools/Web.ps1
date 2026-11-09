@@ -226,9 +226,14 @@ function Assert-SafeWebResolution {
     }
 }
 
+function Test-AgentWebAutoApproval {
+    param([string]$Permission = $script:AgentPermission)
+    return ($Permission -eq 'Auto' -or $script:AutoApproveWeb)
+}
+
 function Request-AgentWebConfirmation {
     param([string]$ToolName, [string]$Target)
-    if ($script:AgentPermission -in @('AutoEdit', 'Auto') -or $script:AutoApproveWeb) {
+    if (Test-AgentWebAutoApproval) {
         return @{ approved = $true; response = $null }
     }
     if ($script:OutputMode -eq 'json') {
@@ -236,7 +241,7 @@ function Request-AgentWebConfirmation {
             approved = $false
             response = (@{
                 status = 'cancelled'
-                message = 'Interactive confirmation is disabled in JSON mode. Use -Permission AutoEdit or Auto to allow outbound web requests.'
+                message = 'Interactive confirmation is disabled in JSON mode. Use -Permission Auto to allow outbound web requests.'
             } | ConvertTo-Json -Compress)
         }
     }

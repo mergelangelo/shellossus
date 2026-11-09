@@ -265,7 +265,11 @@ try {
 
     $script:AgentPermission = 'AutoEdit'
     $autoEditSys = Build-SystemPrompt -Root $workspacePath -ConfigDir ''
-    Assert-True ($autoEditSys.Contains('Web tools (fetch_url, web_search): network requests are automatically approved without confirmation.')) 'Build-SystemPrompt in AutoEdit mode did not indicate automatic web tool approval.'
+    Assert-True ($autoEditSys.Contains('Web tools (fetch_url, web_search): network requests require explicit user confirmation before connecting.')) 'Build-SystemPrompt in AutoEdit mode did not indicate separate web confirmation.'
+    $script:AutoApproveWeb = $true
+    $webApprovedSys = Build-SystemPrompt -Root $workspacePath -ConfigDir ''
+    Assert-True ($webApprovedSys.Contains('Web tools (fetch_url, web_search): network requests are automatically approved without confirmation.')) 'Build-SystemPrompt did not reflect explicit web approval.'
+    $script:AutoApproveWeb = $false
     $syncState = @{
         workspace = $workspacePath
         messages = @(
