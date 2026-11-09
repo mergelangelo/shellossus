@@ -2076,7 +2076,7 @@ description: Optional subagent role: recon (ReadOnly search), audit (ReadOnly re
     $mExactCrlfTrail = Find-EditMatch -Content $lfContent -OldText "line1`r`nline2`r`n"
     Assert-True ($mExactCrlfTrail.index -eq 0 -and $mExactCrlfTrail.matched_text -ceq "line1`nline2`n") 'Find-EditMatch should match CRLF old_text with trailing CRLF against LF file content.'
     $mFuzzyCrlfTrail = Find-EditMatch -Content $lfContent -OldText "line1   `r`nline2`r`n"
-    Assert-True ($mFuzzyCrlfTrail.index -eq 0 -and $mFuzzyCrlfTrail.matched_text -ceq "line1`nline2") 'Find-EditMatch fuzzy line matching should strip single trailing newline on CRLF old_text.'
+    Assert-True ($mFuzzyCrlfTrail.index -eq 0 -and $mFuzzyCrlfTrail.matched_text -ceq "line1`nline2`n") 'Fuzzy matching should include the LF corresponding to the final CRLF in old_text.'
 
     # Regression (Task 8): ConvertFrom-HtmlToText decodes &amp; last; Invoke-AgentWebSearch decodes &amp; in uddg redirect links.
     $htmlText = ConvertFrom-HtmlToText -Html '<p>Escaped: &amp;lt;tag&amp;gt; &amp;quot;q&amp;quot;</p>'

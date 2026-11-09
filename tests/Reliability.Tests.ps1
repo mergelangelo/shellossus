@@ -39,6 +39,33 @@ try {
     $testBackups += $res.backup
     Assert-True ((Get-Content -LiteralPath $path -Raw -Encoding UTF8) -ceq "a`nB`nC`nc") 'edit_file introduced CRLF into an LF file.'
 
+    # A unique replacement must include exactly the separators specified by old_text.
+    $matchPath = Join-Path $workspacePath 'edit-match.txt'
+    foreach ($case in @(
+        @{ name = 'exact overlap'; before = 'aaa'; old = 'aa'; error = '*occurs more than once*' }
+        @{ name = 'CRLF overlap'; before = "a`r`na`r`na"; old = "a`na"; error = '*occurs more than once*' }
+        @{ name = 'LF overlap'; before = "a`na`na"; old = "a`r`na"; error = '*occurs more than once*' }
+        @{ name = 'CRLF fuzzy'; before = "foo  `r`nbar`r`n"; old = "foo`n"; new = "baz`n"; after = "baz`r`nbar`r`n" }
+        @{ name = 'LF fuzzy'; before = "foo  `nbar`n"; old = "foo`r`n"; new = "baz`r`n"; after = "baz`nbar`n" }
+        @{ name = 'fuzzy deletion'; before = "foo  `r`nbar`r`n"; old = "foo`n"; new = ''; after = "bar`r`n" }
+        @{ name = 'unterminated duplicate'; before = "foo  `nfoo  "; old = "foo`n"; new = "baz`n"; after = "baz`nfoo  " }
+        @{ name = 'missing final newline'; before = 'foo  '; old = "foo`n"; error = '*old_text was not found*' }
+    )) {
+        Set-AgentUtf8Content -LiteralPath $matchPath -Value $case.before
+        $script:CurrentTurnWrites = @()
+        $replacement = if ($case.error) { 'replacement' } else { $case.new }
+        $argsJson = @{ path = 'edit-match.txt'; old_text = $case.old; new_text = $replacement } | ConvertTo-Json -Compress
+        $res = Invoke-AgentTool -Root $workspacePath -Call @{ function = @{ name = 'edit_file'; arguments = $argsJson } } | ConvertFrom-Json
+        if ($res.backup) { $testBackups += $res.backup }
+        $actual = Get-Content -LiteralPath $matchPath -Raw -Encoding UTF8
+        if ($case.error) {
+            Assert-True ($res.error -like $case.error -and $actual -ceq $case.before -and $script:CurrentTurnWrites.Count -eq 0) "Unsafe edit was not rejected for $($case.name)."
+        }
+        else {
+            Assert-True ($res.status -eq 'written' -and $actual -ceq $case.after) "Incorrect replacement for $($case.name)."
+        }
+    }
+
     # Corruption anywhere in an undo chain must prevent ALL restores/deletes.
     $script:CurrentTurnWrites = @()
     Set-Content -LiteralPath (Join-Path $workspacePath 'original.txt') -Value 'original' -Encoding UTF8 -NoNewline

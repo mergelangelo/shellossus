@@ -15,7 +15,7 @@ function Find-EditMatch {
     param([string]$Content, [string]$OldText)
     $idx = $Content.IndexOf($OldText, [StringComparison]::Ordinal)
     if ($idx -ge 0) {
-        if ($Content.IndexOf($OldText, $idx + $OldText.Length, [StringComparison]::Ordinal) -ge 0) {
+        if ($Content.IndexOf($OldText, $idx + 1, [StringComparison]::Ordinal) -ge 0) {
             throw 'old_text occurs more than once. Provide more context.'
         }
         return @{ index = $idx; length = $OldText.Length; matched_text = $OldText }
@@ -24,7 +24,7 @@ function Find-EditMatch {
         $crlfOld = $OldText.Replace("`r`n", "`n").Replace("`n", "`r`n")
         $idx = $Content.IndexOf($crlfOld, [StringComparison]::Ordinal)
         if ($idx -ge 0) {
-            if ($Content.IndexOf($crlfOld, $idx + $crlfOld.Length, [StringComparison]::Ordinal) -ge 0) {
+            if ($Content.IndexOf($crlfOld, $idx + 1, [StringComparison]::Ordinal) -ge 0) {
                 throw 'old_text occurs more than once. Provide more context.'
             }
             return @{ index = $idx; length = $crlfOld.Length; matched_text = $crlfOld }
@@ -34,7 +34,7 @@ function Find-EditMatch {
         $lfOld = $OldText.Replace("`r`n", "`n")
         $idx = $Content.IndexOf($lfOld, [StringComparison]::Ordinal)
         if ($idx -ge 0) {
-            if ($Content.IndexOf($lfOld, $idx + $lfOld.Length, [StringComparison]::Ordinal) -ge 0) {
+            if ($Content.IndexOf($lfOld, $idx + 1, [StringComparison]::Ordinal) -ge 0) {
                 throw 'old_text occurs more than once. Provide more context.'
             }
             return @{ index = $idx; length = $lfOld.Length; matched_text = $lfOld }
@@ -42,7 +42,8 @@ function Find-EditMatch {
     }
     $contentLines = @($Content -split "`n")
     $oldClean = $OldText.Replace("`r`n", "`n").TrimEnd("`r")
-    if ($oldClean.Length -gt 0 -and $oldClean.EndsWith("`n")) {
+    $includeTrailingNewline = $oldClean.EndsWith("`n")
+    if ($includeTrailingNewline) {
         $oldClean = $oldClean.Substring(0, $oldClean.Length - 1)
     }
     $oldLines = @($oldClean -split "`n")
@@ -57,6 +58,8 @@ function Find-EditMatch {
         $normOld = @($oldLines | ForEach-Object { Format-FuzzyLine -Line $_ })
         $matchesFound = @()
         $maxStart = $contentLines.Count - $oldLines.Count
+        # A trailing newline requires a following split element, even if it is empty at EOF.
+        if ($includeTrailingNewline) { $maxStart-- }
         for ($i = 0; $i -le $maxStart; $i++) {
             $ok = $true
             for ($j = 0; $j -lt $oldLines.Count; $j++) {
@@ -71,9 +74,14 @@ function Find-EditMatch {
             $startLineIdx = $matchesFound[0]
             $endLineIdx = $startLineIdx + $oldLines.Count - 1
             $charStart = $lineStarts[$startLineIdx]
-            $endLineRaw = $contentLines[$endLineIdx]
-            $endLineCleanLen = if ($endLineRaw.EndsWith("`r")) { $endLineRaw.Length - 1 } else { $endLineRaw.Length }
-            $charEnd = $lineStarts[$endLineIdx] + $endLineCleanLen
+            $charEnd = if ($includeTrailingNewline) {
+                $lineStarts[$endLineIdx + 1]
+            }
+            else {
+                $endLineRaw = $contentLines[$endLineIdx]
+                $endLineCleanLen = if ($endLineRaw.EndsWith("`r")) { $endLineRaw.Length - 1 } else { $endLineRaw.Length }
+                $lineStarts[$endLineIdx] + $endLineCleanLen
+            }
             $matchedLen = $charEnd - $charStart
             return @{
                 index = $charStart
