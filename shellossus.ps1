@@ -4003,14 +4003,7 @@ function Invoke-AgentStagedWrite {
             $current = Get-Content -LiteralPath $path -Raw -Encoding UTF8 -ErrorAction Stop
             if ($null -eq $current) { $current = '' }
             if ($current -cne $before) { throw 'File changed during confirmation. No write performed.' }
-            $backup = New-AgentTempFile
-            Copy-Item -LiteralPath $path -Destination $backup.FullName -Force -ErrorAction Stop
-            $backupCheck = Get-Content -LiteralPath $backup.FullName -Raw -Encoding UTF8 -ErrorAction Stop
-            if ($null -eq $backupCheck) { $backupCheck = '' }
-            if ($backupCheck -cne $before) {
-                Remove-Item -LiteralPath $backup.FullName -Force -ErrorAction SilentlyContinue
-                throw 'Backup verification failed. No write performed.'
-            }
+            $backup = New-AgentUndoBackup -Path $path -Before $before
             $backupPath = $backup.FullName
             if ($script:OutputMode -ne 'json') {
                 Write-Host ($script:Gm.Grey1 + 'Backup: ' + $backupPath + $script:Gm.Reset)
@@ -4898,9 +4891,48 @@ function Clear-AgentUndoBackups {
     }
 }
 
+function Read-AgentUndoContent {
+    param([string]$Path)
+    if (-not (Test-Path -LiteralPath $Path -ErrorAction Stop)) { return $null }
+    if ((Get-Item -LiteralPath $Path -Force -ErrorAction Stop).PSIsContainer) {
+        throw "Expected a file at $Path."
+    }
+    $content = Get-Content -LiteralPath $Path -Raw -Encoding UTF8 -ErrorAction Stop
+    if ($null -eq $content) { return '' }
+    return [string]$content
+}
+
+function New-AgentUndoBackup {
+    param([string]$Path, [AllowEmptyString()][string]$Before)
+    $backup = New-AgentTempFile
+    try {
+        Copy-Item -LiteralPath $Path -Destination $backup.FullName -Force -ErrorAction Stop
+        if ((Read-AgentUndoContent -Path $backup.FullName) -cne $Before) {
+            throw 'Backup verification failed. No write performed.'
+        }
+        return $backup
+    }
+    catch {
+        Remove-Item -LiteralPath $backup.FullName -Force -ErrorAction SilentlyContinue
+        throw
+    }
+}
+
 function Assert-AgentUndoPath {
     param($Write)
     if (-not $Write.root -or -not $Write.full_path) { throw 'Undo entry has no workspace path.' }
+    if ($Write.memory_scope) {
+        $rootMemory = Join-Path $Write.root 'MEMORY.md'
+        $dotMemory = Join-Path (Join-Path $Write.root '.shellossus') 'MEMORY.md'
+        if ($Write.full_path -eq $script:AgentConfigPath -or
+            ($Write.full_path -cne $rootMemory -and ($Write.memory_scope -ne 'workspace' -or $Write.full_path -cne $dotMemory))) {
+            throw 'Undo entry is not a fixed memory path.'
+        }
+        if (Test-PathHasReparsePoint -Path $Write.full_path -StopAt $Write.root) {
+            throw 'Reparse points are not allowed.'
+        }
+        return
+    }
     $parent = Split-Path -Path $Write.full_path -Parent
     $anc = $parent
     while ($anc -and -not (Test-Path -LiteralPath $anc)) {
@@ -4915,115 +4947,89 @@ function Assert-AgentUndoPath {
     }
 }
 
+function Assert-AgentUndoBackup {
+    param($Write)
+    if (-not $Write.backup -or -not (Test-Path -LiteralPath $Write.backup)) {
+        throw "Backup file missing for $($Write.rel_path)."
+    }
+    try {
+        $backupItem = Get-Item -LiteralPath $Write.backup -Force -ErrorAction Stop
+        if (($backupItem.Attributes -band 1024) -ne 0) { throw 'Backup is a reparse point.' }
+        if ((Read-AgentUndoContent -Path $Write.backup) -cne $Write.before_content) {
+            throw 'Backup does not match the recorded original content.'
+        }
+    }
+    catch {
+        throw "Backup verification failed for $($Write.rel_path): $($_.Exception.Message)"
+    }
+}
+
+function Assert-AgentUndoContent {
+    param($Write)
+    $current = Read-AgentUndoContent -Path $Write.full_path
+    if ($current -cne $Write.after_content -and $current -cne $Write.before_content) {
+        throw "File $($Write.rel_path) changed after the agent operation. Refusing to overwrite manual changes."
+    }
+}
+
+function Stop-AgentUndo {
+    param($UndoEntry, [string]$Reason)
+    $UndoEntry.preserve_backups = $true
+    $pending = @()
+    $backups = @()
+    foreach ($w in @($UndoEntry.writes)) {
+        if (-not $w) { continue }
+        $w.preserve_backup = $true
+        if (-not $w.undone) { $pending += "$($w.full_path) ($($w.action))" }
+        if ($w.backup -and (Test-Path -LiteralPath $w.backup -ErrorAction SilentlyContinue)) {
+            $backups += "$($w.full_path) ($($w.action)) -> $($w.backup)"
+        }
+    }
+    $message = "Undo failed: $Reason Conversation and task board restoration is pending."
+    if ($pending.Count) { $message += ' Pending file operations: ' + ($pending -join ', ') + '.' }
+    if ($backups.Count) { $message += ' Backups kept: ' + ($backups -join ', ') + '.' }
+    throw $message
+}
+
 function Invoke-AgentUndo {
     param($State, $UndoEntry)
     if (-not $UndoEntry) { return }
     $writes = @($UndoEntry.writes)
-    $preflightErrors = @()
     $expectedByPath = @{}
     for ($i = $writes.Count - 1; $i -ge 0; $i--) {
         $w = $writes[$i]
         if (-not $w -or $w.undone) { continue }
+        try { Assert-AgentUndoPath -Write $w }
+        catch { Stop-AgentUndo -UndoEntry $UndoEntry -Reason "Unsafe undo path for $($w.rel_path): $($_.Exception.Message)" }
         try {
-            Assert-AgentUndoPath -Write $w
-        }
-        catch {
-            $preflightErrors += "Unsafe undo path for $($w.rel_path): $($_.Exception.Message)"
-            continue
-        }
-        $fullKey = [string]$w.full_path
-        $isLatestForPath = (-not $expectedByPath.ContainsKey($fullKey))
-        if ($w.action -eq 'modified') {
-            if (-not $w.backup -or -not (Test-Path -LiteralPath $w.backup)) {
-                $preflightErrors += "Backup file missing for $($w.rel_path)."
-                continue
+            if ($w.action -in @('modified', 'deleted')) {
+                Assert-AgentUndoBackup -Write $w
             }
-            try {
-                $backupContent = Get-Content -LiteralPath $w.backup -Raw -Encoding UTF8 -ErrorAction Stop
-                if ($null -eq $backupContent) { $backupContent = '' }
-                if ($null -eq $w.before_content -or $backupContent -cne $w.before_content) {
-                    throw 'Backup does not match the recorded original content.'
+            $fullKey = [string]$w.full_path
+            if ($expectedByPath.ContainsKey($fullKey)) {
+                if ($w.after_content -cne $expectedByPath[$fullKey]) {
+                    throw "Undo chain mismatch for $($w.rel_path)."
                 }
             }
-            catch {
-                $preflightErrors += "Backup verification failed for $($w.rel_path); backup kept at $($w.backup): $($_.Exception.Message)"
-                continue
-            }
-            if ($isLatestForPath) {
-                if (Test-Path -LiteralPath $w.full_path) {
-                    $targetItem = Get-Item -LiteralPath $w.full_path -Force -ErrorAction SilentlyContinue
-                    if ($targetItem -and $targetItem.PSIsContainer) {
-                        $preflightErrors += "Target path $($w.rel_path) is now a directory."
-                        continue
-                    }
-                    if ($null -ne $w.after_content) {
-                        $diskNow = Get-Content -LiteralPath $w.full_path -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
-                        if ($null -eq $diskNow) { $diskNow = '' }
-                        if (($diskNow -cne $w.after_content) -and ($null -eq $w.before_content -or $diskNow -cne $w.before_content)) {
-                            $preflightErrors += "File $($w.rel_path) was modified after the agent write; refusing to overwrite manual changes (backup kept at $($w.backup))."
-                            continue
-                        }
-                    }
-                }
-            }
-            else {
-                $expectedAfter = $expectedByPath[$fullKey]
-                if ($null -ne $expectedAfter -and $null -ne $w.after_content -and ($w.after_content -cne $expectedAfter)) {
-                    $preflightErrors += "Undo chain mismatch for $($w.rel_path)."
-                    continue
-                }
-            }
+            else { Assert-AgentUndoContent -Write $w }
             $expectedByPath[$fullKey] = $w.before_content
         }
-        elseif ($w.action -eq 'created') {
-            if ($isLatestForPath) {
-                if (Test-Path -LiteralPath $w.full_path) {
-                    $targetItem = Get-Item -LiteralPath $w.full_path -Force -ErrorAction SilentlyContinue
-                    if ($targetItem -and $targetItem.PSIsContainer) {
-                        $preflightErrors += "Created path $($w.rel_path) is now a directory."
-                        continue
-                    }
-                    if ($null -ne $w.after_content) {
-                        $diskNow = Get-Content -LiteralPath $w.full_path -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
-                        if ($null -eq $diskNow) { $diskNow = '' }
-                        if ($diskNow -cne $w.after_content) {
-                            $preflightErrors += "Created file $($w.rel_path) was modified after creation; refusing to delete manual changes."
-                            continue
-                        }
-                    }
-                }
-            }
-            else {
-                $expectedAfter = $expectedByPath[$fullKey]
-                if ($null -ne $expectedAfter -and $null -ne $w.after_content -and ($w.after_content -cne $expectedAfter)) {
-                    $preflightErrors += "Undo chain mismatch for $($w.rel_path)."
-                    continue
-                }
-            }
-            $expectedByPath[$fullKey] = $null
+        catch {
+            Stop-AgentUndo -UndoEntry $UndoEntry -Reason $_.Exception.Message
         }
     }
-    if ($preflightErrors.Count -gt 0) {
-        throw ('Undo failed: ' + ($preflightErrors -join '; '))
-    }
-    $undoErrors = @()
     for ($i = $writes.Count - 1; $i -ge 0; $i--) {
         $w = $writes[$i]
         if (-not $w -or $w.undone) { continue }
         try {
             Assert-AgentUndoPath -Write $w
-            if ($w.action -eq 'modified') {
-                $expectedOrig = [string]$w.before_content
-                $backupNow = Get-Content -LiteralPath $w.backup -Raw -Encoding UTF8 -ErrorAction Stop
-                if ($null -eq $backupNow) { $backupNow = '' }
-                if ($backupNow -cne $expectedOrig) { throw "Backup changed after preflight for $($w.rel_path)." }
+            Assert-AgentUndoContent -Write $w
+            if ($w.action -in @('modified', 'deleted')) {
+                Assert-AgentUndoBackup -Write $w
                 Copy-Item -LiteralPath $w.backup -Destination $w.full_path -Force -ErrorAction Stop
-                $restoredNow = Get-Content -LiteralPath $w.full_path -Raw -Encoding UTF8 -ErrorAction Stop
-                if ($null -eq $restoredNow) { $restoredNow = '' }
-                if ($restoredNow -cne $expectedOrig) {
-                    throw "Restored content verification failed for $($w.rel_path) (backup kept at $($w.backup))."
+                if ((Read-AgentUndoContent -Path $w.full_path) -cne $w.before_content) {
+                    throw "Restored content verification failed for $($w.rel_path)."
                 }
-                Remove-Item -LiteralPath $w.backup -Force -ErrorAction Stop
                 $w.undone = $true
                 if ($script:OutputMode -ne 'json') {
                     Write-Host ($script:Gm.Aqua + '  [undo] Restored ' + $w.rel_path + $script:Gm.Reset)
@@ -5039,7 +5045,8 @@ function Invoke-AgentUndo {
                 if ($w.created_dirs) {
                     foreach ($dirPath in @($w.created_dirs)) {
                         if ($dirPath -and (Test-Path -LiteralPath $dirPath)) {
-                            $resolvedDir = Resolve-AgentPath -Root $w.root -RelativePath $dirPath
+                            $resolvedDir = if ($w.memory_scope) { $dirPath } else { Resolve-AgentPath -Root $w.root -RelativePath $dirPath }
+                            if (Test-PathHasReparsePoint -Path $resolvedDir -StopAt $w.root) { throw 'Reparse points are not allowed.' }
                             $dirItem = Get-Item -LiteralPath $resolvedDir -Force -ErrorAction SilentlyContinue
                             if ($dirItem -and $dirItem.PSIsContainer) {
                                 $remaining = @(Get-ChildItem -LiteralPath $resolvedDir -Force -ErrorAction SilentlyContinue)
@@ -5054,11 +5061,16 @@ function Invoke-AgentUndo {
             }
         }
         catch {
-            $undoErrors += $_.Exception.Message
+            Stop-AgentUndo -UndoEntry $UndoEntry -Reason $_.Exception.Message
         }
     }
-    if ($undoErrors.Count -gt 0) {
-        throw ('Undo failed: ' + ($undoErrors -join '; '))
+    if ($UndoEntry -is [hashtable]) {
+        if ($UndoEntry.ContainsKey('todos')) {
+            $State.todos = @(Copy-SessionHashtableArray -Items $UndoEntry.todos)
+        }
+        if ($UndoEntry.ContainsKey('active_session_todos')) {
+            $script:ActiveSessionTodos = @(Copy-SessionHashtableArray -Items $UndoEntry.active_session_todos)
+        }
     }
     $State.messages = @($UndoEntry.messages)
     $State.last_prompt_tokens = 0
@@ -5094,6 +5106,11 @@ function Invoke-AgentUndo {
         }
     }
     Sync-AgentMemoryContext -State $State | Out-Null
+    $UndoEntry.preserve_backups = $false
+    foreach ($w in $writes) {
+        if ($w) { $w.preserve_backup = $false }
+    }
+    Clear-AgentUndoBackups -Writes $writes
 }
 
 # --- src/tools/Web.ps1 ---
@@ -5962,16 +5979,6 @@ function Format-MemoryAppendText {
     return @{ text = $updatedText; bullet = $newBullet }
 }
 
-function Read-AgentMemoryText {
-    param([string]$TargetPath)
-    if (-not (Test-Path -LiteralPath $TargetPath)) { return '' }
-    $item = Get-Item -LiteralPath $TargetPath -Force -ErrorAction Stop
-    if ($item.PSIsContainer) { throw 'MEMORY.md path is a directory.' }
-    $text = Get-Content -LiteralPath $TargetPath -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
-    if ($null -eq $text) { return '' }
-    return [string]$text
-}
-
 function Invoke-AgentMemory {
     param([string]$Root, $Arguments)
     $toolStart = Get-Date
@@ -6026,17 +6033,14 @@ function Invoke-AgentMemory {
         }
     }
 
+    if ($targetPath -eq $script:AgentConfigPath) {
+        throw 'Agent tools cannot access credential configuration files.'
+    }
     if (Test-PathHasReparsePoint -Path $targetPath -StopAt $stopRoot) {
         throw 'Reparse points are not allowed.'
     }
-
-    $existing = ''
-    if (Test-Path -LiteralPath $targetPath) {
-        $candItem = Get-Item -LiteralPath $targetPath -Force -ErrorAction Stop
-        if ($candItem.PSIsContainer) { throw 'MEMORY.md path is a directory.' }
-        $existing = Get-Content -LiteralPath $targetPath -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
-        if ($null -eq $existing) { $existing = '' }
-    }
+    $before = Read-AgentUndoContent -Path $targetPath
+    $existing = [string]$before
 
     $summaryText = ''
     $cardContent = ''
@@ -6101,58 +6105,82 @@ function Invoke-AgentMemory {
         if (Test-PathHasReparsePoint -Path $targetPath -StopAt $stopRoot) {
             throw 'Reparse points are not allowed.'
         }
-        if ($action -in @('append', 'set')) {
-            if (-not (Test-Path -LiteralPath $parentDir)) {
-                New-Item -ItemType Directory -Path $parentDir -Force -ErrorAction Stop | Out-Null
-            }
-            if (Test-PathHasReparsePoint -Path $targetPath -StopAt $stopRoot) {
-                throw 'Reparse points are not allowed.'
-            }
-            if ($action -eq 'append') {
-                $freshExisting = Read-AgentMemoryText -TargetPath $targetPath
-                $rebuilt = Format-MemoryAppendText -Existing $freshExisting -Content $content
-                $updatedText = [string]$rebuilt.text
-            }
-            elseif ($action -eq 'set') {
-                $freshExisting = Read-AgentMemoryText -TargetPath $targetPath
-                if ($freshExisting -cne $existing) {
-                    throw 'Memory file changed during confirmation. No write performed.'
-                }
-            }
-            $stageFile = New-AgentTempFile
+        $fresh = Read-AgentUndoContent -Path $targetPath
+        if ($action -eq 'append') {
+            $before = $fresh
+            $rebuilt = Format-MemoryAppendText -Existing $before -Content $content
+            $updatedText = [string]$rebuilt.text
+        }
+        elseif ($fresh -cne $before) {
+            throw 'Memory file changed during confirmation. No write performed.'
+        }
+
+        if ($action -ne 'clear' -or $null -ne $before) {
+            $trackWrite = ($Arguments.user_initiated -ne $true)
+            $stageFile = $null
+            $backup = $null
+            $recorded = $false
+            $createdDirs = @()
             try {
-                Set-AgentUtf8Content -LiteralPath $stageFile.FullName -Value $updatedText
-                $stagedCheck = Get-Content -LiteralPath $stageFile.FullName -Raw -Encoding UTF8 -ErrorAction Stop
-                if ($null -eq $stagedCheck) { $stagedCheck = '' }
-                if ($stagedCheck -cne $updatedText) { throw 'Staged memory verification failed. No write performed.' }
+                $after = $null
+                $writeAction = 'deleted'
+                if ($action -ne 'clear') {
+                    $after = $updatedText
+                    $writeAction = if ($null -eq $before) { 'created' } else { 'modified' }
+                    $stageFile = New-AgentTempFile
+                    Set-AgentUtf8Content -LiteralPath $stageFile.FullName -Value $after
+                    if ((Read-AgentUndoContent -Path $stageFile.FullName) -cne $after) {
+                        throw 'Staged memory verification failed. No write performed.'
+                    }
+                    if (-not (Test-Path -LiteralPath $parentDir)) {
+                        New-Item -ItemType Directory -Path $parentDir -ErrorAction Stop | Out-Null
+                        $createdDirs = @($parentDir)
+                    }
+                }
                 if (Test-PathHasReparsePoint -Path $targetPath -StopAt $stopRoot) {
                     throw 'Reparse points are not allowed.'
                 }
-                Move-Item -LiteralPath $stageFile.FullName -Destination $targetPath -Force -ErrorAction Stop
-                $writtenCheck = Get-Content -LiteralPath $targetPath -Raw -Encoding UTF8 -ErrorAction Stop
-                if ($null -eq $writtenCheck) { $writtenCheck = '' }
-                if ($writtenCheck -cne $updatedText) { throw 'Written memory verification failed.' }
+                if ($trackWrite -and $null -ne $before) {
+                    $backup = New-AgentUndoBackup -Path $targetPath -Before $before
+                }
+                if (Test-PathHasReparsePoint -Path $targetPath -StopAt $stopRoot) {
+                    throw 'Reparse points are not allowed.'
+                }
+                if ((Read-AgentUndoContent -Path $targetPath) -cne $before) {
+                    throw 'Memory file changed before the operation. No write performed.'
+                }
+                if ($trackWrite) {
+                    $script:CurrentTurnWrites += @{
+                        action = $writeAction
+                        root = $stopRoot
+                        full_path = $targetPath
+                        rel_path = $displayRel
+                        memory_scope = $scope
+                        before_content = $before
+                        after_content = $after
+                        backup = $backup.FullName
+                        created_dirs = $createdDirs
+                    }
+                    $recorded = $true
+                }
+                if ($action -eq 'clear') {
+                    Remove-Item -LiteralPath $targetPath -Force -ErrorAction Stop
+                }
+                else {
+                    Move-Item -LiteralPath $stageFile.FullName -Destination $targetPath -Force -ErrorAction Stop
+                }
+                if ((Read-AgentUndoContent -Path $targetPath) -cne $after) { throw 'Written memory verification failed.' }
             }
             finally {
-                if ($stageFile -and (Test-Path -LiteralPath $stageFile.FullName)) {
+                if ($stageFile) {
                     Remove-Item -LiteralPath $stageFile.FullName -Force -ErrorAction SilentlyContinue
                 }
-            }
-            $existing = $updatedText
-        }
-        elseif ($action -eq 'clear') {
-            if (Test-Path -LiteralPath $targetPath) {
-                if (Test-PathHasReparsePoint -Path $targetPath -StopAt $stopRoot) {
-                    throw 'Reparse points are not allowed.'
+                if ($backup -and -not $recorded) {
+                    Remove-Item -LiteralPath $backup.FullName -Force -ErrorAction SilentlyContinue
                 }
-                $freshExisting = Read-AgentMemoryText -TargetPath $targetPath
-                if ($freshExisting -cne $existing) {
-                    throw 'Memory file changed during confirmation. No write performed.'
-                }
-                Remove-Item -LiteralPath $targetPath -Force -ErrorAction Stop
             }
-            $existing = ''
         }
+        $existing = $updatedText
 
         Sync-AgentMemoryContext -State $script:ActiveState -Root $Root -ConfigDir $configDir | Out-Null
     }
@@ -9497,6 +9525,8 @@ function New-AgentTurnSnapshot {
         messages = $messages
         leaf_id = $leafId
         tree_entries = $treeEntries
+        todos = @(Copy-SessionHashtableArray -Items $State.todos)
+        active_session_todos = @(Copy-SessionHashtableArray -Items $script:ActiveSessionTodos)
         agent_permission = [string]$script:AgentPermission
         auto_approve_commands = [bool]$script:AutoApproveCommands
         auto_approve_web = [bool]$script:AutoApproveWeb
@@ -9531,6 +9561,8 @@ function New-AgentUndoFrame {
         tree_entries = @($Snapshot.tree_entries)
         writes = @($Writes)
     }
+    if ($null -ne $Snapshot.todos) { $frame.todos = @($Snapshot.todos) }
+    if ($null -ne $Snapshot.active_session_todos) { $frame.active_session_todos = @($Snapshot.active_session_todos) }
     if (Test-AgentTurnFrameHasPermission -Frame $Snapshot) {
         $frame.agent_permission = [string]$Snapshot.agent_permission
         $frame.auto_approve_commands = [bool]$Snapshot.auto_approve_commands
@@ -10750,13 +10782,13 @@ function Invoke-ReplUndoCommand {
     try {
         Invoke-AgentUndo -State $State -UndoEntry $lastUndo
         Restore-AgentTurnPermission -Frame $lastUndo -State $State
+        Save-AgentSession -SessionFile $SessionFile -State $State -Workspace $RootPath -Model $Model
         if ($UndoStack.Count -eq 1) { $UndoStack = @() }
         else { $UndoStack = @($UndoStack[0..($UndoStack.Count - 2)]) }
-        Save-AgentSession -SessionFile $SessionFile -State $State -Workspace $RootPath -Model $Model
         if ($dropsLaterShell) {
             Write-Host ($script:Gm.Yellow + '  Warning: a later shell message is dropped from the transcript. The shell effect is not undone.' + $script:Gm.Reset)
         }
-        Write-Host ($script:Gm.Green + '  Reverted last turn and restored disk state.' + $script:Gm.Reset)
+        Write-Host ($script:Gm.Green + '  Reverted last turn and restored tracked changes.' + $script:Gm.Reset)
     }
     catch {
         Write-Host ($script:Gm.Red + '  ' + $_.Exception.Message + $script:Gm.Reset)
@@ -10898,8 +10930,8 @@ function Invoke-ReplContinueCommand {
     try {
         Invoke-AgentContinue -State $State -Endpoint $Endpoint -ModelId $Model -ApiKey $ApiKey -Root $RootPath -Steps $contSteps | Out-Null
         $LastFailedQuestion = ''
-        $UndoStack += (New-AgentUndoFrame -Snapshot $turnSnapshot -Writes @($script:CurrentTurnWrites))
         Save-AgentSession -SessionFile $SessionFile -State $State -Workspace $RootPath -Model $Model
+        $UndoStack += (New-AgentUndoFrame -Snapshot $turnSnapshot -Writes @($script:CurrentTurnWrites))
     }
     catch {
         $requestErr = Format-AgentError -ErrorRecord $_
@@ -11201,10 +11233,14 @@ if (-not $LibraryOnly) {
             catch {
                 $errMsg = Format-AgentError -ErrorRecord $_
                 $rollback = Invoke-AgentTurnRollback -State $state -Snapshot $turnSnapshot -Writes @($script:CurrentTurnWrites)
-                if (-not $rollback.succeeded -and $script:OutputMode -ne 'json') {
-                    Write-Host ($script:Gm.Red + 'Rollback did not succeed: ' + $rollback.error + $script:Gm.Reset)
+                $errorPayload = @{ status = 'error'; error = $errMsg }
+                if (-not $rollback.succeeded) {
+                    $errorPayload.rollback_error = $rollback.error
+                    if ($script:OutputMode -ne 'json') {
+                        Write-Host ($script:Gm.Red + 'Rollback did not succeed: ' + $rollback.error + $script:Gm.Reset)
+                    }
                 }
-                Write-AgentJsonEvent -EventType 'turn_end' -Payload @{ status = 'error'; error = $errMsg }
+                Write-AgentJsonEvent -EventType 'turn_end' -Payload $errorPayload
                 throw
             }
             return
@@ -11331,8 +11367,8 @@ if (-not $LibraryOnly) {
             try {
                 Invoke-AgentTurn -State $state -Endpoint $endpoint -ModelId $Model -ApiKey $agentKey -Root $rootPath -Steps $MaxSteps
                 $lastFailedQuestion = ''
-                $undoStack += (New-AgentUndoFrame -Snapshot $turnSnapshot -Writes @($script:CurrentTurnWrites))
                 Save-AgentSession -SessionFile $sessionFile -State $state -Workspace $rootPath -Model $Model
+                $undoStack += (New-AgentUndoFrame -Snapshot $turnSnapshot -Writes @($script:CurrentTurnWrites))
             }
             catch {
                 $lastFailedQuestion = $question

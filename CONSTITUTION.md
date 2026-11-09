@@ -62,7 +62,7 @@ Tool availability and confirmation prompts are governed by four permission modes
 3. **`AutoEdit`**: Automatically approves file creations and edits while still requiring `RUN` confirmation for `run_command`.
 4. **`Auto`**: Automatically approves file-tool modifications and shell commands. Only the file tools enforce workspace boundaries; commands retain OS permissions.
 
-These confirmation rules apply to `write_file`, `edit_file`, `memory` (modifying actions `append`, `set`, `clear`), and `run_command`. `memory` uses staged atomic writes and prompts for confirmation in `Ask` mode, while remaining a fixed-path cross-session tool outside `/undo` backup tracking. Outbound web tools (`fetch_url` and `web_search`) require explicit user confirmation in `ReadOnly` and `Ask` modes (with `[a]ll` approving web requests for the active session) and are automatically approved in `AutoEdit` and `Auto` modes.
+These confirmation rules apply to `write_file`, `edit_file`, `memory` (modifying actions `append`, `set`, `clear`), and `run_command`. `memory` uses staged writes at fixed paths and prompts for confirmation in `Ask` mode. Before modifying or clearing an existing memory file, the tool verifies a backup for the turn journal. Outbound web tools (`fetch_url` and `web_search`) require explicit user confirmation in `ReadOnly` and `Ask` modes (with `[a]ll` approving web requests for the active session) and are automatically approved in `AutoEdit` and `Auto` modes.
 
 ### Section 2. Strict Argument Validation
 Tool arguments must be validated against the tool's schema before execution. Unknown parameters, missing required parameters, and mismatched types (such as a string `"false"` passed for a boolean parameter) must be rejected immediately.
@@ -72,11 +72,11 @@ Tool arguments must be validated against the tool's schema before execution. Unk
 2. Existing file line endings (`CRLF` or `LF`) must be preserved. `edit_file` must support exact matches, CRLF-normalized matches, line-by-line fuzzy matches (ignoring trailing whitespace, BOM, and smart quotes/dashes), and non-overlapping batch `edits[]` applied bottom-to-top.
 
 ### Section 4. Safe Multi-Step `/undo`
-1. Every turn records files created or modified by `write_file` and `edit_file`, including in-process subagent edits, on the undo stack. Shell effects, `memory`, task-board state, settings, exports, and network effects are outside this stack.
+1. Every turn records files created, modified, or deleted by `write_file`, `edit_file`, and `memory`, including in-process subagent edits, on the undo stack. It also snapshots the session and active task boards. Shell effects, manual `/memory` commands, settings, exports, and network effects are outside this stack.
 2. Before `/undo` (or automatic rollback on turn failure) modifies any file on disk, a preflight check must validate the entire chain of operations for that turn in reverse order.
 3. Multiple edits to the same file within a single turn (such as `write_file` followed by `edit_file`, or multiple sequential `edit_file` calls) must be verified as a continuous chain and restored to the state prior to the turn.
 4. If a file was manually modified by the user after the agent's write, `/undo` must refuse to overwrite the manual changes and must keep all backup files intact so the user can resolve the conflict and retry `/undo`.
-5. Undo history is process-local and is not recovered from saved sessions. Preflight checks precede restoration, but a restore-time I/O failure can leave a partial rollback; no filesystem-wide atomic transaction is promised.
+5. Undo history is process-local. If restoration fails after preflight, report pending changes and keep the recovery backups. Restore conversation and task-board state only after file restoration succeeds.
 
 ### Section 5. Isolated Shell Execution and Output Logs
 `run_command` must redirect stdout and stderr directly to temporary disk files to avoid memory exhaustion, enforce a strict execution timeout (`Wait-Process` followed by process termination), and save the full untruncated output under `.shellossus/output/` whenever terminal output is truncated.
@@ -84,7 +84,7 @@ Tool arguments must be validated against the tool's schema before execution. Unk
 ### Section 6. Subagent Delegation (`run_agent`)
 1. `run_agent` supports single delegation (`prompt`), parallel read-only fan-out (`parallel[]`, 1..8 tasks), and sequential pipelines (`pipeline[]`, 1..8 steps with `{previous}` / `$PREVIOUS` substitution), with `context` set to `'clean'` (default) or `'fork'` (cloning parent conversation history up to the last valid boundary).
 2. Subagents cannot recursively invoke `run_agent` (`$script:SubagentDepth` is capped at 1) and can never escalate permissions above the parent session (`ReadOnly` sessions and `recon`/`audit`/`parallel[]` subagents are strictly clamped to `ReadOnly`).
-3. `write_file` / `edit_file` changes performed by in-process subagents are recorded into the parent turn's `$script:CurrentTurnWrites` so a single `/undo` covers both parent and subagent file-tool changes, subject to the preflight and I/O limits above.
+3. `write_file`, `edit_file`, and `memory` changes performed by in-process subagents are recorded into the parent turn's `$script:CurrentTurnWrites` so a single `/undo` covers both parent and subagent file changes, subject to the preflight and I/O limits above.
 
 ---
 

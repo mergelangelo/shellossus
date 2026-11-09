@@ -12,7 +12,7 @@ Drop [`shellossus.ps1`](shellossus.ps1) onto any machine and connect to any Open
 | **13 Built-in Tools** | `list_files`, `read_file` (line & character pagination), `find_files` (path globs + `.gitignore`), `grep_files` (regex/literal, filters, context, `file_offset` + `start_line` continuation), `write_file`, `edit_file` (fuzzy matching + batch `edits[]`), `run_command`, `run_agent` (single, parallel, pipeline), `fetch_url`, `web_search`, `todo`, `ask_user`, and `memory` (workspace/global persistent notes). See the [tool reference](docs/architecture.md#built-in-tool-reference). |
 | **Subagent Delegation** | Built-in roles (`recon`, `audit`, `craft`) + custom `.shellossus/agents/*.md` profiles, `/agents` catalog, `/agent:<role> <task>` shortcut, and unified parent `/undo` across subagent file edits |
 | **4 Permission Modes** | `ReadOnly` (blocks model file edits, memory writes, and commands), `Ask` *(default: prompts `WRITE` / `RUN`)*, `AutoEdit` (auto-approves file writes with backup; asks `RUN`), `Auto` (auto-approves writes and commands) |
-| **Verified File Edits & `/undo`** | Staged writes, diff previews, backups, and manual-edit conflict detection for `write_file` / `edit_file`, including in-process subagent edits. Shell commands and `memory` changes are outside undo coverage. |
+| **Verified File Edits & `/undo`** | Staged writes, backups, and manual-edit conflict detection for file and memory tools. Undo also restores the turn's task board. |
 | **First-Run Diagnostics** | `-Doctor` / `/doctor` explains runtime, configuration, endpoint, model catalog, and session storage problems without generating a model response |
 | **Session Tree, Fork & Export** | Workspace-scoped `.jsonl` sessions (`-Continue`, `/sessions`, `/resume`), branch navigation (`/tree`), session forking (`/fork`), and standalone HTML export (`/export`) |
 | **Smart Context Compaction** | Iterative structured handoffs (`/compact [focus]`) with cumulative `<read-files>` / `<modified-files>` tracking and automatic context-overflow recovery |
@@ -84,7 +84,7 @@ shellossus -Mascot                          # Display the 20x16 half-block masco
 | `/diagnostics [on\|off]` | Show or toggle pre-request capability and tool diagnostics |
 | `/reasoning <opt>` | Display: `compact`, `full`, `hide`; Effort: `low`, `medium`, `high`, `default` |
 | `/continue [steps]` | Continue execution after hitting the step limit (or continue the last response) |
-| `/undo` | Revert the last tracked turn and its `write_file` / `edit_file` changes; see coverage below |
+| `/undo` | Revert the last tracked turn, including file and memory tool changes and the task board |
 | `/todo [clear]` (`/td`) | Display or clear active task plan checklist |
 | `/retry` | Resend the last failed user prompt |
 | `/compact [focus]` | Summarize older turns into a structured context handoff |
@@ -116,9 +116,9 @@ shellossus -Mascot                          # Display the 20x16 half-block masco
 
 `list_files`, `read_file`, `find_files`, `grep_files`, `write_file`, `edit_file`, and `@file` attachments enforce workspace paths and reject reparse-point traversal. `read_file` can also read explicitly registered global `SKILL.md` files. **Shell commands are not sandboxed**: `run_command`, `!cmd`, and `!!cmd` start in the workspace but retain your OS permissions and can access other paths, programs, and the network. User-entered `!` / `!!` shortcuts run directly, without the model tool's permission prompt, including in `ReadOnly` mode.
 
-`memory` has workspace and global scopes. Global notes live beside the active configuration file; memory writes check target and ancestor paths for reparse points, are blocked in `ReadOnly`, and require confirmation in `Ask` mode (while remaining outside `/undo` backup tracking). Sessions, exports, temporary files, and global customization files also have paths outside the workspace. See the [full boundary and permission reference](docs/security.md).
+`memory` has workspace and global scopes. Global notes live beside the active configuration file. Memory writes check target and ancestor paths for reparse points, are blocked in `ReadOnly`, and require confirmation in `Ask` mode. Sessions, exports, temporary files, and global customization files also have paths outside the workspace. See the [full boundary and permission reference](docs/security.md).
 
-`/undo` covers recorded `write_file` / `edit_file` changes in the active process, including in-process subagent edits. It checks backups and manual-edit conflicts before restoring files. It does **not** undo shell effects, `memory`, task-board state, settings, exports, network effects, or changes from other processes. Undo history is not restored by loading a saved session. A restore-time I/O failure can leave a partially restored turn; this is not a filesystem-wide transaction or a replacement for version control.
+`/undo` and automatic rollback cover recorded `write_file`, `edit_file`, and `memory` tool changes, including in-process subagent edits. They check backups and manual-edit conflicts before restoring files, then restore the conversation and task board. Shell effects, manual `/memory` commands, settings, exports, and network effects are outside the turn journal. Undo history is process-local. A restore-time I/O failure can leave a partially restored turn. Shellossus reports the pending changes and keeps the backups for recovery.
 
 ## Repository Structure
 

@@ -16,16 +16,6 @@ function Format-MemoryAppendText {
     return @{ text = $updatedText; bullet = $newBullet }
 }
 
-function Read-AgentMemoryText {
-    param([string]$TargetPath)
-    if (-not (Test-Path -LiteralPath $TargetPath)) { return '' }
-    $item = Get-Item -LiteralPath $TargetPath -Force -ErrorAction Stop
-    if ($item.PSIsContainer) { throw 'MEMORY.md path is a directory.' }
-    $text = Get-Content -LiteralPath $TargetPath -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
-    if ($null -eq $text) { return '' }
-    return [string]$text
-}
-
 function Invoke-AgentMemory {
     param([string]$Root, $Arguments)
     $toolStart = Get-Date
@@ -80,17 +70,14 @@ function Invoke-AgentMemory {
         }
     }
 
+    if ($targetPath -eq $script:AgentConfigPath) {
+        throw 'Agent tools cannot access credential configuration files.'
+    }
     if (Test-PathHasReparsePoint -Path $targetPath -StopAt $stopRoot) {
         throw 'Reparse points are not allowed.'
     }
-
-    $existing = ''
-    if (Test-Path -LiteralPath $targetPath) {
-        $candItem = Get-Item -LiteralPath $targetPath -Force -ErrorAction Stop
-        if ($candItem.PSIsContainer) { throw 'MEMORY.md path is a directory.' }
-        $existing = Get-Content -LiteralPath $targetPath -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
-        if ($null -eq $existing) { $existing = '' }
-    }
+    $before = Read-AgentUndoContent -Path $targetPath
+    $existing = [string]$before
 
     $summaryText = ''
     $cardContent = ''
@@ -155,58 +142,82 @@ function Invoke-AgentMemory {
         if (Test-PathHasReparsePoint -Path $targetPath -StopAt $stopRoot) {
             throw 'Reparse points are not allowed.'
         }
-        if ($action -in @('append', 'set')) {
-            if (-not (Test-Path -LiteralPath $parentDir)) {
-                New-Item -ItemType Directory -Path $parentDir -Force -ErrorAction Stop | Out-Null
-            }
-            if (Test-PathHasReparsePoint -Path $targetPath -StopAt $stopRoot) {
-                throw 'Reparse points are not allowed.'
-            }
-            if ($action -eq 'append') {
-                $freshExisting = Read-AgentMemoryText -TargetPath $targetPath
-                $rebuilt = Format-MemoryAppendText -Existing $freshExisting -Content $content
-                $updatedText = [string]$rebuilt.text
-            }
-            elseif ($action -eq 'set') {
-                $freshExisting = Read-AgentMemoryText -TargetPath $targetPath
-                if ($freshExisting -cne $existing) {
-                    throw 'Memory file changed during confirmation. No write performed.'
-                }
-            }
-            $stageFile = New-AgentTempFile
+        $fresh = Read-AgentUndoContent -Path $targetPath
+        if ($action -eq 'append') {
+            $before = $fresh
+            $rebuilt = Format-MemoryAppendText -Existing $before -Content $content
+            $updatedText = [string]$rebuilt.text
+        }
+        elseif ($fresh -cne $before) {
+            throw 'Memory file changed during confirmation. No write performed.'
+        }
+
+        if ($action -ne 'clear' -or $null -ne $before) {
+            $trackWrite = ($Arguments.user_initiated -ne $true)
+            $stageFile = $null
+            $backup = $null
+            $recorded = $false
+            $createdDirs = @()
             try {
-                Set-AgentUtf8Content -LiteralPath $stageFile.FullName -Value $updatedText
-                $stagedCheck = Get-Content -LiteralPath $stageFile.FullName -Raw -Encoding UTF8 -ErrorAction Stop
-                if ($null -eq $stagedCheck) { $stagedCheck = '' }
-                if ($stagedCheck -cne $updatedText) { throw 'Staged memory verification failed. No write performed.' }
+                $after = $null
+                $writeAction = 'deleted'
+                if ($action -ne 'clear') {
+                    $after = $updatedText
+                    $writeAction = if ($null -eq $before) { 'created' } else { 'modified' }
+                    $stageFile = New-AgentTempFile
+                    Set-AgentUtf8Content -LiteralPath $stageFile.FullName -Value $after
+                    if ((Read-AgentUndoContent -Path $stageFile.FullName) -cne $after) {
+                        throw 'Staged memory verification failed. No write performed.'
+                    }
+                    if (-not (Test-Path -LiteralPath $parentDir)) {
+                        New-Item -ItemType Directory -Path $parentDir -ErrorAction Stop | Out-Null
+                        $createdDirs = @($parentDir)
+                    }
+                }
                 if (Test-PathHasReparsePoint -Path $targetPath -StopAt $stopRoot) {
                     throw 'Reparse points are not allowed.'
                 }
-                Move-Item -LiteralPath $stageFile.FullName -Destination $targetPath -Force -ErrorAction Stop
-                $writtenCheck = Get-Content -LiteralPath $targetPath -Raw -Encoding UTF8 -ErrorAction Stop
-                if ($null -eq $writtenCheck) { $writtenCheck = '' }
-                if ($writtenCheck -cne $updatedText) { throw 'Written memory verification failed.' }
+                if ($trackWrite -and $null -ne $before) {
+                    $backup = New-AgentUndoBackup -Path $targetPath -Before $before
+                }
+                if (Test-PathHasReparsePoint -Path $targetPath -StopAt $stopRoot) {
+                    throw 'Reparse points are not allowed.'
+                }
+                if ((Read-AgentUndoContent -Path $targetPath) -cne $before) {
+                    throw 'Memory file changed before the operation. No write performed.'
+                }
+                if ($trackWrite) {
+                    $script:CurrentTurnWrites += @{
+                        action = $writeAction
+                        root = $stopRoot
+                        full_path = $targetPath
+                        rel_path = $displayRel
+                        memory_scope = $scope
+                        before_content = $before
+                        after_content = $after
+                        backup = $backup.FullName
+                        created_dirs = $createdDirs
+                    }
+                    $recorded = $true
+                }
+                if ($action -eq 'clear') {
+                    Remove-Item -LiteralPath $targetPath -Force -ErrorAction Stop
+                }
+                else {
+                    Move-Item -LiteralPath $stageFile.FullName -Destination $targetPath -Force -ErrorAction Stop
+                }
+                if ((Read-AgentUndoContent -Path $targetPath) -cne $after) { throw 'Written memory verification failed.' }
             }
             finally {
-                if ($stageFile -and (Test-Path -LiteralPath $stageFile.FullName)) {
+                if ($stageFile) {
                     Remove-Item -LiteralPath $stageFile.FullName -Force -ErrorAction SilentlyContinue
                 }
-            }
-            $existing = $updatedText
-        }
-        elseif ($action -eq 'clear') {
-            if (Test-Path -LiteralPath $targetPath) {
-                if (Test-PathHasReparsePoint -Path $targetPath -StopAt $stopRoot) {
-                    throw 'Reparse points are not allowed.'
+                if ($backup -and -not $recorded) {
+                    Remove-Item -LiteralPath $backup.FullName -Force -ErrorAction SilentlyContinue
                 }
-                $freshExisting = Read-AgentMemoryText -TargetPath $targetPath
-                if ($freshExisting -cne $existing) {
-                    throw 'Memory file changed during confirmation. No write performed.'
-                }
-                Remove-Item -LiteralPath $targetPath -Force -ErrorAction Stop
             }
-            $existing = ''
         }
+        $existing = $updatedText
 
         Sync-AgentMemoryContext -State $script:ActiveState -Root $Root -ConfigDir $configDir | Out-Null
     }

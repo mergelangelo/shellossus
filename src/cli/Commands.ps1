@@ -278,13 +278,13 @@ function Invoke-ReplUndoCommand {
     try {
         Invoke-AgentUndo -State $State -UndoEntry $lastUndo
         Restore-AgentTurnPermission -Frame $lastUndo -State $State
+        Save-AgentSession -SessionFile $SessionFile -State $State -Workspace $RootPath -Model $Model
         if ($UndoStack.Count -eq 1) { $UndoStack = @() }
         else { $UndoStack = @($UndoStack[0..($UndoStack.Count - 2)]) }
-        Save-AgentSession -SessionFile $SessionFile -State $State -Workspace $RootPath -Model $Model
         if ($dropsLaterShell) {
             Write-Host ($script:Gm.Yellow + '  Warning: a later shell message is dropped from the transcript. The shell effect is not undone.' + $script:Gm.Reset)
         }
-        Write-Host ($script:Gm.Green + '  Reverted last turn and restored disk state.' + $script:Gm.Reset)
+        Write-Host ($script:Gm.Green + '  Reverted last turn and restored tracked changes.' + $script:Gm.Reset)
     }
     catch {
         Write-Host ($script:Gm.Red + '  ' + $_.Exception.Message + $script:Gm.Reset)
@@ -426,8 +426,8 @@ function Invoke-ReplContinueCommand {
     try {
         Invoke-AgentContinue -State $State -Endpoint $Endpoint -ModelId $Model -ApiKey $ApiKey -Root $RootPath -Steps $contSteps | Out-Null
         $LastFailedQuestion = ''
-        $UndoStack += (New-AgentUndoFrame -Snapshot $turnSnapshot -Writes @($script:CurrentTurnWrites))
         Save-AgentSession -SessionFile $SessionFile -State $State -Workspace $RootPath -Model $Model
+        $UndoStack += (New-AgentUndoFrame -Snapshot $turnSnapshot -Writes @($script:CurrentTurnWrites))
     }
     catch {
         $requestErr = Format-AgentError -ErrorRecord $_

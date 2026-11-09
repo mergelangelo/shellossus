@@ -38,6 +38,8 @@ function New-AgentTurnSnapshot {
         messages = $messages
         leaf_id = $leafId
         tree_entries = $treeEntries
+        todos = @(Copy-SessionHashtableArray -Items $State.todos)
+        active_session_todos = @(Copy-SessionHashtableArray -Items $script:ActiveSessionTodos)
         agent_permission = [string]$script:AgentPermission
         auto_approve_commands = [bool]$script:AutoApproveCommands
         auto_approve_web = [bool]$script:AutoApproveWeb
@@ -72,6 +74,8 @@ function New-AgentUndoFrame {
         tree_entries = @($Snapshot.tree_entries)
         writes = @($Writes)
     }
+    if ($null -ne $Snapshot.todos) { $frame.todos = @($Snapshot.todos) }
+    if ($null -ne $Snapshot.active_session_todos) { $frame.active_session_todos = @($Snapshot.active_session_todos) }
     if (Test-AgentTurnFrameHasPermission -Frame $Snapshot) {
         $frame.agent_permission = [string]$Snapshot.agent_permission
         $frame.auto_approve_commands = [bool]$Snapshot.auto_approve_commands

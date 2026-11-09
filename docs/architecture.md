@@ -32,7 +32,7 @@
 - **Ignore Rules & Directory Walk (`Ignore.ps1`):** `.gitignore` / `.ignore` parsing, ancestor rule resolution, and workspace walking (`Invoke-WorkspaceWalk`).
 - **File Writing & Editing (`Files.ps1`):** Fuzzy line matching (`Find-EditMatch`), diff previews (`Format-DiffSnippet`), line-ending preservation, and transactional single/batch file writes (`Invoke-AgentWrite`).
 - **File Discovery & Reading (`Search.ps1`):** Directory listing (`Invoke-AgentListFiles`), glob file search (`Invoke-AgentFindFiles`), regex/literal content search (`Invoke-AgentGrepFiles`), and paginated file reading (`Invoke-AgentReadFile`).
-- **Undo Engine (`Undo.ps1`):** Transactional disk rollback and turn reversal (`Invoke-AgentUndo`).
+- **Undo Engine (`Undo.ps1`)** checks and reverses recorded file operations, then restores conversation and task-board snapshots (`Invoke-AgentUndo`).
 - **Process & Shell (`Shell.ps1`):** Process tracking (`Stop-AgentProcessTree`) and sanitized command execution (`Invoke-AgentCommand`).
 - **Web & Search (`Web.ps1`):** URL encoding, HTML text extraction, web search (`Invoke-AgentWebSearch`), and page fetch (`Invoke-AgentFetchUrl`).
 - **Task Tracking (`Todo.ps1`):** Lightweight task state tracking tool (`Invoke-AgentTodo`).
@@ -81,11 +81,11 @@ These are the 13 canonical tools from `Get-AgentTools` in `src/tools/Schemas.ps1
 | `run_agent` | Single, parallel, or pipeline delegation | Inherits tool restrictions; in-process file edits join parent undo |
 | `fetch_url` | Fetch HTTP(S) text | Network access; no undo |
 | `web_search` | Search the web | Network access; no undo |
-| `todo` | Maintain the session task board | State persisted with sessions; no task-board undo |
+| `todo` | Maintain the session task board | Persisted with sessions and restored by turn undo |
 | `ask_user` | Ask a question or request plan review | Interactive response, not a general permission grant; no file undo |
-| `memory` | View/append/set/clear persistent notes | Workspace or configuration directory; no file undo |
+| `memory` | View/append/set/clear persistent notes | Workspace or configuration directory. Tool changes join turn undo. |
 
-`run_command` is a process with the user's permissions, not an OS sandbox. User-entered `!` / `!!` shortcuts invoke it directly. The `memory` implementation uses fixed-path handling rather than `Resolve-AgentPath`, checks the target file and ancestor directories up to the scope root for reparse points (`Test-PathHasReparsePoint`), and requires confirmation in `Ask` mode while remaining outside `/undo` backup tracking. See [security boundaries and undo coverage](security.md).
+`run_command` runs with the user's OS permissions. User-entered `!` / `!!` shortcuts invoke it directly. The `memory` tool checks its fixed target file and ancestor directories up to the scope root for reparse points (`Test-PathHasReparsePoint`). It requires confirmation in `Ask` mode and journals file creations, modifications, and deletions. See [security boundaries and undo coverage](security.md).
 
 ---
 

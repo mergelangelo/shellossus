@@ -262,10 +262,14 @@ if (-not $LibraryOnly) {
             catch {
                 $errMsg = Format-AgentError -ErrorRecord $_
                 $rollback = Invoke-AgentTurnRollback -State $state -Snapshot $turnSnapshot -Writes @($script:CurrentTurnWrites)
-                if (-not $rollback.succeeded -and $script:OutputMode -ne 'json') {
-                    Write-Host ($script:Gm.Red + 'Rollback did not succeed: ' + $rollback.error + $script:Gm.Reset)
+                $errorPayload = @{ status = 'error'; error = $errMsg }
+                if (-not $rollback.succeeded) {
+                    $errorPayload.rollback_error = $rollback.error
+                    if ($script:OutputMode -ne 'json') {
+                        Write-Host ($script:Gm.Red + 'Rollback did not succeed: ' + $rollback.error + $script:Gm.Reset)
+                    }
                 }
-                Write-AgentJsonEvent -EventType 'turn_end' -Payload @{ status = 'error'; error = $errMsg }
+                Write-AgentJsonEvent -EventType 'turn_end' -Payload $errorPayload
                 throw
             }
             return
@@ -392,8 +396,8 @@ if (-not $LibraryOnly) {
             try {
                 Invoke-AgentTurn -State $state -Endpoint $endpoint -ModelId $Model -ApiKey $agentKey -Root $rootPath -Steps $MaxSteps
                 $lastFailedQuestion = ''
-                $undoStack += (New-AgentUndoFrame -Snapshot $turnSnapshot -Writes @($script:CurrentTurnWrites))
                 Save-AgentSession -SessionFile $sessionFile -State $state -Workspace $rootPath -Model $Model
+                $undoStack += (New-AgentUndoFrame -Snapshot $turnSnapshot -Writes @($script:CurrentTurnWrites))
             }
             catch {
                 $lastFailedQuestion = $question

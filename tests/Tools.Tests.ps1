@@ -2819,7 +2819,7 @@ description: Optional subagent role: recon (ReadOnly search), audit (ReadOnly re
         if (Test-Path -LiteralPath $task11SetWs) { Remove-Item -LiteralPath $task11SetWs -Recurse -Force -ErrorAction SilentlyContinue }
     }
 
-    # Task 11: successful /undo after a memory append keeps the file, refreshes the prompt, and does not claim memory was rolled back.
+    # A direct /memory append outside the tracked turn remains on disk and in the prompt.
     $task11UndoPerm = $script:AgentPermission
     $task11UndoMode = $script:OutputMode
     $task11UndoActive = $script:ActiveState
@@ -2835,7 +2835,9 @@ description: Optional subagent role: recon (ReadOnly search), audit (ReadOnly re
         }
         Assert-True (-not ([string]$task11UndoBefore).Contains('undo memory note')) 'Undo fixture prompt already contained the memory note.'
         $script:ActiveState = $task11UndoState
-        $task11UndoAppend = Invoke-AgentMemory -Root $task11UndoWs -Arguments @{ action = 'append'; content = 'undo memory note' } | ConvertFrom-Json
+        $task11WritesBefore = @($script:CurrentTurnWrites).Count
+        $task11UndoAppend = Invoke-AgentMemory -Root $task11UndoWs -Arguments @{ action = 'append'; content = 'undo memory note'; user_initiated = $true } | ConvertFrom-Json
+        Assert-True (@($script:CurrentTurnWrites).Count -eq $task11WritesBefore) 'A direct /memory change joined the agent turn.'
         $task11UndoMem = Join-Path $task11UndoWs '.shellossus/MEMORY.md'
         Assert-True ($task11UndoAppend.success -and (Test-Path -LiteralPath $task11UndoMem)) 'Undo fixture did not append workspace memory.'
         $script:task11UndoHost = @()

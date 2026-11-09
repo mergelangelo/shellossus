@@ -112,6 +112,106 @@ try {
     if (Test-Path -LiteralPath $atomicBackup) { $atomicBackupAfter = Get-Content -LiteralPath $atomicBackup -Raw -Encoding UTF8 }
     Assert-True ((Test-Path -LiteralPath $atomicBackup) -and $atomicBackupAfter -ceq 'damaged' -and $atomicBackupBefore -ceq 'original-bytes') 'Failed preflight removed or rewrote the backup.'
 
+    # Exercise real turn entry points with a mixed file/memory journal and distinct todo snapshots.
+    $memoryRoot = Join-Path $workspacePath 'memory-undo'
+    $memoryConfig = Join-Path $envData.TestRoot 'memory-config'
+    New-Item -ItemType Directory -Path $memoryRoot, $memoryConfig -Force | Out-Null
+    $workspaceMemory = Join-Path $memoryRoot '.shellossus/MEMORY.md'
+    $globalMemory = Join-Path $memoryConfig 'MEMORY.md'
+    $memorySession = Join-Path $envData.TestRoot 'memory-undo.jsonl'
+    $savedMemoryConfig = $script:AgentConfigPath
+    $script:AgentConfigPath = Join-Path $memoryConfig '.env'
+    try {
+        & {
+            function Invoke-WebRequest {
+                param($Uri, $Method, $Headers, $ContentType, $Body, $TimeoutSec, $ErrorAction, [switch]$UseBasicParsing, $OutFile)
+                $request = $Body | ConvertFrom-Json
+                if ($request.messages[-1].role -eq 'tool') {
+                    $finish = if ($failTurn) { 'content_filter' } else { 'stop' }
+                    $choice = @{ finish_reason = $finish; message = @{ content = 'Done.' } }
+                }
+                else {
+                    $calls = @(
+                        @{ name = 'memory'; arguments = '{"action":"append","content":"workspace note"}' }
+                        @{ name = 'edit_file'; arguments = '{"path":".shellossus/MEMORY.md","old_text":"workspace note","new_text":"edited note"}' }
+                        @{ name = 'memory'; arguments = '{"action":"clear"}' }
+                        @{ name = 'memory'; arguments = '{"scope":"global","action":"append","content":"global note"}' }
+                        @{ name = 'memory'; arguments = '{"scope":"global","action":"clear"}' }
+                        @{ name = 'memory'; arguments = '{"action":"set","content":"recreated note"}' }
+                        @{ name = 'todo'; arguments = '{"todos":[{"content":"new task","status":"completed"}]}' }
+                    )
+                    $toolCalls = @(for ($i = 0; $i -lt $calls.Count; $i++) {
+                        @{ id = "memory-undo-$i"; type = 'function'; function = $calls[$i] }
+                    })
+                    $choice = @{ finish_reason = 'tool_calls'; message = @{ content = ''; tool_calls = $toolCalls } }
+                }
+                $reply = @{ choices = @($choice) } | ConvertTo-Json -Depth 10 -Compress
+                Set-Content -LiteralPath $OutFile -Value $reply -Encoding UTF8 -NoNewline
+            }
+
+            foreach ($failTurn in @($true, $false)) {
+                Set-AgentUtf8Content -LiteralPath $globalMemory -Value ''
+                $memoryState = @{
+                    workspace = $memoryRoot
+                    todos = @(@{ content = 'state task'; status = 'pending' })
+                    messages = @(@{ role = 'system'; content = 'system before' }, @{ role = 'user'; content = 'update memory' })
+                }
+                $script:ActiveSessionTodos = @(@{ content = 'active task'; status = 'in_progress' })
+                $turn = Invoke-ReplContinueCommand -State $memoryState -Endpoint 'https://example.invalid/v1/chat/completions' -Model 'test-model' -ApiKey 'fake' -RootPath $memoryRoot -SessionFile $memorySession -MaxSteps 4
+                $writes = @($script:CurrentTurnWrites)
+                Assert-True (($writes.action -join ',') -eq 'created,modified,deleted,modified,deleted,created') 'Memory and regular file writes did not share the journal.'
+                if ($failTurn) {
+                    Assert-True (@($turn.undo_stack).Count -eq 0 -and @($memoryState.messages).Count -eq 2) 'A failed turn did not restore history and its undo stack.'
+                }
+                else {
+                    $frame = $turn.undo_stack[0]
+                    Assert-True ($memoryState.todos[0].content -eq 'new task' -and $script:ActiveSessionTodos[0].content -eq 'new task') 'The todo tool did not update both task boards.'
+                    Assert-True ((Get-Content -LiteralPath $workspaceMemory -Raw) -like '*recreated note*' -and -not (Test-Path -LiteralPath $globalMemory)) 'The memory mutations did not reach disk.'
+
+                    Set-AgentUtf8Content -LiteralPath $globalMemory -Value 'manual replacement'
+                    $manualConflict = ''
+                    try { Invoke-AgentUndo -State $memoryState -UndoEntry $frame }
+                    catch { $manualConflict = $_.Exception.Message }
+                    Assert-True ($manualConflict -like '*manual changes*' -and (Test-Path -LiteralPath $workspaceMemory)) 'A manually recreated memory file did not stop undo preflight.'
+                    Remove-Item -LiteralPath $globalMemory -Force
+
+                    $partialError = & {
+                        function Copy-Item {
+                            [CmdletBinding()]
+                            param($LiteralPath, $Destination, [switch]$Force)
+                            if ($Destination -eq $globalMemory) { throw 'Injected memory restore failure.' }
+                            Microsoft.PowerShell.Management\Copy-Item @PSBoundParameters
+                        }
+                        try { Invoke-AgentUndo -State $memoryState -UndoEntry $frame }
+                        catch { $_.Exception.Message }
+                    }
+                    Assert-True ($partialError -like '*Injected memory restore failure*' -and $partialError.Contains($globalMemory) -and $partialError.Contains($writes[4].backup)) 'Partial undo did not report pending memory operations and backup paths.'
+                    Assert-True ($writes[-1].undone -and -not $writes[2].undone -and -not (Test-Path -LiteralPath $workspaceMemory)) 'Partial undo did not stop before earlier writes.'
+                    Assert-True ($memoryState.todos[0].content -eq 'new task' -and $script:ActiveSessionTodos[0].content -eq 'new task') 'Partial undo restored todo before restoring files.'
+                    Clear-AgentUndoBackups -UndoEntries @($frame) -Writes $writes
+                    Assert-True (Test-Path -LiteralPath $writes[4].backup) 'Partial undo lost a recovery backup.'
+                    $undo = Invoke-ReplUndoCommand -State $memoryState -RootPath $memoryRoot -Model 'test-model' -SessionFile $memorySession -UndoStack @($frame)
+                    Assert-True (@($undo.undo_stack).Count -eq 0) 'The partial undo could not be retried.'
+                    $meta = Get-Content -LiteralPath $memorySession -TotalCount 1 | ConvertFrom-Json
+                    Assert-True ($meta.todos[0].content -eq 'active task') 'Undo did not persist the restored task board.'
+                }
+                Assert-True (-not (Test-Path -LiteralPath $workspaceMemory) -and (Test-Path -LiteralPath $globalMemory -PathType Leaf) -and (Get-Item -LiteralPath $globalMemory).Length -eq 0) 'Rollback did not distinguish missing from empty memory.'
+                Assert-True ($memoryState.todos[0].content -eq 'state task' -and $script:ActiveSessionTodos[0].content -eq 'active task') 'Rollback did not restore the two task snapshots independently.'
+                Assert-True ($memoryState.messages[0].content -notlike '*recreated note*') 'Restored system prompt still includes undone memory.'
+                foreach ($w in $writes) {
+                    Assert-True (-not $w.backup -or -not (Test-Path -LiteralPath $w.backup)) 'Successful rollback left a recovery backup.'
+                }
+            }
+        }
+    }
+    finally {
+        foreach ($w in @($script:CurrentTurnWrites)) {
+            if ($w.backup) { Remove-Item -LiteralPath $w.backup -Force -ErrorAction SilentlyContinue }
+        }
+        $script:AgentConfigPath = $savedMemoryConfig
+        $script:ActiveSessionTodos = @()
+    }
+
     # Failed rollback keeps one pre-turn frame and its backups; success still reports rollback and adds no second frame.
     $script:AgentPermission = 'AutoEdit'
     $script:OutputMode = 'text'
@@ -392,6 +492,7 @@ try {
             if ([string]$jsonEv.type -eq 'turn_end') {
                 $sawJsonEnd = $true
                 Assert-True ([string]$jsonEv.status -eq 'error' -and [string]$jsonEv.error -like '*500*' -and [string]$jsonEv.error -notlike '*rolled back*') "JSON turn_end claimed rollback: $trim"
+                Assert-True ($jsonEv.rollback_error -like '*Backup verification failed*' -and $jsonEv.rollback_error.Contains($global:rbBackup)) 'JSON turn_end omitted the rollback failure and backup path.'
             }
         }
         Assert-True $sawJsonEnd 'JSON -Prompt did not emit turn_end.'

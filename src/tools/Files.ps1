@@ -160,14 +160,7 @@ function Invoke-AgentStagedWrite {
             $current = Get-Content -LiteralPath $path -Raw -Encoding UTF8 -ErrorAction Stop
             if ($null -eq $current) { $current = '' }
             if ($current -cne $before) { throw 'File changed during confirmation. No write performed.' }
-            $backup = New-AgentTempFile
-            Copy-Item -LiteralPath $path -Destination $backup.FullName -Force -ErrorAction Stop
-            $backupCheck = Get-Content -LiteralPath $backup.FullName -Raw -Encoding UTF8 -ErrorAction Stop
-            if ($null -eq $backupCheck) { $backupCheck = '' }
-            if ($backupCheck -cne $before) {
-                Remove-Item -LiteralPath $backup.FullName -Force -ErrorAction SilentlyContinue
-                throw 'Backup verification failed. No write performed.'
-            }
+            $backup = New-AgentUndoBackup -Path $path -Before $before
             $backupPath = $backup.FullName
             if ($script:OutputMode -ne 'json') {
                 Write-Host ($script:Gm.Grey1 + 'Backup: ' + $backupPath + $script:Gm.Reset)

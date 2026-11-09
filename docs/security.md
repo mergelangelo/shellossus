@@ -17,7 +17,7 @@ You can set the permission mode at launch (`-Permission <Mode>`) or switch it at
 
 When resuming a saved session via `/resume`, `shellossus` resets the active permission mode to `Ask` unless `-Permission` was explicitly passed at launch.
 
-The table describes the model's `write_file`, `edit_file`, and `run_command` tools. It does not make the entire process read-only. `todo`, `ask_user`, and `memory` remain available (subject to tool filters); memory modifications (`append`, `set`, `clear`) are rejected in `ReadOnly` and require confirmation in `Ask` mode (using staged atomic writes without `/undo` backup tracking). Outbound web tools (`fetch_url` and `web_search`) require explicit user confirmation in `ReadOnly` and `Ask` modes (with `[a]ll` approving web requests for the active session) and are automatically approved in `AutoEdit` and `Auto` modes. Sessions can still be saved in `ReadOnly`. User-entered `!cmd` / `!!cmd` shortcuts execute directly, without `RUN` confirmation or a `ReadOnly` check. `ask_user` plan approval does not change these permission rules.
+The table describes the model's `write_file`, `edit_file`, and `run_command` tools. It does not make the entire process read-only. `todo`, `ask_user`, and `memory` remain available subject to tool filters. Memory modifications (`append`, `set`, `clear`) are rejected in `ReadOnly` and require confirmation in `Ask` mode. Outbound web tools (`fetch_url` and `web_search`) require explicit user confirmation in `ReadOnly` and `Ask` modes (with `[a]ll` approving web requests for the active session) and are automatically approved in `AutoEdit` and `Auto` modes. Sessions can still be saved in `ReadOnly`. User-entered `!cmd` / `!!cmd` shortcuts execute directly, without `RUN` confirmation or a `ReadOnly` check. `ask_user` plan approval does not change these permission rules.
 
 ---
 
@@ -44,15 +44,15 @@ The table describes the model's `write_file`, `edit_file`, and `run_command` too
 - **Conflict-Aware `/undo`:**
   - `write_file` and `edit_file` record created/modified paths and their content. Modified files also have verified pre-edit backups. In-process subagent file edits join the parent's recorded turn.
   - Before changing any file, undo verifies every pending backup against its recorded `before_content`, including intermediate backups from repeated edits to the same file. Missing, unreadable, or corrupted backups stop the entire preflight; files, backups, and conversation state are preserved for a retry.
-  - Undo checks each recorded target and its parent path for workspace boundaries and reparse points during preflight and again before each restoration or deletion. As with the file tools, these application-level checks do not eliminate filesystem races.
+  - Undo checks each recorded target against the workspace boundary or its fixed memory path. It checks for reparse points during preflight and again before each restoration or deletion. These application-level checks are subject to filesystem races.
   - When `/undo` is invoked, `Invoke-AgentUndo` checks whether the file on disk was modified manually after the agent's write. If manual edits are detected, `/undo` refuses to overwrite the file and preserves the backup path.
-  - During `/undo`, backup files are deleted only after restoration succeeds and the restored content is verified against the recorded original content. Temporary backup files are also removed when a session is reset or switched (`/new`, `/clear`, `/resume`, `/import`, `/tree`, `/fork`) or when `shellossus` exits.
+  - Undo removes the backups after restoration and verification succeed. A failed undo reports pending operations and preserves the backups, including across session switches and process exit.
 
-### What `/undo` Does Not Cover
+### Turn and Recovery Scope
 
-`/undo` restores the tracked turn's conversation messages and recorded file changes. It does not reverse effects of `run_command`, `!cmd`, `!!cmd`, `memory` (either scope), task-board state, configuration/setup, session exports, network requests, or changes by external processes. The same limit applies to automatic rollback after a failed turn. For example, `write_file` creating `a.txt` is tracked, while a shell command creating `b.txt` or `memory` appending a note is not.
+`/undo` and automatic rollback after a failed turn reverse recorded `write_file`, `edit_file`, and `memory` tool changes in both memory scopes. They restore conversation and task-board state after file restoration succeeds. Shell commands, manual `/memory` commands, configuration, session exports, and network requests are outside the turn journal.
 
-Undo history is kept in memory and is reset (removing temporary backup files) when a session is reset or switched (`/new`, `/clear`, `/resume`, `/import`, `/tree`, `/fork`) or when `shellossus` exits; loading JSONL history does not reconstruct file backups. Preflight failure prevents that undo operation from changing files, but I/O failure during restoration can leave some files restored and others pending. Backups are temporary local files, not a durable transaction journal. Keep version control or other backups for long-lived recovery.
+Undo history is process-local. Session resets, session switches, and process exit discard undo history and clean up ordinary backups. An I/O failure during restoration can leave some files restored and others pending. In that case Shellossus reports the pending paths and keeps the backups for recovery.
 
 ---
 
