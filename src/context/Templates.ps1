@@ -150,10 +150,14 @@ function Resolve-PromptTemplate {
 }
 
 function Expand-UserPrompt {
-    param([string]$Root, [string]$Prompt)
+    param([string]$Root, [string]$Prompt, [string]$AttachmentSource = $Prompt)
     $attachments = @()
     $seenPaths = @{}
-    foreach ($token in @($Prompt -split '\s+')) {
+    foreach ($token in @($AttachmentSource -split '\s+')) {
+        if (($token.StartsWith('"@') -and $token.EndsWith('"')) -or
+            ($token.StartsWith("'@") -and $token.EndsWith("'"))) {
+            $token = $token.Substring(1, $token.Length - 2)
+        }
         if ($token.StartsWith('@') -and $token.Length -gt 1) {
             $rel = $token.Substring(1).TrimEnd(',', '.', ';', ':', ')', ']', '?', '!')
             if (-not $rel) { continue }

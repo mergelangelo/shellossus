@@ -94,8 +94,8 @@ function Invoke-SubagentInProcess {
         else {
             @{ role = 'system'; content = $subSys }
         })
-        $expandedTask = Expand-UserPrompt -Root $Root -Prompt $TaskPrompt
-        $initMsgs += @{ role = 'user'; content = $expandedTask }
+        # Tool arguments and prior step output are task text, never attachment requests.
+        $initMsgs += @{ role = 'user'; content = $TaskPrompt }
         $childState = @{
             session_id = 'sub-' + (Get-Date -Format 'yyyyMMdd-HHmmss') + '-' + (Get-Random -Minimum 1000 -Maximum 9999)
             workspace = $Root

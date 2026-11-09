@@ -841,6 +841,72 @@ try {
     }
     finally { Remove-Item Function:\Invoke-WebRequest -ErrorAction SilentlyContinue }
 
+    # Model-authored task text stays literal even when it names an existing file.
+    Set-AgentUtf8Content -LiteralPath (Join-Path $workspacePath 'model-only.txt') -Value 'private attachment marker'
+    & {
+        $receivedTasks = @{ prompts = @() }
+        function Invoke-WebRequest {
+            param($Uri, $Method, $Headers, $ContentType, $Body, $TimeoutSec, $ErrorAction, [switch]$UseBasicParsing, $OutFile)
+            $request = $Body | ConvertFrom-Json
+            $task = [string]$request.messages[-1].content
+            $receivedTasks.prompts += $task
+            Assert-True (@($request.tools).Count -eq 0) 'Attachment fixture unexpectedly exposed a file tool.'
+            $replyText = if ($task -eq 'Generate a reference') { 'generated @model-only.txt' } else { 'done' }
+            @{ choices = @(@{ finish_reason = 'stop'; message = @{ content = $replyText } }) } |
+                ConvertTo-Json -Depth 10 -Compress | Set-Content -LiteralPath $OutFile -Encoding UTF8 -NoNewline
+        }
+        foreach ($arguments in @(
+            '{"role":"writer-only","prompt":"Inspect @model-only.txt"}'
+            '{"parallel":[{"role":"writer-only","prompt":"Parallel @model-only.txt"}]}'
+            '{"pipeline":[{"role":"writer-only","prompt":"Generate a reference"},{"role":"writer-only","prompt":"Use {previous} and $PREVIOUS"}]}'
+        )) {
+            $res = Invoke-AgentTool -Root $workspacePath -Call @{ function = @{ name = 'run_agent'; arguments = $arguments } } | ConvertFrom-Json
+            Assert-True ($res.status -eq 'completed') "Subagent attachment fixture failed: $($res.error)"
+        }
+        $expected = @('Inspect @model-only.txt', 'Parallel @model-only.txt', 'Generate a reference', 'Use generated @model-only.txt and generated @model-only.txt')
+        Assert-True (($receivedTasks.prompts -join '|') -ceq ($expected -join '|')) 'A model task or pipeline result was expanded as a file attachment.'
+    }
+
+    # CLI input can attach a file through a template argument. Template text and literal worker input stay inert.
+    $templateDir = Join-Path $workspacePath '.shellossus/prompts'
+    New-Item -ItemType Directory -Path $templateDir -Force | Out-Null
+    Set-AgentUtf8Content -LiteralPath (Join-Path $templateDir 'check-files.md') -Value 'Review $1 and @model-only.txt'
+    Set-AgentUtf8Content -LiteralPath (Join-Path $workspacePath 'explicit.txt') -Value 'user attachment marker'
+    $promptConfig = Join-Path $envData.TestRoot 'attachment-policy.env'
+    Save-AgentConfig -Path $promptConfig -Config @{ SHELLOSSUS_API_KEY = 'test-key' }
+    & {
+        $received = @{ prompts = @(); fail_next = $false; queue = @() }
+        function Invoke-WebRequest {
+            param($Uri, $Method, $Headers, $ContentType, $Body, $TimeoutSec, $ErrorAction, [switch]$UseBasicParsing, $OutFile)
+            $request = $Body | ConvertFrom-Json
+            $received.prompts += [string]$request.messages[-1].content
+            $finish = if ($received.fail_next) { 'content_filter' } else { 'stop' }
+            $received.fail_next = $false
+            @{ choices = @(@{ finish_reason = $finish; message = @{ content = 'done' } }) } |
+                ConvertTo-Json -Depth 10 -Compress | Set-Content -LiteralPath $OutFile -Encoding UTF8 -NoNewline
+        }
+        function Read-Host {
+            param($Prompt)
+            if ($received.queue.Count -eq 0) { return '/exit' }
+            $next = $received.queue[0]
+            $received.queue = @($received.queue | Select-Object -Skip 1)
+            return $next
+        }
+        $cliArgs = @{ Workspace = $workspacePath; BaseUrl = 'https://example.invalid/v1'; Model = 'test-model'; ConfigPath = $promptConfig; NoSession = $true }
+        $userInput = '/check-files "@explicit.txt"'
+        & "$PSScriptRoot\..\shellossus.ps1" @cliArgs -Mode json -Prompt $userInput
+        & "$PSScriptRoot\..\shellossus.ps1" @cliArgs -Mode json -Prompt $userInput -LiteralPrompt
+        $received.fail_next = $true
+        $received.queue = @($userInput, '/retry', '/exit')
+        & "$PSScriptRoot\..\shellossus.ps1" @cliArgs -Mode text
+        Assert-True ($received.prompts.Count -eq 4 -and $received.prompts[1] -ceq $userInput) 'The worker prompt expanded user shortcuts or the REPL did not retry.'
+        foreach ($promptIndex in @(0, 2, 3)) {
+            $sent = $received.prompts[$promptIndex]
+            Assert-True ($sent -like 'Review @explicit.txt and @model-only.txt*<file path="explicit.txt">*user attachment marker*') 'An explicit template argument lost its file attachment.'
+            Assert-True ($sent -notlike '*private attachment marker*' -and $sent -notlike '*<file path="model-only.txt">*') 'Template text or retry requested an implicit attachment.'
+        }
+    }
+
     # Actual worker processes receive the same role/parent intersection, CLI flags
     # (-NoSkills, -NoPromptTemplates, -NoContextFiles, -ReasoningEffort), role in system prompt
     # rather than user -Prompt, and aggregate token usage into parent $State.
@@ -859,6 +925,7 @@ param(
     [switch]$NoTools,
     $ExcludeTools,
     $Prompt,
+    [switch]$LiteralPrompt,
     $ConfigPath,
     [switch]$NoSkills,
     [switch]$NoPromptTemplates,
@@ -873,6 +940,7 @@ $passedNoTemplates = [bool]$NoPromptTemplates
 $passedNoContext = [bool]$NoContextFiles
 $passedReasoning = [string]$ReasoningEffort
 $passedPrompt = [string]$Prompt
+$passedLiteralPrompt = [bool]$LiteralPrompt
 . '__LIBRARY__' -LibraryOnly
 $script:EnabledTools = @($allowed -split ',' | Where-Object { $_ })
 $script:ExcludedTools = @($denied -split ',' | Where-Object { $_ })
@@ -892,6 +960,7 @@ $payload = @{
     no_context = $passedNoContext
     reasoning_effort = $passedReasoning
     user_prompt = $passedPrompt
+    literal_prompt = $passedLiteralPrompt
     sys_has_role = $sysPrompt.Contains("[Subagent Role: $($env:SHELLOSSUS_SUB_ROLE)]")
 }
 @{ type = 'message_end'; role = 'assistant'; content = ($payload | ConvertTo-Json -Compress) } | ConvertTo-Json -Compress
@@ -908,14 +977,14 @@ $payload = @{
     $parentStateForParallel = @{ usage_input_tokens = 10; usage_output_tokens = 5 }
     $script:ActiveState = $parentStateForParallel
     try {
-        $workerResults = @(Invoke-ParallelSubagentProcesses -Root $workspacePath -Tasks @(@{ role = 'reader'; prompt = 'inspect' }, @{ role = 'writer-only'; prompt = 'inspect' }) -ScriptPath $workerScript)
+        $workerResults = @(Invoke-ParallelSubagentProcesses -Root $workspacePath -Tasks @(@{ role = 'reader'; prompt = '/check-files @model-only.txt' }, @{ role = 'writer-only'; prompt = 'inspect' }) -ScriptPath $workerScript)
         Assert-True ($workerResults.Count -eq 2) 'Parallel worker filter test did not return two results.'
         $reader = $workerResults[0].output | ConvertFrom-Json
         $writer = $workerResults[1].output | ConvertFrom-Json
         Assert-True (($reader.tools -join ',') -eq 'read_file') 'Worker did not inherit aliases, wildcard filters, or exclusions.'
         Assert-True ($writer.no_tools -and $writer.tools.Count -eq 0) 'Empty worker allowlist enabled tools.'
         Assert-True ($reader.no_skills -and $reader.no_templates -and $reader.no_context -and $reader.reasoning_effort -eq 'high') 'Worker did not receive -NoSkills, -NoPromptTemplates, -NoContextFiles, or -ReasoningEffort.'
-        Assert-True ($reader.user_prompt -eq 'inspect' -and $reader.sys_has_role) ("Parallel worker mixed [Subagent Role] into user -Prompt instead of system prompt: " + ($reader | ConvertTo-Json -Compress))
+        Assert-True ($reader.user_prompt -ceq '/check-files @model-only.txt' -and $reader.literal_prompt -and $reader.sys_has_role) ("Parallel worker did not receive a literal user prompt and separate role: " + ($reader | ConvertTo-Json -Compress))
         Assert-True ($parentStateForParallel.usage_input_tokens -eq 260 -and $parentStateForParallel.usage_output_tokens -eq 75) "Parallel worker token usage was not aggregated into parent state (got in=$($parentStateForParallel.usage_input_tokens), out=$($parentStateForParallel.usage_output_tokens))."
 
         # Regression (Task 11): Aborted/crashed parallel worker that emitted message_end with read_file tool_call

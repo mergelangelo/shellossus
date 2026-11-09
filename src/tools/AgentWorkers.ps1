@@ -86,6 +86,7 @@ $workerArgs = @{
     NoTools = ($env:SHELLOSSUS_SUB_NO_TOOLS -eq '1')
     ExcludeTools = 'run_agent'
     Prompt = $pText
+    LiteralPrompt = $true
 }
 if ($env:SHELLOSSUS_SUB_CONFIG) { $workerArgs.ConfigPath = $env:SHELLOSSUS_SUB_CONFIG }
 if ($env:SHELLOSSUS_SUB_NO_SKILLS -eq '1') { $workerArgs.NoSkills = $true }

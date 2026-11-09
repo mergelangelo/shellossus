@@ -111,7 +111,8 @@ param(
     [string]$ProfilePath = $PROFILE,
     [string]$Shortcut = '',
     [switch]$NoShortcut,
-    [switch]$LibraryOnly
+    [switch]$LibraryOnly,
+    [switch]$LiteralPrompt
 )
 
 # Windows PowerShell 5.1 compatible. No downloaded executables or modules.

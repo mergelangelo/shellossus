@@ -40,6 +40,8 @@ All `.ps1` files (`src/*.ps1`, `shellossus.ps1`, `build.ps1`, `tests/*.ps1`) mus
 ### Section 1. Workspace Boundary Enforcement
 Workspace file tools (`list_files`, `read_file`, `find_files`, `grep_files`, `write_file`, `edit_file`) and `@file` attachments must enforce the active workspace root, with a read-only exception for registered global `SKILL.md` files via `read_file`. This is an application-level file-tool boundary, not an OS sandbox. Shell commands retain the user's OS permissions; configuration/context loading, sessions, imports/exports, temporary files, and the explicit global `memory` scope have separate paths that must be documented accurately.
 
+Only explicit `@file` references in the user's original input can request attachments. Model-generated subagent tasks and substituted pipeline output are passed as literal text.
+
 ### Section 2. Reparse Point and Symlink Rejection
 Before a workspace file tool accesses a path, `shellossus` must verify the target and ancestor directories. Any path that traverses a symbolic link, NTFS junction, or reparse point (`Attributes -band 1024`) must be rejected. The `memory` tool likewise checks its target path and ancestor directories up to the scope root (`Test-PathHasReparsePoint`) before reading or writing `MEMORY.md`.
 

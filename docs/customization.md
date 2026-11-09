@@ -75,7 +75,7 @@ You: /review @src/tools/Files.ps1
 
 ## 5. Inline File Attachments (`@file`) & Shell Shortcuts (`!cmd`)
 
-- **`@path/to/file`:** Any `@relative/path` token in your prompt automatically attaches the first 300 lines (up to 20,000 characters) of that workspace file in a `<file path="...">...</file>` block.
+- **`@path/to/file`** in your original input, including slash-command arguments, attaches the first 300 lines (up to 20,000 characters) of that workspace file in a `<file path="...">...</file>` block. Template bodies and subagent task text are passed through without reading their `@file` references.
 - **`!command`:** Runs a PowerShell command in the workspace root, prints the output, and appends the command + output to the conversation context.
 - **`!!command`:** Runs a PowerShell command locally in the terminal without adding its output to the conversation context.
 

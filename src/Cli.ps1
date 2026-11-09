@@ -207,6 +207,7 @@ if (-not $LibraryOnly) {
     Sync-AgentCapabilities -State $state | Out-Null
     $undoStack = @()
     $lastFailedQuestion = ''
+    $lastFailedAttachmentSource = ''
     if ($Session) {
         $candSess = if (Test-Path -LiteralPath $Session) { $Session } else { Join-Path $sessionDir (Split-Path $Session -Leaf) }
         if (-not (Test-Path -LiteralPath $candSess) -and ($candSess -notmatch '\.jsonl$')) { $candSess += '.jsonl' }
@@ -251,9 +252,12 @@ if (-not $LibraryOnly) {
             $turnSnapshot = New-AgentTurnSnapshot -State $state
             $null = Invoke-ThresholdAutoCompact -State $state -Endpoint $endpoint -ModelId $Model -ApiKey $agentKey
             $script:CurrentTurnWrites = @()
-            $tplPrompt = Resolve-PromptTemplate -Root $rootPath -ConfigDir $configDir -InputText $Prompt.Trim()
-            $effectivePrompt = if ($null -ne $tplPrompt) { $tplPrompt } else { $Prompt }
-            $expandedPrompt = Expand-UserPrompt -Root $rootPath -Prompt $effectivePrompt
+            $expandedPrompt = $Prompt
+            if (-not $LiteralPrompt) {
+                $tplPrompt = Resolve-PromptTemplate -Root $rootPath -ConfigDir $configDir -InputText $Prompt.Trim()
+                $effectivePrompt = if ($null -ne $tplPrompt) { $tplPrompt } else { $Prompt }
+                $expandedPrompt = Expand-UserPrompt -Root $rootPath -Prompt $effectivePrompt -AttachmentSource $Prompt
+            }
             $state.messages += @{ role = 'user'; content = $expandedPrompt }
             try {
                 Invoke-AgentTurn -State $state -Endpoint $endpoint -ModelId $Model -ApiKey $agentKey -Root $rootPath -Steps $MaxSteps
@@ -365,13 +369,14 @@ if (-not $LibraryOnly) {
                 $undoStack = @($contRes.undo_stack); $lastFailedQuestion = $contRes.last_failed_question
                 continue
             }
+            $attachmentSource = $question
             if ($trimmedQ -eq '/retry') {
                 if (-not $lastFailedQuestion) {
                     Write-Host ($script:Gm.Grey1 + '  No failed request to retry.' + $script:Gm.Reset)
                     continue
                 }
                 $question = $lastFailedQuestion
-                $trimmedQ = $question.Trim()
+                $attachmentSource = $lastFailedAttachmentSource
                 Write-Host ($script:Gm.Aqua + '  [retry] Resending last failed prompt...' + $script:Gm.Reset)
             }
             elseif ($trimmedQ.StartsWith('/')) {
@@ -391,7 +396,7 @@ if (-not $LibraryOnly) {
             $turnSnapshot = New-AgentTurnSnapshot -State $state
             $null = Invoke-ThresholdAutoCompact -State $state -Endpoint $endpoint -ModelId $Model -ApiKey $agentKey
             $script:CurrentTurnWrites = @()
-            $expandedQuestion = Expand-UserPrompt -Root $rootPath -Prompt $question
+            $expandedQuestion = Expand-UserPrompt -Root $rootPath -Prompt $question -AttachmentSource $attachmentSource
             $state.messages += @{ role = 'user'; content = $expandedQuestion }
             try {
                 Invoke-AgentTurn -State $state -Endpoint $endpoint -ModelId $Model -ApiKey $agentKey -Root $rootPath -Steps $MaxSteps
@@ -401,6 +406,7 @@ if (-not $LibraryOnly) {
             }
             catch {
                 $lastFailedQuestion = $question
+                $lastFailedAttachmentSource = $attachmentSource
                 $requestErr = Format-AgentError -ErrorRecord $_
                 $rollback = Invoke-AgentTurnRollback -State $state -Snapshot $turnSnapshot -Writes @($script:CurrentTurnWrites) -UndoStack $undoStack
                 if ($rollback.succeeded) {
