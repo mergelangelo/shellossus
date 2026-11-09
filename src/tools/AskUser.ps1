@@ -66,28 +66,20 @@ function Invoke-AgentAskUser {
 
     $title = if ($intent -eq 'plan-review') { "Plan Review: $q" } else { "Question: $q" }
     $prompt = if ($allowCustom) { 'Select number or type response (Enter cancels)' } else { 'Select number (Enter cancels)' }
-    $picked = Invoke-TuiSelector -Title $title -Items $selectorItems -PromptText $prompt -AllowFreeText:$allowCustom
-    if ($null -eq $picked -or -not [string]$picked.Trim()) {
+    $isPlanReview = $intent -eq 'plan-review'
+    $picked = Invoke-TuiSelector -Title $title -Items $selectorItems -PromptText $prompt -AllowFreeText:$allowCustom -ExactMatch:$isPlanReview -PassThru
+    if ($null -eq $picked) {
         $isCancelled = $true
     }
+    elseif ($picked -is [hashtable]) {
+        $chosenAnswer = [string]$picked.value
+    }
     else {
-        $pickedStr = [string]$picked.Trim()
-        if ($pickedStr -ieq 'other' -or $pickedStr -ieq 'custom' -or $pickedStr -ieq 'o') {
-            $chosenAnswer = '__custom__'
-        }
-        else {
-            $matchedItem = $selectorItems | Where-Object { $_.value -ieq $pickedStr -or $_.label -ieq $pickedStr } | Select-Object -First 1
-            if ($matchedItem) {
-                $chosenAnswer = $matchedItem.value
-            }
-            else {
-                $chosenAnswer = $pickedStr
-                $customChoice = $pickedStr
-            }
-        }
+        $chosenAnswer = [string]$picked
+        $customChoice = $chosenAnswer
     }
 
-    if (-not $isCancelled -and $chosenAnswer -eq '__custom__') {
+    if (-not $isCancelled -and $allowCustom -and $chosenAnswer -in @('__custom__', 'other', 'custom', 'o')) {
         $promptLabel = if ($intent -eq 'plan-review') { 'Enter custom feedback: ' } else { 'Enter custom response: ' }
         Write-Host ('  ' + $script:Gm.BoldYellow + $promptLabel + $script:Gm.Fg) -NoNewline
         $custRaw = Read-Host
@@ -99,13 +91,13 @@ function Invoke-AgentAskUser {
         else {
             $isCancelled = $true
             $chosenAnswer = $null
+            $customChoice = $null
         }
     }
 
-    if (-not $isCancelled -and $intent -eq 'plan-review') {
-        if ($chosenAnswer -match '^(Approve|Yes|Ok|Accept)') {
-            $isApproved = $true
-        }
+    if (-not $isCancelled -and $isPlanReview -and $picked -is [hashtable] -and $null -eq $customChoice) {
+        $approvalOption = '\A(?:Approve|Yes|Ok(?:ay)?|Accept)(?: \(Recommended\))?\z'
+        $isApproved = $picked.label -match $approvalOption -and $picked.value -match $approvalOption
     }
 
     $elapsedMs = [int](((Get-Date) - $toolStart).TotalMilliseconds)

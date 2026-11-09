@@ -245,6 +245,7 @@ function Format-CapabilitiesPromptBlock {
     }
     if ($cap.tool_names -contains 'ask_user') {
         $lines += '- User questions and plan reviews: call ask_user with options and intent (question or plan-review) to clarify choices or get explicit approval on plans before modifying files.'
+        $lines += '- For plan-review, omit options to use the standard choices. Treat the plan as approved only when ask_user returns approved=true. Treat custom responses as feedback.'
     }
     if ($cap.tool_names -contains 'memory') {
         $lines += '- Persistent project memory: call memory tool to record, view, or update long-term knowledge, user preferences, and architectural invariants across sessions.'

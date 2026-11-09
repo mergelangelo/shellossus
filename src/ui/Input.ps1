@@ -82,7 +82,9 @@ function Invoke-TuiSelector {
         [string]$Title,
         [array]$Items,
         [string]$PromptText = 'Select number (Enter cancels)',
-        [switch]$AllowFreeText
+        [switch]$AllowFreeText,
+        [switch]$ExactMatch,
+        [switch]$PassThru
     )
     if (-not $Items -or $Items.Count -eq 0) { return $null }
     if ($script:OutputMode -eq 'json') { return $null }
@@ -109,31 +111,44 @@ function Invoke-TuiSelector {
     }
     if (-not $rawChoice -or -not $rawChoice.Trim()) { return $null }
     $trimmed = $rawChoice.Trim()
+    $picked = $null
     if ($trimmed -match '^\d{1,6}$') {
         $idx = [int]$trimmed - 1
         if ($idx -ge 0 -and $idx -lt $Items.Count) {
             $picked = $Items[$idx]
-            return $(if ($null -ne $picked.value) { $picked.value } else { $picked.label })
         }
     }
-    foreach ($it in $Items) {
-        $val = if ($null -ne $it.value) { [string]$it.value } else { [string]$it.label }
-        if ($val -ieq $trimmed -or ([string]$it.label -ieq $trimmed)) {
-            return $val
+    if (-not $picked) {
+        foreach ($it in $Items) {
+            $val = if ($null -ne $it.value) { [string]$it.value } else { [string]$it.label }
+            $lbl = [string]$it.label
+            if ($val.Equals($trimmed, [StringComparison]::OrdinalIgnoreCase) -or $lbl.Equals($trimmed, [StringComparison]::OrdinalIgnoreCase)) {
+                if ($ExactMatch -and $picked) {
+                    if ($AllowFreeText) { return $trimmed }
+                    return $null
+                }
+                $picked = $it
+                if (-not $ExactMatch) { break }
+            }
         }
     }
-    if (-not $AllowFreeText) {
+    if (-not $picked -and -not $AllowFreeText -and -not $ExactMatch) {
         $prefixMatches = @()
         foreach ($it in $Items) {
             $val = if ($null -ne $it.value) { [string]$it.value } else { [string]$it.label }
             $lbl = [string]$it.label
             if ($val.StartsWith($trimmed, [StringComparison]::OrdinalIgnoreCase) -or $lbl.StartsWith($trimmed, [StringComparison]::OrdinalIgnoreCase)) {
-                $prefixMatches += $val
+                $prefixMatches += $it
             }
         }
         if ($prefixMatches.Count -eq 1) {
-            return $prefixMatches[0]
+            $picked = $prefixMatches[0]
         }
+    }
+    if ($picked) {
+        if ($PassThru) { return $picked }
+        if ($null -ne $picked.value) { return $picked.value }
+        return $picked.label
     }
     if ($AllowFreeText) {
         return $trimmed

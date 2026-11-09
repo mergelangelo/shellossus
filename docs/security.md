@@ -19,6 +19,8 @@ When resuming a saved session via `/resume`, `shellossus` resets the active perm
 
 The table describes the model's `write_file`, `edit_file`, and `run_command` tools. It does not make the entire process read-only. `todo`, `ask_user`, and `memory` remain available subject to tool filters. Memory modifications (`append`, `set`, `clear`) are rejected in `ReadOnly` and require confirmation in `Ask` mode. Outbound web tools (`fetch_url` and `web_search`) require explicit user confirmation in `ReadOnly` and `Ask` modes (with `[a]ll` approving web requests for the active session) and are automatically approved in `AutoEdit` and `Auto` modes. Sessions can still be saved in `ReadOnly`. User-entered `!cmd` / `!!cmd` shortcuts execute directly, without `RUN` confirmation or a `ReadOnly` check. `ask_user` plan approval does not change these permission rules.
 
+Plan review sets `approved` only when the user selects an explicit approval option by number, full label, or exact value. Both the label and value must be `Approve`, `Yes`, `Ok`, `Okay`, or `Accept`, optionally followed by ` (Recommended)`. Free-text responses are returned as feedback.
+
 ---
 
 ## Workspace Isolation & Path Safety

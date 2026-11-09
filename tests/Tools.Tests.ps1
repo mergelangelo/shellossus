@@ -1178,6 +1178,32 @@ try {
     $planRes = Invoke-AgentTool -Root $workspacePath -Call $planCall | ConvertFrom-Json
     Assert-True ($planRes.question -eq 'Approve refactoring plan?' -and $planRes.intent -eq 'plan-review' -and $planRes.approved -and $planRes.answer -eq 'Approve' -and (-not $planRes.cancelled)) 'ask_user plan approval failed.'
 
+    foreach ($explicitChoice in @('approve', 'Approve (Recommended)')) {
+        $script:approval = $explicitChoice
+        $planRes = Invoke-AgentTool -Root $workspacePath -Call $planCall | ConvertFrom-Json
+        Assert-True ($planRes.approved -and $planRes.answer -eq 'Approve' -and $null -eq $planRes.custom) "Exact plan choice was not approved: $explicitChoice"
+    }
+    foreach ($feedback in @('Approve only after you remove the migration', 'Okay, but do not implement yet', 'Yes', 'Appr')) {
+        $script:approval = $feedback
+        $planRes = Invoke-AgentTool -Root $workspacePath -Call $planCall | ConvertFrom-Json
+        Assert-True (-not $planRes.approved -and -not $planRes.cancelled -and $planRes.answer -ceq $feedback -and $planRes.custom -ceq $feedback) "Free text was not returned as feedback: $feedback"
+    }
+    $script:approval = @('4', 'Approve')
+    $planRes = Invoke-AgentTool -Root $workspacePath -Call $planCall | ConvertFrom-Json
+    Assert-True (-not $planRes.approved -and -not $planRes.cancelled -and $planRes.custom -ceq 'Approve') 'Custom feedback matching an option was treated as approval.'
+
+    $strictPlan = @{ function = @{ name = 'ask_user'; arguments = '{"question":"Approve?","intent":"plan-review","allow_custom":false}' } }
+    $script:approval = 'Appr'
+    $planRes = Invoke-AgentTool -Root $workspacePath -Call $strictPlan | ConvertFrom-Json
+    Assert-True (-not $planRes.approved -and $planRes.cancelled) 'A prefix selected an approval option with custom responses disabled.'
+
+    $conditionalPlan = @{ function = @{ name = 'ask_user'; arguments = '{"question":"Approve?","intent":"plan-review","options":[{"label":"Approve","value":"Approve"},{"label":"Approve only after removing the migration","value":"Approve"},{"label":"Yes, after revision","value":"Yes, after revision"}]}' } }
+    foreach ($choice in @('2', '3', 'Approve')) {
+        $script:approval = $choice
+        $planRes = Invoke-AgentTool -Root $workspacePath -Call $conditionalPlan | ConvertFrom-Json
+        Assert-True (-not $planRes.approved -and -not $planRes.cancelled) "Conditional or ambiguous plan choice was approved: $choice"
+    }
+
     # Test execution: choice by label
     $script:approval = 'Pester 5'
     $qCall = @{

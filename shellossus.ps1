@@ -1727,7 +1727,9 @@ function Invoke-TuiSelector {
         [string]$Title,
         [array]$Items,
         [string]$PromptText = 'Select number (Enter cancels)',
-        [switch]$AllowFreeText
+        [switch]$AllowFreeText,
+        [switch]$ExactMatch,
+        [switch]$PassThru
     )
     if (-not $Items -or $Items.Count -eq 0) { return $null }
     if ($script:OutputMode -eq 'json') { return $null }
@@ -1754,31 +1756,44 @@ function Invoke-TuiSelector {
     }
     if (-not $rawChoice -or -not $rawChoice.Trim()) { return $null }
     $trimmed = $rawChoice.Trim()
+    $picked = $null
     if ($trimmed -match '^\d{1,6}$') {
         $idx = [int]$trimmed - 1
         if ($idx -ge 0 -and $idx -lt $Items.Count) {
             $picked = $Items[$idx]
-            return $(if ($null -ne $picked.value) { $picked.value } else { $picked.label })
         }
     }
-    foreach ($it in $Items) {
-        $val = if ($null -ne $it.value) { [string]$it.value } else { [string]$it.label }
-        if ($val -ieq $trimmed -or ([string]$it.label -ieq $trimmed)) {
-            return $val
+    if (-not $picked) {
+        foreach ($it in $Items) {
+            $val = if ($null -ne $it.value) { [string]$it.value } else { [string]$it.label }
+            $lbl = [string]$it.label
+            if ($val.Equals($trimmed, [StringComparison]::OrdinalIgnoreCase) -or $lbl.Equals($trimmed, [StringComparison]::OrdinalIgnoreCase)) {
+                if ($ExactMatch -and $picked) {
+                    if ($AllowFreeText) { return $trimmed }
+                    return $null
+                }
+                $picked = $it
+                if (-not $ExactMatch) { break }
+            }
         }
     }
-    if (-not $AllowFreeText) {
+    if (-not $picked -and -not $AllowFreeText -and -not $ExactMatch) {
         $prefixMatches = @()
         foreach ($it in $Items) {
             $val = if ($null -ne $it.value) { [string]$it.value } else { [string]$it.label }
             $lbl = [string]$it.label
             if ($val.StartsWith($trimmed, [StringComparison]::OrdinalIgnoreCase) -or $lbl.StartsWith($trimmed, [StringComparison]::OrdinalIgnoreCase)) {
-                $prefixMatches += $val
+                $prefixMatches += $it
             }
         }
         if ($prefixMatches.Count -eq 1) {
-            return $prefixMatches[0]
+            $picked = $prefixMatches[0]
         }
+    }
+    if ($picked) {
+        if ($PassThru) { return $picked }
+        if ($null -ne $picked.value) { return $picked.value }
+        return $picked.label
     }
     if ($AllowFreeText) {
         return $trimmed
@@ -5977,28 +5992,20 @@ function Invoke-AgentAskUser {
 
     $title = if ($intent -eq 'plan-review') { "Plan Review: $q" } else { "Question: $q" }
     $prompt = if ($allowCustom) { 'Select number or type response (Enter cancels)' } else { 'Select number (Enter cancels)' }
-    $picked = Invoke-TuiSelector -Title $title -Items $selectorItems -PromptText $prompt -AllowFreeText:$allowCustom
-    if ($null -eq $picked -or -not [string]$picked.Trim()) {
+    $isPlanReview = $intent -eq 'plan-review'
+    $picked = Invoke-TuiSelector -Title $title -Items $selectorItems -PromptText $prompt -AllowFreeText:$allowCustom -ExactMatch:$isPlanReview -PassThru
+    if ($null -eq $picked) {
         $isCancelled = $true
     }
+    elseif ($picked -is [hashtable]) {
+        $chosenAnswer = [string]$picked.value
+    }
     else {
-        $pickedStr = [string]$picked.Trim()
-        if ($pickedStr -ieq 'other' -or $pickedStr -ieq 'custom' -or $pickedStr -ieq 'o') {
-            $chosenAnswer = '__custom__'
-        }
-        else {
-            $matchedItem = $selectorItems | Where-Object { $_.value -ieq $pickedStr -or $_.label -ieq $pickedStr } | Select-Object -First 1
-            if ($matchedItem) {
-                $chosenAnswer = $matchedItem.value
-            }
-            else {
-                $chosenAnswer = $pickedStr
-                $customChoice = $pickedStr
-            }
-        }
+        $chosenAnswer = [string]$picked
+        $customChoice = $chosenAnswer
     }
 
-    if (-not $isCancelled -and $chosenAnswer -eq '__custom__') {
+    if (-not $isCancelled -and $allowCustom -and $chosenAnswer -in @('__custom__', 'other', 'custom', 'o')) {
         $promptLabel = if ($intent -eq 'plan-review') { 'Enter custom feedback: ' } else { 'Enter custom response: ' }
         Write-Host ('  ' + $script:Gm.BoldYellow + $promptLabel + $script:Gm.Fg) -NoNewline
         $custRaw = Read-Host
@@ -6010,13 +6017,13 @@ function Invoke-AgentAskUser {
         else {
             $isCancelled = $true
             $chosenAnswer = $null
+            $customChoice = $null
         }
     }
 
-    if (-not $isCancelled -and $intent -eq 'plan-review') {
-        if ($chosenAnswer -match '^(Approve|Yes|Ok|Accept)') {
-            $isApproved = $true
-        }
+    if (-not $isCancelled -and $isPlanReview -and $picked -is [hashtable] -and $null -eq $customChoice) {
+        $approvalOption = '\A(?:Approve|Yes|Ok(?:ay)?|Accept)(?: \(Recommended\))?\z'
+        $isApproved = $picked.label -match $approvalOption -and $picked.value -match $approvalOption
     }
 
     $elapsedMs = [int](((Get-Date) - $toolStart).TotalMilliseconds)
@@ -7209,6 +7216,7 @@ function Format-CapabilitiesPromptBlock {
     }
     if ($cap.tool_names -contains 'ask_user') {
         $lines += '- User questions and plan reviews: call ask_user with options and intent (question or plan-review) to clarify choices or get explicit approval on plans before modifying files.'
+        $lines += '- For plan-review, omit options to use the standard choices. Treat the plan as approved only when ask_user returns approved=true. Treat custom responses as feedback.'
     }
     if ($cap.tool_names -contains 'memory') {
         $lines += '- Persistent project memory: call memory tool to record, view, or update long-term knowledge, user preferences, and architectural invariants across sessions.'

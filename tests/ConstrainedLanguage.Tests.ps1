@@ -216,6 +216,9 @@ try {
     $clAskCall = @{ id = 'cl-ask'; function = @{ name = 'ask_user'; arguments = '{"question":"Confirm?","intent":"plan-review","plan":"# CL Plan"}' } }
     $clAskRes = Invoke-AgentTool -Root $workspacePath -Call $clAskCall | ConvertFrom-Json
     Assert-True ($clAskRes.question -eq 'Confirm?' -and $clAskRes.intent -eq 'plan-review' -and $clAskRes.approved) 'ConstrainedLanguage ask_user execution failed.'
+    $script:approval = 'Okay, but wait for my review'
+    $clAskRes = Invoke-AgentTool -Root $workspacePath -Call $clAskCall | ConvertFrom-Json
+    Assert-True (-not $clAskRes.approved -and $clAskRes.custom -ceq $script:approval) 'ConstrainedLanguage plan review approved conditional feedback.'
     $script:approval = $savedAppr
     $clMemCall = @{ id = 'cl-mem'; function = @{ name = 'memory'; arguments = '{"action":"append","content":"CL invariant"}' } }
     $clMemRes = Invoke-AgentTool -Root $workspacePath -Call $clMemCall | ConvertFrom-Json
