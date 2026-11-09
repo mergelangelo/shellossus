@@ -112,6 +112,84 @@ try {
     if (Test-Path -LiteralPath $atomicBackup) { $atomicBackupAfter = Get-Content -LiteralPath $atomicBackup -Raw -Encoding UTF8 }
     Assert-True ((Test-Path -LiteralPath $atomicBackup) -and $atomicBackupAfter -ceq 'damaged' -and $atomicBackupBefore -ceq 'original-bytes') 'Failed preflight removed or rewrote the backup.'
 
+    # Inject nonterminating read errors so the memory tool must request ErrorAction Stop.
+    $readErrorRoot = Join-Path $workspacePath 'unreadable-memory'
+    New-Item -ItemType Directory -Path $readErrorRoot -Force | Out-Null
+    $readErrorMemory = Join-Path $readErrorRoot 'MEMORY.md'
+    Set-AgentUtf8Content -LiteralPath $readErrorMemory -Value 'original memory'
+    $script:CurrentTurnWrites = @()
+    & {
+        $probe = @{ reads = 0; fail_at = 0; backup = ''; corrupt_backup = $false }
+        function Get-Content {
+            [CmdletBinding()]
+            param($LiteralPath, [switch]$Raw, $Encoding)
+            if ($LiteralPath -eq $readErrorMemory) {
+                $probe.reads++
+                if ($probe.reads -eq $probe.fail_at) {
+                    $readAction = $PSBoundParameters['ErrorAction']
+                    if ($null -eq $readAction) { $readAction = 'Continue' }
+                    Write-Error 'Injected memory read error.' -Category ReadError -ErrorAction $readAction
+                    return
+                }
+            }
+            Microsoft.PowerShell.Management\Get-Content @PSBoundParameters
+        }
+        function Copy-Item {
+            [CmdletBinding()]
+            param($LiteralPath, $Destination, [switch]$Force)
+            Microsoft.PowerShell.Management\Copy-Item @PSBoundParameters
+            if ($LiteralPath -eq $readErrorMemory) {
+                $probe.backup = $Destination
+                if ($probe.corrupt_backup) {
+                    Set-AgentUtf8Content -LiteralPath $Destination -Value 'damaged copy'
+                }
+            }
+        }
+
+        try {
+            foreach ($case in @(
+                @{ action = 'view'; fail_at = 1 }
+                @{ action = 'append'; fail_at = 1 }
+                @{ action = 'set'; fail_at = 2 }
+                @{ action = 'clear'; fail_at = 3 }
+            )) {
+                $probe.reads = 0
+                $probe.fail_at = $case.fail_at
+                $arguments = @{ action = $case.action }
+                if ($case.action -in @('append', 'set')) { $arguments.content = 'replacement' }
+                $result = Invoke-AgentTool -Root $readErrorRoot -Call @{ function = @{
+                    name = 'memory'; arguments = ($arguments | ConvertTo-Json -Compress)
+                } } | ConvertFrom-Json
+                Assert-True ($result.error -like '*Injected memory read error*') "Unexpected memory $($case.action) result: $($result | ConvertTo-Json -Compress)"
+                Assert-True ((Microsoft.PowerShell.Management\Get-Content -LiteralPath $readErrorMemory -Raw) -ceq 'original memory') 'A read failure changed the memory file.'
+                Assert-True (@($script:CurrentTurnWrites).Count -eq 0) 'A failed read recorded an undo operation.'
+            }
+            Assert-True ($probe.backup -and -not (Test-Path -LiteralPath $probe.backup)) 'A failed pre-write read left a temporary backup.'
+
+            $manualArgs = @{ action = 'set'; content = 'replacement'; user_initiated = $true }
+            $probe.corrupt_backup = $true
+            $probe.fail_at = 0
+            $backupError = ''
+            try { $null = Invoke-AgentMemory -Root $readErrorRoot -Arguments $manualArgs }
+            catch { $backupError = $_.Exception.Message }
+            Assert-True ($backupError -like '*Backup verification failed*') 'A manual memory replacement proceeded without a verified backup.'
+            Assert-True ((Microsoft.PowerShell.Management\Get-Content -LiteralPath $readErrorMemory -Raw) -ceq 'original memory') 'A bad backup allowed a manual replacement.'
+
+            $probe.corrupt_backup = $false
+            $probe.reads = 0
+            $probe.fail_at = 4
+            $verifyError = ''
+            try { $null = Invoke-AgentMemory -Root $readErrorRoot -Arguments $manualArgs }
+            catch { $verifyError = $_.Exception.Message }
+            Assert-True ($verifyError -like '*Injected memory read error*' -and $verifyError.Contains($probe.backup)) 'A failed manual write verification did not report its backup.'
+            Assert-True ((Microsoft.PowerShell.Management\Get-Content -LiteralPath $probe.backup -Raw) -ceq 'original memory') 'A failed manual write verification lost the original data.'
+            Assert-True (@($script:CurrentTurnWrites).Count -eq 0) 'Manual memory changes joined the undo journal.'
+        }
+        finally {
+            if ($probe.backup) { Remove-Item -LiteralPath $probe.backup -Force -ErrorAction SilentlyContinue }
+        }
+    }
+
     # Exercise real turn entry points with a mixed file/memory journal and distinct todo snapshots.
     $memoryRoot = Join-Path $workspacePath 'memory-undo'
     $memoryConfig = Join-Path $envData.TestRoot 'memory-config'

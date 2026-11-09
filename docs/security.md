@@ -41,6 +41,7 @@ The table describes the model's `write_file`, `edit_file`, and `run_command` too
 ## Safe File Writes & `/undo` Protection
 
 - **Staged Writes:** `Invoke-AgentWrite` writes new content to a temporary file first, verifies the written content, verifies that the target file did not change during user confirmation, creates and verifies a backup copy, and then replaces the target file via `Move-Item -Force`.
+- Memory changes stop on a read error. Replacing or clearing an existing memory file requires a verified backup, including when the user runs `/memory` directly.
 - **Conflict-Aware `/undo`:**
   - `write_file` and `edit_file` record created/modified paths and their content. Modified files also have verified pre-edit backups. In-process subagent file edits join the parent's recorded turn.
   - Before changing any file, undo verifies every pending backup against its recorded `before_content`, including intermediate backups from repeated edits to the same file. Missing, unreadable, or corrupted backups stop the entire preflight; files, backups, and conversation state are preserved for a retry.

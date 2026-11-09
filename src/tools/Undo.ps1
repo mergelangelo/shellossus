@@ -22,8 +22,14 @@ function Clear-AgentUndoBackups {
 
 function Read-AgentUndoContent {
     param([string]$Path)
-    if (-not (Test-Path -LiteralPath $Path -ErrorAction Stop)) { return $null }
-    if ((Get-Item -LiteralPath $Path -Force -ErrorAction Stop).PSIsContainer) {
+    try {
+        $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+    }
+    catch {
+        if ($_.FullyQualifiedErrorId -eq 'PathNotFound,Microsoft.PowerShell.Commands.GetItemCommand') { return $null }
+        throw
+    }
+    if ($item.PSIsContainer) {
         throw "Expected a file at $Path."
     }
     $content = Get-Content -LiteralPath $Path -Raw -Encoding UTF8 -ErrorAction Stop

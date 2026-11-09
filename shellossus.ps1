@@ -4893,8 +4893,14 @@ function Clear-AgentUndoBackups {
 
 function Read-AgentUndoContent {
     param([string]$Path)
-    if (-not (Test-Path -LiteralPath $Path -ErrorAction Stop)) { return $null }
-    if ((Get-Item -LiteralPath $Path -Force -ErrorAction Stop).PSIsContainer) {
+    try {
+        $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+    }
+    catch {
+        if ($_.FullyQualifiedErrorId -eq 'PathNotFound,Microsoft.PowerShell.Commands.GetItemCommand') { return $null }
+        throw
+    }
+    if ($item.PSIsContainer) {
         throw "Expected a file at $Path."
     }
     $content = Get-Content -LiteralPath $Path -Raw -Encoding UTF8 -ErrorAction Stop
@@ -6021,7 +6027,7 @@ function Invoke-AgentMemory {
         if ((Test-PathHasReparsePoint -Path $wsRootMem -StopAt $Root) -or (Test-PathHasReparsePoint -Path $wsDotMem -StopAt $Root)) {
             throw 'Reparse points are not allowed.'
         }
-        if (Test-Path -LiteralPath $wsRootMem) {
+        if (Test-Path -LiteralPath $wsRootMem -ErrorAction Stop) {
             $parentDir = $Root
             $targetPath = $wsRootMem
             $displayRel = 'MEMORY.md'
@@ -6119,7 +6125,7 @@ function Invoke-AgentMemory {
             $trackWrite = ($Arguments.user_initiated -ne $true)
             $stageFile = $null
             $backup = $null
-            $recorded = $false
+            $keepBackup = $false
             $createdDirs = @()
             try {
                 $after = $null
@@ -6140,7 +6146,7 @@ function Invoke-AgentMemory {
                 if (Test-PathHasReparsePoint -Path $targetPath -StopAt $stopRoot) {
                     throw 'Reparse points are not allowed.'
                 }
-                if ($trackWrite -and $null -ne $before) {
+                if ($null -ne $before) {
                     $backup = New-AgentUndoBackup -Path $targetPath -Before $before
                 }
                 if (Test-PathHasReparsePoint -Path $targetPath -StopAt $stopRoot) {
@@ -6161,8 +6167,8 @@ function Invoke-AgentMemory {
                         backup = $backup.FullName
                         created_dirs = $createdDirs
                     }
-                    $recorded = $true
                 }
+                $keepBackup = ($null -ne $backup)
                 if ($action -eq 'clear') {
                     Remove-Item -LiteralPath $targetPath -Force -ErrorAction Stop
                 }
@@ -6170,12 +6176,19 @@ function Invoke-AgentMemory {
                     Move-Item -LiteralPath $stageFile.FullName -Destination $targetPath -Force -ErrorAction Stop
                 }
                 if ((Read-AgentUndoContent -Path $targetPath) -cne $after) { throw 'Written memory verification failed.' }
+                $keepBackup = $trackWrite
+            }
+            catch {
+                if ($keepBackup -and -not $trackWrite) {
+                    throw "Memory update failed. Backup kept at $($backup.FullName). $($_.Exception.Message)"
+                }
+                throw
             }
             finally {
                 if ($stageFile) {
                     Remove-Item -LiteralPath $stageFile.FullName -Force -ErrorAction SilentlyContinue
                 }
-                if ($backup -and -not $recorded) {
+                if ($backup -and -not $keepBackup) {
                     Remove-Item -LiteralPath $backup.FullName -Force -ErrorAction SilentlyContinue
                 }
             }
