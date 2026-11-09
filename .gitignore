@@ -6,3 +6,4 @@ sessions/
 secrets/
 .shellossus/output/
 .DS_Store
+tmp/
