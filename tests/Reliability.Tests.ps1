@@ -66,6 +66,107 @@ try {
         }
     }
 
+    # File tools preserve encoding and verify backups even when only the BOM differs.
+    $encodedPath = Join-Path $workspacePath 'encoded.txt'
+    $expectedPath = Join-Path $envData.TestRoot 'expected-encoding.txt'
+    $utf8Bom = if ($PSVersionTable.PSVersion.Major -lt 6) { 'UTF8' } else { 'utf8BOM' }
+    $nonAscii = ([string][char]0x044F) + ([string][char]0xFFFD)
+    $encodedBefore = "original $nonAscii`r`n"
+    foreach ($encoding in @($utf8Bom, 'Unicode', 'BigEndianUnicode')) {
+        $script:CurrentTurnWrites = @()
+        Set-Content -LiteralPath $encodedPath -Value $encodedBefore -Encoding $encoding -NoNewline
+        $originalHash = (Get-FileHash -LiteralPath $encodedPath).Hash
+        $edit = Invoke-AgentTool -Root $workspacePath -Call @{ function = @{
+            name = 'edit_file'; arguments = '{"path":"encoded.txt","old_text":"original","new_text":"edited"}'
+        } } | ConvertFrom-Json
+        Assert-True ($edit.status -eq 'written') "Editing $encoding failed: $($edit.error)"
+        $testBackups += $edit.backup
+        Set-Content -LiteralPath $expectedPath -Value "edited $nonAscii`r`n" -Encoding $encoding -NoNewline
+        Assert-True ((Get-FileHash -LiteralPath $encodedPath).Hash -ceq (Get-FileHash -LiteralPath $expectedPath).Hash) "edit_file changed $encoding encoding."
+        Assert-True ((Get-FileHash -LiteralPath $edit.backup).Hash -ceq $originalHash) "Backup did not preserve $encoding bytes."
+
+        $overwrite = Invoke-AgentTool -Root $workspacePath -Call @{ function = @{
+            name = 'write_file'; arguments = '{"path":"encoded.txt","content":"","overwrite":true}'
+        } } | ConvertFrom-Json
+        Assert-True ($overwrite.status -eq 'written') "Overwriting $encoding failed: $($overwrite.error)"
+        $testBackups += $overwrite.backup
+        Set-Content -LiteralPath $expectedPath -Value '' -Encoding $encoding -NoNewline
+        Assert-True ((Get-FileHash -LiteralPath $encodedPath).Hash -ceq (Get-FileHash -LiteralPath $expectedPath).Hash) "Overwriting with empty content lost the $encoding BOM."
+        $encodingFrame = @{ messages = @(); writes = @($script:CurrentTurnWrites) }
+        if ($encoding -eq $utf8Bom) {
+            Set-AgentUtf8Content -LiteralPath $encodedPath -Value ''
+            $bomConflict = ''
+            try { Invoke-AgentUndo -State @{ messages = @() } -UndoEntry $encodingFrame }
+            catch { $bomConflict = $_.Exception.Message }
+            Assert-True ($bomConflict -like '*manual changes*') 'Undo missed a BOM-only change to the target.'
+            Copy-Item -LiteralPath $expectedPath -Destination $encodedPath -Force
+
+            Set-AgentUtf8Content -LiteralPath $edit.backup -Value $encodedBefore
+            $backupConflict = ''
+            try { Invoke-AgentUndo -State @{ messages = @() } -UndoEntry $encodingFrame }
+            catch { $backupConflict = $_.Exception.Message }
+            Assert-True ($backupConflict -like '*Backup verification failed*') 'Undo accepted a backup with a missing BOM.'
+            Set-Content -LiteralPath $edit.backup -Value $encodedBefore -Encoding $encoding -NoNewline
+        }
+        Invoke-AgentUndo -State @{ messages = @() } -UndoEntry $encodingFrame
+        Assert-True ((Get-FileHash -LiteralPath $encodedPath).Hash -ceq $originalHash) "Undo did not restore the original $encoding bytes."
+    }
+
+    foreach ($name in @('unicode.ps1', 'unicode.txt', 'ascii.ps1')) {
+        $script:CurrentTurnWrites = @()
+        $value = if ($name -eq 'ascii.ps1') { 'Write-Output 1' } else { "Write-Output '$nonAscii'" }
+        $argsJson = @{ path = $name; content = $value } | ConvertTo-Json -Compress
+        $created = Invoke-AgentTool -Root $workspacePath -Call @{ function = @{ name = 'write_file'; arguments = $argsJson } } | ConvertFrom-Json
+        Assert-True ($created.status -eq 'written') "Writing $name failed: $($created.error)"
+        if ($name -eq 'unicode.ps1') {
+            Set-Content -LiteralPath $expectedPath -Value $value -Encoding $utf8Bom -NoNewline
+        }
+        else { Set-AgentUtf8Content -LiteralPath $expectedPath -Value $value }
+        Assert-True ((Get-FileHash -LiteralPath (Join-Path $workspacePath $name)).Hash -ceq (Get-FileHash -LiteralPath $expectedPath).Hash) "Unexpected encoding for new $name."
+    }
+
+    foreach ($badEncoding in @(
+        @{ name = 'legacy'; bytes = [byte[]]@(0xCF, 0xF0) }
+        @{ name = 'malformed UTF-8'; bytes = [byte[]]@(0xEF, 0xBB, 0xBF, 0xC3, 0x28) }
+        @{ name = 'malformed UTF-16'; bytes = [byte[]]@(0xFF, 0xFE, 0x41) }
+        @{ name = 'UTF-32'; bytes = [byte[]]@(0xFF, 0xFE, 0, 0, 0x41, 0, 0, 0) }
+    )) {
+        if ($PSVersionTable.PSVersion.Major -lt 6) {
+            Set-Content -LiteralPath $encodedPath -Value $badEncoding.bytes -Encoding Byte
+        }
+        else { Set-Content -LiteralPath $encodedPath -Value $badEncoding.bytes -AsByteStream }
+        $originalHash = (Get-FileHash -LiteralPath $encodedPath).Hash
+        $script:CurrentTurnWrites = @()
+        $rejected = Invoke-AgentTool -Root $workspacePath -Call @{ function = @{
+            name = 'write_file'; arguments = '{"path":"encoded.txt","content":"replacement","overwrite":true}'
+        } } | ConvertFrom-Json
+        Assert-True ($rejected.error -like '*encoding*' -and $script:CurrentTurnWrites.Count -eq 0) "write_file accepted $($badEncoding.name)."
+        Assert-True ((Get-FileHash -LiteralPath $encodedPath).Hash -ceq $originalHash) "write_file changed $($badEncoding.name) bytes."
+    }
+
+    Set-AgentUtf8Content -LiteralPath $encodedPath -Value 'original'
+    Set-Content -LiteralPath $expectedPath -Value 'original' -Encoding $utf8Bom -NoNewline
+    $script:AgentPermission = 'Ask'
+    $script:OutputMode = 'text'
+    try {
+        $conflict = & {
+            function Read-TuiConfirmation {
+                param($PromptText, [switch]$AllowDiff, $ActionType)
+                Copy-Item -LiteralPath $expectedPath -Destination $encodedPath -Force
+                return 'y'
+            }
+            Invoke-AgentTool -Root $workspacePath -Call @{ function = @{
+                name = 'edit_file'; arguments = '{"path":"encoded.txt","old_text":"original","new_text":"edited"}'
+            } } | ConvertFrom-Json
+        }
+        Assert-True ($conflict.error -like '*changed during confirmation*' -and $script:CurrentTurnWrites.Count -eq 0) 'A BOM-only change during confirmation did not stop the edit.'
+        Assert-True ((Get-FileHash -LiteralPath $encodedPath).Hash -ceq (Get-FileHash -LiteralPath $expectedPath).Hash) 'The edit overwrote a BOM-only manual change.'
+    }
+    finally {
+        $script:AgentPermission = 'AutoEdit'
+        $script:OutputMode = 'json'
+    }
+
     # Corruption anywhere in an undo chain must prevent ALL restores/deletes.
     $script:CurrentTurnWrites = @()
     Set-Content -LiteralPath (Join-Path $workspacePath 'original.txt') -Value 'original' -Encoding UTF8 -NoNewline

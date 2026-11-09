@@ -3946,12 +3946,64 @@ function ConvertTo-ExistingLineEndings {
     return $Content
 }
 
+function Get-AgentEditableEncoding {
+    param([string]$Path)
+    $header = if ($PSVersionTable.PSVersion.Major -lt 6) {
+        Get-Content -LiteralPath $Path -Encoding Byte -TotalCount 4 -ErrorAction Stop
+    }
+    else {
+        Get-Content -LiteralPath $Path -AsByteStream -TotalCount 4 -ErrorAction Stop
+    }
+    switch -Regex ($header -join ' ') {
+        '^(255 254 0 0|0 0 254 255)$' { throw 'Unsupported file encoding. UTF-32 is not supported.' }
+        '^239 187 191( |$)' { return 'utf8BOM' }
+        '^255 254( |$)' { return 'Unicode' }
+        '^254 255( |$)' { return 'BigEndianUnicode' }
+        default { return 'utf8NoBOM' }
+    }
+}
+
+function Set-AgentEditableContent {
+    param([string]$Path, [AllowEmptyString()][string]$Text, [string]$Encoding)
+    if ($Encoding -eq 'utf8NoBOM') {
+        Set-AgentUtf8Content -LiteralPath $Path -Value $Text
+        return
+    }
+    if ($Encoding -eq 'utf8BOM' -and $PSVersionTable.PSVersion.Major -lt 6) {
+        $Encoding = 'UTF8'
+    }
+    Set-Content -LiteralPath $Path -Value $Text -Encoding $Encoding -NoNewline -ErrorAction Stop
+}
+
+function Read-AgentEditableFile {
+    param([string]$Path)
+    $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+    if ($item.PSIsContainer -or $item.Length -gt 1MB) { throw 'Expected a text file up to 1 MiB.' }
+    $snapshot = New-AgentTempFile
+    try {
+        Copy-Item -LiteralPath $Path -Destination $snapshot.FullName -Force -ErrorAction Stop
+        $encoding = Get-AgentEditableEncoding -Path $snapshot.FullName
+        $hash = Read-AgentUndoContent -Path $snapshot.FullName -Hash
+        $text = Read-AgentUndoContent -Path $snapshot.FullName
+        if ($text -match '\x00') { throw 'Binary content is not supported.' }
+        # Re-encoding a single snapshot detects any lossy decoding, including replacement characters.
+        Set-AgentEditableContent -Path $snapshot.FullName -Text $text -Encoding $encoding
+        if ((Read-AgentUndoContent -Path $snapshot.FullName -Hash) -cne $hash) {
+            throw 'Invalid or unsupported file encoding. Expected UTF-8 or BOM-marked UTF-16.'
+        }
+        return @{ text = $text; encoding = $encoding; hash = $hash }
+    }
+    finally {
+        Remove-Item -LiteralPath $snapshot.FullName -Force -ErrorAction SilentlyContinue
+    }
+}
+
 function Invoke-AgentStagedWrite {
     param(
         [string]$Root,
         [string]$Name,
         $Arguments,
-        $before,
+        $originalFile,
         [string]$after,
         [int]$editsApplied,
         [int]$firstChangedLine,
@@ -3959,6 +4011,7 @@ function Invoke-AgentStagedWrite {
         [string]$leaf,
         [string[]]$dirsToCreate
     )
+    $before = $originalFile.text
     if ($after.Length -gt 1MB -or ($null -ne $before -and $before.Length -gt 1MB)) { throw 'File content exceeds 1 MiB limit.' }
     if ($after -match '\x00' -or ($null -ne $before -and $before -match '\x00')) { throw 'Binary content is not supported.' }
     if ($script:OutputMode -ne 'json') {
@@ -4002,17 +4055,27 @@ function Invoke-AgentStagedWrite {
     $backupPath = $null
     $backupRecorded = $false
     try {
-        Set-AgentUtf8Content -LiteralPath $stageFile.FullName -Value $after
-        $stagedCheck = Get-Content -LiteralPath $stageFile.FullName -Raw -Encoding UTF8 -ErrorAction Stop
-        if ($null -eq $stagedCheck) { $stagedCheck = '' }
-        if ($stagedCheck -cne $after) { throw 'Staged file verification failed. No write performed.' }
+        $encoding = if ($originalFile) { $originalFile.encoding }
+        elseif ($Arguments.path -like '*.ps1' -and $after -match '[^\x00-\x7F]') { 'utf8BOM' }
+        else { 'utf8NoBOM' }
+        Set-AgentEditableContent -Path $stageFile.FullName -Text $after -Encoding $encoding
+        $stagedCheck = Read-AgentUndoContent -Path $stageFile.FullName
+        if (-not $after.Equals($stagedCheck, [StringComparison]::Ordinal) -or
+            (Get-AgentEditableEncoding -Path $stageFile.FullName) -ne $encoding) {
+            throw 'Staged file verification failed. No write performed.'
+        }
+        $afterHash = Read-AgentUndoContent -Path $stageFile.FullName -Hash
         if ($null -ne $before) {
             $path = Resolve-AgentPath -Root $Root -RelativePath $Arguments.path
-            $current = Get-Content -LiteralPath $path -Raw -Encoding UTF8 -ErrorAction Stop
-            if ($null -eq $current) { $current = '' }
-            if ($current -cne $before) { throw 'File changed during confirmation. No write performed.' }
-            $backup = New-AgentUndoBackup -Path $path -Before $before
+            if ((Read-AgentUndoContent -Path $path -Hash) -cne $originalFile.hash) {
+                throw 'File changed during confirmation. No write performed.'
+            }
+            $backup = New-AgentUndoBackup -Path $path -Before $before -BeforeHash $originalFile.hash
             $backupPath = $backup.FullName
+            $path = Resolve-AgentPath -Root $Root -RelativePath $Arguments.path
+            if ((Read-AgentUndoContent -Path $path -Hash) -cne $originalFile.hash) {
+                throw 'File changed before replacement. No write performed.'
+            }
             if ($script:OutputMode -ne 'json') {
                 Write-Host ($script:Gm.Grey1 + 'Backup: ' + $backupPath + $script:Gm.Reset)
             }
@@ -4024,6 +4087,8 @@ function Invoke-AgentStagedWrite {
                 backup = $backupPath
                 before_content = $before
                 after_content = $after
+                before_hash = $originalFile.hash
+                after_hash = $afterHash
             }
             $backupRecorded = $true
             Move-Item -LiteralPath $stageFile.FullName -Destination $path -Force -ErrorAction Stop
@@ -4049,13 +4114,12 @@ function Invoke-AgentStagedWrite {
                 full_path = $path
                 rel_path = $Arguments.path
                 after_content = $after
+                after_hash = $afterHash
                 created_dirs = $createdDirs
             }
             Move-Item -LiteralPath $stageFile.FullName -Destination $path -Force -ErrorAction Stop
         }
-        $writtenCheck = Get-Content -LiteralPath $path -Raw -Encoding UTF8 -ErrorAction Stop
-        if ($null -eq $writtenCheck) { $writtenCheck = '' }
-        if ($writtenCheck -cne $after) {
+        if ((Read-AgentUndoContent -Path $path -Hash) -cne $afterHash) {
             if ($backupPath) {
                 throw ('Written file verification failed (backup kept at ' + $backupPath + ').')
             }
@@ -4075,7 +4139,7 @@ function Invoke-AgentStagedWrite {
 
 function Invoke-AgentCreateOrOverwrite {
     param([string]$Root, $Arguments)
-    $before = $null
+    $originalFile = $null
     $editsApplied = 1
     $firstChangedLine = 1
     $writeTarget = Resolve-AgentWriteTarget -Root $Root -RelativePath $Arguments.path
@@ -4088,25 +4152,20 @@ function Invoke-AgentCreateOrOverwrite {
     if (Test-Path -LiteralPath $path) {
         if (-not $allowOverwrite) { throw 'File already exists. Use edit_file or set overwrite=true.' }
         $path = Resolve-AgentPath -Root $Root -RelativePath $Arguments.path
-        $existingItem = Get-Item -LiteralPath $path -Force
-        if ($existingItem.PSIsContainer -or $existingItem.Length -gt 1MB) { throw 'Expected a text file up to 1 MiB.' }
-        $before = Get-Content -LiteralPath $path -Raw -Encoding UTF8 -ErrorAction Stop
-        if ($null -eq $before) { $before = '' }
+        $originalFile = Read-AgentEditableFile -Path $path
     }
-    $after = if ($null -ne $before) {
-        ConvertTo-ExistingLineEndings -Content $Arguments.content -Original $before
+    $after = if ($originalFile) {
+        ConvertTo-ExistingLineEndings -Content $Arguments.content -Original $originalFile.text
     }
     else { $Arguments.content }
-    return (Invoke-AgentStagedWrite -Root $Root -Name 'write_file' -Arguments $Arguments -before $before -after $after -editsApplied $editsApplied -firstChangedLine $firstChangedLine -parent $parent -leaf $leaf -dirsToCreate $dirsToCreate)
+    return (Invoke-AgentStagedWrite -Root $Root -Name 'write_file' -Arguments $Arguments -OriginalFile $originalFile -after $after -editsApplied $editsApplied -firstChangedLine $firstChangedLine -parent $parent -leaf $leaf -dirsToCreate $dirsToCreate)
 }
 
 function Invoke-AgentEditFile {
     param([string]$Root, $Arguments)
     $path = Resolve-AgentPath -Root $Root -RelativePath $Arguments.path
-    $item = Get-Item -LiteralPath $path -Force
-    if ($item.PSIsContainer -or $item.Length -gt 1MB) { throw 'Expected a text file up to 1 MiB.' }
-    $before = Get-Content -LiteralPath $path -Raw -Encoding UTF8 -ErrorAction Stop
-    if ($null -eq $before) { $before = '' }
+    $originalFile = Read-AgentEditableFile -Path $path
+    $before = $originalFile.text
     $rawEdits = if ($null -ne $Arguments.edits) {
         @($Arguments.edits)
     }
@@ -4138,7 +4197,7 @@ function Invoke-AgentEditFile {
         $after = $after.Substring(0, $ed.index) + $ed.new_text + $after.Substring($ed.index + $ed.length)
     }
     if ($after -ceq $before) { return (@{ status = 'unchanged' } | ConvertTo-Json -Compress) }
-    return (Invoke-AgentStagedWrite -Root $Root -Name 'edit_file' -Arguments $Arguments -before $before -after $after -editsApplied $editsApplied -firstChangedLine $firstChangedLine)
+    return (Invoke-AgentStagedWrite -Root $Root -Name 'edit_file' -Arguments $Arguments -OriginalFile $originalFile -after $after -editsApplied $editsApplied -firstChangedLine $firstChangedLine)
 }
 
 function Invoke-AgentWrite {
@@ -4900,7 +4959,7 @@ function Clear-AgentUndoBackups {
 }
 
 function Read-AgentUndoContent {
-    param([string]$Path)
+    param([string]$Path, [switch]$Hash)
     try {
         $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
     }
@@ -4911,17 +4970,21 @@ function Read-AgentUndoContent {
     if ($item.PSIsContainer) {
         throw "Expected a file at $Path."
     }
+    if ($Hash) {
+        return (Get-FileHash -LiteralPath $Path -Algorithm SHA256 -ErrorAction Stop).Hash
+    }
     $content = Get-Content -LiteralPath $Path -Raw -Encoding UTF8 -ErrorAction Stop
     if ($null -eq $content) { return '' }
     return [string]$content
 }
 
 function New-AgentUndoBackup {
-    param([string]$Path, [AllowEmptyString()][string]$Before)
+    param([string]$Path, [AllowEmptyString()][string]$Before, [string]$BeforeHash)
     $backup = New-AgentTempFile
     try {
         Copy-Item -LiteralPath $Path -Destination $backup.FullName -Force -ErrorAction Stop
-        if ((Read-AgentUndoContent -Path $backup.FullName) -cne $Before) {
+        $expected = if ($BeforeHash) { $BeforeHash } else { $Before }
+        if ((Read-AgentUndoContent -Path $backup.FullName -Hash:([bool]$BeforeHash)) -cne $expected) {
             throw 'Backup verification failed. No write performed.'
         }
         return $backup
@@ -4969,7 +5032,8 @@ function Assert-AgentUndoBackup {
     try {
         $backupItem = Get-Item -LiteralPath $Write.backup -Force -ErrorAction Stop
         if (($backupItem.Attributes -band 1024) -ne 0) { throw 'Backup is a reparse point.' }
-        if ((Read-AgentUndoContent -Path $Write.backup) -cne $Write.before_content) {
+        $expected = if ($Write.before_hash) { $Write.before_hash } else { $Write.before_content }
+        if ((Read-AgentUndoContent -Path $Write.backup -Hash:([bool]$Write.before_hash)) -cne $expected) {
             throw 'Backup does not match the recorded original content.'
         }
     }
@@ -4980,8 +5044,11 @@ function Assert-AgentUndoBackup {
 
 function Assert-AgentUndoContent {
     param($Write)
-    $current = Read-AgentUndoContent -Path $Write.full_path
-    if ($current -cne $Write.after_content -and $current -cne $Write.before_content) {
+    $useHash = [bool]($Write.after_hash -or $Write.before_hash)
+    $before = if ($useHash) { $Write.before_hash } else { $Write.before_content }
+    $after = if ($useHash) { $Write.after_hash } else { $Write.after_content }
+    $current = Read-AgentUndoContent -Path $Write.full_path -Hash:$useHash
+    if ($current -cne $after -and $current -cne $before) {
         throw "File $($Write.rel_path) changed after the agent operation. Refusing to overwrite manual changes."
     }
 }
@@ -5021,12 +5088,14 @@ function Invoke-AgentUndo {
             }
             $fullKey = [string]$w.full_path
             if ($expectedByPath.ContainsKey($fullKey)) {
-                if ($w.after_content -cne $expectedByPath[$fullKey]) {
+                $nextWrite = $expectedByPath[$fullKey]
+                if ($w.after_content -cne $nextWrite.before_content -or
+                    ($w.after_hash -and $nextWrite.before_hash -and $w.after_hash -cne $nextWrite.before_hash)) {
                     throw "Undo chain mismatch for $($w.rel_path)."
                 }
             }
             else { Assert-AgentUndoContent -Write $w }
-            $expectedByPath[$fullKey] = $w.before_content
+            $expectedByPath[$fullKey] = $w
         }
         catch {
             Stop-AgentUndo -UndoEntry $UndoEntry -Reason $_.Exception.Message
@@ -5041,7 +5110,8 @@ function Invoke-AgentUndo {
             if ($w.action -in @('modified', 'deleted')) {
                 Assert-AgentUndoBackup -Write $w
                 Copy-Item -LiteralPath $w.backup -Destination $w.full_path -Force -ErrorAction Stop
-                if ((Read-AgentUndoContent -Path $w.full_path) -cne $w.before_content) {
+                $expected = if ($w.before_hash) { $w.before_hash } else { $w.before_content }
+                if ((Read-AgentUndoContent -Path $w.full_path -Hash:([bool]$w.before_hash)) -cne $expected) {
                     throw "Restored content verification failed for $($w.rel_path)."
                 }
                 $w.undone = $true

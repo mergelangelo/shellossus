@@ -21,7 +21,7 @@ function Clear-AgentUndoBackups {
 }
 
 function Read-AgentUndoContent {
-    param([string]$Path)
+    param([string]$Path, [switch]$Hash)
     try {
         $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
     }
@@ -32,17 +32,21 @@ function Read-AgentUndoContent {
     if ($item.PSIsContainer) {
         throw "Expected a file at $Path."
     }
+    if ($Hash) {
+        return (Get-FileHash -LiteralPath $Path -Algorithm SHA256 -ErrorAction Stop).Hash
+    }
     $content = Get-Content -LiteralPath $Path -Raw -Encoding UTF8 -ErrorAction Stop
     if ($null -eq $content) { return '' }
     return [string]$content
 }
 
 function New-AgentUndoBackup {
-    param([string]$Path, [AllowEmptyString()][string]$Before)
+    param([string]$Path, [AllowEmptyString()][string]$Before, [string]$BeforeHash)
     $backup = New-AgentTempFile
     try {
         Copy-Item -LiteralPath $Path -Destination $backup.FullName -Force -ErrorAction Stop
-        if ((Read-AgentUndoContent -Path $backup.FullName) -cne $Before) {
+        $expected = if ($BeforeHash) { $BeforeHash } else { $Before }
+        if ((Read-AgentUndoContent -Path $backup.FullName -Hash:([bool]$BeforeHash)) -cne $expected) {
             throw 'Backup verification failed. No write performed.'
         }
         return $backup
@@ -90,7 +94,8 @@ function Assert-AgentUndoBackup {
     try {
         $backupItem = Get-Item -LiteralPath $Write.backup -Force -ErrorAction Stop
         if (($backupItem.Attributes -band 1024) -ne 0) { throw 'Backup is a reparse point.' }
-        if ((Read-AgentUndoContent -Path $Write.backup) -cne $Write.before_content) {
+        $expected = if ($Write.before_hash) { $Write.before_hash } else { $Write.before_content }
+        if ((Read-AgentUndoContent -Path $Write.backup -Hash:([bool]$Write.before_hash)) -cne $expected) {
             throw 'Backup does not match the recorded original content.'
         }
     }
@@ -101,8 +106,11 @@ function Assert-AgentUndoBackup {
 
 function Assert-AgentUndoContent {
     param($Write)
-    $current = Read-AgentUndoContent -Path $Write.full_path
-    if ($current -cne $Write.after_content -and $current -cne $Write.before_content) {
+    $useHash = [bool]($Write.after_hash -or $Write.before_hash)
+    $before = if ($useHash) { $Write.before_hash } else { $Write.before_content }
+    $after = if ($useHash) { $Write.after_hash } else { $Write.after_content }
+    $current = Read-AgentUndoContent -Path $Write.full_path -Hash:$useHash
+    if ($current -cne $after -and $current -cne $before) {
         throw "File $($Write.rel_path) changed after the agent operation. Refusing to overwrite manual changes."
     }
 }
@@ -142,12 +150,14 @@ function Invoke-AgentUndo {
             }
             $fullKey = [string]$w.full_path
             if ($expectedByPath.ContainsKey($fullKey)) {
-                if ($w.after_content -cne $expectedByPath[$fullKey]) {
+                $nextWrite = $expectedByPath[$fullKey]
+                if ($w.after_content -cne $nextWrite.before_content -or
+                    ($w.after_hash -and $nextWrite.before_hash -and $w.after_hash -cne $nextWrite.before_hash)) {
                     throw "Undo chain mismatch for $($w.rel_path)."
                 }
             }
             else { Assert-AgentUndoContent -Write $w }
-            $expectedByPath[$fullKey] = $w.before_content
+            $expectedByPath[$fullKey] = $w
         }
         catch {
             Stop-AgentUndo -UndoEntry $UndoEntry -Reason $_.Exception.Message
@@ -162,7 +172,8 @@ function Invoke-AgentUndo {
             if ($w.action -in @('modified', 'deleted')) {
                 Assert-AgentUndoBackup -Write $w
                 Copy-Item -LiteralPath $w.backup -Destination $w.full_path -Force -ErrorAction Stop
-                if ((Read-AgentUndoContent -Path $w.full_path) -cne $w.before_content) {
+                $expected = if ($w.before_hash) { $w.before_hash } else { $w.before_content }
+                if ((Read-AgentUndoContent -Path $w.full_path -Hash:([bool]$w.before_hash)) -cne $expected) {
                     throw "Restored content verification failed for $($w.rel_path)."
                 }
                 $w.undone = $true

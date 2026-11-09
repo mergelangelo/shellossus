@@ -41,6 +41,7 @@ The table describes the model's `write_file`, `edit_file`, and `run_command` too
 ## Safe File Writes & `/undo` Protection
 
 - **Staged Writes:** `Invoke-AgentWrite` writes new content to a temporary file first, verifies the written content, verifies that the target file did not change during user confirmation, creates and verifies a backup copy, and then replaces the target file via `Move-Item -Force`.
+- `write_file` and `edit_file` accept UTF-8 with or without a BOM and BOM-marked UTF-16 LE or BE. They verify that the original bytes round-trip through the detected encoding before an edit or overwrite, preserve the existing encoding and BOM, and verify backups and undo by byte hash. New files use UTF-8 without a BOM, except for new `.ps1` files with non-ASCII characters, which use a UTF-8 BOM for Windows PowerShell 5.1.
 - Memory changes stop on a read error. Replacing or clearing an existing memory file requires a verified backup, including when the user runs `/memory` directly.
 - **Conflict-Aware `/undo`:**
   - `write_file` and `edit_file` record created/modified paths and their content. Modified files also have verified pre-edit backups. In-process subagent file edits join the parent's recorded turn.
