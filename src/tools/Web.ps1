@@ -188,6 +188,44 @@ function Test-SafeWebUrl {
     return $true
 }
 
+function Assert-SafeWebResolution {
+    param([uri]$Target)
+    $targetHost = $Target.IdnHost -replace '^\[|\]$', ''
+    if ($Target.IsLoopback) {
+        throw "Blocked request to local or private network address: $targetHost"
+    }
+    if ($Target.HostNameType -in @('IPv4', 'IPv6')) {
+        $addresses = @($targetHost)
+    }
+    else {
+        try {
+            if (Get-Command -Name 'Resolve-DnsName' -ErrorAction SilentlyContinue) {
+                $addresses = @(Resolve-DnsName -Name $targetHost -Type A_AAAA -DnsOnly -ErrorAction Stop |
+                    Where-Object { $_.Type -in @('A', 'AAAA') -and $_.Section -eq 'Answer' } |
+                    ForEach-Object { [string]$_.IPAddress })
+            }
+            elseif ($ExecutionContext.SessionState.LanguageMode -eq 'FullLanguage') {
+                # Preserve hostname resolution on platforms without the Windows DNS cmdlet.
+                $addresses = @([System.Net.Dns]::GetHostAddresses($targetHost))
+            }
+            else {
+                throw 'Resolve-DnsName is unavailable in this PowerShell session.'
+            }
+        }
+        catch {
+            throw "DNS resolution failed for ${targetHost}: $($_.Exception.Message)"
+        }
+        if (-not $addresses.Count -or $addresses -contains '') {
+            throw "DNS resolution failed for ${targetHost}: no IPv4 or IPv6 addresses returned."
+        }
+    }
+    foreach ($address in $addresses) {
+        if (Test-BlockedWebAddress -Address ([string]$address)) {
+            throw "Blocked request to local or private network address: $targetHost"
+        }
+    }
+}
+
 function Request-AgentWebConfirmation {
     param([string]$ToolName, [string]$Target)
     if ($script:AgentPermission -in @('AutoEdit', 'Auto') -or $script:AutoApproveWeb) {
@@ -310,66 +348,26 @@ function Invoke-AgentWebDownload {
         $proc = $null
         $procId = 0
         try {
-            $classifierBody = (Get-Command -Name 'Test-BlockedWebAddress' -CommandType Function).Definition
-            $workerHead = @'
+            $workerFunctions = foreach ($name in @('Test-BlockedWebAddress', 'Assert-SafeWebResolution', 'Format-WebRequestError')) {
+                $body = (Get-Command -Name $name -CommandType Function).Definition
+                "function $name {`n$body`n}"
+            }
+            $workerMain = @'
 $ErrorActionPreference = 'Stop'
-function Test-BlockedWebAddress {
-'@
-            $workerTail = @'
+try {
+    Assert-SafeWebResolution -Target $env:SHELLOSSUS_WEB_DOWNLOAD_URI
+} catch {
+    Write-Output $_.Exception.Message
+    exit 1
 }
 try {
-    $downloadUri = $env:SHELLOSSUS_WEB_DOWNLOAD_URI
-    $targetHost = ''
-    try {
-        $parsedUri = [uri]$downloadUri
-        $targetHost = $parsedUri.DnsSafeHost
-        if (-not $targetHost) { $targetHost = $parsedUri.Host }
-        $targetHost = $targetHost -replace '^\[|\]$', ''
-    } catch {
-        $targetHost = ''
-    }
-    if (-not $targetHost) {
-        Write-Output 'Blocked request to local or private network address'
-        exit 1
-    }
-    $resolved = @()
-    try {
-        $resolved = @([System.Net.Dns]::GetHostAddresses($targetHost))
-    } catch {
-        Write-Output 'Blocked request to local or private network address'
-        exit 1
-    }
-    if (-not $resolved -or @($resolved).Count -eq 0) {
-        Write-Output 'Blocked request to local or private network address'
-        exit 1
-    }
-    foreach ($oneAddr in @($resolved)) {
-        $canon = [string]$oneAddr
-        if (-not $canon -or (Test-BlockedWebAddress -Address $canon)) {
-            Write-Output 'Blocked request to local or private network address'
-            exit 1
-        }
-    }
     Invoke-WebRequest -Uri $env:SHELLOSSUS_WEB_DOWNLOAD_URI -Method Get -Headers @{ 'User-Agent' = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Shellossus/1.0' } -MaximumRedirection 0 -TimeoutSec 30 -UseBasicParsing -OutFile $env:SHELLOSSUS_WEB_DOWNLOAD_FILE -ErrorAction Stop
 } catch {
-    $code = 0
-    try {
-        if ($_.Exception.Response -and $_.Exception.Response.StatusCode) {
-            $code = [int]$_.Exception.Response.StatusCode
-        }
-    } catch {}
-    $msg = if ($_.Exception -and $_.Exception.Message) { [string]$_.Exception.Message } else { [string]$_ }
-    $msg = ($msg -replace '[\r\n]+', ' ').Trim()
-    $codeText = [string]$code
-    if ($code -gt 0 -and ($msg -notmatch ('\b' + $codeText + '\b'))) {
-        Write-Output ('HTTP ' + $codeText + ': ' + $msg)
-    } else {
-        Write-Output $msg
-    }
+    Write-Output (Format-WebRequestError -ErrorRecord $_)
     exit 1
 }
 '@
-            $worker = $workerHead + $classifierBody + $workerTail
+            $worker = ($workerFunctions -join "`n") + "`n" + $workerMain
             # A multiline -Command is cut at the first newline on Windows PowerShell 5.1.
             $workerFile = New-AgentTempFile
             Set-AgentUtf8Content -LiteralPath $workerFile.FullName -Value $worker
@@ -410,8 +408,8 @@ try {
             }
             $errDetail = if ($errOut -and $errOut.Trim()) { ($errOut -replace '[\r\n]+', ' ').Trim() } else { '' }
             if ($errDetail.Length -gt 240) { $errDetail = $errDetail.Substring(0, 240) + '...' }
-            if ($errDetail -or -not (Test-Path -LiteralPath $OutFile)) {
-                if ($errDetail) { throw "Web request failed: $errDetail" }
+            if ($errDetail) { throw $errDetail }
+            if (-not (Test-Path -LiteralPath $OutFile)) {
                 throw 'Web request failed.'
             }
         }

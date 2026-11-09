@@ -296,6 +296,48 @@ try {
     Assert-True ($clScoped.Contains('Constrained scoped rule.')) 'ConstrainedLanguage scoped AGENTS.md lookup failed.'
     Assert-True ((ConvertFrom-HtmlToText -Html '<p>Hi &amp; bye</p>').Contains('Hi & bye')) 'ConstrainedLanguage ConvertFrom-HtmlToText failed.'
 
+    # Exercise the worker's DNS validation without issuing DNS or HTTP requests.
+    if (-not (Get-Command -Name 'Resolve-DnsName' -ErrorAction SilentlyContinue)) {
+        $clDnsUnavailable = ''
+        try { Assert-SafeWebResolution -Target 'https://public.test/' }
+        catch { $clDnsUnavailable = $_.Exception.Message }
+        Assert-True ($clDnsUnavailable -like 'DNS resolution failed*Resolve-DnsName is unavailable*') 'Missing DNS cmdlet must fail closed in ConstrainedLanguage.'
+    }
+    & {
+        function Resolve-DnsName {
+            [CmdletBinding()]
+            param([string]$Name, [string]$Type, [switch]$DnsOnly)
+            Assert-True ($Type -eq 'A_AAAA' -and $DnsOnly -and $ErrorActionPreference -eq 'Stop') 'Expected a terminating DNS query for A and AAAA records.'
+            if ($Name -eq 'missing.test') { throw 'Mock DNS name does not exist.' }
+            @{ Type = 'CNAME'; Section = 'Answer'; NameHost = 'alias.test' }
+            @{ Type = 'A'; Section = 'Additional'; IPAddress = '10.0.0.1' }
+            if ($Name -ne 'empty.test') {
+                @{ Type = 'AAAA'; Section = 'Answer'; IPAddress = '2606:4700:4700::1111' }
+            }
+            if ($Name -eq 'mixed.test') {
+                @{ Type = 'A'; Section = 'Answer'; IPAddress = '8.8.8.8' }
+                @{ Type = 'AAAA'; Section = 'Answer'; IPAddress = 'fd00::1' }
+            }
+            if ($Name -eq 'private-v4.test') {
+                @{ Type = 'A'; Section = 'Answer'; IPAddress = '192.168.1.1' }
+            }
+        }
+
+        Assert-SafeWebResolution -Target 'https://public.test/'
+        Assert-SafeWebResolution -Target 'https://[2606:4700:4700::1111]/'
+        foreach ($dnsCase in @(
+            @{ name = 'mixed.test'; error = 'Blocked request*' }
+            @{ name = 'private-v4.test'; error = 'Blocked request*' }
+            @{ name = 'empty.test'; error = 'DNS resolution failed*no IPv4 or IPv6 addresses*' }
+            @{ name = 'missing.test'; error = 'DNS resolution failed*Mock DNS name does not exist*' }
+        )) {
+            $dnsError = ''
+            try { Assert-SafeWebResolution -Target ('https://' + $dnsCase.name + '/') }
+            catch { $dnsError = $_.Exception.Message }
+            Assert-True ($dnsError -like $dnsCase.error) "Unexpected DNS validation result for $($dnsCase.name): $dnsError"
+        }
+    }
+
     $clTmp = New-AgentTempFile
     try {
         Assert-True ($null -ne $clTmp -and (Test-Path -LiteralPath $clTmp.FullName)) 'ConstrainedLanguage New-AgentTempFile failed.'

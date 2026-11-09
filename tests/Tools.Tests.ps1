@@ -2264,6 +2264,7 @@ description: Optional subagent role: recon (ReadOnly search), audit (ReadOnly re
         'http://127.0.0.1/',
         'http://169.254.169.254/',
         'http://100.64.0.1/',
+        'http://[fd00::1]/',
         'http://localhost/'
     )) {
         $blockedOut = Join-Path $testRoot ('blocked-web-' + ($blockedUri -replace '[^0-9A-Za-z]', '-') + '.tmp')
