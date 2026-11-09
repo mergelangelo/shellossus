@@ -1994,7 +1994,7 @@ property: path
 description: Workspace-relative text file path. Parent directory must exist.
 
 tool: run_command
-description: Execute a PowerShell command in the workspace directory.
+description: Execute PowerShell with the user's OS permissions, starting in the workspace directory.
 property: command
 description: PowerShell command to execute.
 property: timeout_sec

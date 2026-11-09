@@ -347,9 +347,9 @@ function Invoke-AgentWebDownload {
         }
     }
     else {
+        $shellExe = Get-AgentPowerShellExecutable
         $stdout = New-AgentTempFile
         $stderr = New-AgentTempFile
-        $workerFile = $null
         $proc = $null
         $procId = 0
         try {
@@ -366,26 +366,21 @@ try {
     exit 1
 }
 try {
-    Invoke-WebRequest -Uri $env:SHELLOSSUS_WEB_DOWNLOAD_URI -Method Get -Headers @{ 'User-Agent' = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Shellossus/1.0' } -MaximumRedirection 0 -TimeoutSec 30 -UseBasicParsing -OutFile $env:SHELLOSSUS_WEB_DOWNLOAD_FILE -ErrorAction Stop
+    Microsoft.PowerShell.Utility\Invoke-WebRequest -Uri $env:SHELLOSSUS_WEB_DOWNLOAD_URI -Method Get -Headers @{ 'User-Agent' = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Shellossus/1.0' } -MaximumRedirection 0 -TimeoutSec 30 -UseBasicParsing -OutFile $env:SHELLOSSUS_WEB_DOWNLOAD_FILE -ErrorAction Stop
 } catch {
     Write-Output (Format-WebRequestError -ErrorRecord $_)
     exit 1
 }
 '@
             $worker = ($workerFunctions -join "`n") + "`n" + $workerMain
-            # A multiline -Command is cut at the first newline on Windows PowerShell 5.1.
-            $workerFile = New-AgentTempFile
-            Set-AgentUtf8Content -LiteralPath $workerFile.FullName -Value $worker
-            $launch = '$ErrorActionPreference = ''Stop''; Invoke-Expression (Get-Content -LiteralPath $env:SHELLOSSUS_WEB_WORKER_FILE -Raw)'
-            $workerArguments = Get-AgentCommandArguments -CommandText $launch
+            $workerArguments = Get-AgentWorkerArguments -CommandText $worker
             $proc = Invoke-WithProcessEnvironment -Values @{
                 SHELLOSSUS_API_KEY = $null
                 OPENAI_API_KEY = $null
                 SHELLOSSUS_WEB_DOWNLOAD_URI = $Uri
                 SHELLOSSUS_WEB_DOWNLOAD_FILE = $OutFile
-                SHELLOSSUS_WEB_WORKER_FILE = $workerFile.FullName
             } -Action {
-                Start-Process -FilePath (Get-AgentEnvironment).shell_exe -ArgumentList $workerArguments -RedirectStandardOutput $stdout.FullName -RedirectStandardError $stderr.FullName -NoNewWindow -PassThru -ErrorAction Stop
+                Start-Process -FilePath $shellExe -ArgumentList $workerArguments -RedirectStandardOutput $stdout.FullName -RedirectStandardError $stderr.FullName -NoNewWindow -PassThru -ErrorAction Stop
             }
             $procId = 0
             try { $procId = [int]$proc.Id } catch { $procId = 0 }
@@ -414,7 +409,7 @@ try {
             $errDetail = if ($errOut -and $errOut.Trim()) { ($errOut -replace '[\r\n]+', ' ').Trim() } else { '' }
             if ($errDetail.Length -gt 240) { $errDetail = $errDetail.Substring(0, 240) + '...' }
             if ($errDetail) { throw $errDetail }
-            if (-not (Test-Path -LiteralPath $OutFile)) {
+            if (($null -ne $proc.ExitCode -and $proc.ExitCode -ne 0) -or -not (Test-Path -LiteralPath $OutFile)) {
                 throw 'Web request failed.'
             }
         }
@@ -423,9 +418,6 @@ try {
                 Stop-Process -Id $procId -Force -ErrorAction SilentlyContinue
             }
             Remove-Item -LiteralPath $stdout.FullName, $stderr.FullName -Force -ErrorAction SilentlyContinue
-            if ($workerFile) {
-                Remove-Item -LiteralPath $workerFile.FullName -Force -ErrorAction SilentlyContinue
-            }
         }
     }
     $resultFile = Get-Item -LiteralPath $OutFile -Force -ErrorAction Stop

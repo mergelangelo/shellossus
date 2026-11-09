@@ -297,39 +297,51 @@ function Get-AgentEnvironment {
     else {
         'FullLanguage'
     }
-    $preferPwsh = ($editionName -eq 'Core')
-    $shellCmd = if ($preferPwsh) {
-        $c = Get-Command -Name 'pwsh' -ErrorAction SilentlyContinue
-        if (-not $c) { $c = Get-Command -Name 'powershell' -ErrorAction SilentlyContinue }
-        $c
-    }
-    else {
-        $c = Get-Command -Name 'powershell' -ErrorAction SilentlyContinue
-        if (-not $c) { $c = Get-Command -Name 'pwsh' -ErrorAction SilentlyContinue }
-        $c
-    }
-    $shellExe = if ($shellCmd -and $shellCmd.Name) {
-        if ($shellCmd.Name -match '(?i)^pwsh') { 'pwsh' } else { 'powershell' }
-    }
-    elseif ($preferPwsh) {
-        'pwsh'
-    }
-    else {
-        'powershell'
-    }
-    $shellVer = $psVer
-    if ($shellCmd -and $shellCmd.Version -and ([string]$shellCmd.Version -ne '0.0.0.0')) {
-        $shellVer = [string]$shellCmd.Version
-    }
+    $shellExe = if ($editionName -eq 'Core') { 'pwsh' } else { 'powershell' }
     return @{
         os = $osDesc
         ps_version = $psVer
         ps_edition = $editionName
         language_mode = $langMode
         shell_exe = $shellExe
-        shell_version = $shellVer
+        shell_version = $psVer
         workspace = [string]$effRoot
     }
+}
+
+function Get-AgentPowerShellExecutable {
+    $name = if ($PSVersionTable.PSEdition -eq 'Desktop') { 'powershell.exe' }
+    elseif ($IsWindows) { 'pwsh.exe' }
+    else { 'pwsh' }
+    $path = Join-Path $PSHOME $name
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf -ErrorAction Stop)) {
+        throw "PowerShell executable was not found in the current installation: $path"
+    }
+    return $path
+}
+
+function Get-AgentWorkerArguments {
+    param([string]$CommandText)
+    # -EncodedCommand takes Base64 of UTF-16LE. Use operators for CLM compatibility.
+    $bytes = [byte[]]::new($CommandText.Length * 2)
+    for ($i = 0; $i -lt $CommandText.Length; $i++) {
+        $code = [int][char]$CommandText[$i]
+        $bytes[2 * $i] = $code -band 255
+        $bytes[2 * $i + 1] = $code -shr 8
+    }
+    $alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
+    $encoded = -join @(for ($i = 0; $i -lt $bytes.Length; $i += 3) {
+        $first = $bytes[$i]
+        $hasSecond = ($i + 1 -lt $bytes.Length)
+        $hasThird = ($i + 2 -lt $bytes.Length)
+        $second = if ($hasSecond) { $bytes[$i + 1] } else { 0 }
+        $third = if ($hasThird) { $bytes[$i + 2] } else { 0 }
+        $alphabet[$first -shr 2]
+        $alphabet[(($first -band 3) -shl 4) -bor ($second -shr 4)]
+        if ($hasSecond) { $alphabet[(($second -band 15) -shl 2) -bor ($third -shr 6)] } else { '=' }
+        if ($hasThird) { $alphabet[$third -band 63] } else { '=' }
+    })
+    return @('-NoProfile', '-NonInteractive', '-OutputFormat', 'Text', '-EncodedCommand', $encoded)
 }
 
 function Get-AgentCommandArguments {

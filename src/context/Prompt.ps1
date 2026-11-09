@@ -232,6 +232,9 @@ function Format-CapabilitiesPromptBlock {
     $lines += 'PowerShell and command execution rules:'
     $lines += '- Write commands in PowerShell syntax compatible with Windows PowerShell 5.1 (avoid bash syntax and PS7-only && or || operators; use ; or check $? / $LASTEXITCODE).'
     $lines += '- Before calling external programs in run_command (e.g. git, rg, python, node, dotnet), check availability with Get-Command <name> -ErrorAction SilentlyContinue.'
+    if ($cap.can_exec) {
+        $lines += '- run_command starts in the workspace. OS permissions and application-control policy govern access to files, programs, and the network.'
+    }
     $lines += 'Rules for truthful behavior and state changes:'
     $lines += '- Judge tool availability strictly by this current <capabilities> block and active tool definitions, never by your own earlier replies in conversation history.'
     $lines += '- If an action is disallowed, explain the restriction immediately without searching for workarounds.'

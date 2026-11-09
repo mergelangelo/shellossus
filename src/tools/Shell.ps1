@@ -120,8 +120,7 @@ function Invoke-ShellCommand {
     if (-not $Command -or -not $Command.Trim()) { throw 'Command must not be empty.' }
     if ($TimeoutSec -lt 1 -or $TimeoutSec -gt 600) { throw 'timeout_sec must be between 1 and 600.' }
     $rootFull = (Get-Item -LiteralPath $Root -Force -ErrorAction Stop).FullName
-    $envInfo = Get-AgentEnvironment -Root $rootFull
-    $shellExe = $envInfo.shell_exe
+    $shellExe = Get-AgentPowerShellExecutable
     $outTemp = New-AgentTempFile
     $errTemp = New-AgentTempFile
     $savedSSess = $env:SHELLOSSUS_SESSION_ID

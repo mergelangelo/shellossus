@@ -33,6 +33,8 @@ All `.ps1` files (`src/*.ps1`, `shellossus.ps1`, `build.ps1`, `tests/*.ps1`) mus
 ### Section 3. OpenAI-Compatible API Transport
 `shellossus` communicates with models via standard OpenAI-compatible `/v1/chat/completions` endpoints (cloud providers, local `Ollama`/`vLLM` servers, or internal corporate gateways) using UTF-8 file-backed HTTP requests so non-ASCII prompts and responses are never corrupted by default codepages.
 
+HTTP workers launch the PowerShell executable from the current installation's `$PSHOME` by absolute path. They run application-owned worker code and receive request inputs separately as data.
+
 ---
 
 ## Article III — Workspace Isolation and Credential Protection

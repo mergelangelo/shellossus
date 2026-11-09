@@ -126,7 +126,7 @@ function Format-TuiHelpCard {
         ($script:Gm.Aqua + '  /skills | /skill:<name> [a]  ' + $script:Gm.Fg + 'List or invoke a SKILL.md skill directly' + $script:Gm.Reset),
         ($script:Gm.Aqua + '  /<template> [args] | /reload ' + $script:Gm.Fg + 'Run prompt template or reload context' + $script:Gm.Reset),
         ($script:Gm.Aqua + '  @path/to/file                ' + $script:Gm.Fg + 'Inline-attach workspace file into prompt' + $script:Gm.Reset),
-        ($script:Gm.Aqua + '  !cmd / !!cmd                 ' + $script:Gm.Fg + 'Run shell cmd (! in context, !! local)' + $script:Gm.Reset),
+        ($script:Gm.Aqua + '  !cmd / !!cmd                 ' + $script:Gm.Fg + 'Run directly (! adds output, !! local)' + $script:Gm.Reset),
         ($script:Gm.Aqua + '  """ ... """ or trailing \    ' + $script:Gm.Fg + 'Multi-line prompt input block' + $script:Gm.Reset)
     )
     return @(Format-TuiCardBox -Header $hdr -BodyLines $body -Width $w)

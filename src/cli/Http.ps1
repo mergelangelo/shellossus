@@ -97,7 +97,7 @@ function Invoke-AgentHttpRequest {
         Invoke-WebRequest @request -UseBasicParsing -OutFile $OutFile
         return
     }
-    $shellExe = (Get-AgentEnvironment).shell_exe
+    $shellExe = Get-AgentPowerShellExecutable
     $reqTemp = New-AgentTempFile
     $errTemp = New-AgentTempFile
     $stdoutTemp = New-AgentTempFile
@@ -107,7 +107,7 @@ function Invoke-AgentHttpRequest {
         $workerCmd = @'
 $ErrorActionPreference = 'Stop'
 try {
-    Invoke-WebRequest -Uri $env:SHELLOSSUS_HTTP_URI -Method 'Post' -Headers @{ Authorization = ('Bearer ' + $env:SHELLOSSUS_HTTP_KEY) } -ContentType 'application/json; charset=utf-8' -InFile $env:SHELLOSSUS_HTTP_IN -OutFile $env:SHELLOSSUS_HTTP_OUT -MaximumRedirection 0 -TimeoutSec ([int]$env:SHELLOSSUS_HTTP_TIMEOUT) -UseBasicParsing -ErrorAction Stop
+    Microsoft.PowerShell.Utility\Invoke-WebRequest -Uri $env:SHELLOSSUS_HTTP_URI -Method 'Post' -Headers @{ Authorization = ('Bearer ' + $env:SHELLOSSUS_HTTP_KEY) } -ContentType 'application/json; charset=utf-8' -InFile $env:SHELLOSSUS_HTTP_IN -OutFile $env:SHELLOSSUS_HTTP_OUT -MaximumRedirection 0 -TimeoutSec ([int]$env:SHELLOSSUS_HTTP_TIMEOUT) -UseBasicParsing -ErrorAction Stop
 }
 catch {
     $msg = $_.Exception.Message
@@ -128,7 +128,7 @@ catch {
     exit 1
 }
 '@
-        $argList = Get-AgentCommandArguments -CommandText $workerCmd
+        $argList = Get-AgentWorkerArguments -CommandText $workerCmd
         $proc = Invoke-WithProcessEnvironment -Values @{
             SHELLOSSUS_HTTP_URI = $Uri
             SHELLOSSUS_HTTP_KEY = $ApiKey

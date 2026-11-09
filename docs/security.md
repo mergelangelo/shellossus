@@ -17,7 +17,9 @@ You can set the permission mode at launch (`-Permission <Mode>`) or switch it at
 
 When resuming a saved session via `/resume`, `shellossus` resets the active permission mode to `Ask` unless `-Permission` was explicitly passed at launch.
 
-The table describes the model's `write_file`, `edit_file`, and `run_command` tools. It does not make the entire process read-only. `todo`, `ask_user`, and `memory` remain available subject to tool filters. Memory modifications (`append`, `set`, `clear`) are rejected in `ReadOnly` and require confirmation in `Ask` mode. Sessions can still be saved in `ReadOnly`. User-entered `!cmd` / `!!cmd` shortcuts execute directly, without `RUN` confirmation or a `ReadOnly` check. `ask_user` plan approval does not change these permission rules.
+The table describes the model's `write_file`, `edit_file`, and `run_command` tools. It does not make the entire process read-only. `todo`, `ask_user`, and `memory` remain available subject to tool filters. Memory modifications (`append`, `set`, `clear`) are rejected in `ReadOnly` and require confirmation in `Ask` mode. Sessions can still be saved in `ReadOnly`. `ask_user` plan approval does not change these permission rules.
+
+User-entered `!cmd` and `!!cmd` are direct operator commands in every permission mode, including `ReadOnly`. They run immediately with the user's OS permissions. `!cmd` records the command and its output in the conversation. `!!cmd` displays the result locally.
 
 Outbound web tools (`fetch_url` and `web_search`) require separate confirmation in `ReadOnly`, `Ask`, and `AutoEdit`. Choose `[a]ll` at a web prompt to approve further web requests for the session. `Auto` approves web requests automatically. In JSON mode, a request that requires confirmation returns `cancelled` immediately.
 
@@ -32,7 +34,7 @@ Plan review sets `approved` only when the user selects an explicit approval opti
 1. **Workspace Boundary Enforcement:**
    - `list_files`, `read_file`, `find_files`, `grep_files`, `write_file`, `edit_file`, and `@file` attachments use workspace path validation. Paths resolving outside the workspace directory are rejected (`Path is outside the workspace.`). Boundary checks (`Test-AgentPathWithinRoot` and `Get-WorkspaceRelativePath`) match Windows drive paths (`C:\...`) case-insensitively on Windows (`OrdinalIgnoreCase`) while keeping POSIX paths case-sensitive (`Ordinal`).
    - The read-only exception for these file tools is `read_file` access to global `SKILL.md` files explicitly registered by `Get-SkillsCatalog` from the global configuration directory (normally `%USERPROFILE%\.shellossus\skills`).
-   - Shell commands start with the workspace as their working directory, but retain the user's OS permissions. They can change directory, read/write other paths (including configuration files), invoke programs, and use the network. Permission prompts approve execution; they do not sandbox it.
+   - The workspace is the starting directory for `run_command`, `!`, and `!!`. These commands can access other paths, invoke native executables, and use the network wherever the user's OS permissions and application-control policies allow. On Windows, controls such as AppLocker or WDAC enforce executable restrictions.
    - `memory` is a separate fixed-path tool: workspace scope uses an existing root `MEMORY.md`, otherwise `.shellossus/MEMORY.md`; global scope uses `MEMORY.md` beside the active configuration file. It does not use `Resolve-AgentPath`, but it checks its target path and ancestor directories up to the scope root for reparse points (`Test-PathHasReparsePoint`).
    - Configuration and global context/skills/agent profiles are intentionally loaded from outside the workspace. Sessions normally live beside the configuration in `sessions/` (`-SessionDir` overrides this); imports/exports and explicit session paths are not constrained by the file-tool boundary. Staging files, backups, and HTTP response files use OS temporary storage. Doctor can create the configured session directory and temporarily probe it.
 2. **Reparse Point Rejection:**
@@ -65,6 +67,8 @@ Undo history is process-local. Session resets, session switches, and process exi
 ---
 
 ## Process Execution & Command Timeouts
+
+Child PowerShell processes launch the executable by absolute path from the current installation's `$PSHOME` with profiles disabled. The model API POST and web download workers receive application-owned code through `-EncodedCommand`. Request URLs, credentials, and payloads travel separately as environment values or data files.
 
 For `fetch_url` and `web_search`, downloads run in a separate PowerShell process. The parent checks the temporary output file while the download is running, stops it when it exceeds 2 MiB, and checks the completed file again before reading it. The check is periodic, so a fast response can temporarily exceed the limit between polls; this is not a strict disk or worker-memory quota.
 

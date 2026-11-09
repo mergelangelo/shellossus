@@ -2465,39 +2465,51 @@ function Get-AgentEnvironment {
     else {
         'FullLanguage'
     }
-    $preferPwsh = ($editionName -eq 'Core')
-    $shellCmd = if ($preferPwsh) {
-        $c = Get-Command -Name 'pwsh' -ErrorAction SilentlyContinue
-        if (-not $c) { $c = Get-Command -Name 'powershell' -ErrorAction SilentlyContinue }
-        $c
-    }
-    else {
-        $c = Get-Command -Name 'powershell' -ErrorAction SilentlyContinue
-        if (-not $c) { $c = Get-Command -Name 'pwsh' -ErrorAction SilentlyContinue }
-        $c
-    }
-    $shellExe = if ($shellCmd -and $shellCmd.Name) {
-        if ($shellCmd.Name -match '(?i)^pwsh') { 'pwsh' } else { 'powershell' }
-    }
-    elseif ($preferPwsh) {
-        'pwsh'
-    }
-    else {
-        'powershell'
-    }
-    $shellVer = $psVer
-    if ($shellCmd -and $shellCmd.Version -and ([string]$shellCmd.Version -ne '0.0.0.0')) {
-        $shellVer = [string]$shellCmd.Version
-    }
+    $shellExe = if ($editionName -eq 'Core') { 'pwsh' } else { 'powershell' }
     return @{
         os = $osDesc
         ps_version = $psVer
         ps_edition = $editionName
         language_mode = $langMode
         shell_exe = $shellExe
-        shell_version = $shellVer
+        shell_version = $psVer
         workspace = [string]$effRoot
     }
+}
+
+function Get-AgentPowerShellExecutable {
+    $name = if ($PSVersionTable.PSEdition -eq 'Desktop') { 'powershell.exe' }
+    elseif ($IsWindows) { 'pwsh.exe' }
+    else { 'pwsh' }
+    $path = Join-Path $PSHOME $name
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf -ErrorAction Stop)) {
+        throw "PowerShell executable was not found in the current installation: $path"
+    }
+    return $path
+}
+
+function Get-AgentWorkerArguments {
+    param([string]$CommandText)
+    # -EncodedCommand takes Base64 of UTF-16LE. Use operators for CLM compatibility.
+    $bytes = [byte[]]::new($CommandText.Length * 2)
+    for ($i = 0; $i -lt $CommandText.Length; $i++) {
+        $code = [int][char]$CommandText[$i]
+        $bytes[2 * $i] = $code -band 255
+        $bytes[2 * $i + 1] = $code -shr 8
+    }
+    $alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
+    $encoded = -join @(for ($i = 0; $i -lt $bytes.Length; $i += 3) {
+        $first = $bytes[$i]
+        $hasSecond = ($i + 1 -lt $bytes.Length)
+        $hasThird = ($i + 2 -lt $bytes.Length)
+        $second = if ($hasSecond) { $bytes[$i + 1] } else { 0 }
+        $third = if ($hasThird) { $bytes[$i + 2] } else { 0 }
+        $alphabet[$first -shr 2]
+        $alphabet[(($first -band 3) -shl 4) -bor ($second -shr 4)]
+        if ($hasSecond) { $alphabet[(($second -band 15) -shl 2) -bor ($third -shr 6)] } else { '=' }
+        if ($hasThird) { $alphabet[$third -band 63] } else { '=' }
+    })
+    return @('-NoProfile', '-NonInteractive', '-OutputFormat', 'Text', '-EncodedCommand', $encoded)
 }
 
 function Get-AgentCommandArguments {
@@ -2734,7 +2746,7 @@ function Get-AgentToolSpecifications {
         },
         @{
             name = 'run_command'
-            description = 'Execute a PowerShell command in the workspace directory.'
+            description = 'Execute PowerShell with the user''s OS permissions, starting in the workspace directory.'
             required = @('command')
             properties = @{
                 command = @{ type = 'string'; description = 'PowerShell command to execute.' }
@@ -4771,8 +4783,7 @@ function Invoke-ShellCommand {
     if (-not $Command -or -not $Command.Trim()) { throw 'Command must not be empty.' }
     if ($TimeoutSec -lt 1 -or $TimeoutSec -gt 600) { throw 'timeout_sec must be between 1 and 600.' }
     $rootFull = (Get-Item -LiteralPath $Root -Force -ErrorAction Stop).FullName
-    $envInfo = Get-AgentEnvironment -Root $rootFull
-    $shellExe = $envInfo.shell_exe
+    $shellExe = Get-AgentPowerShellExecutable
     $outTemp = New-AgentTempFile
     $errTemp = New-AgentTempFile
     $savedSSess = $env:SHELLOSSUS_SESSION_ID
@@ -5564,9 +5575,9 @@ function Invoke-AgentWebDownload {
         }
     }
     else {
+        $shellExe = Get-AgentPowerShellExecutable
         $stdout = New-AgentTempFile
         $stderr = New-AgentTempFile
-        $workerFile = $null
         $proc = $null
         $procId = 0
         try {
@@ -5583,26 +5594,21 @@ try {
     exit 1
 }
 try {
-    Invoke-WebRequest -Uri $env:SHELLOSSUS_WEB_DOWNLOAD_URI -Method Get -Headers @{ 'User-Agent' = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Shellossus/1.0' } -MaximumRedirection 0 -TimeoutSec 30 -UseBasicParsing -OutFile $env:SHELLOSSUS_WEB_DOWNLOAD_FILE -ErrorAction Stop
+    Microsoft.PowerShell.Utility\Invoke-WebRequest -Uri $env:SHELLOSSUS_WEB_DOWNLOAD_URI -Method Get -Headers @{ 'User-Agent' = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Shellossus/1.0' } -MaximumRedirection 0 -TimeoutSec 30 -UseBasicParsing -OutFile $env:SHELLOSSUS_WEB_DOWNLOAD_FILE -ErrorAction Stop
 } catch {
     Write-Output (Format-WebRequestError -ErrorRecord $_)
     exit 1
 }
 '@
             $worker = ($workerFunctions -join "`n") + "`n" + $workerMain
-            # A multiline -Command is cut at the first newline on Windows PowerShell 5.1.
-            $workerFile = New-AgentTempFile
-            Set-AgentUtf8Content -LiteralPath $workerFile.FullName -Value $worker
-            $launch = '$ErrorActionPreference = ''Stop''; Invoke-Expression (Get-Content -LiteralPath $env:SHELLOSSUS_WEB_WORKER_FILE -Raw)'
-            $workerArguments = Get-AgentCommandArguments -CommandText $launch
+            $workerArguments = Get-AgentWorkerArguments -CommandText $worker
             $proc = Invoke-WithProcessEnvironment -Values @{
                 SHELLOSSUS_API_KEY = $null
                 OPENAI_API_KEY = $null
                 SHELLOSSUS_WEB_DOWNLOAD_URI = $Uri
                 SHELLOSSUS_WEB_DOWNLOAD_FILE = $OutFile
-                SHELLOSSUS_WEB_WORKER_FILE = $workerFile.FullName
             } -Action {
-                Start-Process -FilePath (Get-AgentEnvironment).shell_exe -ArgumentList $workerArguments -RedirectStandardOutput $stdout.FullName -RedirectStandardError $stderr.FullName -NoNewWindow -PassThru -ErrorAction Stop
+                Start-Process -FilePath $shellExe -ArgumentList $workerArguments -RedirectStandardOutput $stdout.FullName -RedirectStandardError $stderr.FullName -NoNewWindow -PassThru -ErrorAction Stop
             }
             $procId = 0
             try { $procId = [int]$proc.Id } catch { $procId = 0 }
@@ -5631,7 +5637,7 @@ try {
             $errDetail = if ($errOut -and $errOut.Trim()) { ($errOut -replace '[\r\n]+', ' ').Trim() } else { '' }
             if ($errDetail.Length -gt 240) { $errDetail = $errDetail.Substring(0, 240) + '...' }
             if ($errDetail) { throw $errDetail }
-            if (-not (Test-Path -LiteralPath $OutFile)) {
+            if (($null -ne $proc.ExitCode -and $proc.ExitCode -ne 0) -or -not (Test-Path -LiteralPath $OutFile)) {
                 throw 'Web request failed.'
             }
         }
@@ -5640,9 +5646,6 @@ try {
                 Stop-Process -Id $procId -Force -ErrorAction SilentlyContinue
             }
             Remove-Item -LiteralPath $stdout.FullName, $stderr.FullName -Force -ErrorAction SilentlyContinue
-            if ($workerFile) {
-                Remove-Item -LiteralPath $workerFile.FullName -Force -ErrorAction SilentlyContinue
-            }
         }
     }
     $resultFile = Get-Item -LiteralPath $OutFile -Force -ErrorAction Stop
@@ -6377,7 +6380,7 @@ function New-SubagentErrorResult {
 function Invoke-ParallelSubagentProcesses {
     param([string]$Root, [array]$Tasks, [int]$MaxSteps = 15, [string]$ScriptPath, [int]$TimeoutSec = 180)
     $configDir = if ($script:AgentConfigPath) { Split-Path $script:AgentConfigPath -Parent } else { '' }
-    $shellExe = (Get-AgentEnvironment -Root $Root).shell_exe
+    $shellExe = Get-AgentPowerShellExecutable
     $effEndpoint = if ($script:ActiveEndpoint) { $script:ActiveEndpoint } else { 'https://example.invalid/v1/chat/completions' }
     $baseUrl = $effEndpoint -replace '/chat/completions/?$', ''
     $effKey = if ($script:ActiveApiKey) { $script:ActiveApiKey } else { 'subagent-key' }
@@ -6405,7 +6408,7 @@ if ($env:SHELLOSSUS_SUB_NO_CONTEXT -eq '1') { $workerArgs.NoContextFiles = $true
 if ($env:SHELLOSSUS_SUB_REASONING_EFFORT) { $workerArgs.ReasoningEffort = $env:SHELLOSSUS_SUB_REASONING_EFFORT }
 & $env:SHELLOSSUS_SUB_SCRIPT @workerArgs
 '@
-    $argList = Get-AgentCommandArguments -CommandText $workerCmd
+    $argList = Get-AgentWorkerArguments -CommandText $workerCmd
     $allResults = @()
     $batchSize = 4
     for ($offset = 0; $offset -lt $Tasks.Count; $offset += $batchSize) {
@@ -7211,6 +7214,9 @@ function Format-CapabilitiesPromptBlock {
     $lines += 'PowerShell and command execution rules:'
     $lines += '- Write commands in PowerShell syntax compatible with Windows PowerShell 5.1 (avoid bash syntax and PS7-only && or || operators; use ; or check $? / $LASTEXITCODE).'
     $lines += '- Before calling external programs in run_command (e.g. git, rg, python, node, dotnet), check availability with Get-Command <name> -ErrorAction SilentlyContinue.'
+    if ($cap.can_exec) {
+        $lines += '- run_command starts in the workspace. OS permissions and application-control policy govern access to files, programs, and the network.'
+    }
     $lines += 'Rules for truthful behavior and state changes:'
     $lines += '- Judge tool availability strictly by this current <capabilities> block and active tool definitions, never by your own earlier replies in conversation history.'
     $lines += '- If an action is disallowed, explain the restriction immediately without searching for workarounds.'
@@ -9533,7 +9539,7 @@ function Invoke-AgentHttpRequest {
         Invoke-WebRequest @request -UseBasicParsing -OutFile $OutFile
         return
     }
-    $shellExe = (Get-AgentEnvironment).shell_exe
+    $shellExe = Get-AgentPowerShellExecutable
     $reqTemp = New-AgentTempFile
     $errTemp = New-AgentTempFile
     $stdoutTemp = New-AgentTempFile
@@ -9543,7 +9549,7 @@ function Invoke-AgentHttpRequest {
         $workerCmd = @'
 $ErrorActionPreference = 'Stop'
 try {
-    Invoke-WebRequest -Uri $env:SHELLOSSUS_HTTP_URI -Method 'Post' -Headers @{ Authorization = ('Bearer ' + $env:SHELLOSSUS_HTTP_KEY) } -ContentType 'application/json; charset=utf-8' -InFile $env:SHELLOSSUS_HTTP_IN -OutFile $env:SHELLOSSUS_HTTP_OUT -MaximumRedirection 0 -TimeoutSec ([int]$env:SHELLOSSUS_HTTP_TIMEOUT) -UseBasicParsing -ErrorAction Stop
+    Microsoft.PowerShell.Utility\Invoke-WebRequest -Uri $env:SHELLOSSUS_HTTP_URI -Method 'Post' -Headers @{ Authorization = ('Bearer ' + $env:SHELLOSSUS_HTTP_KEY) } -ContentType 'application/json; charset=utf-8' -InFile $env:SHELLOSSUS_HTTP_IN -OutFile $env:SHELLOSSUS_HTTP_OUT -MaximumRedirection 0 -TimeoutSec ([int]$env:SHELLOSSUS_HTTP_TIMEOUT) -UseBasicParsing -ErrorAction Stop
 }
 catch {
     $msg = $_.Exception.Message
@@ -9564,7 +9570,7 @@ catch {
     exit 1
 }
 '@
-        $argList = Get-AgentCommandArguments -CommandText $workerCmd
+        $argList = Get-AgentWorkerArguments -CommandText $workerCmd
         $proc = Invoke-WithProcessEnvironment -Values @{
             SHELLOSSUS_HTTP_URI = $Uri
             SHELLOSSUS_HTTP_KEY = $ApiKey
@@ -10232,7 +10238,7 @@ function Format-TuiHelpCard {
         ($script:Gm.Aqua + '  /skills | /skill:<name> [a]  ' + $script:Gm.Fg + 'List or invoke a SKILL.md skill directly' + $script:Gm.Reset),
         ($script:Gm.Aqua + '  /<template> [args] | /reload ' + $script:Gm.Fg + 'Run prompt template or reload context' + $script:Gm.Reset),
         ($script:Gm.Aqua + '  @path/to/file                ' + $script:Gm.Fg + 'Inline-attach workspace file into prompt' + $script:Gm.Reset),
-        ($script:Gm.Aqua + '  !cmd / !!cmd                 ' + $script:Gm.Fg + 'Run shell cmd (! in context, !! local)' + $script:Gm.Reset),
+        ($script:Gm.Aqua + '  !cmd / !!cmd                 ' + $script:Gm.Fg + 'Run directly (! adds output, !! local)' + $script:Gm.Reset),
         ($script:Gm.Aqua + '  """ ... """ or trailing \    ' + $script:Gm.Fg + 'Multi-line prompt input block' + $script:Gm.Reset)
     )
     return @(Format-TuiCardBox -Header $hdr -BodyLines $body -Width $w)

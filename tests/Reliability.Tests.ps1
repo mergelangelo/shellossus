@@ -14,6 +14,78 @@ $script:AgentPermission = 'AutoEdit'
 $testBackups = @()
 $testProcesses = @()
 try {
+    # Fixed worker code survives multiline launch in CLM and request data stays separate.
+    $shellName = if ($PSVersionTable.PSEdition -eq 'Desktop') { 'powershell.exe' } elseif ($IsWindows) { 'pwsh.exe' } else { 'pwsh' }
+    $installedShell = Join-Path $PSHOME $shellName
+    $workerArgs = @(Get-AgentWorkerArguments -CommandText "Write-Output 'first line'`nWrite-Output 'second line'")
+    $workerOutput = @(& $installedShell @workerArgs)
+    Assert-True (($workerOutput -join '|') -ceq 'first line|second line') 'Encoded worker launch lost multiline code.'
+    & {
+        $launches = @{ items = @(); kind = '' }
+        function Start-Process {
+            [CmdletBinding()]
+            param($FilePath, [string[]]$ArgumentList, $RedirectStandardOutput, $RedirectStandardError, [switch]$NoNewWindow, [switch]$PassThru)
+            if ($launches.kind -eq 'post') {
+                $uri = $env:SHELLOSSUS_HTTP_URI
+                $body = Get-Content -LiteralPath $env:SHELLOSSUS_HTTP_IN -Raw -Encoding Ascii
+                $destination = $env:SHELLOSSUS_HTTP_OUT
+            }
+            else {
+                $uri = $env:SHELLOSSUS_WEB_DOWNLOAD_URI
+                $body = ''
+                $destination = $env:SHELLOSSUS_WEB_DOWNLOAD_FILE
+            }
+            $launches.items += @{ executable = $FilePath; arguments = $ArgumentList; uri = $uri; body = $body }
+            Set-AgentUtf8Content -LiteralPath $destination -Value 'response'
+            return @{ HasExited = $true; ExitCode = 0; Id = 0 }
+        }
+
+        $outPath = Join-Path $envData.TestRoot 'fixed-worker-response.txt'
+        foreach ($kind in @('post', 'get')) {
+            $launches.kind = $kind
+            $launches.items = @()
+            foreach ($uri in @('https://example.invalid/first', 'https://example.invalid/second')) {
+                if ($kind -eq 'post') {
+                    Invoke-AgentHttpRequest -Uri $uri -ApiKey 'test-key' -Body $uri -OutFile $outPath -ForceBackgroundWorker
+                }
+                else { Invoke-AgentWebDownload -Uri $uri -OutFile $outPath }
+            }
+            Assert-True ($launches.items.Count -eq 2 -and $launches.items[0].uri -ne $launches.items[1].uri) "The $kind worker lost request data."
+            if ($kind -eq 'post') {
+                Assert-True ($launches.items[0].body -ceq $launches.items[0].uri -and $launches.items[1].body -ceq $launches.items[1].uri) 'The API worker lost its file-backed request body.'
+            }
+            foreach ($launch in $launches.items) {
+                Assert-True ($launch.executable -ceq $installedShell -and $launch.arguments -contains '-NoProfile' -and $launch.arguments -contains '-EncodedCommand') "The $kind worker did not launch fixed code using the installed PowerShell."
+            }
+            Assert-True (($launches.items[0].arguments -join ' ') -ceq ($launches.items[1].arguments -join ' ')) "Request data changed the $kind worker program."
+            if (-not $ConstrainedLanguage) {
+                $workerCode = [System.Text.Encoding]::Unicode.GetString([Convert]::FromBase64String($launches.items[0].arguments[-1]))
+                Assert-True ($workerCode -like '*Invoke-WebRequest*' -and $workerCode -notlike '*Invoke-Expression*') "The $kind worker evaluates external code."
+            }
+        }
+    }
+
+    # Operator shortcuts retain OS access while the model's shell tool is gated.
+    $script:AgentPermission = 'ReadOnly'
+    $script:OutputMode = 'text'
+    try {
+        $operatorState = @{ messages = @(@{ role = 'system'; content = 'sys' }); workspace = $workspacePath }
+        $outsidePath = Join-Path $envData.TestRoot 'operator-output.txt'
+        $quotedPath = $outsidePath.Replace("'", "''")
+        $command = "Set-Content -LiteralPath '$quotedPath' -Value 'operator output' -Encoding Ascii"
+        $arguments = @{ command = $command } | ConvertTo-Json -Compress
+        $blocked = Invoke-AgentTool -Root $workspacePath -Call @{ function = @{ name = 'run_command'; arguments = $arguments } } | ConvertFrom-Json
+        Assert-True ($blocked.error -like '*ReadOnly*' -and -not (Test-Path -LiteralPath $outsidePath)) 'ReadOnly allowed a model command.'
+        Invoke-ReplBangCommand -State $operatorState -RootPath $workspacePath -InputText "!!$command"
+        Assert-True ((Test-Path -LiteralPath $outsidePath) -and $operatorState.messages.Count -eq 1) 'The local operator shortcut did not run or changed the conversation.'
+        Invoke-ReplBangCommand -State $operatorState -RootPath $workspacePath -InputText "!Get-Content -LiteralPath '$quotedPath'"
+        Assert-True ($operatorState.messages.Count -eq 2 -and $operatorState.messages[-1].content -like '*operator output*') 'The operator shortcut did not include its output in the conversation.'
+    }
+    finally {
+        $script:AgentPermission = 'AutoEdit'
+        $script:OutputMode = 'json'
+    }
+
     # Both overwrite and edit preserve the existing newline convention.
     foreach ($case in @(
         @{ before = "a`r`nb`r`n"; incoming = "a`nc`n"; expected = "a`r`nc`r`n" },

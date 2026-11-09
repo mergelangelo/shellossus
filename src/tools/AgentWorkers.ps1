@@ -67,7 +67,7 @@ function New-SubagentErrorResult {
 function Invoke-ParallelSubagentProcesses {
     param([string]$Root, [array]$Tasks, [int]$MaxSteps = 15, [string]$ScriptPath, [int]$TimeoutSec = 180)
     $configDir = if ($script:AgentConfigPath) { Split-Path $script:AgentConfigPath -Parent } else { '' }
-    $shellExe = (Get-AgentEnvironment -Root $Root).shell_exe
+    $shellExe = Get-AgentPowerShellExecutable
     $effEndpoint = if ($script:ActiveEndpoint) { $script:ActiveEndpoint } else { 'https://example.invalid/v1/chat/completions' }
     $baseUrl = $effEndpoint -replace '/chat/completions/?$', ''
     $effKey = if ($script:ActiveApiKey) { $script:ActiveApiKey } else { 'subagent-key' }
@@ -95,7 +95,7 @@ if ($env:SHELLOSSUS_SUB_NO_CONTEXT -eq '1') { $workerArgs.NoContextFiles = $true
 if ($env:SHELLOSSUS_SUB_REASONING_EFFORT) { $workerArgs.ReasoningEffort = $env:SHELLOSSUS_SUB_REASONING_EFFORT }
 & $env:SHELLOSSUS_SUB_SCRIPT @workerArgs
 '@
-    $argList = Get-AgentCommandArguments -CommandText $workerCmd
+    $argList = Get-AgentWorkerArguments -CommandText $workerCmd
     $allResults = @()
     $batchSize = 4
     for ($offset = 0; $offset -lt $Tasks.Count; $offset += $batchSize) {

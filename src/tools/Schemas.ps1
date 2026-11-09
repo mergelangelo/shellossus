@@ -180,7 +180,7 @@ function Get-AgentToolSpecifications {
         },
         @{
             name = 'run_command'
-            description = 'Execute a PowerShell command in the workspace directory.'
+            description = 'Execute PowerShell with the user''s OS permissions, starting in the workspace directory.'
             required = @('command')
             properties = @{
                 command = @{ type = 'string'; description = 'PowerShell command to execute.' }
