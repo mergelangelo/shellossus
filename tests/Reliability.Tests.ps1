@@ -1169,6 +1169,121 @@ try {
     $badLine = Invoke-AgentTool -Root $workspacePath -Call @{ function = @{ name = 'grep_files'; arguments = '{"path":"pages","pattern":"hit","start_line":0}' } } | ConvertFrom-Json
     Assert-True ($badLine.error -like '*start_line*') 'Search accepted an invalid line cursor.'
 
+    # Limits fail before parsing or side effects, including with multi-byte input.
+    & {
+        function Assert-LimitError {
+            param([scriptblock]$Action, [string]$Expected)
+            try { $null = & $Action }
+            catch {
+                Assert-True ($_.Exception.Message -like $Expected) "Expected $Expected, got $($_.Exception.Message)"
+                return
+            }
+            throw "Expected $Expected."
+        }
+
+        $accent = [string][char]0x00E9
+        $emoji = [string][char]0xD83D + [char]0xDE00
+        Assert-True ((Get-AgentUtf8ByteCount ('a' + $accent + $emoji)) -eq 7) 'UTF-8 byte count lost a multi-byte character.'
+        $head = Invoke-TruncateHead -Content ($accent + "`nabc") -MaxBytes 3
+        $tail = Invoke-TruncateTail -Content ('a' + $emoji + $accent) -MaxBytes 5
+        Assert-True ($head.content -ceq $accent -and $head.output_bytes -eq 2 -and $head.total_bytes -eq 6) 'Head byte truncation was incorrect.'
+        Assert-True ($tail.content -ceq $accent -and $tail.output_bytes -eq 2 -and $tail.total_bytes -eq 7) 'Tail split a surrogate pair.'
+
+        $limits = @{
+            AgentMaxApiResponseBytes = 3
+            AgentMaxToolArgumentBytes = 3
+            AgentMaxBatchEdits = 1
+            AgentMaxMemoryBytes = 4
+            AgentMaxWalkEntries = 3
+            AgentMaxSessionBytes = 3
+            AgentMaxSessionRecords = 1
+            AgentMaxTreeEntries = 1
+            AgentMaxUndoFrames = 1
+            AgentMaxTurnToolCalls = 2
+            AgentMaxDiagnosticsEntries = 1
+        }
+        $savedLimits = @{}
+        foreach ($key in $limits.Keys) { $savedLimits[$key] = Get-Variable -Name $key -Scope Script -ValueOnly }
+        $root = Join-Path $workspacePath 'resource-limits'
+        New-Item -ItemType Directory -Path $root | Out-Null
+        try {
+            foreach ($key in $limits.Keys) { Set-Variable -Name $key -Scope Script -Value $limits[$key] }
+            $invalid = Join-Path $root 'invalid.jsonl'
+            Set-AgentUtf8Content -LiteralPath $invalid -Value ($accent * 2)
+            Assert-LimitError { Read-AgentApiResponse -Path $invalid } '*3-byte limit*'
+            Assert-LimitError { Get-AgentSessionCandidate -SessionFile $invalid } '*3-byte limit*'
+            Assert-LimitError { Assert-AgentToolArgumentSize -RawArguments ($accent * 2) } '*3-byte limit*'
+            Assert-LimitError { ConvertFrom-AgentSessionLines -Lines @('x', 'y') } '*1-record limit*'
+            Assert-LimitError { Format-EditArguments -Arguments @{ edits = @(@{}, @{}) } } '*at most 1 operations*'
+
+            $session = Join-Path $root 'save.jsonl'
+            $tree = @{ messages = @(@{ role = 'user'; content = 'first' }); tree_entries = @() }
+            Assert-LimitError { Save-AgentSession -SessionFile $session -State $tree } '*record or byte limit*'
+            Assert-True (-not (Test-Path -LiteralPath $session)) 'Oversized save left a session file.'
+            Assert-LimitError { Save-AgentSession -State $tree } '*record or byte limit*'
+            $tree.messages += @{ role = 'assistant'; content = 'second' }
+            Assert-LimitError { Ensure-SessionTree -State $tree } '*1-entry limit*'
+            Assert-True ($tree.tree_entries.Count -eq 1 -and -not $tree.messages[1].id) 'Tree limit partially applied a new entry.'
+
+            function Invoke-ShellCommand {
+                param($Root, $Command)
+                return @{ output = 'output'; exit_code = 0 }
+            }
+            $operator = @{ messages = @(@{ role = 'system'; content = 'system' }) }
+            Invoke-ReplBangCommand -State $operator -InputText '!test' -RootPath $root
+            Assert-True ($operator.messages.Count -eq 1) 'A shell result rejected by the session budget stayed in context.'
+
+            $mem = Join-Path $root 'MEMORY.md'
+            Assert-LimitError { Invoke-AgentMemory -Root $root -Arguments @{ action = 'set'; content = ($accent * 2) } } '*4-byte limit*'
+            Set-AgentUtf8Content -LiteralPath $mem -Value ($accent * 3)
+            Assert-LimitError { Invoke-AgentMemory -Root $root -Arguments @{ action = 'view' } } '*4-byte limit*'
+
+            $old = @{ writes = @(@{ backup = $invalid }) }
+            $recovery = @{ preserve_backups = $true; writes = @(@{ backup = $mem }) }
+            $stack = @(Add-AgentUndoFrame -UndoStack @($old, $recovery) -Frame @{ writes = @() })
+            Assert-True ($stack.Count -eq 1 -and -not $stack[0].preserve_backups -and (Test-Path -LiteralPath $mem) -and -not (Test-Path -LiteralPath $invalid)) 'Undo retention removed recovery data or leaked an ordinary backup.'
+
+            $walkRoot = Join-Path $root 'walk'
+            $nested = Join-Path $walkRoot 'nested'
+            New-Item -ItemType Directory -Path $nested -Force | Out-Null
+            foreach ($name in @('a.txt', 'b.txt')) {
+                Set-Content -LiteralPath (Join-Path $walkRoot $name) -Value 'needle' -Encoding Ascii
+                Set-Content -LiteralPath (Join-Path $nested $name) -Value 'needle' -Encoding Ascii
+            }
+            $walkItem = Get-Item -LiteralPath $walkRoot
+            $script:AgentMaxWalkEntries = 10
+            $find = Invoke-AgentFindFiles -Root $root -Path $walkRoot -Item $walkItem -Arguments @{ pattern = '*.txt'; limit = 1 } -ToolStart (Get-Date) | ConvertFrom-Json
+            $script:AgentMaxWalkEntries = $limits.AgentMaxWalkEntries
+            $grep = Invoke-AgentGrepFiles -Root $root -Path $walkRoot -Item $walkItem -Arguments @{ pattern = '^needle$' } -ToolStart (Get-Date) | ConvertFrom-Json
+            Assert-True ($find.count -eq 1 -and $find.entries_visited -eq 3 -and $find.truncated) 'Find visited the nested directory after reaching its result limit.'
+            Assert-True ($grep.matches.Count -eq 2 -and $grep.truncation_reason -eq 'max_entries' -and -not $grep.total_files_exact -and $null -eq $grep.next_file_offset) 'Grep did not report the incomplete traversal.'
+
+            $script:AgentMaxApiResponseBytes = $savedLimits.AgentMaxApiResponseBytes
+            $script:AgentMaxTreeEntries = $savedLimits.AgentMaxTreeEntries
+            $calls = @{ replies = 0; tools = 0 }
+            function Invoke-AgentHttpRequest {
+                param($Uri, $ApiKey, $Body, $OutFile, $TimeoutSec, $StatusLabel)
+                $calls.replies++
+                $reply = @{ choices = @(@{ finish_reason = 'tool_calls'; message = @{ tool_calls = @(foreach ($n in 1..2) {
+                    @{ id = "$($calls.replies)-$n"; type = 'function'; function = @{ name = 'read_file'; arguments = '{}' } }
+                }) } }) }
+                Set-AgentUtf8Content -LiteralPath $OutFile -Value ($reply | ConvertTo-Json -Depth 8 -Compress)
+            }
+            function Invoke-AgentTool {
+                param($Root, $Call)
+                $calls.tools++
+                return '{}'
+            }
+            $state = @{ messages = @(@{ role = 'system'; content = 'system' }, @{ role = 'user'; content = 'test' }) }
+            Assert-LimitError { Invoke-AgentTurn -State $state -Endpoint 'https://example.invalid/v1' -ModelId 'test' -ApiKey 'fake' -Root $root -Steps 3 } '*2-tool-call limit*'
+            Assert-True ($calls.replies -eq 2 -and $calls.tools -eq 2 -and (Test-ValidConversationBoundary -Messages $state.messages)) 'Turn call limit dispatched or recorded an overflowing batch.'
+            Assert-True ($state.diagnostics_log.Count -eq 1 -and $state.diagnostics_log[0].step -eq 1) 'Diagnostic retention did not keep the newest step.'
+        }
+        finally {
+            foreach ($key in $savedLimits.Keys) { Set-Variable -Name $key -Scope Script -Value $savedLimits[$key] }
+        }
+    }
+
     # Exercise the real agent loop with a transport mock that deliberately
     # requests a forbidden write, not just the displayed list of tools.
     $roleDir = Join-Path $workspacePath '.shellossus/agents'

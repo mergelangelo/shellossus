@@ -39,7 +39,11 @@ function Assert-AgentSessionRevision {
 
 function Save-AgentSession {
     param([string]$SessionFile, $State, [string]$Workspace = '', [string]$Model = '', [string]$SessionId = '', [switch]$AsExport)
-    if (-not $SessionFile) { return }
+    if (-not $SessionFile) {
+        Ensure-SessionTree -State $State
+        Get-AgentSessionLines -State $State | Out-Null
+        return
+    }
     $parent = Split-Path $SessionFile -Parent
     if (-not $parent) { $parent = (Get-Location).Path }
     if (-not (Test-Path -LiteralPath $parent)) {
@@ -71,6 +75,47 @@ function Save-AgentSession {
     }
 }
 
+function Get-AgentSessionLines {
+    param($State, $Meta)
+    $recordCount = 0
+    $bytes = if ($PSVersionTable.PSVersion.Major -lt 6) { 3 } else { 0 }
+    $lineEndingBytes = [Environment]::NewLine.Length
+    & {
+        if ($Meta) { $Meta | ConvertTo-Json -Depth 5 -Compress }
+        $activeIds = @{}
+        $sessionMessages = @($State.messages)
+        for ($mi = 0; $mi -lt $sessionMessages.Count; $mi++) {
+            $m = $sessionMessages[$mi]
+            $isCapNote = ($m.role -eq 'user' -and $m.content -is [string] -and $m.content.StartsWith('[Capability State Change]'))
+            if ($isCapNote -and (Test-CapabilityNoteInsideOpenToolCalls -Messages $sessionMessages -NoteIndex $mi)) {
+                continue
+            }
+            if ($m.id) { $activeIds[[string]$m.id] = $true }
+            ($m | ConvertTo-Json -Depth 20 -Compress)
+        }
+        foreach ($te in @($State.tree_entries)) {
+            if ($te -and $te.id -and -not $activeIds.ContainsKey([string]$te.id)) {
+                $bEntry = @{
+                    type = 'branch_entry'
+                    id = [string]$te.id
+                    parent_id = $te.parent_id
+                    role = [string]$te.role
+                    content = $te.content
+                }
+                Copy-MessageOptionalFields -Source $te -Target $bEntry
+                ($bEntry | ConvertTo-Json -Depth 20 -Compress)
+            }
+        }
+    } | ForEach-Object {
+        $recordCount++
+        $bytes += (Get-AgentUtf8ByteCount $_) + $lineEndingBytes
+        if ($recordCount -gt $script:AgentMaxSessionRecords -or $bytes -gt $script:AgentMaxSessionBytes) {
+            throw 'Session exceeds its record or byte limit. Start a new session with /new.'
+        }
+        $_
+    }
+}
+
 function Write-AgentSessionFile {
     param([string]$Path, $State, [string]$Workspace, [string]$Model, [string]$SessionId, $Expected, [switch]$AsExport)
     Ensure-SessionTree -State $State
@@ -97,34 +142,9 @@ function Write-AgentSessionFile {
     elseif ($State -and $State.todos -and $State.todos.Count -gt 0) {
         $meta.todos = @($State.todos)
     }
-    $lines = @($meta | ConvertTo-Json -Depth 5 -Compress)
-    $activeIds = @{}
-    $sessionMessages = @($State.messages)
-    for ($mi = 0; $mi -lt $sessionMessages.Count; $mi++) {
-        $m = $sessionMessages[$mi]
-        $isCapNote = ($m.role -eq 'user' -and $m.content -is [string] -and $m.content.StartsWith('[Capability State Change]'))
-        if ($isCapNote -and (Test-CapabilityNoteInsideOpenToolCalls -Messages $sessionMessages -NoteIndex $mi)) {
-            continue
-        }
-        if ($m.id) { $activeIds[[string]$m.id] = $true }
-        $lines += ($m | ConvertTo-Json -Depth 20 -Compress)
-    }
-    foreach ($te in @($State.tree_entries)) {
-        if ($te -and $te.id -and -not $activeIds.ContainsKey([string]$te.id)) {
-            $bEntry = @{
-                type = 'branch_entry'
-                id = [string]$te.id
-                parent_id = $te.parent_id
-                role = [string]$te.role
-                content = $te.content
-            }
-            Copy-MessageOptionalFields -Source $te -Target $bEntry
-            $lines += ($bEntry | ConvertTo-Json -Depth 20 -Compress)
-        }
-    }
     $tempPath = Join-Path (Split-Path $Path -Parent) ('.session-tmp-' + $PID + '-' + (Get-Random -Minimum 100000 -Maximum 999999) + '.tmp')
     try {
-        Set-Content -LiteralPath $tempPath -Value $lines -Encoding UTF8 -ErrorAction Stop
+        Get-AgentSessionLines -State $State -Meta $meta | Set-Content -LiteralPath $tempPath -Encoding UTF8 -ErrorAction Stop
         $revision = (Get-FileHash -LiteralPath $tempPath -Algorithm SHA256 -ErrorAction Stop).Hash
         Assert-AgentSessionRevision -Path $Path -Expected $Expected
         Move-Item -LiteralPath $tempPath -Destination $Path -Force -ErrorAction Stop
@@ -149,7 +169,8 @@ function Write-AgentSessionFile {
 
 function Get-AgentSessionMeta {
     param([string]$SessionFile)
-    if (-not (Test-Path -LiteralPath $SessionFile)) { return $null }
+    $item = Get-Item -LiteralPath $SessionFile -ErrorAction SilentlyContinue
+    if (-not $item -or $item.Length -gt $script:AgentMaxSessionBytes) { return $null }
     foreach ($line in @(Get-Content -LiteralPath $SessionFile -TotalCount 5 -Encoding UTF8 -ErrorAction SilentlyContinue)) {
         $trimmed = $line.Trim()
         if (-not $trimmed) { continue }
@@ -178,6 +199,9 @@ function Get-AgentSessionMeta {
 
 function ConvertFrom-AgentSessionLines {
     param([string[]]$Lines)
+    if ($Lines.Count -gt $script:AgentMaxSessionRecords) {
+        throw "Session exceeds the $($script:AgentMaxSessionRecords)-record limit."
+    }
     $candidate = @{ messages = @(); tree_entries = @(); todos = @(); leaf_id = ''; session_name = ''; parent_session = '' }
     $jsonOptions = @{ ErrorAction = 'Stop' }
     if ((Get-Command ConvertFrom-Json).Parameters.Keys -contains 'DateKind') { $jsonOptions.DateKind = 'String' }
@@ -297,11 +321,19 @@ function ConvertFrom-AgentSessionLines {
 function Get-AgentSessionCandidate {
     param([string]$SessionFile)
     if (-not (Test-Path -LiteralPath $SessionFile -PathType Leaf)) { throw "Session file not found: $SessionFile" }
+    $item = Get-Item -LiteralPath $SessionFile -ErrorAction Stop
+    if ($item.Length -gt $script:AgentMaxSessionBytes) {
+        throw "Session exceeds the $($script:AgentMaxSessionBytes)-byte limit."
+    }
     $path = Convert-Path -LiteralPath $SessionFile -ErrorAction Stop
     $snapshot = New-AgentTempFile
     try {
         Copy-Item -LiteralPath $path -Destination $snapshot.FullName -Force -ErrorAction Stop
-        $candidate = ConvertFrom-AgentSessionLines -Lines @(Get-Content -LiteralPath $snapshot.FullName -Encoding UTF8 -ErrorAction Stop)
+        if ((Get-Item -LiteralPath $snapshot.FullName -ErrorAction Stop).Length -gt $script:AgentMaxSessionBytes) {
+            throw "Session exceeds the $($script:AgentMaxSessionBytes)-byte limit."
+        }
+        $lines = @(Get-Content -LiteralPath $snapshot.FullName -TotalCount ($script:AgentMaxSessionRecords + 1) -Encoding UTF8 -ErrorAction Stop)
+        $candidate = ConvertFrom-AgentSessionLines -Lines $lines
         $candidate.session_revision_path = $path
         $candidate.session_revision_hash = (Get-FileHash -LiteralPath $snapshot.FullName -Algorithm SHA256 -ErrorAction Stop).Hash
         return $candidate

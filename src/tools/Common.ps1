@@ -26,6 +26,19 @@ $script:PermissionRevision = 0
 $script:StartupAgentPermission = 'Ask'
 $script:StartupPermissionSpecified = $false
 
+$script:AgentMaxApiResponseBytes = 8MB
+$script:AgentMaxToolArgumentBytes = 1MB
+$script:AgentMaxTurnToolCalls = 128
+$script:AgentMaxTurnPayloadBytes = 32MB
+$script:AgentMaxBatchEdits = 64
+$script:AgentMaxMemoryBytes = 256KB
+$script:AgentMaxSessionBytes = 32MB
+$script:AgentMaxSessionRecords = 10000
+$script:AgentMaxTreeEntries = 5000
+$script:AgentMaxUndoFrames = 20
+$script:AgentMaxDiagnosticsEntries = 100
+$script:AgentMaxWalkEntries = 10000
+
 function Get-CurrentTurnWritePathsSince {
     param([int]$StartCount)
     $paths = @()
@@ -116,6 +129,14 @@ function Test-IsToolEnabled {
     return $true
 }
 
+function Get-AgentUtf8ByteCount {
+    param([string]$Text)
+    if ($Text -cnotmatch '[^\x00-\x7f]') { return $Text.Length }
+    # Count UTF-8 bytes using operators available in ConstrainedLanguage.
+    # A surrogate pair uses four bytes; an isolated surrogate encodes as U+FFFD.
+    return ($Text -creplace '[\ud800-\udbff][\udc00-\udfff]', 'xxxx' -creplace '[\u0080-\u07ff]', 'xx' -creplace '[\u0800-\uffff]', 'xxx').Length
+}
+
 function Format-ByteSize {
     param([long]$Bytes)
     if ($Bytes -lt 1024) { return "${Bytes}B" }
@@ -182,14 +203,14 @@ function Invoke-TruncateHead {
         else { $lines = @($lines[0..($lines.Count - 2)]) }
     }
     $totalLines = $lines.Count
-    $totalBytes = $norm.Length
+    $totalBytes = Get-AgentUtf8ByteCount $norm
     if ($totalLines -le $MaxLines -and $totalBytes -le $MaxBytes) {
         return (New-TruncateResult -Content $norm -Truncated $false -TruncatedBy $null `
             -TotalLines $totalLines -TotalBytes $totalBytes -OutputLines $totalLines -OutputBytes $totalBytes `
             -LastLinePartial $false -FirstLineExceedsLimit $false `
             -MaxLines $MaxLines -MaxBytes $MaxBytes)
     }
-    if ($lines.Count -gt 0 -and ([string]$lines[0]).Length -gt $MaxBytes) {
+    if ($lines.Count -gt 0 -and (Get-AgentUtf8ByteCount $lines[0]) -gt $MaxBytes) {
         return (New-TruncateResult -Content '' -Truncated $true -TruncatedBy 'bytes' `
             -TotalLines $totalLines -TotalBytes $totalBytes -OutputLines 0 -OutputBytes 0 `
             -LastLinePartial $false -FirstLineExceedsLimit $true `
@@ -199,7 +220,7 @@ function Invoke-TruncateHead {
     $truncBy = 'lines'
     $outLines = @(for ($i = 0; $i -lt $lines.Count -and $i -lt $MaxLines; $i++) {
         $ln = [string]$lines[$i]
-        $lnBytes = $ln.Length + $(if ($i -gt 0) { 1 } else { 0 })
+        $lnBytes = (Get-AgentUtf8ByteCount $ln) + $(if ($i -gt 0) { 1 } else { 0 })
         if (($outBytes + $lnBytes) -gt $MaxBytes) {
             $truncBy = 'bytes'
             break
@@ -207,12 +228,12 @@ function Invoke-TruncateHead {
         $outBytes += $lnBytes
         $ln
     })
-    if ($outLines.Count -ge $MaxLines -and $outBytes -le $MaxBytes) {
+    if ($outLines.Count -ge $MaxLines -and $truncBy -ne 'bytes') {
         $truncBy = 'lines'
     }
     $outText = $outLines -join "`n"
     return (New-TruncateResult -Content $outText -Truncated $true -TruncatedBy $truncBy `
-        -TotalLines $totalLines -TotalBytes $totalBytes -OutputLines $outLines.Count -OutputBytes $outText.Length `
+        -TotalLines $totalLines -TotalBytes $totalBytes -OutputLines $outLines.Count -OutputBytes (Get-AgentUtf8ByteCount $outText) `
         -LastLinePartial $false -FirstLineExceedsLimit $false `
         -MaxLines $MaxLines -MaxBytes $MaxBytes)
 }
@@ -232,7 +253,7 @@ function Invoke-TruncateTail {
         else { $lines = @($lines[0..($lines.Count - 2)]) }
     }
     $totalLines = $lines.Count
-    $totalBytes = $norm.Length
+    $totalBytes = Get-AgentUtf8ByteCount $norm
     if ($totalLines -le $MaxLines -and $totalBytes -le $MaxBytes) {
         return (New-TruncateResult -Content $norm -Truncated $false -TruncatedBy $null `
             -TotalLines $totalLines -TotalBytes $totalBytes -OutputLines $totalLines -OutputBytes $totalBytes `
@@ -245,12 +266,21 @@ function Invoke-TruncateTail {
     $revLines = @(for ($i = $lines.Count - 1; $i -ge 0 -and (($lines.Count - 1 - $i) -lt $MaxLines); $i--) {
         $ln = [string]$lines[$i]
         $isFirst = ($i -eq ($lines.Count - 1))
-        $lnBytes = $ln.Length + $(if (-not $isFirst) { 1 } else { 0 })
+        $lnBytes = (Get-AgentUtf8ByteCount $ln) + $(if (-not $isFirst) { 1 } else { 0 })
         if (($outBytes + $lnBytes) -gt $MaxBytes) {
             $truncBy = 'bytes'
-            if ($isFirst -and $ln.Length -gt $MaxBytes) {
+            if ($isFirst) {
                 $lastPartial = $true
-                $ln.Substring($ln.Length - $MaxBytes)
+                $low = if ($ln.Length -gt $MaxBytes) { $ln.Length - $MaxBytes } else { 0 }
+                $high = $ln.Length
+                while ($low -lt $high) {
+                    $mid = ($low + $high) -shr 1
+                    if ((Get-AgentUtf8ByteCount ($ln.Substring($mid))) -gt $MaxBytes) { $low = $mid + 1 }
+                    else { $high = $mid }
+                }
+                if ($low -gt 0 -and $low -lt $ln.Length -and [char]::IsSurrogatePair($ln, $low - 1)) { $low++ }
+                $outBytes = Get-AgentUtf8ByteCount ($ln.Substring($low))
+                if ($outBytes -gt 0) { $ln.Substring($low) }
             }
             break
         }
@@ -260,12 +290,12 @@ function Invoke-TruncateTail {
     $outLines = @(for ($j = $revLines.Count - 1; $j -ge 0; $j--) {
         $revLines[$j]
     })
-    if ($outLines.Count -ge $MaxLines -and $outBytes -le $MaxBytes) {
+    if ($outLines.Count -ge $MaxLines -and $truncBy -ne 'bytes') {
         $truncBy = 'lines'
     }
     $outText = $outLines -join "`n"
     return (New-TruncateResult -Content $outText -Truncated $true -TruncatedBy $truncBy `
-        -TotalLines $totalLines -TotalBytes $totalBytes -OutputLines $outLines.Count -OutputBytes $outText.Length `
+        -TotalLines $totalLines -TotalBytes $totalBytes -OutputLines $outLines.Count -OutputBytes (Get-AgentUtf8ByteCount $outText) `
         -LastLinePartial $lastPartial -FirstLineExceedsLimit $false `
         -MaxLines $MaxLines -MaxBytes $MaxBytes)
 }

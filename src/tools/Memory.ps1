@@ -76,7 +76,7 @@ function Invoke-AgentMemory {
     if (Test-PathHasReparsePoint -Path $targetPath -StopAt $stopRoot) {
         throw 'Reparse points are not allowed.'
     }
-    $before = Read-AgentUndoContent -Path $targetPath
+    $before = Read-AgentUndoContent -Path $targetPath -MaxBytes $script:AgentMaxMemoryBytes
     $existing = [string]$before
 
     $summaryText = ''
@@ -106,6 +106,9 @@ function Invoke-AgentMemory {
 
     $cardPrinted = $false
     if ($action -in @('append', 'set', 'clear')) {
+        if ((Get-AgentUtf8ByteCount $updatedText) -gt $script:AgentMaxMemoryBytes) {
+            throw "Memory exceeds the $($script:AgentMaxMemoryBytes)-byte limit."
+        }
         $needsConfirm = ($script:AgentPermission -eq 'Ask') -and (-not ($Arguments.user_initiated -eq $true))
         if ($needsConfirm) {
             if ($script:OutputMode -eq 'json') {
@@ -142,11 +145,14 @@ function Invoke-AgentMemory {
         if (Test-PathHasReparsePoint -Path $targetPath -StopAt $stopRoot) {
             throw 'Reparse points are not allowed.'
         }
-        $fresh = Read-AgentUndoContent -Path $targetPath
+        $fresh = Read-AgentUndoContent -Path $targetPath -MaxBytes $script:AgentMaxMemoryBytes
         if ($action -eq 'append') {
             $before = $fresh
             $rebuilt = Format-MemoryAppendText -Existing $before -Content $content
             $updatedText = [string]$rebuilt.text
+            if ((Get-AgentUtf8ByteCount $updatedText) -gt $script:AgentMaxMemoryBytes) {
+                throw "Memory exceeds the $($script:AgentMaxMemoryBytes)-byte limit."
+            }
         }
         elseif ($fresh -cne $before) {
             throw 'Memory file changed during confirmation. No write performed.'
@@ -183,7 +189,7 @@ function Invoke-AgentMemory {
                 if (Test-PathHasReparsePoint -Path $targetPath -StopAt $stopRoot) {
                     throw 'Reparse points are not allowed.'
                 }
-                if ((Read-AgentUndoContent -Path $targetPath) -cne $before) {
+                if ((Read-AgentUndoContent -Path $targetPath -MaxBytes $script:AgentMaxMemoryBytes) -cne $before) {
                     throw 'Memory file changed before the operation. No write performed.'
                 }
                 if ($trackWrite) {
@@ -206,7 +212,7 @@ function Invoke-AgentMemory {
                 else {
                     Move-Item -LiteralPath $stageFile.FullName -Destination $targetPath -Force -ErrorAction Stop
                 }
-                if ((Read-AgentUndoContent -Path $targetPath) -cne $after) { throw 'Written memory verification failed.' }
+                if ((Read-AgentUndoContent -Path $targetPath -MaxBytes $script:AgentMaxMemoryBytes) -cne $after) { throw 'Written memory verification failed.' }
                 $keepBackup = $trackWrite
             }
             catch {

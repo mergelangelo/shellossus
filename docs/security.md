@@ -62,7 +62,7 @@ Plan review sets `approved` only when the user selects an explicit approval opti
 
 `/undo` and automatic rollback after a failed turn reverse recorded `write_file`, `edit_file`, and `memory` tool changes in both memory scopes. They restore conversation and task-board state after file restoration succeeds. Shell commands, manual `/memory` commands, configuration, session exports, and network requests are outside the turn journal.
 
-Undo history is process-local. Session resets, session switches, and process exit discard undo history and clean up ordinary backups. An I/O failure during restoration can leave some files restored and others pending. In that case Shellossus reports the pending paths and keeps the backups for recovery.
+Undo history is process-local and retains the 20 newest frames. Eviction, session resets, session switches, and process exit clean up ordinary backups. An I/O failure during restoration can leave some files restored and others pending. In that case Shellossus reports the pending paths and keeps the backups for recovery.
 
 ---
 
@@ -75,9 +75,17 @@ For `fetch_url` and `web_search`, downloads run in a separate PowerShell process
 The worker checks literal IPs and all IPv4 and IPv6 DNS answers before making the HTTP request, and disables redirects. It uses the Windows inbox `Resolve-DnsName` cmdlet when available. If the cmdlet is missing, the worker can use the system resolver in `FullLanguage` mode, and hostname requests fail closed in `ConstrainedLanguage`. The HTTP client resolves the hostname separately, so DNS preflight does not pin the connection to a checked IP. Deployments that require a guaranteed destination restriction need an outbound network policy or gateway.
 
 - **API Key Scrubbing:** `Invoke-ShellCommand` clears `SHELLOSSUS_API_KEY` and `OPENAI_API_KEY` before spawning a child PowerShell process and restores them afterward. Other environment variables remain available, and commands can still read files allowed by the OS, including a saved `.env` key.
-- **Disk-Backed Output Streaming:** Standard output and standard error are redirected directly to temporary files on disk (`Start-Process -RedirectStandardOutput -RedirectStandardError`). Only the last 300 lines (up to 20,000 characters) are read into memory for the model response; if truncated, the full log is preserved under `.shellossus/output/cmd-*.log`.
+- **Disk-Backed Output Streaming:** Standard output and standard error are redirected directly to temporary files on disk (`Start-Process -RedirectStandardOutput -RedirectStandardError`). The model receives a tail of up to 300 lines and 20,000 UTF-8 bytes. If output is truncated, the full log is preserved under `.shellossus/output/cmd-*.log`.
 - **Timeout & Termination:** Commands default to a 60-second timeout (`timeout_sec`, configurable from 1 to 600 seconds). While waiting, `shellossus` tracks child and descendant processes. On timeout or interrupted execution it stops the command and tracked descendants using built-in cmdlets. Windows PowerShell 5.1 uses `Get-CimInstance Win32_Process` for parent relationships; PowerShell on Linux/macOS uses `Get-Process`. Start times are checked before termination to avoid stopping an unrelated process that reused a PID. Timeout results include `termination_errors` if cleanup could not be completed.
 - **Process Tracking Limits:** Tracking is based on periodic snapshots, not an OS process sandbox. A detached descendant whose parent exits between snapshots can escape discovery; command execution retains the user's OS permissions. Normal successful commands may intentionally leave background processes running.
+
+## Resource Limits
+
+Each agent turn can accept up to 128 tool calls across model responses, regardless of the step limit. A batch that would exceed the budget is rejected before any call in it runs. Tool arguments are limited to 1 MiB of UTF-8 before parsing, and `edit_file` accepts up to 64 edits per batch. Each model response is limited to 8 MiB before JSON parsing. The HTTP worker is monitored periodically, so the temporary download can briefly exceed the limit. Accepted model responses and tool results share a 32 MiB payload budget per turn.
+
+Each memory file is limited to 256 KiB. A session has a 32 MiB JSONL budget, a 10,000-record limit, and a 5,000-entry tree limit. Start a new session with `/new` when the history fills up. Diagnostics retain the 100 newest steps.
+
+Workspace searches visit up to 10,000 directory entries, including ignored entries. Search results indicate when the traversal is incomplete. `grep_files` additionally allows 100 ms per regular-expression match and 10 seconds for the content scan. Narrow the search path after a traversal limit, or simplify the pattern after a match timeout.
 
 ## Subagent Tool Restrictions
 

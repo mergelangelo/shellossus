@@ -88,6 +88,19 @@ function New-AgentUndoFrame {
     return $frame
 }
 
+function Add-AgentUndoFrame {
+    param([array]$UndoStack, $Frame)
+    $stack = @($UndoStack) + @($Frame)
+    $excess = $stack.Count - $script:AgentMaxUndoFrames
+    if ($excess -gt 0) {
+        Clear-AgentUndoBackups -UndoEntries @($stack | Select-Object -First $excess)
+        $stack | Select-Object -Skip $excess
+    }
+    else {
+        $stack
+    }
+}
+
 function Restore-AgentTurnSnapshot {
     param($State, $Snapshot, [AllowEmptyCollection()][array]$Writes = @())
     Invoke-AgentUndo -State $State -UndoEntry (New-AgentUndoFrame -Snapshot $Snapshot -Writes @($Writes))
@@ -110,8 +123,7 @@ function Invoke-AgentTurnRollback {
         }
         $kept = New-AgentUndoFrame -Snapshot $Snapshot -Writes @($Writes)
         $kept.preserve_backups = $true
-        $stack = @($UndoStack)
-        $stack += $kept
+        $stack = @(Add-AgentUndoFrame -UndoStack $UndoStack -Frame $kept)
         return @{
             succeeded = $false
             undo_stack = @($stack)
@@ -156,6 +168,8 @@ function Invoke-AgentTurn {
     # Count attempts, with a warning on a repeat and a stop on the next attempt.
     $repeatWarningAt = if ($repeatLimit -eq 1) { 2 } else { $repeatLimit }
     $mutationEpoch = 0
+    $turnToolCalls = 0
+    $turnPayloadBytes = 0
     $toolCallCounts = @{}
     if ($null -eq $State.scoped_instr_cache -or $State.scoped_instr_cache -isnot [hashtable]) {
         $State.scoped_instr_cache = @{}
@@ -181,6 +195,9 @@ function Invoke-AgentTurn {
         $State.last_diagnostics = $diagEntry
         if ($null -eq $State.diagnostics_log) { $State.diagnostics_log = @() }
         $State.diagnostics_log += $diagEntry
+        if ($State.diagnostics_log.Count -gt $script:AgentMaxDiagnosticsEntries) {
+            $State.diagnostics_log = @($State.diagnostics_log | Select-Object -Last $script:AgentMaxDiagnosticsEntries)
+        }
         if ($script:Diagnostics) {
             if ($script:OutputMode -eq 'json') {
                 Write-AgentJsonEvent -EventType 'diagnostics' -Payload $diagEntry
@@ -207,7 +224,12 @@ function Invoke-AgentTurn {
             for ($attempt = 0; $attempt -le $maxRetries; $attempt++) {
                 try {
                     Invoke-AgentHttpRequest -Uri $Endpoint -ApiKey $ApiKey -Body $body -OutFile $tempResponse.FullName -TimeoutSec 180 -StatusLabel $statusLabel
-                    $reply = Get-Content -LiteralPath $tempResponse.FullName -Raw -Encoding UTF8 -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+                    $responseBytes = (Get-Item -LiteralPath $tempResponse.FullName -ErrorAction Stop).Length
+                    if ($turnPayloadBytes + $responseBytes -gt $script:AgentMaxTurnPayloadBytes) {
+                        throw "Turn exceeds the $($script:AgentMaxTurnPayloadBytes)-byte payload limit."
+                    }
+                    $reply = Read-AgentApiResponse -Path $tempResponse.FullName
+                    $turnPayloadBytes += $responseBytes
                     break
                 }
                 catch {
@@ -261,6 +283,12 @@ function Invoke-AgentTurn {
         }
         $message = $choice.message
         Assert-AgentToolCallBatch -Message $message -FinishReason $finishReason
+        if ($message.tool_calls) {
+            $turnToolCalls += $message.tool_calls.Count
+            if ($turnToolCalls -gt $script:AgentMaxTurnToolCalls) {
+                throw "Turn exceeds the $($script:AgentMaxTurnToolCalls)-tool-call limit."
+            }
+        }
         if ($reply.usage) {
             if ($reply.usage.prompt_tokens) { $State.usage_input_tokens = [int]$State.usage_input_tokens + [int]$reply.usage.prompt_tokens }
             if ($reply.usage.completion_tokens) { $State.usage_output_tokens = [int]$State.usage_output_tokens + [int]$reply.usage.completion_tokens }
@@ -439,6 +467,10 @@ function Invoke-AgentTurn {
                 }
             }
             if ($null -eq $output) { $output = Invoke-AgentTool -Root $Root -Call $call }
+            $turnPayloadBytes += Get-AgentUtf8ByteCount $output
+            if ($turnPayloadBytes -gt $script:AgentMaxTurnPayloadBytes) {
+                throw "Turn exceeds the $($script:AgentMaxTurnPayloadBytes)-byte payload limit."
+            }
             Write-AgentJsonEvent -EventType 'tool_execution_end' -Payload @{ id = [string]$call.id; name = [string]$call.function.name; result = $output }
             $State.messages += @{ role = 'tool'; tool_call_id = $call.id; content = $output }
             Ensure-SessionTree -State $State

@@ -213,6 +213,26 @@ function Ensure-SessionTree {
     foreach ($te in @($State.tree_entries)) {
         if ($te -and $te.id) { $existingById[[string]$te.id] = $te }
     }
+    # Near the limit, count only entries that would actually be added.
+    if ($State.tree_entries.Count + $State.messages.Count -gt $script:AgentMaxTreeEntries) {
+        $needed = $State.tree_entries.Count
+        $newIds = @{}
+        foreach ($m in @($State.messages)) {
+            if ($m.role -eq 'system') { continue }
+            if ($m.id) {
+                $mid = [string]$m.id
+                if ($existingById.ContainsKey($mid) -or $newIds.ContainsKey($mid)) { continue }
+                $newIds[$mid] = $true
+            }
+            elseif ($m.role -eq 'user' -and $m.content -is [string] -and $m.content.StartsWith('[Capability State Change]')) {
+                continue
+            }
+            $needed++
+        }
+        if ($needed -gt $script:AgentMaxTreeEntries) {
+            throw "Session tree reached its $($script:AgentMaxTreeEntries)-entry limit. Start a new session with /new."
+        }
+    }
     $msgIdsInState = @{}
     $lastExistingMsgId = $null
     foreach ($m in @($State.messages)) {

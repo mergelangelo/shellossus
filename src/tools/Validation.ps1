@@ -13,6 +13,14 @@ function Get-AgentToolCallIdSet {
     return $ids
 }
 
+function Assert-AgentToolArgumentSize {
+    param([string]$RawArguments)
+    $limit = $script:AgentMaxToolArgumentBytes
+    if ($RawArguments.Length -gt $limit -or (Get-AgentUtf8ByteCount $RawArguments) -gt $limit) {
+        throw "Tool arguments exceed the $limit-byte limit."
+    }
+}
+
 function Assert-AgentToolCallBatch {
     param($Message, [string]$FinishReason, [switch]$Replay)
     if (-not (Test-IsJsonObject $Message) -or
@@ -49,6 +57,7 @@ function Assert-AgentToolCallBatch {
             $call.function.arguments -isnot [string]) {
             throw "Invalid tool_calls batch. Call $($i + 1) needs a function object with a name and string arguments."
         }
+        if (-not $Replay) { Assert-AgentToolArgumentSize -RawArguments $call.function.arguments }
     }
     # Argument JSON and tool schema errors are reported by the dispatcher for each call.
 }
@@ -62,6 +71,9 @@ function Test-AgentEditFileArguments {
         throw 'Provide either old_text/new_text or edits[], not both.'
     }
     if ($hasEdits) {
+        if ($Arguments.edits.Count -gt $script:AgentMaxBatchEdits) {
+            throw "edits[] may contain at most $($script:AgentMaxBatchEdits) operations."
+        }
         if ($Arguments.edits.Count -eq 0) { throw 'edits array must not be empty.' }
         foreach ($ed in $Arguments.edits) {
             if ($null -eq $ed -or $ed -is [string] -or $ed -is [ValueType] -or $ed -is [array]) {

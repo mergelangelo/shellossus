@@ -223,6 +223,7 @@ function Get-CompactionFileOperations {
                 $fnArgsRaw = if ($tc.function -and $tc.function.arguments) { [string]$tc.function.arguments } else { '' }
                 if (-not $fnArgsRaw) { continue }
                 try {
+                    Assert-AgentToolArgumentSize -RawArguments $fnArgsRaw
                     $parsedArgs = $fnArgsRaw | ConvertFrom-Json -ErrorAction Stop
                     if (Get-Command -Name 'Format-AgentToolArguments' -ErrorAction SilentlyContinue) {
                         $parsedArgs = Format-AgentToolArguments -Name $fnName -Arguments $parsedArgs
@@ -348,7 +349,7 @@ function Invoke-AgentCompact {
     $tempFile = New-AgentTempFile
     try {
         Invoke-AgentHttpRequest -Uri $Endpoint -ApiKey $ApiKey -Body $summaryReq -OutFile $tempFile.FullName -TimeoutSec 180 -StatusLabel "Compacting context ($ModelId)"
-        $reply = Get-Content -LiteralPath $tempFile.FullName -Raw -Encoding UTF8 -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+        $reply = Read-AgentApiResponse -Path $tempFile.FullName
     }
     finally {
         Remove-Item -LiteralPath $tempFile.FullName -Force -ErrorAction SilentlyContinue
@@ -369,6 +370,9 @@ function Invoke-AgentCompact {
     $summaryText = $choice.message.content
     if (-not $summaryText) { throw 'Compaction returned empty summary.' }
     $finalSummary = $summaryText.Trim() + $fileOps.xml
+    if ($State.tree_entries.Count -ge $script:AgentMaxTreeEntries) {
+        throw "Session tree reached its $($script:AgentMaxTreeEntries)-entry limit. Start a new session with /new."
+    }
     $firstKeptId = if ($recent.Count -gt 0 -and $recent[0].id) { [string]$recent[0].id } else { '' }
     $existingById = @{}
     foreach ($te in @($State.tree_entries)) {

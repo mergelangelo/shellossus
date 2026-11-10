@@ -401,7 +401,7 @@ if (-not $LibraryOnly) {
                 Invoke-AgentTurn -State $state -Endpoint $endpoint -ModelId $Model -ApiKey $agentKey -Root $rootPath -Steps $MaxSteps
                 $lastFailedQuestion = ''
                 Save-AgentSession -SessionFile $sessionFile -State $state -Workspace $rootPath -Model $Model
-                $undoStack += (New-AgentUndoFrame -Snapshot $turnSnapshot -Writes @($script:CurrentTurnWrites))
+                $undoStack = @(Add-AgentUndoFrame -UndoStack $undoStack -Frame (New-AgentUndoFrame -Snapshot $turnSnapshot -Writes @($script:CurrentTurnWrites)))
             }
             catch {
                 $lastFailedQuestion = $question

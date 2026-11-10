@@ -21,7 +21,7 @@ function Clear-AgentUndoBackups {
 }
 
 function Read-AgentUndoContent {
-    param([string]$Path, [switch]$Hash)
+    param([string]$Path, [switch]$Hash, [long]$MaxBytes)
     try {
         $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
     }
@@ -31,6 +31,9 @@ function Read-AgentUndoContent {
     }
     if ($item.PSIsContainer) {
         throw "Expected a file at $Path."
+    }
+    if ($MaxBytes -gt 0 -and $item.Length -gt $MaxBytes) {
+        throw "File exceeds the $MaxBytes-byte limit: $Path"
     }
     if ($Hash) {
         return (Get-FileHash -LiteralPath $Path -Algorithm SHA256 -ErrorAction Stop).Hash

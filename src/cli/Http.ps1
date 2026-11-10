@@ -40,8 +40,22 @@ function Write-AgentJsonEvent {
     Write-Host (ConvertTo-AsciiJson -Json ($ev | ConvertTo-Json -Depth 20 -Compress))
 }
 
+function Assert-AgentApiResponseSize {
+    param([string]$Path)
+    $item = Get-Item -LiteralPath $Path -ErrorAction SilentlyContinue
+    if ($item -and $item.Length -gt $script:AgentMaxApiResponseBytes) {
+        throw "API response exceeds the $($script:AgentMaxApiResponseBytes)-byte limit."
+    }
+}
+
+function Read-AgentApiResponse {
+    param([string]$Path)
+    Assert-AgentApiResponseSize -Path $Path
+    Get-Content -LiteralPath $Path -Raw -Encoding UTF8 -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+}
+
 function Wait-AgentProcessWithSpinner {
-    param($Process, [string]$StatusLabel = 'Waiting for model', [int]$TimeoutSec = 180, [int]$PollMs = 200)
+    param($Process, [string]$StatusLabel = 'Waiting for model', [int]$TimeoutSec = 180, [int]$PollMs = 200, [string]$ResponsePath)
     $frames = @('|', '/', '-', '\')
     $frameIdx = 0
     $startWait = Get-Date
@@ -49,6 +63,7 @@ function Wait-AgentProcessWithSpinner {
     $lastSpinVisLen = 0
     try {
         while (-not $Process.HasExited) {
+            if ($ResponsePath) { Assert-AgentApiResponseSize -Path $ResponsePath }
             $elapsed = ((Get-Date) - $startWait).TotalSeconds
             if ($showSpinner) {
                 $spinChar = $frames[$frameIdx % $frames.Count]
@@ -111,6 +126,7 @@ function Invoke-AgentHttpRequest {
             $request['MaximumRedirection'] = 0
         }
         Invoke-WebRequest @request -UseBasicParsing -OutFile $OutFile
+        Assert-AgentApiResponseSize -Path $OutFile
         return
     }
     $shellExe = Get-AgentPowerShellExecutable
@@ -132,11 +148,14 @@ catch {
         $details = $_.ErrorDetails.Message.Trim()
     }
     if ($details) {
-        try {
-            $parsed = $details | ConvertFrom-Json -ErrorAction Stop
-            if ($parsed.error -and $parsed.error.message) { $details = [string]$parsed.error.message }
+        # The worker runs standalone. Four bytes per code unit is a safe UTF-8 upper bound.
+        if ($details.Length -le 4096) {
+            try {
+                $parsed = $details | ConvertFrom-Json -ErrorAction Stop
+                if ($parsed.error -and $parsed.error.message) { $details = [string]$parsed.error.message }
+            }
+            catch {}
         }
-        catch {}
         if ($details.Length -gt 300) { $details = $details.Substring(0, 300) + '...' }
         $msg = $msg + ' (' + $details + ')'
     }
@@ -155,7 +174,8 @@ catch {
         } -Action {
             Start-Process -FilePath $shellExe -ArgumentList $argList -RedirectStandardOutput $stdoutTemp.FullName -RedirectStandardError $stderrTemp.FullName -NoNewWindow -PassThru -ErrorAction Stop
         }
-        Wait-AgentProcessWithSpinner -Process $proc -StatusLabel $StatusLabel -TimeoutSec $TimeoutSec
+        Wait-AgentProcessWithSpinner -Process $proc -StatusLabel $StatusLabel -TimeoutSec $TimeoutSec -ResponsePath $OutFile
+        Assert-AgentApiResponseSize -Path $OutFile
         $errItem = Get-Item -LiteralPath $errTemp.FullName -Force -ErrorAction SilentlyContinue
         if ($errItem -and $errItem.Length -gt 0) {
             $errText = Get-Content -LiteralPath $errTemp.FullName -Raw -Encoding UTF8 -ErrorAction SilentlyContinue

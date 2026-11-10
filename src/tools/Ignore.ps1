@@ -288,9 +288,14 @@ function Invoke-WorkspaceWalk {
         [array]$ParentRules = @(),
         [switch]$FilesOnly,
         [int]$Depth = 0,
-        [int]$MaxDepth = 64
+        [int]$MaxDepth = 64,
+        [hashtable]$Budget
     )
-    if ($Depth -gt $MaxDepth) { return }
+    $remaining = $Budget.limit - $Budget.visited
+    if ($Depth -gt $MaxDepth -or $remaining -le 0) {
+        $Budget.truncated = $true
+        return
+    }
     $localRules = @(Read-DirectoryIgnoreRules -RootFull $RootFull -DirFull $CurrentDir)
     $activeRules = @(if ($localRules.Count -gt 0) {
         Compress-IgnoreRules -Rules (@($ParentRules) + $localRules)
@@ -301,8 +306,14 @@ function Invoke-WorkspaceWalk {
     else {
         $ParentRules
     })
-    $entries = @(Get-ChildItem -LiteralPath $CurrentDir -Force -ErrorAction SilentlyContinue | Sort-Object FullName)
-    $dirsToEnter = @(foreach ($child in $entries) {
+    # Charge all entries, including ignored items, before sorting or descending.
+    $entries = @(Get-ChildItem -LiteralPath $CurrentDir -Force -ErrorAction SilentlyContinue | Select-Object -First ($remaining + 1))
+    if ($entries.Count -gt $remaining) {
+        $Budget.truncated = $true
+        $entries = @($entries | Select-Object -First $remaining)
+    }
+    $Budget.visited += $entries.Count
+    foreach ($child in ($entries | Sort-Object FullName)) {
         if (($child.Attributes -band 1024) -ne 0) { continue }
         if ($child.PSIsContainer) {
             if ($child.Name -ieq '.git' -or $child.Name -ieq 'node_modules') { continue }
@@ -311,7 +322,7 @@ function Invoke-WorkspaceWalk {
             if (-not $FilesOnly) {
                 @{ item = $child; rel_path = $relDir; is_dir = $true }
             }
-            $child
+            Invoke-WorkspaceWalk -RootFull $RootFull -CurrentDir $child.FullName -ParentRules $activeRules -FilesOnly:$FilesOnly -Depth ($Depth + 1) -MaxDepth $MaxDepth -Budget $Budget
         }
         else {
             if (Test-IsSecretFile $child) { continue }
@@ -319,19 +330,11 @@ function Invoke-WorkspaceWalk {
             if (Test-PathIgnored -RelativePath $relFile -IsDir $false -Rules $activeRules) { continue }
             @{ item = $child; rel_path = $relFile; is_dir = $false }
         }
-    })
-    foreach ($entryOrDir in $dirsToEnter) {
-        if ($entryOrDir -is [hashtable]) {
-            $entryOrDir
-        }
-        else {
-            Invoke-WorkspaceWalk -RootFull $RootFull -CurrentDir $entryOrDir.FullName -ParentRules $activeRules -FilesOnly:$FilesOnly -Depth ($Depth + 1) -MaxDepth $MaxDepth
-        }
     }
 }
 
 function Get-WorkspaceWalkEntries {
-    param([string]$Root, [string]$SearchPath = '', [switch]$FilesOnly)
+    param([string]$Root, [string]$SearchPath = '', [switch]$FilesOnly, [hashtable]$Budget = @{ limit = $script:AgentMaxWalkEntries; visited = 0; truncated = $false })
     if (-not $Root -or -not (Test-Path -LiteralPath $Root)) { return @() }
     $rootFull = (Get-Item -LiteralPath $Root -Force).FullName.TrimEnd('\').TrimEnd('/')
     $scanItem = if ($SearchPath -and (Test-Path -LiteralPath $SearchPath)) { Get-Item -LiteralPath $SearchPath -Force } else { Get-Item -LiteralPath $Root -Force }
@@ -344,5 +347,5 @@ function Get-WorkspaceWalkEntries {
     }
     $scanDir = $scanItem.FullName.TrimEnd('\').TrimEnd('/')
     $ancestorRules = @(Get-AncestorIgnoreRules -RootFull $rootFull -ScanDir $scanDir)
-    return @(Invoke-WorkspaceWalk -RootFull $rootFull -CurrentDir $scanDir -ParentRules $ancestorRules -FilesOnly:$FilesOnly)
+    Invoke-WorkspaceWalk -RootFull $rootFull -CurrentDir $scanDir -ParentRules $ancestorRules -FilesOnly:$FilesOnly -Budget $Budget
 }

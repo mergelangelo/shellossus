@@ -330,8 +330,15 @@ function Invoke-ReplCompactCommand {
     param($State, [string]$Endpoint, [string]$Model, [string]$ApiKey, [string]$SessionFile = '', [string]$RootPath, [string]$Focus = '')
     $trimmedFocus = if ($Focus) { $Focus.Trim() } else { '' }
     try {
+        $snapshot = New-AgentTurnSnapshot -State $State
         if (Invoke-AgentCompact -State $State -Endpoint $Endpoint -ModelId $Model -ApiKey $ApiKey -Focus $trimmedFocus) {
-            Save-AgentSession -SessionFile $SessionFile -State $State -Workspace $RootPath -Model $Model
+            try {
+                Save-AgentSession -SessionFile $SessionFile -State $State -Workspace $RootPath -Model $Model
+            }
+            catch {
+                Restore-AgentTurnSnapshot -State $State -Snapshot $snapshot
+                throw
+            }
             $st = Get-ContextStats -State $State
             Write-Host ($script:Gm.Green + "  Context compacted (~$($st.est_tokens) tokens remaining)." + $script:Gm.Reset)
         }
@@ -442,7 +449,7 @@ function Invoke-ReplContinueCommand {
         Invoke-AgentContinue -State $State -Endpoint $Endpoint -ModelId $Model -ApiKey $ApiKey -Root $RootPath -Steps $contSteps | Out-Null
         $LastFailedQuestion = ''
         Save-AgentSession -SessionFile $SessionFile -State $State -Workspace $RootPath -Model $Model
-        $UndoStack += (New-AgentUndoFrame -Snapshot $turnSnapshot -Writes @($script:CurrentTurnWrites))
+        $UndoStack = @(Add-AgentUndoFrame -UndoStack $UndoStack -Frame (New-AgentUndoFrame -Snapshot $turnSnapshot -Writes @($script:CurrentTurnWrites)))
     }
     catch {
         $requestErr = Format-AgentError -ErrorRecord $_
@@ -468,9 +475,15 @@ function Invoke-ReplBangCommand {
         if ($res.output) { Write-Host ($script:Gm.Fg + $res.output + $script:Gm.Reset) }
         Write-Host ($script:Gm.Grey1 + "  [exit $($res.exit_code)]" + $script:Gm.Reset)
         if (-not $localOnly) {
-            $State.messages += @{ role = 'user'; content = ("[Shell command $cmdStr exit=$($res.exit_code)]`n" + $res.output) }
-            Ensure-SessionTree -State $State
-            Save-AgentSession -SessionFile $SessionFile -State $State -Workspace $RootPath -Model $Model
+            $snapshot = New-AgentTurnSnapshot -State $State
+            try {
+                $State.messages += @{ role = 'user'; content = ("[Shell command $cmdStr exit=$($res.exit_code)]`n" + $res.output) }
+                Save-AgentSession -SessionFile $SessionFile -State $State -Workspace $RootPath -Model $Model
+            }
+            catch {
+                Restore-AgentTurnSnapshot -State $State -Snapshot $snapshot
+                throw
+            }
             Write-Host ($script:Gm.Aqua + '  (Output added to conversation context)' + $script:Gm.Reset)
         }
     }

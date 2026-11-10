@@ -211,11 +211,13 @@ function Format-AgentError {
         $details = $ErrorRecord.ErrorDetails.Message.Trim()
     }
     if ($details) {
-        try {
-            $parsed = $details | ConvertFrom-Json -ErrorAction Stop
-            if ($parsed.error -and $parsed.error.message) { $details = [string]$parsed.error.message }
+        if ($details.Length -le 16KB -and (Get-AgentUtf8ByteCount $details) -le 16KB) {
+            try {
+                $parsed = $details | ConvertFrom-Json -ErrorAction Stop
+                if ($parsed.error -and $parsed.error.message) { $details = [string]$parsed.error.message }
+            }
+            catch {}
         }
-        catch {}
         if ($details.Length -gt 300) { $details = $details.Substring(0, 300) + '...' }
         return ($msg + ' (' + $details + ')')
     }
@@ -2194,6 +2196,19 @@ $script:PermissionRevision = 0
 $script:StartupAgentPermission = 'Ask'
 $script:StartupPermissionSpecified = $false
 
+$script:AgentMaxApiResponseBytes = 8MB
+$script:AgentMaxToolArgumentBytes = 1MB
+$script:AgentMaxTurnToolCalls = 128
+$script:AgentMaxTurnPayloadBytes = 32MB
+$script:AgentMaxBatchEdits = 64
+$script:AgentMaxMemoryBytes = 256KB
+$script:AgentMaxSessionBytes = 32MB
+$script:AgentMaxSessionRecords = 10000
+$script:AgentMaxTreeEntries = 5000
+$script:AgentMaxUndoFrames = 20
+$script:AgentMaxDiagnosticsEntries = 100
+$script:AgentMaxWalkEntries = 10000
+
 function Get-CurrentTurnWritePathsSince {
     param([int]$StartCount)
     $paths = @()
@@ -2284,6 +2299,14 @@ function Test-IsToolEnabled {
     return $true
 }
 
+function Get-AgentUtf8ByteCount {
+    param([string]$Text)
+    if ($Text -cnotmatch '[^\x00-\x7f]') { return $Text.Length }
+    # Count UTF-8 bytes using operators available in ConstrainedLanguage.
+    # A surrogate pair uses four bytes; an isolated surrogate encodes as U+FFFD.
+    return ($Text -creplace '[\ud800-\udbff][\udc00-\udfff]', 'xxxx' -creplace '[\u0080-\u07ff]', 'xx' -creplace '[\u0800-\uffff]', 'xxx').Length
+}
+
 function Format-ByteSize {
     param([long]$Bytes)
     if ($Bytes -lt 1024) { return "${Bytes}B" }
@@ -2350,14 +2373,14 @@ function Invoke-TruncateHead {
         else { $lines = @($lines[0..($lines.Count - 2)]) }
     }
     $totalLines = $lines.Count
-    $totalBytes = $norm.Length
+    $totalBytes = Get-AgentUtf8ByteCount $norm
     if ($totalLines -le $MaxLines -and $totalBytes -le $MaxBytes) {
         return (New-TruncateResult -Content $norm -Truncated $false -TruncatedBy $null `
             -TotalLines $totalLines -TotalBytes $totalBytes -OutputLines $totalLines -OutputBytes $totalBytes `
             -LastLinePartial $false -FirstLineExceedsLimit $false `
             -MaxLines $MaxLines -MaxBytes $MaxBytes)
     }
-    if ($lines.Count -gt 0 -and ([string]$lines[0]).Length -gt $MaxBytes) {
+    if ($lines.Count -gt 0 -and (Get-AgentUtf8ByteCount $lines[0]) -gt $MaxBytes) {
         return (New-TruncateResult -Content '' -Truncated $true -TruncatedBy 'bytes' `
             -TotalLines $totalLines -TotalBytes $totalBytes -OutputLines 0 -OutputBytes 0 `
             -LastLinePartial $false -FirstLineExceedsLimit $true `
@@ -2367,7 +2390,7 @@ function Invoke-TruncateHead {
     $truncBy = 'lines'
     $outLines = @(for ($i = 0; $i -lt $lines.Count -and $i -lt $MaxLines; $i++) {
         $ln = [string]$lines[$i]
-        $lnBytes = $ln.Length + $(if ($i -gt 0) { 1 } else { 0 })
+        $lnBytes = (Get-AgentUtf8ByteCount $ln) + $(if ($i -gt 0) { 1 } else { 0 })
         if (($outBytes + $lnBytes) -gt $MaxBytes) {
             $truncBy = 'bytes'
             break
@@ -2375,12 +2398,12 @@ function Invoke-TruncateHead {
         $outBytes += $lnBytes
         $ln
     })
-    if ($outLines.Count -ge $MaxLines -and $outBytes -le $MaxBytes) {
+    if ($outLines.Count -ge $MaxLines -and $truncBy -ne 'bytes') {
         $truncBy = 'lines'
     }
     $outText = $outLines -join "`n"
     return (New-TruncateResult -Content $outText -Truncated $true -TruncatedBy $truncBy `
-        -TotalLines $totalLines -TotalBytes $totalBytes -OutputLines $outLines.Count -OutputBytes $outText.Length `
+        -TotalLines $totalLines -TotalBytes $totalBytes -OutputLines $outLines.Count -OutputBytes (Get-AgentUtf8ByteCount $outText) `
         -LastLinePartial $false -FirstLineExceedsLimit $false `
         -MaxLines $MaxLines -MaxBytes $MaxBytes)
 }
@@ -2400,7 +2423,7 @@ function Invoke-TruncateTail {
         else { $lines = @($lines[0..($lines.Count - 2)]) }
     }
     $totalLines = $lines.Count
-    $totalBytes = $norm.Length
+    $totalBytes = Get-AgentUtf8ByteCount $norm
     if ($totalLines -le $MaxLines -and $totalBytes -le $MaxBytes) {
         return (New-TruncateResult -Content $norm -Truncated $false -TruncatedBy $null `
             -TotalLines $totalLines -TotalBytes $totalBytes -OutputLines $totalLines -OutputBytes $totalBytes `
@@ -2413,12 +2436,21 @@ function Invoke-TruncateTail {
     $revLines = @(for ($i = $lines.Count - 1; $i -ge 0 -and (($lines.Count - 1 - $i) -lt $MaxLines); $i--) {
         $ln = [string]$lines[$i]
         $isFirst = ($i -eq ($lines.Count - 1))
-        $lnBytes = $ln.Length + $(if (-not $isFirst) { 1 } else { 0 })
+        $lnBytes = (Get-AgentUtf8ByteCount $ln) + $(if (-not $isFirst) { 1 } else { 0 })
         if (($outBytes + $lnBytes) -gt $MaxBytes) {
             $truncBy = 'bytes'
-            if ($isFirst -and $ln.Length -gt $MaxBytes) {
+            if ($isFirst) {
                 $lastPartial = $true
-                $ln.Substring($ln.Length - $MaxBytes)
+                $low = if ($ln.Length -gt $MaxBytes) { $ln.Length - $MaxBytes } else { 0 }
+                $high = $ln.Length
+                while ($low -lt $high) {
+                    $mid = ($low + $high) -shr 1
+                    if ((Get-AgentUtf8ByteCount ($ln.Substring($mid))) -gt $MaxBytes) { $low = $mid + 1 }
+                    else { $high = $mid }
+                }
+                if ($low -gt 0 -and $low -lt $ln.Length -and [char]::IsSurrogatePair($ln, $low - 1)) { $low++ }
+                $outBytes = Get-AgentUtf8ByteCount ($ln.Substring($low))
+                if ($outBytes -gt 0) { $ln.Substring($low) }
             }
             break
         }
@@ -2428,12 +2460,12 @@ function Invoke-TruncateTail {
     $outLines = @(for ($j = $revLines.Count - 1; $j -ge 0; $j--) {
         $revLines[$j]
     })
-    if ($outLines.Count -ge $MaxLines -and $outBytes -le $MaxBytes) {
+    if ($outLines.Count -ge $MaxLines -and $truncBy -ne 'bytes') {
         $truncBy = 'lines'
     }
     $outText = $outLines -join "`n"
     return (New-TruncateResult -Content $outText -Truncated $true -TruncatedBy $truncBy `
-        -TotalLines $totalLines -TotalBytes $totalBytes -OutputLines $outLines.Count -OutputBytes $outText.Length `
+        -TotalLines $totalLines -TotalBytes $totalBytes -OutputLines $outLines.Count -OutputBytes (Get-AgentUtf8ByteCount $outText) `
         -LastLinePartial $lastPartial -FirstLineExceedsLimit $false `
         -MaxLines $MaxLines -MaxBytes $MaxBytes)
 }
@@ -2864,7 +2896,7 @@ function Test-IsJsonObject {
 }
 
 function ConvertTo-NormalizedObjectArray {
-    param($Value, [scriptblock]$ItemNormalizer, [scriptblock]$SingleItemDetector)
+    param($Value, [scriptblock]$ItemNormalizer, [scriptblock]$SingleItemDetector, [int]$MaxItems)
     # String: ConvertFrom-Json, wrap a single object.
     # One object: wrap when SingleItemDetector says so.
     # Array: normalize each object through ItemNormalizer.
@@ -2891,6 +2923,9 @@ function ConvertTo-NormalizedObjectArray {
     }
 
     if ($Value -is [array]) {
+        if ($MaxItems -gt 0 -and $Value.Count -gt $MaxItems) {
+            throw "edits[] may contain at most $MaxItems operations."
+        }
         $normArr = @()
         foreach ($item in $Value) {
             if ((Test-IsJsonObject -Value $item) -and ($null -ne $ItemNormalizer)) {
@@ -2923,7 +2958,7 @@ function Format-EditArguments {
         else { $out[$p] = $Arguments.$p }
     }
     if ($out.ContainsKey('edits') -and $null -ne $out['edits']) {
-        $out['edits'] = ConvertTo-NormalizedObjectArray -Value $out['edits'] -ItemNormalizer {
+        $out['edits'] = ConvertTo-NormalizedObjectArray -Value $out['edits'] -MaxItems $script:AgentMaxBatchEdits -ItemNormalizer {
             param($Item)
             $ip = @(Get-ObjectPropertyNames -InputObject $Item)
             $normItem = @{}
@@ -3317,6 +3352,14 @@ function Get-AgentToolCallIdSet {
     return $ids
 }
 
+function Assert-AgentToolArgumentSize {
+    param([string]$RawArguments)
+    $limit = $script:AgentMaxToolArgumentBytes
+    if ($RawArguments.Length -gt $limit -or (Get-AgentUtf8ByteCount $RawArguments) -gt $limit) {
+        throw "Tool arguments exceed the $limit-byte limit."
+    }
+}
+
 function Assert-AgentToolCallBatch {
     param($Message, [string]$FinishReason, [switch]$Replay)
     if (-not (Test-IsJsonObject $Message) -or
@@ -3353,6 +3396,7 @@ function Assert-AgentToolCallBatch {
             $call.function.arguments -isnot [string]) {
             throw "Invalid tool_calls batch. Call $($i + 1) needs a function object with a name and string arguments."
         }
+        if (-not $Replay) { Assert-AgentToolArgumentSize -RawArguments $call.function.arguments }
     }
     # Argument JSON and tool schema errors are reported by the dispatcher for each call.
 }
@@ -3366,6 +3410,9 @@ function Test-AgentEditFileArguments {
         throw 'Provide either old_text/new_text or edits[], not both.'
     }
     if ($hasEdits) {
+        if ($Arguments.edits.Count -gt $script:AgentMaxBatchEdits) {
+            throw "edits[] may contain at most $($script:AgentMaxBatchEdits) operations."
+        }
         if ($Arguments.edits.Count -eq 0) { throw 'edits array must not be empty.' }
         foreach ($ed in $Arguments.edits) {
             if ($null -eq $ed -or $ed -is [string] -or $ed -is [ValueType] -or $ed -is [array]) {
@@ -3862,9 +3909,14 @@ function Invoke-WorkspaceWalk {
         [array]$ParentRules = @(),
         [switch]$FilesOnly,
         [int]$Depth = 0,
-        [int]$MaxDepth = 64
+        [int]$MaxDepth = 64,
+        [hashtable]$Budget
     )
-    if ($Depth -gt $MaxDepth) { return }
+    $remaining = $Budget.limit - $Budget.visited
+    if ($Depth -gt $MaxDepth -or $remaining -le 0) {
+        $Budget.truncated = $true
+        return
+    }
     $localRules = @(Read-DirectoryIgnoreRules -RootFull $RootFull -DirFull $CurrentDir)
     $activeRules = @(if ($localRules.Count -gt 0) {
         Compress-IgnoreRules -Rules (@($ParentRules) + $localRules)
@@ -3875,8 +3927,14 @@ function Invoke-WorkspaceWalk {
     else {
         $ParentRules
     })
-    $entries = @(Get-ChildItem -LiteralPath $CurrentDir -Force -ErrorAction SilentlyContinue | Sort-Object FullName)
-    $dirsToEnter = @(foreach ($child in $entries) {
+    # Charge all entries, including ignored items, before sorting or descending.
+    $entries = @(Get-ChildItem -LiteralPath $CurrentDir -Force -ErrorAction SilentlyContinue | Select-Object -First ($remaining + 1))
+    if ($entries.Count -gt $remaining) {
+        $Budget.truncated = $true
+        $entries = @($entries | Select-Object -First $remaining)
+    }
+    $Budget.visited += $entries.Count
+    foreach ($child in ($entries | Sort-Object FullName)) {
         if (($child.Attributes -band 1024) -ne 0) { continue }
         if ($child.PSIsContainer) {
             if ($child.Name -ieq '.git' -or $child.Name -ieq 'node_modules') { continue }
@@ -3885,7 +3943,7 @@ function Invoke-WorkspaceWalk {
             if (-not $FilesOnly) {
                 @{ item = $child; rel_path = $relDir; is_dir = $true }
             }
-            $child
+            Invoke-WorkspaceWalk -RootFull $RootFull -CurrentDir $child.FullName -ParentRules $activeRules -FilesOnly:$FilesOnly -Depth ($Depth + 1) -MaxDepth $MaxDepth -Budget $Budget
         }
         else {
             if (Test-IsSecretFile $child) { continue }
@@ -3893,19 +3951,11 @@ function Invoke-WorkspaceWalk {
             if (Test-PathIgnored -RelativePath $relFile -IsDir $false -Rules $activeRules) { continue }
             @{ item = $child; rel_path = $relFile; is_dir = $false }
         }
-    })
-    foreach ($entryOrDir in $dirsToEnter) {
-        if ($entryOrDir -is [hashtable]) {
-            $entryOrDir
-        }
-        else {
-            Invoke-WorkspaceWalk -RootFull $RootFull -CurrentDir $entryOrDir.FullName -ParentRules $activeRules -FilesOnly:$FilesOnly -Depth ($Depth + 1) -MaxDepth $MaxDepth
-        }
     }
 }
 
 function Get-WorkspaceWalkEntries {
-    param([string]$Root, [string]$SearchPath = '', [switch]$FilesOnly)
+    param([string]$Root, [string]$SearchPath = '', [switch]$FilesOnly, [hashtable]$Budget = @{ limit = $script:AgentMaxWalkEntries; visited = 0; truncated = $false })
     if (-not $Root -or -not (Test-Path -LiteralPath $Root)) { return @() }
     $rootFull = (Get-Item -LiteralPath $Root -Force).FullName.TrimEnd('\').TrimEnd('/')
     $scanItem = if ($SearchPath -and (Test-Path -LiteralPath $SearchPath)) { Get-Item -LiteralPath $SearchPath -Force } else { Get-Item -LiteralPath $Root -Force }
@@ -3918,7 +3968,7 @@ function Get-WorkspaceWalkEntries {
     }
     $scanDir = $scanItem.FullName.TrimEnd('\').TrimEnd('/')
     $ancestorRules = @(Get-AncestorIgnoreRules -RootFull $rootFull -ScanDir $scanDir)
-    return @(Invoke-WorkspaceWalk -RootFull $rootFull -CurrentDir $scanDir -ParentRules $ancestorRules -FilesOnly:$FilesOnly)
+    Invoke-WorkspaceWalk -RootFull $rootFull -CurrentDir $scanDir -ParentRules $ancestorRules -FilesOnly:$FilesOnly -Budget $Budget
 }
 
 # --- src/tools/Files.ps1 ---
@@ -4063,6 +4113,7 @@ function Read-AgentEditableFile {
     $snapshot = New-AgentTempFile
     try {
         Copy-Item -LiteralPath $Path -Destination $snapshot.FullName -Force -ErrorAction Stop
+        if ((Get-Item -LiteralPath $snapshot.FullName -ErrorAction Stop).Length -gt 1MB) { throw 'Expected a text file up to 1 MiB.' }
         $encoding = Get-AgentEditableEncoding -Path $snapshot.FullName
         $hash = Read-AgentUndoContent -Path $snapshot.FullName -Hash
         $text = Read-AgentUndoContent -Path $snapshot.FullName
@@ -4253,6 +4304,9 @@ function Invoke-AgentEditFile {
     else {
         @(@{ old_text = $Arguments.old_text; new_text = $Arguments.new_text })
     }
+    if ($rawEdits.Count -gt $script:AgentMaxBatchEdits) {
+        throw "edits[] may contain at most $($script:AgentMaxBatchEdits) operations."
+    }
     $resolvedEdits = @()
     foreach ($ed in $rawEdits) {
         if ($ed.old_text -isnot [string] -or -not $ed.old_text -or $ed.new_text -isnot [string]) { throw 'Each edit must have nonempty old_text and string new_text.' }
@@ -4300,15 +4354,20 @@ function Invoke-AgentListFiles {
         $maxEntries = [int]$Arguments.limit
         if ($maxEntries -lt 1 -or $maxEntries -gt 500) { throw 'limit must be between 1 and 500.' }
     }
-    $entries = @(Get-ChildItem -LiteralPath $Path -Force -ErrorAction Stop | Where-Object {
+    $walkLimit = $script:AgentMaxWalkEntries
+    $items = @(Get-ChildItem -LiteralPath $Path -Force -ErrorAction Stop | Select-Object -First ($walkLimit + 1))
+    $walkTruncated = ($items.Count -gt $walkLimit)
+    $entries = @($items | Select-Object -First $walkLimit | Where-Object {
         -not (Test-IsSecretFile $_)
     } | Sort-Object { $_.Name.ToLower() } | Select-Object -First ($maxEntries + 1))
-    $isTrunc = ($entries.Count -gt $maxEntries)
+    $isTrunc = ($entries.Count -gt $maxEntries -or $walkTruncated)
     $shownEntries = @($entries | Select-Object -First $maxEntries -Property Name, PSIsContainer, Length)
     $elapsedMs = [int](((Get-Date) - $ToolStart).TotalMilliseconds)
     $sumText = "$($shownEntries.Count) entries" + $(if ($isTrunc) { ' (truncated)' } else { '' })
     Write-ToolCallCard -Name 'list_files' -Target $Arguments.path -Status 'ok' -Summary $sumText -ElapsedMs $elapsedMs
-    $notice = if ($isTrunc) { "[${maxEntries} entries limit reached]" } else { $null }
+    $notice = if ($walkTruncated) { "[Directory entry scan limit reached ($walkLimit)]" }
+    elseif ($isTrunc) { "[${maxEntries} entries limit reached]" }
+    else { $null }
     return (@{
         entries = $shownEntries
         truncated = $isTrunc
@@ -4319,6 +4378,7 @@ function Invoke-AgentListFiles {
 function Get-GlobCandidatePatterns {
     param([string]$Pattern)
     if (-not $Pattern) { return @() }
+    if ($Pattern.Length -gt 4096) { throw 'Glob pattern exceeds 4096 characters.' }
     $normPat = $Pattern.Replace('\', '/').TrimStart('/')
     if (-not $normPat) { return @($Pattern) }
     $candPats = @($normPat)
@@ -4329,6 +4389,7 @@ function Get-GlobCandidatePatterns {
                 $trimmedLead = $cp.Substring(3)
                 if ($trimmedLead -and ($candPats -notcontains $trimmedLead)) {
                     $candPats += $trimmedLead
+                    if ($candPats.Count -gt 16) { throw 'Glob expands to more than 16 patterns.' }
                     $addedPat = $true
                 }
             }
@@ -4341,6 +4402,7 @@ function Get-GlobCandidatePatterns {
                 $collapsedMid = $cp.Substring(0, $absIdx) + '/' + $cp.Substring($absIdx + 4)
                 if ($collapsedMid -and ($candPats -notcontains $collapsedMid)) {
                     $candPats += $collapsedMid
+                    if ($candPats.Count -gt 16) { throw 'Glob expands to more than 16 patterns.' }
                     $addedPat = $true
                 }
                 $scanPos = $absIdx + 3
@@ -4349,11 +4411,12 @@ function Get-GlobCandidatePatterns {
                 $trimmedTrail = $cp.Substring(0, $cp.Length - 3)
                 if ($trimmedTrail -and ($candPats -notcontains $trimmedTrail)) {
                     $candPats += $trimmedTrail
+                    if ($candPats.Count -gt 16) { throw 'Glob expands to more than 16 patterns.' }
                     $addedPat = $true
                 }
             }
         }
-        if (-not $addedPat -or $candPats.Count -ge 16) { break }
+        if (-not $addedPat) { break }
     }
     return @($candPats)
 }
@@ -4370,9 +4433,9 @@ function Invoke-AgentFindFiles {
     $rawPat = $Arguments.pattern.Trim()
     $isPathPat = ($rawPat.Contains('/') -or $rawPat.Contains('\'))
     $candPats = @(Get-GlobCandidatePatterns -Pattern $rawPat)
-    $truncated = $false
-    $matchCount = 0
-    $found = @(foreach ($walkEntry in @(Get-WorkspaceWalkEntries -Root $Root -SearchPath $Path)) {
+    $walk = @{ limit = $script:AgentMaxWalkEntries; visited = 0; truncated = $false }
+    $found = @(Get-WorkspaceWalkEntries -Root $Root -SearchPath $Path -Budget $walk | ForEach-Object {
+        $walkEntry = $_
         $child = $walkEntry.item
         $relPath = $walkEntry.rel_path
         $relToSearch = Get-WorkspaceRelativePath -Root $Path -FullPath $child.FullName
@@ -4390,8 +4453,6 @@ function Invoke-AgentFindFiles {
             ($child.Name -like $rawPat)
         }
         if ($isMatch) {
-            if ($matchCount -ge $maxFind) { $truncated = $true; break }
-            $matchCount++
             @{
                 path = $relPath
                 relative_path = $relToSearch
@@ -4399,12 +4460,16 @@ function Invoke-AgentFindFiles {
                 length = if ($walkEntry.is_dir) { $null } else { $child.Length }
             }
         }
-    })
+    } | Select-Object -First ($maxFind + 1))
+    $truncated = ($found.Count -gt $maxFind -or $walk.truncated)
+    $found = @($found | Select-Object -First $maxFind)
     $elapsedMs = [int](((Get-Date) - $ToolStart).TotalMilliseconds)
     $sumText = "$($found.Count) matches" + $(if ($truncated) { ' (truncated)' } else { '' })
     Write-ToolCallCard -Name 'find_files' -Target $Arguments.path -Detail "pattern=$rawPat" -Status 'ok' -Summary $sumText -ElapsedMs $elapsedMs
-    $notice = if ($truncated) { "[${maxFind} results limit reached. Refine pattern or increase limit]" } else { $null }
-    return (@{ matches = @($found); files = @($found); count = $found.Count; truncated = $truncated; notice = $notice } | ConvertTo-Json -Depth 5 -Compress)
+    $notice = if ($walk.truncated) { '[Workspace traversal limit reached. Narrow the search path]' }
+    elseif ($truncated) { "[${maxFind} results limit reached. Refine pattern or increase limit]" }
+    else { $null }
+    return (@{ matches = @($found); files = @($found); count = $found.Count; truncated = $truncated; entries_visited = $walk.visited; notice = $notice } | ConvertTo-Json -Depth 5 -Compress)
 }
 
 function Invoke-AgentGrepFiles {
@@ -4441,9 +4506,16 @@ function Invoke-AgentGrepFiles {
         $startLine = [int]$Arguments.start_line
         if ($startLine -lt 1) { throw 'start_line must be at least 1.' }
     }
+    if ($Arguments.pattern.Length -gt 4096) { throw 'Search pattern exceeds 4096 characters.' }
+    $comparison = if ($isCaseSensitive) { [StringComparison]::CurrentCulture } else { [StringComparison]::CurrentCultureIgnoreCase }
+    if (-not $isLiteral) {
+        $regexOptions = if ($isCaseSensitive) { [System.Text.RegularExpressions.RegexOptions]::None } else { [System.Text.RegularExpressions.RegexOptions]::IgnoreCase }
+        $pattern = [regex]::new($Arguments.pattern, $regexOptions, (New-TimeSpan -Milliseconds 100))
+    }
+    $walk = @{ limit = $script:AgentMaxWalkEntries; visited = 0; truncated = $false }
     $includePatterns = @(if ($includeFilter) { Get-GlobCandidatePatterns -Pattern $includeFilter } else { @() })
     $allCandidateFiles = @(if ($Item.PSIsContainer) {
-        foreach ($walkEntry in @(Get-WorkspaceWalkEntries -Root $Root -SearchPath $Path -FilesOnly)) {
+        foreach ($walkEntry in @(Get-WorkspaceWalkEntries -Root $Root -SearchPath $Path -FilesOnly -Budget $walk)) {
             $child = $walkEntry.item
             $relCandidate = $walkEntry.rel_path
             if ($includePatterns.Count -gt 0) {
@@ -4487,57 +4559,68 @@ function Invoke-AgentGrepFiles {
     $hits = @()
     $nextFileOffset = $null
     $nextStartLine = $null
-    for ($fileIndex = $fileOffset; $fileIndex -lt $totalFiles -and $filesScanned -lt 500; $fileIndex++) {
-        $filesScanned++
+    $deadline = [datetime]::UtcNow.AddSeconds(10)
+    $timedOut = $false
+    :scan for ($fileIndex = $fileOffset; $fileIndex -lt $totalFiles -and $filesScanned -lt 500; $fileIndex++) {
         $firstLine = if ($fileIndex -eq $fileOffset) { $startLine } else { 1 }
-        $selParams = @{ LiteralPath = $allCandidateFiles[$fileIndex]; Pattern = $Arguments.pattern; Encoding = 'UTF8'; ErrorAction = 'Stop' }
-        if ($isLiteral) { $selParams.SimpleMatch = $true }
-        if ($isCaseSensitive) { $selParams.CaseSensitive = $true }
-        if ($ctxLines -gt 0) { $selParams.Context = @($ctxLines, $ctxLines) }
-        # Keep one lookahead match so continuation within a file starts
-        # at the first result not returned, without buffering all matches.
-        $pageMatches = @(Select-String @selParams | Where-Object { $_.LineNumber -ge $firstLine } | Select-Object -First ($maxMatches - $hitCount + 1))
-        foreach ($m in $pageMatches) {
-            if ($hitCount -ge $maxMatches) {
-                $matchLimitReached = $true
-                $nextFileOffset = $fileIndex
-                $nextStartLine = [int]$m.LineNumber
-                break
-            }
-            $hitCount++
-            $lineText = [string]$m.Line
-            if ($lineText.Length -gt 300) {
-                $lineText = $lineText.Substring(0, 300) + '...'
-                $linesTruncated = $true
-            }
-            $hitObj = @{
-                path = (Get-WorkspaceRelativePath -Root $Root -FullPath $m.Path)
-                file = (Get-WorkspaceRelativePath -Root $Path -FullPath $m.Path)
-                line_number = [int]$m.LineNumber
-                line = $lineText
-            }
-            if ($ctxLines -gt 0 -and $m.Context) {
-                $preCtx = @($m.Context.PreContext)
-                for ($ctxIndex = 0; $ctxIndex -lt $preCtx.Count; $ctxIndex++) {
-                    $ctxText = [string]$preCtx[$ctxIndex]
-                    if ($ctxText.Length -gt 300) {
-                        $preCtx[$ctxIndex] = $ctxText.Substring(0, 300) + '...'
-                        $linesTruncated = $true
-                    }
-                }
-                $postCtx = @($m.Context.PostContext)
-                for ($ctxIndex = 0; $ctxIndex -lt $postCtx.Count; $ctxIndex++) {
-                    $ctxText = [string]$postCtx[$ctxIndex]
-                    if ($ctxText.Length -gt 300) {
-                        $postCtx[$ctxIndex] = $ctxText.Substring(0, 300) + '...'
-                        $linesTruncated = $true
-                    }
-                }
-                $hitObj.context = @($preCtx) + @($lineText) + @($postCtx)
-            }
-            $hits += $hitObj
+        if ([datetime]::UtcNow -ge $deadline) {
+            $timedOut = $true
+            $nextFileOffset = $fileIndex
+            $nextStartLine = $firstLine
+            break
         }
-        if ($matchLimitReached) { break }
+        $file = Get-Item -LiteralPath $allCandidateFiles[$fileIndex] -Force -ErrorAction Stop
+        $filesScanned++
+        if ($file.Length -le 1MB -and -not $file.PSIsContainer -and ($file.Attributes -band 1024) -eq 0) {
+            $raw = Get-Content -LiteralPath $file.FullName -Raw -Encoding UTF8 -ErrorAction Stop
+            $lines = @($raw -split '\r\n|[\r\n]')
+            $lineCount = $lines.Count
+            if ($lineCount -gt 0 -and $lines[-1] -eq '') { $lineCount-- }
+            for ($i = $firstLine - 1; $i -lt $lineCount; $i++) {
+                if ([datetime]::UtcNow -ge $deadline) {
+                    $timedOut = $true
+                    $nextFileOffset = $fileIndex
+                    $nextStartLine = $i + 1
+                    break scan
+                }
+                try {
+                    $matched = if ($isLiteral) { $lines[$i].IndexOf($Arguments.pattern, $comparison) -ge 0 }
+                    else { $pattern.IsMatch($lines[$i]) }
+                }
+                catch [System.Text.RegularExpressions.RegexMatchTimeoutException] {
+                    throw 'Regular expression exceeded the 100 ms match limit. Simplify the pattern or use literal matching.'
+                }
+                if (-not $matched) { continue }
+                # Keep one lookahead match so continuation starts at the first omitted hit.
+                if ($hitCount -ge $maxMatches) {
+                    $matchLimitReached = $true
+                    $nextFileOffset = $fileIndex
+                    $nextStartLine = $i + 1
+                    break scan
+                }
+                $hitCount++
+                $firstContext = $i - $ctxLines
+                if ($firstContext -lt 0) { $firstContext = 0 }
+                $lastContext = $i + $ctxLines
+                if ($lastContext -ge $lineCount) { $lastContext = $lineCount - 1 }
+                $excerpt = @(for ($j = $firstContext; $j -le $lastContext; $j++) {
+                    $line = $lines[$j]
+                    if ($line.Length -gt 300) {
+                        $line = $line.Substring(0, 300) + '...'
+                        $linesTruncated = $true
+                    }
+                    $line
+                })
+                $hit = @{
+                    path = (Get-WorkspaceRelativePath -Root $Root -FullPath $file.FullName)
+                    file = (Get-WorkspaceRelativePath -Root $Path -FullPath $file.FullName)
+                    line_number = $i + 1
+                    line = $excerpt[$i - $firstContext]
+                }
+                if ($ctxLines -gt 0) { $hit.context = $excerpt }
+                $hits += $hit
+            }
+        }
         if ($fileIndex + 1 -lt $totalFiles) {
             $matchLimitReached = ($hitCount -ge $maxMatches)
             $fileLimitReached = ($filesScanned -ge 500)
@@ -4548,8 +4631,11 @@ function Invoke-AgentGrepFiles {
             }
         }
     }
-    $truncated = ($fileLimitReached -or $matchLimitReached)
-    $truncReason = if ($matchLimitReached -and $fileLimitReached) {
+    $truncated = ($fileLimitReached -or $matchLimitReached -or $timedOut -or $walk.truncated)
+    $truncReason = if ($timedOut) {
+        'search_timeout'
+    }
+    elseif ($matchLimitReached -and $fileLimitReached) {
         'max_matches_and_max_files'
     }
     elseif ($matchLimitReached) {
@@ -4558,13 +4644,18 @@ function Invoke-AgentGrepFiles {
     elseif ($fileLimitReached) {
         'max_files'
     }
+    elseif ($walk.truncated) {
+        'max_entries'
+    }
     else {
         $null
     }
     $notices = @()
     if ($matchLimitReached) { $notices += "${maxMatches} matches limit reached" }
     if ($fileLimitReached) { $notices += "Scanned ${filesScanned} of ${totalFiles} files" }
-    if ($truncated) { $notices += "Continue with file_offset=${nextFileOffset} and start_line=${nextStartLine} using the same search arguments" }
+    if ($timedOut) { $notices += 'Search time limit reached' }
+    if ($walk.truncated) { $notices += 'Workspace traversal limit reached. Narrow the search path to scan remaining files' }
+    if ($null -ne $nextFileOffset) { $notices += "Continue with file_offset=${nextFileOffset} and start_line=${nextStartLine} using the same search arguments" }
     if ($linesTruncated) { $notices += 'Some lines truncated to 300 chars; use read_file for full lines' }
     $noticeStr = if ($notices.Count -gt 0) { '[' + ($notices -join '. ') + ']' } else { $null }
     $elapsedMs = [int](((Get-Date) - $ToolStart).TotalMilliseconds)
@@ -4576,6 +4667,8 @@ function Invoke-AgentGrepFiles {
         truncation_reason = $truncReason
         files_scanned = $filesScanned
         total_files = $totalFiles
+        total_files_exact = (-not $walk.truncated)
+        entries_visited = $walk.visited
         next_file_offset = $nextFileOffset
         next_start_line = $nextStartLine
         lines_truncated = $linesTruncated
@@ -5049,7 +5142,7 @@ function Clear-AgentUndoBackups {
 }
 
 function Read-AgentUndoContent {
-    param([string]$Path, [switch]$Hash)
+    param([string]$Path, [switch]$Hash, [long]$MaxBytes)
     try {
         $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
     }
@@ -5059,6 +5152,9 @@ function Read-AgentUndoContent {
     }
     if ($item.PSIsContainer) {
         throw "Expected a file at $Path."
+    }
+    if ($MaxBytes -gt 0 -and $item.Length -gt $MaxBytes) {
+        throw "File exceeds the $MaxBytes-byte limit: $Path"
     }
     if ($Hash) {
         return (Get-FileHash -LiteralPath $Path -Algorithm SHA256 -ErrorAction Stop).Hash
@@ -6202,7 +6298,7 @@ function Invoke-AgentMemory {
     if (Test-PathHasReparsePoint -Path $targetPath -StopAt $stopRoot) {
         throw 'Reparse points are not allowed.'
     }
-    $before = Read-AgentUndoContent -Path $targetPath
+    $before = Read-AgentUndoContent -Path $targetPath -MaxBytes $script:AgentMaxMemoryBytes
     $existing = [string]$before
 
     $summaryText = ''
@@ -6232,6 +6328,9 @@ function Invoke-AgentMemory {
 
     $cardPrinted = $false
     if ($action -in @('append', 'set', 'clear')) {
+        if ((Get-AgentUtf8ByteCount $updatedText) -gt $script:AgentMaxMemoryBytes) {
+            throw "Memory exceeds the $($script:AgentMaxMemoryBytes)-byte limit."
+        }
         $needsConfirm = ($script:AgentPermission -eq 'Ask') -and (-not ($Arguments.user_initiated -eq $true))
         if ($needsConfirm) {
             if ($script:OutputMode -eq 'json') {
@@ -6268,11 +6367,14 @@ function Invoke-AgentMemory {
         if (Test-PathHasReparsePoint -Path $targetPath -StopAt $stopRoot) {
             throw 'Reparse points are not allowed.'
         }
-        $fresh = Read-AgentUndoContent -Path $targetPath
+        $fresh = Read-AgentUndoContent -Path $targetPath -MaxBytes $script:AgentMaxMemoryBytes
         if ($action -eq 'append') {
             $before = $fresh
             $rebuilt = Format-MemoryAppendText -Existing $before -Content $content
             $updatedText = [string]$rebuilt.text
+            if ((Get-AgentUtf8ByteCount $updatedText) -gt $script:AgentMaxMemoryBytes) {
+                throw "Memory exceeds the $($script:AgentMaxMemoryBytes)-byte limit."
+            }
         }
         elseif ($fresh -cne $before) {
             throw 'Memory file changed during confirmation. No write performed.'
@@ -6309,7 +6411,7 @@ function Invoke-AgentMemory {
                 if (Test-PathHasReparsePoint -Path $targetPath -StopAt $stopRoot) {
                     throw 'Reparse points are not allowed.'
                 }
-                if ((Read-AgentUndoContent -Path $targetPath) -cne $before) {
+                if ((Read-AgentUndoContent -Path $targetPath -MaxBytes $script:AgentMaxMemoryBytes) -cne $before) {
                     throw 'Memory file changed before the operation. No write performed.'
                 }
                 if ($trackWrite) {
@@ -6332,7 +6434,7 @@ function Invoke-AgentMemory {
                 else {
                     Move-Item -LiteralPath $stageFile.FullName -Destination $targetPath -Force -ErrorAction Stop
                 }
-                if ((Read-AgentUndoContent -Path $targetPath) -cne $after) { throw 'Written memory verification failed.' }
+                if ((Read-AgentUndoContent -Path $targetPath -MaxBytes $script:AgentMaxMemoryBytes) -cne $after) { throw 'Written memory verification failed.' }
                 $keepBackup = $trackWrite
             }
             catch {
@@ -7013,6 +7115,7 @@ function Invoke-AgentTool {
         if (-not (Test-IsToolEnabled -Name $name)) {
             throw "Tool '$name' is disabled by current tool configuration."
         }
+        Assert-AgentToolArgumentSize -RawArguments $Call.function.arguments
         $arguments = $Call.function.arguments | ConvertFrom-Json -ErrorAction Stop
         $arguments = Format-AgentToolArguments -Name $name -Arguments $arguments
         if ($null -ne $arguments -and $arguments -isnot [string] -and $arguments -isnot [ValueType] -and $arguments -isnot [array]) {
@@ -8154,6 +8257,26 @@ function Ensure-SessionTree {
     foreach ($te in @($State.tree_entries)) {
         if ($te -and $te.id) { $existingById[[string]$te.id] = $te }
     }
+    # Near the limit, count only entries that would actually be added.
+    if ($State.tree_entries.Count + $State.messages.Count -gt $script:AgentMaxTreeEntries) {
+        $needed = $State.tree_entries.Count
+        $newIds = @{}
+        foreach ($m in @($State.messages)) {
+            if ($m.role -eq 'system') { continue }
+            if ($m.id) {
+                $mid = [string]$m.id
+                if ($existingById.ContainsKey($mid) -or $newIds.ContainsKey($mid)) { continue }
+                $newIds[$mid] = $true
+            }
+            elseif ($m.role -eq 'user' -and $m.content -is [string] -and $m.content.StartsWith('[Capability State Change]')) {
+                continue
+            }
+            $needed++
+        }
+        if ($needed -gt $script:AgentMaxTreeEntries) {
+            throw "Session tree reached its $($script:AgentMaxTreeEntries)-entry limit. Start a new session with /new."
+        }
+    }
     $msgIdsInState = @{}
     $lastExistingMsgId = $null
     foreach ($m in @($State.messages)) {
@@ -8300,7 +8423,11 @@ function Assert-AgentSessionRevision {
 
 function Save-AgentSession {
     param([string]$SessionFile, $State, [string]$Workspace = '', [string]$Model = '', [string]$SessionId = '', [switch]$AsExport)
-    if (-not $SessionFile) { return }
+    if (-not $SessionFile) {
+        Ensure-SessionTree -State $State
+        Get-AgentSessionLines -State $State | Out-Null
+        return
+    }
     $parent = Split-Path $SessionFile -Parent
     if (-not $parent) { $parent = (Get-Location).Path }
     if (-not (Test-Path -LiteralPath $parent)) {
@@ -8332,6 +8459,47 @@ function Save-AgentSession {
     }
 }
 
+function Get-AgentSessionLines {
+    param($State, $Meta)
+    $recordCount = 0
+    $bytes = if ($PSVersionTable.PSVersion.Major -lt 6) { 3 } else { 0 }
+    $lineEndingBytes = [Environment]::NewLine.Length
+    & {
+        if ($Meta) { $Meta | ConvertTo-Json -Depth 5 -Compress }
+        $activeIds = @{}
+        $sessionMessages = @($State.messages)
+        for ($mi = 0; $mi -lt $sessionMessages.Count; $mi++) {
+            $m = $sessionMessages[$mi]
+            $isCapNote = ($m.role -eq 'user' -and $m.content -is [string] -and $m.content.StartsWith('[Capability State Change]'))
+            if ($isCapNote -and (Test-CapabilityNoteInsideOpenToolCalls -Messages $sessionMessages -NoteIndex $mi)) {
+                continue
+            }
+            if ($m.id) { $activeIds[[string]$m.id] = $true }
+            ($m | ConvertTo-Json -Depth 20 -Compress)
+        }
+        foreach ($te in @($State.tree_entries)) {
+            if ($te -and $te.id -and -not $activeIds.ContainsKey([string]$te.id)) {
+                $bEntry = @{
+                    type = 'branch_entry'
+                    id = [string]$te.id
+                    parent_id = $te.parent_id
+                    role = [string]$te.role
+                    content = $te.content
+                }
+                Copy-MessageOptionalFields -Source $te -Target $bEntry
+                ($bEntry | ConvertTo-Json -Depth 20 -Compress)
+            }
+        }
+    } | ForEach-Object {
+        $recordCount++
+        $bytes += (Get-AgentUtf8ByteCount $_) + $lineEndingBytes
+        if ($recordCount -gt $script:AgentMaxSessionRecords -or $bytes -gt $script:AgentMaxSessionBytes) {
+            throw 'Session exceeds its record or byte limit. Start a new session with /new.'
+        }
+        $_
+    }
+}
+
 function Write-AgentSessionFile {
     param([string]$Path, $State, [string]$Workspace, [string]$Model, [string]$SessionId, $Expected, [switch]$AsExport)
     Ensure-SessionTree -State $State
@@ -8358,34 +8526,9 @@ function Write-AgentSessionFile {
     elseif ($State -and $State.todos -and $State.todos.Count -gt 0) {
         $meta.todos = @($State.todos)
     }
-    $lines = @($meta | ConvertTo-Json -Depth 5 -Compress)
-    $activeIds = @{}
-    $sessionMessages = @($State.messages)
-    for ($mi = 0; $mi -lt $sessionMessages.Count; $mi++) {
-        $m = $sessionMessages[$mi]
-        $isCapNote = ($m.role -eq 'user' -and $m.content -is [string] -and $m.content.StartsWith('[Capability State Change]'))
-        if ($isCapNote -and (Test-CapabilityNoteInsideOpenToolCalls -Messages $sessionMessages -NoteIndex $mi)) {
-            continue
-        }
-        if ($m.id) { $activeIds[[string]$m.id] = $true }
-        $lines += ($m | ConvertTo-Json -Depth 20 -Compress)
-    }
-    foreach ($te in @($State.tree_entries)) {
-        if ($te -and $te.id -and -not $activeIds.ContainsKey([string]$te.id)) {
-            $bEntry = @{
-                type = 'branch_entry'
-                id = [string]$te.id
-                parent_id = $te.parent_id
-                role = [string]$te.role
-                content = $te.content
-            }
-            Copy-MessageOptionalFields -Source $te -Target $bEntry
-            $lines += ($bEntry | ConvertTo-Json -Depth 20 -Compress)
-        }
-    }
     $tempPath = Join-Path (Split-Path $Path -Parent) ('.session-tmp-' + $PID + '-' + (Get-Random -Minimum 100000 -Maximum 999999) + '.tmp')
     try {
-        Set-Content -LiteralPath $tempPath -Value $lines -Encoding UTF8 -ErrorAction Stop
+        Get-AgentSessionLines -State $State -Meta $meta | Set-Content -LiteralPath $tempPath -Encoding UTF8 -ErrorAction Stop
         $revision = (Get-FileHash -LiteralPath $tempPath -Algorithm SHA256 -ErrorAction Stop).Hash
         Assert-AgentSessionRevision -Path $Path -Expected $Expected
         Move-Item -LiteralPath $tempPath -Destination $Path -Force -ErrorAction Stop
@@ -8410,7 +8553,8 @@ function Write-AgentSessionFile {
 
 function Get-AgentSessionMeta {
     param([string]$SessionFile)
-    if (-not (Test-Path -LiteralPath $SessionFile)) { return $null }
+    $item = Get-Item -LiteralPath $SessionFile -ErrorAction SilentlyContinue
+    if (-not $item -or $item.Length -gt $script:AgentMaxSessionBytes) { return $null }
     foreach ($line in @(Get-Content -LiteralPath $SessionFile -TotalCount 5 -Encoding UTF8 -ErrorAction SilentlyContinue)) {
         $trimmed = $line.Trim()
         if (-not $trimmed) { continue }
@@ -8439,6 +8583,9 @@ function Get-AgentSessionMeta {
 
 function ConvertFrom-AgentSessionLines {
     param([string[]]$Lines)
+    if ($Lines.Count -gt $script:AgentMaxSessionRecords) {
+        throw "Session exceeds the $($script:AgentMaxSessionRecords)-record limit."
+    }
     $candidate = @{ messages = @(); tree_entries = @(); todos = @(); leaf_id = ''; session_name = ''; parent_session = '' }
     $jsonOptions = @{ ErrorAction = 'Stop' }
     if ((Get-Command ConvertFrom-Json).Parameters.Keys -contains 'DateKind') { $jsonOptions.DateKind = 'String' }
@@ -8558,11 +8705,19 @@ function ConvertFrom-AgentSessionLines {
 function Get-AgentSessionCandidate {
     param([string]$SessionFile)
     if (-not (Test-Path -LiteralPath $SessionFile -PathType Leaf)) { throw "Session file not found: $SessionFile" }
+    $item = Get-Item -LiteralPath $SessionFile -ErrorAction Stop
+    if ($item.Length -gt $script:AgentMaxSessionBytes) {
+        throw "Session exceeds the $($script:AgentMaxSessionBytes)-byte limit."
+    }
     $path = Convert-Path -LiteralPath $SessionFile -ErrorAction Stop
     $snapshot = New-AgentTempFile
     try {
         Copy-Item -LiteralPath $path -Destination $snapshot.FullName -Force -ErrorAction Stop
-        $candidate = ConvertFrom-AgentSessionLines -Lines @(Get-Content -LiteralPath $snapshot.FullName -Encoding UTF8 -ErrorAction Stop)
+        if ((Get-Item -LiteralPath $snapshot.FullName -ErrorAction Stop).Length -gt $script:AgentMaxSessionBytes) {
+            throw "Session exceeds the $($script:AgentMaxSessionBytes)-byte limit."
+        }
+        $lines = @(Get-Content -LiteralPath $snapshot.FullName -TotalCount ($script:AgentMaxSessionRecords + 1) -Encoding UTF8 -ErrorAction Stop)
+        $candidate = ConvertFrom-AgentSessionLines -Lines $lines
         $candidate.session_revision_path = $path
         $candidate.session_revision_hash = (Get-FileHash -LiteralPath $snapshot.FullName -Algorithm SHA256 -ErrorAction Stop).Hash
         return $candidate
@@ -9040,6 +9195,7 @@ function Get-CompactionFileOperations {
                 $fnArgsRaw = if ($tc.function -and $tc.function.arguments) { [string]$tc.function.arguments } else { '' }
                 if (-not $fnArgsRaw) { continue }
                 try {
+                    Assert-AgentToolArgumentSize -RawArguments $fnArgsRaw
                     $parsedArgs = $fnArgsRaw | ConvertFrom-Json -ErrorAction Stop
                     if (Get-Command -Name 'Format-AgentToolArguments' -ErrorAction SilentlyContinue) {
                         $parsedArgs = Format-AgentToolArguments -Name $fnName -Arguments $parsedArgs
@@ -9165,7 +9321,7 @@ function Invoke-AgentCompact {
     $tempFile = New-AgentTempFile
     try {
         Invoke-AgentHttpRequest -Uri $Endpoint -ApiKey $ApiKey -Body $summaryReq -OutFile $tempFile.FullName -TimeoutSec 180 -StatusLabel "Compacting context ($ModelId)"
-        $reply = Get-Content -LiteralPath $tempFile.FullName -Raw -Encoding UTF8 -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+        $reply = Read-AgentApiResponse -Path $tempFile.FullName
     }
     finally {
         Remove-Item -LiteralPath $tempFile.FullName -Force -ErrorAction SilentlyContinue
@@ -9186,6 +9342,9 @@ function Invoke-AgentCompact {
     $summaryText = $choice.message.content
     if (-not $summaryText) { throw 'Compaction returned empty summary.' }
     $finalSummary = $summaryText.Trim() + $fileOps.xml
+    if ($State.tree_entries.Count -ge $script:AgentMaxTreeEntries) {
+        throw "Session tree reached its $($script:AgentMaxTreeEntries)-entry limit. Start a new session with /new."
+    }
     $firstKeptId = if ($recent.Count -gt 0 -and $recent[0].id) { [string]$recent[0].id } else { '' }
     $existingById = @{}
     foreach ($te in @($State.tree_entries)) {
@@ -9734,8 +9893,22 @@ function Write-AgentJsonEvent {
     Write-Host (ConvertTo-AsciiJson -Json ($ev | ConvertTo-Json -Depth 20 -Compress))
 }
 
+function Assert-AgentApiResponseSize {
+    param([string]$Path)
+    $item = Get-Item -LiteralPath $Path -ErrorAction SilentlyContinue
+    if ($item -and $item.Length -gt $script:AgentMaxApiResponseBytes) {
+        throw "API response exceeds the $($script:AgentMaxApiResponseBytes)-byte limit."
+    }
+}
+
+function Read-AgentApiResponse {
+    param([string]$Path)
+    Assert-AgentApiResponseSize -Path $Path
+    Get-Content -LiteralPath $Path -Raw -Encoding UTF8 -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+}
+
 function Wait-AgentProcessWithSpinner {
-    param($Process, [string]$StatusLabel = 'Waiting for model', [int]$TimeoutSec = 180, [int]$PollMs = 200)
+    param($Process, [string]$StatusLabel = 'Waiting for model', [int]$TimeoutSec = 180, [int]$PollMs = 200, [string]$ResponsePath)
     $frames = @('|', '/', '-', '\')
     $frameIdx = 0
     $startWait = Get-Date
@@ -9743,6 +9916,7 @@ function Wait-AgentProcessWithSpinner {
     $lastSpinVisLen = 0
     try {
         while (-not $Process.HasExited) {
+            if ($ResponsePath) { Assert-AgentApiResponseSize -Path $ResponsePath }
             $elapsed = ((Get-Date) - $startWait).TotalSeconds
             if ($showSpinner) {
                 $spinChar = $frames[$frameIdx % $frames.Count]
@@ -9805,6 +9979,7 @@ function Invoke-AgentHttpRequest {
             $request['MaximumRedirection'] = 0
         }
         Invoke-WebRequest @request -UseBasicParsing -OutFile $OutFile
+        Assert-AgentApiResponseSize -Path $OutFile
         return
     }
     $shellExe = Get-AgentPowerShellExecutable
@@ -9826,11 +10001,14 @@ catch {
         $details = $_.ErrorDetails.Message.Trim()
     }
     if ($details) {
-        try {
-            $parsed = $details | ConvertFrom-Json -ErrorAction Stop
-            if ($parsed.error -and $parsed.error.message) { $details = [string]$parsed.error.message }
+        # The worker runs standalone. Four bytes per code unit is a safe UTF-8 upper bound.
+        if ($details.Length -le 4096) {
+            try {
+                $parsed = $details | ConvertFrom-Json -ErrorAction Stop
+                if ($parsed.error -and $parsed.error.message) { $details = [string]$parsed.error.message }
+            }
+            catch {}
         }
-        catch {}
         if ($details.Length -gt 300) { $details = $details.Substring(0, 300) + '...' }
         $msg = $msg + ' (' + $details + ')'
     }
@@ -9849,7 +10027,8 @@ catch {
         } -Action {
             Start-Process -FilePath $shellExe -ArgumentList $argList -RedirectStandardOutput $stdoutTemp.FullName -RedirectStandardError $stderrTemp.FullName -NoNewWindow -PassThru -ErrorAction Stop
         }
-        Wait-AgentProcessWithSpinner -Process $proc -StatusLabel $StatusLabel -TimeoutSec $TimeoutSec
+        Wait-AgentProcessWithSpinner -Process $proc -StatusLabel $StatusLabel -TimeoutSec $TimeoutSec -ResponsePath $OutFile
+        Assert-AgentApiResponseSize -Path $OutFile
         $errItem = Get-Item -LiteralPath $errTemp.FullName -Force -ErrorAction SilentlyContinue
         if ($errItem -and $errItem.Length -gt 0) {
             $errText = Get-Content -LiteralPath $errTemp.FullName -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
@@ -9960,6 +10139,19 @@ function New-AgentUndoFrame {
     return $frame
 }
 
+function Add-AgentUndoFrame {
+    param([array]$UndoStack, $Frame)
+    $stack = @($UndoStack) + @($Frame)
+    $excess = $stack.Count - $script:AgentMaxUndoFrames
+    if ($excess -gt 0) {
+        Clear-AgentUndoBackups -UndoEntries @($stack | Select-Object -First $excess)
+        $stack | Select-Object -Skip $excess
+    }
+    else {
+        $stack
+    }
+}
+
 function Restore-AgentTurnSnapshot {
     param($State, $Snapshot, [AllowEmptyCollection()][array]$Writes = @())
     Invoke-AgentUndo -State $State -UndoEntry (New-AgentUndoFrame -Snapshot $Snapshot -Writes @($Writes))
@@ -9982,8 +10174,7 @@ function Invoke-AgentTurnRollback {
         }
         $kept = New-AgentUndoFrame -Snapshot $Snapshot -Writes @($Writes)
         $kept.preserve_backups = $true
-        $stack = @($UndoStack)
-        $stack += $kept
+        $stack = @(Add-AgentUndoFrame -UndoStack $UndoStack -Frame $kept)
         return @{
             succeeded = $false
             undo_stack = @($stack)
@@ -10028,6 +10219,8 @@ function Invoke-AgentTurn {
     # Count attempts, with a warning on a repeat and a stop on the next attempt.
     $repeatWarningAt = if ($repeatLimit -eq 1) { 2 } else { $repeatLimit }
     $mutationEpoch = 0
+    $turnToolCalls = 0
+    $turnPayloadBytes = 0
     $toolCallCounts = @{}
     if ($null -eq $State.scoped_instr_cache -or $State.scoped_instr_cache -isnot [hashtable]) {
         $State.scoped_instr_cache = @{}
@@ -10053,6 +10246,9 @@ function Invoke-AgentTurn {
         $State.last_diagnostics = $diagEntry
         if ($null -eq $State.diagnostics_log) { $State.diagnostics_log = @() }
         $State.diagnostics_log += $diagEntry
+        if ($State.diagnostics_log.Count -gt $script:AgentMaxDiagnosticsEntries) {
+            $State.diagnostics_log = @($State.diagnostics_log | Select-Object -Last $script:AgentMaxDiagnosticsEntries)
+        }
         if ($script:Diagnostics) {
             if ($script:OutputMode -eq 'json') {
                 Write-AgentJsonEvent -EventType 'diagnostics' -Payload $diagEntry
@@ -10079,7 +10275,12 @@ function Invoke-AgentTurn {
             for ($attempt = 0; $attempt -le $maxRetries; $attempt++) {
                 try {
                     Invoke-AgentHttpRequest -Uri $Endpoint -ApiKey $ApiKey -Body $body -OutFile $tempResponse.FullName -TimeoutSec 180 -StatusLabel $statusLabel
-                    $reply = Get-Content -LiteralPath $tempResponse.FullName -Raw -Encoding UTF8 -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+                    $responseBytes = (Get-Item -LiteralPath $tempResponse.FullName -ErrorAction Stop).Length
+                    if ($turnPayloadBytes + $responseBytes -gt $script:AgentMaxTurnPayloadBytes) {
+                        throw "Turn exceeds the $($script:AgentMaxTurnPayloadBytes)-byte payload limit."
+                    }
+                    $reply = Read-AgentApiResponse -Path $tempResponse.FullName
+                    $turnPayloadBytes += $responseBytes
                     break
                 }
                 catch {
@@ -10133,6 +10334,12 @@ function Invoke-AgentTurn {
         }
         $message = $choice.message
         Assert-AgentToolCallBatch -Message $message -FinishReason $finishReason
+        if ($message.tool_calls) {
+            $turnToolCalls += $message.tool_calls.Count
+            if ($turnToolCalls -gt $script:AgentMaxTurnToolCalls) {
+                throw "Turn exceeds the $($script:AgentMaxTurnToolCalls)-tool-call limit."
+            }
+        }
         if ($reply.usage) {
             if ($reply.usage.prompt_tokens) { $State.usage_input_tokens = [int]$State.usage_input_tokens + [int]$reply.usage.prompt_tokens }
             if ($reply.usage.completion_tokens) { $State.usage_output_tokens = [int]$State.usage_output_tokens + [int]$reply.usage.completion_tokens }
@@ -10311,6 +10518,10 @@ function Invoke-AgentTurn {
                 }
             }
             if ($null -eq $output) { $output = Invoke-AgentTool -Root $Root -Call $call }
+            $turnPayloadBytes += Get-AgentUtf8ByteCount $output
+            if ($turnPayloadBytes -gt $script:AgentMaxTurnPayloadBytes) {
+                throw "Turn exceeds the $($script:AgentMaxTurnPayloadBytes)-byte payload limit."
+            }
             Write-AgentJsonEvent -EventType 'tool_execution_end' -Payload @{ id = [string]$call.id; name = [string]$call.function.name; result = $output }
             $State.messages += @{ role = 'tool'; tool_call_id = $call.id; content = $output }
             Ensure-SessionTree -State $State
@@ -11242,8 +11453,15 @@ function Invoke-ReplCompactCommand {
     param($State, [string]$Endpoint, [string]$Model, [string]$ApiKey, [string]$SessionFile = '', [string]$RootPath, [string]$Focus = '')
     $trimmedFocus = if ($Focus) { $Focus.Trim() } else { '' }
     try {
+        $snapshot = New-AgentTurnSnapshot -State $State
         if (Invoke-AgentCompact -State $State -Endpoint $Endpoint -ModelId $Model -ApiKey $ApiKey -Focus $trimmedFocus) {
-            Save-AgentSession -SessionFile $SessionFile -State $State -Workspace $RootPath -Model $Model
+            try {
+                Save-AgentSession -SessionFile $SessionFile -State $State -Workspace $RootPath -Model $Model
+            }
+            catch {
+                Restore-AgentTurnSnapshot -State $State -Snapshot $snapshot
+                throw
+            }
             $st = Get-ContextStats -State $State
             Write-Host ($script:Gm.Green + "  Context compacted (~$($st.est_tokens) tokens remaining)." + $script:Gm.Reset)
         }
@@ -11354,7 +11572,7 @@ function Invoke-ReplContinueCommand {
         Invoke-AgentContinue -State $State -Endpoint $Endpoint -ModelId $Model -ApiKey $ApiKey -Root $RootPath -Steps $contSteps | Out-Null
         $LastFailedQuestion = ''
         Save-AgentSession -SessionFile $SessionFile -State $State -Workspace $RootPath -Model $Model
-        $UndoStack += (New-AgentUndoFrame -Snapshot $turnSnapshot -Writes @($script:CurrentTurnWrites))
+        $UndoStack = @(Add-AgentUndoFrame -UndoStack $UndoStack -Frame (New-AgentUndoFrame -Snapshot $turnSnapshot -Writes @($script:CurrentTurnWrites)))
     }
     catch {
         $requestErr = Format-AgentError -ErrorRecord $_
@@ -11380,9 +11598,15 @@ function Invoke-ReplBangCommand {
         if ($res.output) { Write-Host ($script:Gm.Fg + $res.output + $script:Gm.Reset) }
         Write-Host ($script:Gm.Grey1 + "  [exit $($res.exit_code)]" + $script:Gm.Reset)
         if (-not $localOnly) {
-            $State.messages += @{ role = 'user'; content = ("[Shell command $cmdStr exit=$($res.exit_code)]`n" + $res.output) }
-            Ensure-SessionTree -State $State
-            Save-AgentSession -SessionFile $SessionFile -State $State -Workspace $RootPath -Model $Model
+            $snapshot = New-AgentTurnSnapshot -State $State
+            try {
+                $State.messages += @{ role = 'user'; content = ("[Shell command $cmdStr exit=$($res.exit_code)]`n" + $res.output) }
+                Save-AgentSession -SessionFile $SessionFile -State $State -Workspace $RootPath -Model $Model
+            }
+            catch {
+                Restore-AgentTurnSnapshot -State $State -Snapshot $snapshot
+                throw
+            }
             Write-Host ($script:Gm.Aqua + '  (Output added to conversation context)' + $script:Gm.Reset)
         }
     }
@@ -11795,7 +12019,7 @@ if (-not $LibraryOnly) {
                 Invoke-AgentTurn -State $state -Endpoint $endpoint -ModelId $Model -ApiKey $agentKey -Root $rootPath -Steps $MaxSteps
                 $lastFailedQuestion = ''
                 Save-AgentSession -SessionFile $sessionFile -State $state -Workspace $rootPath -Model $Model
-                $undoStack += (New-AgentUndoFrame -Snapshot $turnSnapshot -Writes @($script:CurrentTurnWrites))
+                $undoStack = @(Add-AgentUndoFrame -UndoStack $undoStack -Frame (New-AgentUndoFrame -Snapshot $turnSnapshot -Writes @($script:CurrentTurnWrites)))
             }
             catch {
                 $lastFailedQuestion = $question

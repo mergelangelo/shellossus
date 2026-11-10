@@ -14,7 +14,7 @@ function Test-IsJsonObject {
 }
 
 function ConvertTo-NormalizedObjectArray {
-    param($Value, [scriptblock]$ItemNormalizer, [scriptblock]$SingleItemDetector)
+    param($Value, [scriptblock]$ItemNormalizer, [scriptblock]$SingleItemDetector, [int]$MaxItems)
     # String: ConvertFrom-Json, wrap a single object.
     # One object: wrap when SingleItemDetector says so.
     # Array: normalize each object through ItemNormalizer.
@@ -41,6 +41,9 @@ function ConvertTo-NormalizedObjectArray {
     }
 
     if ($Value -is [array]) {
+        if ($MaxItems -gt 0 -and $Value.Count -gt $MaxItems) {
+            throw "edits[] may contain at most $MaxItems operations."
+        }
         $normArr = @()
         foreach ($item in $Value) {
             if ((Test-IsJsonObject -Value $item) -and ($null -ne $ItemNormalizer)) {
@@ -73,7 +76,7 @@ function Format-EditArguments {
         else { $out[$p] = $Arguments.$p }
     }
     if ($out.ContainsKey('edits') -and $null -ne $out['edits']) {
-        $out['edits'] = ConvertTo-NormalizedObjectArray -Value $out['edits'] -ItemNormalizer {
+        $out['edits'] = ConvertTo-NormalizedObjectArray -Value $out['edits'] -MaxItems $script:AgentMaxBatchEdits -ItemNormalizer {
             param($Item)
             $ip = @(Get-ObjectPropertyNames -InputObject $Item)
             $normItem = @{}

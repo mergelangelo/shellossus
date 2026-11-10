@@ -167,11 +167,13 @@ function Format-AgentError {
         $details = $ErrorRecord.ErrorDetails.Message.Trim()
     }
     if ($details) {
-        try {
-            $parsed = $details | ConvertFrom-Json -ErrorAction Stop
-            if ($parsed.error -and $parsed.error.message) { $details = [string]$parsed.error.message }
+        if ($details.Length -le 16KB -and (Get-AgentUtf8ByteCount $details) -le 16KB) {
+            try {
+                $parsed = $details | ConvertFrom-Json -ErrorAction Stop
+                if ($parsed.error -and $parsed.error.message) { $details = [string]$parsed.error.message }
+            }
+            catch {}
         }
-        catch {}
         if ($details.Length -gt 300) { $details = $details.Substring(0, 300) + '...' }
         return ($msg + ' (' + $details + ')')
     }

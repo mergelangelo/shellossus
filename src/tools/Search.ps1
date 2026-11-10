@@ -8,15 +8,20 @@ function Invoke-AgentListFiles {
         $maxEntries = [int]$Arguments.limit
         if ($maxEntries -lt 1 -or $maxEntries -gt 500) { throw 'limit must be between 1 and 500.' }
     }
-    $entries = @(Get-ChildItem -LiteralPath $Path -Force -ErrorAction Stop | Where-Object {
+    $walkLimit = $script:AgentMaxWalkEntries
+    $items = @(Get-ChildItem -LiteralPath $Path -Force -ErrorAction Stop | Select-Object -First ($walkLimit + 1))
+    $walkTruncated = ($items.Count -gt $walkLimit)
+    $entries = @($items | Select-Object -First $walkLimit | Where-Object {
         -not (Test-IsSecretFile $_)
     } | Sort-Object { $_.Name.ToLower() } | Select-Object -First ($maxEntries + 1))
-    $isTrunc = ($entries.Count -gt $maxEntries)
+    $isTrunc = ($entries.Count -gt $maxEntries -or $walkTruncated)
     $shownEntries = @($entries | Select-Object -First $maxEntries -Property Name, PSIsContainer, Length)
     $elapsedMs = [int](((Get-Date) - $ToolStart).TotalMilliseconds)
     $sumText = "$($shownEntries.Count) entries" + $(if ($isTrunc) { ' (truncated)' } else { '' })
     Write-ToolCallCard -Name 'list_files' -Target $Arguments.path -Status 'ok' -Summary $sumText -ElapsedMs $elapsedMs
-    $notice = if ($isTrunc) { "[${maxEntries} entries limit reached]" } else { $null }
+    $notice = if ($walkTruncated) { "[Directory entry scan limit reached ($walkLimit)]" }
+    elseif ($isTrunc) { "[${maxEntries} entries limit reached]" }
+    else { $null }
     return (@{
         entries = $shownEntries
         truncated = $isTrunc
@@ -27,6 +32,7 @@ function Invoke-AgentListFiles {
 function Get-GlobCandidatePatterns {
     param([string]$Pattern)
     if (-not $Pattern) { return @() }
+    if ($Pattern.Length -gt 4096) { throw 'Glob pattern exceeds 4096 characters.' }
     $normPat = $Pattern.Replace('\', '/').TrimStart('/')
     if (-not $normPat) { return @($Pattern) }
     $candPats = @($normPat)
@@ -37,6 +43,7 @@ function Get-GlobCandidatePatterns {
                 $trimmedLead = $cp.Substring(3)
                 if ($trimmedLead -and ($candPats -notcontains $trimmedLead)) {
                     $candPats += $trimmedLead
+                    if ($candPats.Count -gt 16) { throw 'Glob expands to more than 16 patterns.' }
                     $addedPat = $true
                 }
             }
@@ -49,6 +56,7 @@ function Get-GlobCandidatePatterns {
                 $collapsedMid = $cp.Substring(0, $absIdx) + '/' + $cp.Substring($absIdx + 4)
                 if ($collapsedMid -and ($candPats -notcontains $collapsedMid)) {
                     $candPats += $collapsedMid
+                    if ($candPats.Count -gt 16) { throw 'Glob expands to more than 16 patterns.' }
                     $addedPat = $true
                 }
                 $scanPos = $absIdx + 3
@@ -57,11 +65,12 @@ function Get-GlobCandidatePatterns {
                 $trimmedTrail = $cp.Substring(0, $cp.Length - 3)
                 if ($trimmedTrail -and ($candPats -notcontains $trimmedTrail)) {
                     $candPats += $trimmedTrail
+                    if ($candPats.Count -gt 16) { throw 'Glob expands to more than 16 patterns.' }
                     $addedPat = $true
                 }
             }
         }
-        if (-not $addedPat -or $candPats.Count -ge 16) { break }
+        if (-not $addedPat) { break }
     }
     return @($candPats)
 }
@@ -78,9 +87,9 @@ function Invoke-AgentFindFiles {
     $rawPat = $Arguments.pattern.Trim()
     $isPathPat = ($rawPat.Contains('/') -or $rawPat.Contains('\'))
     $candPats = @(Get-GlobCandidatePatterns -Pattern $rawPat)
-    $truncated = $false
-    $matchCount = 0
-    $found = @(foreach ($walkEntry in @(Get-WorkspaceWalkEntries -Root $Root -SearchPath $Path)) {
+    $walk = @{ limit = $script:AgentMaxWalkEntries; visited = 0; truncated = $false }
+    $found = @(Get-WorkspaceWalkEntries -Root $Root -SearchPath $Path -Budget $walk | ForEach-Object {
+        $walkEntry = $_
         $child = $walkEntry.item
         $relPath = $walkEntry.rel_path
         $relToSearch = Get-WorkspaceRelativePath -Root $Path -FullPath $child.FullName
@@ -98,8 +107,6 @@ function Invoke-AgentFindFiles {
             ($child.Name -like $rawPat)
         }
         if ($isMatch) {
-            if ($matchCount -ge $maxFind) { $truncated = $true; break }
-            $matchCount++
             @{
                 path = $relPath
                 relative_path = $relToSearch
@@ -107,12 +114,16 @@ function Invoke-AgentFindFiles {
                 length = if ($walkEntry.is_dir) { $null } else { $child.Length }
             }
         }
-    })
+    } | Select-Object -First ($maxFind + 1))
+    $truncated = ($found.Count -gt $maxFind -or $walk.truncated)
+    $found = @($found | Select-Object -First $maxFind)
     $elapsedMs = [int](((Get-Date) - $ToolStart).TotalMilliseconds)
     $sumText = "$($found.Count) matches" + $(if ($truncated) { ' (truncated)' } else { '' })
     Write-ToolCallCard -Name 'find_files' -Target $Arguments.path -Detail "pattern=$rawPat" -Status 'ok' -Summary $sumText -ElapsedMs $elapsedMs
-    $notice = if ($truncated) { "[${maxFind} results limit reached. Refine pattern or increase limit]" } else { $null }
-    return (@{ matches = @($found); files = @($found); count = $found.Count; truncated = $truncated; notice = $notice } | ConvertTo-Json -Depth 5 -Compress)
+    $notice = if ($walk.truncated) { '[Workspace traversal limit reached. Narrow the search path]' }
+    elseif ($truncated) { "[${maxFind} results limit reached. Refine pattern or increase limit]" }
+    else { $null }
+    return (@{ matches = @($found); files = @($found); count = $found.Count; truncated = $truncated; entries_visited = $walk.visited; notice = $notice } | ConvertTo-Json -Depth 5 -Compress)
 }
 
 function Invoke-AgentGrepFiles {
@@ -149,9 +160,16 @@ function Invoke-AgentGrepFiles {
         $startLine = [int]$Arguments.start_line
         if ($startLine -lt 1) { throw 'start_line must be at least 1.' }
     }
+    if ($Arguments.pattern.Length -gt 4096) { throw 'Search pattern exceeds 4096 characters.' }
+    $comparison = if ($isCaseSensitive) { [StringComparison]::CurrentCulture } else { [StringComparison]::CurrentCultureIgnoreCase }
+    if (-not $isLiteral) {
+        $regexOptions = if ($isCaseSensitive) { [System.Text.RegularExpressions.RegexOptions]::None } else { [System.Text.RegularExpressions.RegexOptions]::IgnoreCase }
+        $pattern = [regex]::new($Arguments.pattern, $regexOptions, (New-TimeSpan -Milliseconds 100))
+    }
+    $walk = @{ limit = $script:AgentMaxWalkEntries; visited = 0; truncated = $false }
     $includePatterns = @(if ($includeFilter) { Get-GlobCandidatePatterns -Pattern $includeFilter } else { @() })
     $allCandidateFiles = @(if ($Item.PSIsContainer) {
-        foreach ($walkEntry in @(Get-WorkspaceWalkEntries -Root $Root -SearchPath $Path -FilesOnly)) {
+        foreach ($walkEntry in @(Get-WorkspaceWalkEntries -Root $Root -SearchPath $Path -FilesOnly -Budget $walk)) {
             $child = $walkEntry.item
             $relCandidate = $walkEntry.rel_path
             if ($includePatterns.Count -gt 0) {
@@ -195,57 +213,68 @@ function Invoke-AgentGrepFiles {
     $hits = @()
     $nextFileOffset = $null
     $nextStartLine = $null
-    for ($fileIndex = $fileOffset; $fileIndex -lt $totalFiles -and $filesScanned -lt 500; $fileIndex++) {
-        $filesScanned++
+    $deadline = [datetime]::UtcNow.AddSeconds(10)
+    $timedOut = $false
+    :scan for ($fileIndex = $fileOffset; $fileIndex -lt $totalFiles -and $filesScanned -lt 500; $fileIndex++) {
         $firstLine = if ($fileIndex -eq $fileOffset) { $startLine } else { 1 }
-        $selParams = @{ LiteralPath = $allCandidateFiles[$fileIndex]; Pattern = $Arguments.pattern; Encoding = 'UTF8'; ErrorAction = 'Stop' }
-        if ($isLiteral) { $selParams.SimpleMatch = $true }
-        if ($isCaseSensitive) { $selParams.CaseSensitive = $true }
-        if ($ctxLines -gt 0) { $selParams.Context = @($ctxLines, $ctxLines) }
-        # Keep one lookahead match so continuation within a file starts
-        # at the first result not returned, without buffering all matches.
-        $pageMatches = @(Select-String @selParams | Where-Object { $_.LineNumber -ge $firstLine } | Select-Object -First ($maxMatches - $hitCount + 1))
-        foreach ($m in $pageMatches) {
-            if ($hitCount -ge $maxMatches) {
-                $matchLimitReached = $true
-                $nextFileOffset = $fileIndex
-                $nextStartLine = [int]$m.LineNumber
-                break
-            }
-            $hitCount++
-            $lineText = [string]$m.Line
-            if ($lineText.Length -gt 300) {
-                $lineText = $lineText.Substring(0, 300) + '...'
-                $linesTruncated = $true
-            }
-            $hitObj = @{
-                path = (Get-WorkspaceRelativePath -Root $Root -FullPath $m.Path)
-                file = (Get-WorkspaceRelativePath -Root $Path -FullPath $m.Path)
-                line_number = [int]$m.LineNumber
-                line = $lineText
-            }
-            if ($ctxLines -gt 0 -and $m.Context) {
-                $preCtx = @($m.Context.PreContext)
-                for ($ctxIndex = 0; $ctxIndex -lt $preCtx.Count; $ctxIndex++) {
-                    $ctxText = [string]$preCtx[$ctxIndex]
-                    if ($ctxText.Length -gt 300) {
-                        $preCtx[$ctxIndex] = $ctxText.Substring(0, 300) + '...'
-                        $linesTruncated = $true
-                    }
-                }
-                $postCtx = @($m.Context.PostContext)
-                for ($ctxIndex = 0; $ctxIndex -lt $postCtx.Count; $ctxIndex++) {
-                    $ctxText = [string]$postCtx[$ctxIndex]
-                    if ($ctxText.Length -gt 300) {
-                        $postCtx[$ctxIndex] = $ctxText.Substring(0, 300) + '...'
-                        $linesTruncated = $true
-                    }
-                }
-                $hitObj.context = @($preCtx) + @($lineText) + @($postCtx)
-            }
-            $hits += $hitObj
+        if ([datetime]::UtcNow -ge $deadline) {
+            $timedOut = $true
+            $nextFileOffset = $fileIndex
+            $nextStartLine = $firstLine
+            break
         }
-        if ($matchLimitReached) { break }
+        $file = Get-Item -LiteralPath $allCandidateFiles[$fileIndex] -Force -ErrorAction Stop
+        $filesScanned++
+        if ($file.Length -le 1MB -and -not $file.PSIsContainer -and ($file.Attributes -band 1024) -eq 0) {
+            $raw = Get-Content -LiteralPath $file.FullName -Raw -Encoding UTF8 -ErrorAction Stop
+            $lines = @($raw -split '\r\n|[\r\n]')
+            $lineCount = $lines.Count
+            if ($lineCount -gt 0 -and $lines[-1] -eq '') { $lineCount-- }
+            for ($i = $firstLine - 1; $i -lt $lineCount; $i++) {
+                if ([datetime]::UtcNow -ge $deadline) {
+                    $timedOut = $true
+                    $nextFileOffset = $fileIndex
+                    $nextStartLine = $i + 1
+                    break scan
+                }
+                try {
+                    $matched = if ($isLiteral) { $lines[$i].IndexOf($Arguments.pattern, $comparison) -ge 0 }
+                    else { $pattern.IsMatch($lines[$i]) }
+                }
+                catch [System.Text.RegularExpressions.RegexMatchTimeoutException] {
+                    throw 'Regular expression exceeded the 100 ms match limit. Simplify the pattern or use literal matching.'
+                }
+                if (-not $matched) { continue }
+                # Keep one lookahead match so continuation starts at the first omitted hit.
+                if ($hitCount -ge $maxMatches) {
+                    $matchLimitReached = $true
+                    $nextFileOffset = $fileIndex
+                    $nextStartLine = $i + 1
+                    break scan
+                }
+                $hitCount++
+                $firstContext = $i - $ctxLines
+                if ($firstContext -lt 0) { $firstContext = 0 }
+                $lastContext = $i + $ctxLines
+                if ($lastContext -ge $lineCount) { $lastContext = $lineCount - 1 }
+                $excerpt = @(for ($j = $firstContext; $j -le $lastContext; $j++) {
+                    $line = $lines[$j]
+                    if ($line.Length -gt 300) {
+                        $line = $line.Substring(0, 300) + '...'
+                        $linesTruncated = $true
+                    }
+                    $line
+                })
+                $hit = @{
+                    path = (Get-WorkspaceRelativePath -Root $Root -FullPath $file.FullName)
+                    file = (Get-WorkspaceRelativePath -Root $Path -FullPath $file.FullName)
+                    line_number = $i + 1
+                    line = $excerpt[$i - $firstContext]
+                }
+                if ($ctxLines -gt 0) { $hit.context = $excerpt }
+                $hits += $hit
+            }
+        }
         if ($fileIndex + 1 -lt $totalFiles) {
             $matchLimitReached = ($hitCount -ge $maxMatches)
             $fileLimitReached = ($filesScanned -ge 500)
@@ -256,8 +285,11 @@ function Invoke-AgentGrepFiles {
             }
         }
     }
-    $truncated = ($fileLimitReached -or $matchLimitReached)
-    $truncReason = if ($matchLimitReached -and $fileLimitReached) {
+    $truncated = ($fileLimitReached -or $matchLimitReached -or $timedOut -or $walk.truncated)
+    $truncReason = if ($timedOut) {
+        'search_timeout'
+    }
+    elseif ($matchLimitReached -and $fileLimitReached) {
         'max_matches_and_max_files'
     }
     elseif ($matchLimitReached) {
@@ -266,13 +298,18 @@ function Invoke-AgentGrepFiles {
     elseif ($fileLimitReached) {
         'max_files'
     }
+    elseif ($walk.truncated) {
+        'max_entries'
+    }
     else {
         $null
     }
     $notices = @()
     if ($matchLimitReached) { $notices += "${maxMatches} matches limit reached" }
     if ($fileLimitReached) { $notices += "Scanned ${filesScanned} of ${totalFiles} files" }
-    if ($truncated) { $notices += "Continue with file_offset=${nextFileOffset} and start_line=${nextStartLine} using the same search arguments" }
+    if ($timedOut) { $notices += 'Search time limit reached' }
+    if ($walk.truncated) { $notices += 'Workspace traversal limit reached. Narrow the search path to scan remaining files' }
+    if ($null -ne $nextFileOffset) { $notices += "Continue with file_offset=${nextFileOffset} and start_line=${nextStartLine} using the same search arguments" }
     if ($linesTruncated) { $notices += 'Some lines truncated to 300 chars; use read_file for full lines' }
     $noticeStr = if ($notices.Count -gt 0) { '[' + ($notices -join '. ') + ']' } else { $null }
     $elapsedMs = [int](((Get-Date) - $ToolStart).TotalMilliseconds)
@@ -284,6 +321,8 @@ function Invoke-AgentGrepFiles {
         truncation_reason = $truncReason
         files_scanned = $filesScanned
         total_files = $totalFiles
+        total_files_exact = (-not $walk.truncated)
+        entries_visited = $walk.visited
         next_file_offset = $nextFileOffset
         next_start_line = $nextStartLine
         lines_truncated = $linesTruncated

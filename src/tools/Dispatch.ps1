@@ -17,6 +17,7 @@ function Invoke-AgentTool {
         if (-not (Test-IsToolEnabled -Name $name)) {
             throw "Tool '$name' is disabled by current tool configuration."
         }
+        Assert-AgentToolArgumentSize -RawArguments $Call.function.arguments
         $arguments = $Call.function.arguments | ConvertFrom-Json -ErrorAction Stop
         $arguments = Format-AgentToolArguments -Name $name -Arguments $arguments
         if ($null -ne $arguments -and $arguments -isnot [string] -and $arguments -isnot [ValueType] -and $arguments -isnot [array]) {

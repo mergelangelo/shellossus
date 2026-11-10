@@ -139,6 +139,7 @@ function Read-AgentEditableFile {
     $snapshot = New-AgentTempFile
     try {
         Copy-Item -LiteralPath $Path -Destination $snapshot.FullName -Force -ErrorAction Stop
+        if ((Get-Item -LiteralPath $snapshot.FullName -ErrorAction Stop).Length -gt 1MB) { throw 'Expected a text file up to 1 MiB.' }
         $encoding = Get-AgentEditableEncoding -Path $snapshot.FullName
         $hash = Read-AgentUndoContent -Path $snapshot.FullName -Hash
         $text = Read-AgentUndoContent -Path $snapshot.FullName
@@ -328,6 +329,9 @@ function Invoke-AgentEditFile {
     }
     else {
         @(@{ old_text = $Arguments.old_text; new_text = $Arguments.new_text })
+    }
+    if ($rawEdits.Count -gt $script:AgentMaxBatchEdits) {
+        throw "edits[] may contain at most $($script:AgentMaxBatchEdits) operations."
     }
     $resolvedEdits = @()
     foreach ($ed in $rawEdits) {
