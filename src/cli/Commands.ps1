@@ -445,7 +445,6 @@ function Invoke-ReplContinueCommand {
     }
     Ensure-SessionTree -State $State
     $turnSnapshot = New-AgentTurnSnapshot -State $State
-    $null = Invoke-ThresholdAutoCompact -State $State -Endpoint $Endpoint -ModelId $Model -ApiKey $ApiKey
     $script:CurrentTurnWrites = @()
     Write-Host ($script:Gm.Aqua + "  [continue] Continuing agent turn (up to $contSteps steps)..." + $script:Gm.Reset)
     try {

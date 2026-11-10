@@ -195,7 +195,7 @@ try {
 
     # Mid-turn proactive auto-compaction when context exceeds compact threshold across steps.
     $null = Set-AgentContextLimits -WindowSpec '20k' -CompactSpec '15k'
-    $bigFiller = 'X' * 32000
+    $bigFiller = 'X' * 22000
     $midCompactState = @{
         messages = @(
             @{ role = 'system'; content = 'sys' },
@@ -207,19 +207,23 @@ try {
     $script:midStepReq = 0
     function Invoke-WebRequest {
         param($Uri, $Method, $Headers, $ContentType, $Body, $TimeoutSec, $ErrorAction, [switch]$UseBasicParsing, $OutFile)
-        $script:midStepReq++
         $parsedBody = $Body | ConvertFrom-Json
         if ($parsedBody.messages[0].content -like '*context compaction assistant*') {
+            Assert-True ($script:midStepReq -eq 1) 'Expected compaction only after the first chat request.'
             $resp = @{ choices = @(@{ finish_reason = 'stop'; message = @{ content = "## Goal`nMid-turn compacted." } }) } | ConvertTo-Json -Depth 10 -Compress
         }
-        elseif ($script:midStepReq -eq 1) {
-            $resp = @{ choices = @(@{ finish_reason = 'tool_calls'; message = @{
-                content = ''
-                tool_calls = @(@{ id = 'mc-1'; type = 'function'; function = @{ name = 'list_files'; arguments = '{"path":"."}' } })
-            } }) } | ConvertTo-Json -Depth 10 -Compress
-        }
         else {
-            $resp = @{ choices = @(@{ finish_reason = 'stop'; message = @{ content = 'Done after mid-turn compact.' } }) } | ConvertTo-Json -Depth 10 -Compress
+            $script:midStepReq++
+            if ($script:midStepReq -eq 1) {
+                $resp = @{ choices = @(@{ finish_reason = 'tool_calls'; message = @{
+                    content = 'Y' * 14000
+                    tool_calls = @(@{ id = 'mc-1'; type = 'function'; function = @{ name = 'list_files'; arguments = '{"path":"."}' } })
+                } }) } | ConvertTo-Json -Depth 10 -Compress
+            }
+            else {
+                Assert-True ($parsedBody.messages[1].content.StartsWith('[Compacted Conversation Summary]') -and $parsedBody.messages[-1].tool_call_id -eq 'mc-1') 'Mid-turn compaction did not retain the latest tool exchange.'
+                $resp = @{ choices = @(@{ finish_reason = 'stop'; message = @{ content = 'Done after mid-turn compact.' } }) } | ConvertTo-Json -Depth 10 -Compress
+            }
         }
         Set-Content -LiteralPath $OutFile -Value $resp -Encoding UTF8 -NoNewline
     }

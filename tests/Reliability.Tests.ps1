@@ -364,6 +364,142 @@ try {
         }
     }
 
+    & {
+        $savedWindow = $script:ContextWindowTokens
+        $savedThreshold = $script:CompactThresholdTokens
+        $savedNoTools = $script:NoTools
+        $mock = @{ chat = @(); compactions = 0; summary = 'Old task completed.'; serverWindow = 0 }
+        function Invoke-WebRequest {
+            param($Uri, $Method, $Headers, $ContentType, $Body, $TimeoutSec, $ErrorAction, [switch]$UseBasicParsing, $OutFile)
+            $payload = $Body | ConvertFrom-Json
+            if ($payload.messages[0].content -like '*context compaction assistant*') {
+                $mock.compactions++
+                $answer = $mock.summary
+            }
+            else {
+                $mock.chat += $payload
+                if ($mock.serverWindow) {
+                    $limit = $mock.serverWindow
+                    $mock.serverWindow = 0
+                    throw "The maximum context length is $limit tokens, including 500 requested reply tokens."
+                }
+                $answer = 'Request fit the window.'
+            }
+            $response = @{ choices = @(@{ finish_reason = 'stop'; message = @{ content = $answer } }) } | ConvertTo-Json -Depth 5 -Compress
+            Set-Content -LiteralPath $OutFile -Value $response -Encoding UTF8 -NoNewline
+        }
+        $turnArgs = @{ Endpoint = 'https://example.invalid/v1/chat/completions'; ModelId = 'test-model'; ApiKey = 'fake'; Root = $workspacePath; Steps = 1 }
+        try {
+            $script:NoTools = $true
+            $null = Set-AgentContextLimits -WindowSpec '4k' -CompactSpec '75%'
+            $attachment = Join-Path $workspacePath 'context-budget.txt'
+            Set-Content -LiteralPath $attachment -Value ('a' * 16000) -Encoding Ascii -NoNewline
+            $expanded = Expand-UserPrompt -Root $workspacePath -Prompt 'Review @context-budget.txt'
+            $attachedState = @{ messages = @(
+                @{ role = 'system'; content = 'sys' },
+                @{ role = 'user'; content = 'Earlier task.' },
+                @{ role = 'assistant'; content = 'Done.' },
+                @{ role = 'user'; content = $expanded }
+            ) }
+            $rejected = $false
+            try { Invoke-AgentTurn @turnArgs -State $attachedState }
+            catch {
+                if ($_.Exception.Message -notlike 'Required context exceeds the 4000-token window*') { throw }
+                $rejected = $true
+            }
+            Assert-True ($rejected -and $mock.chat.Count -eq 0 -and $mock.compactions -eq 0) 'Oversized expanded input reached a chat or compaction POST.'
+
+            $null = Set-AgentContextLimits -WindowSpec '128k' -CompactSpec '75%'
+            $mock.serverWindow = 4000
+            $rejected = $false
+            try { Invoke-AgentTurn @turnArgs -State $attachedState }
+            catch {
+                if ($_.Exception.Message -notlike 'Required context exceeds the 4000-token window*') { throw }
+                $rejected = $true
+            }
+            Assert-True ($rejected -and $mock.chat.Count -eq 1 -and $mock.compactions -eq 0) 'Server overflow recovery ignored the reported smaller window.'
+            $mock.serverWindow = 0
+            $mock.chat = @()
+
+            $script:NoTools = $false
+            $schemaState = @{ messages = @(@{ role = 'system'; content = 'sys' }, @{ role = 'user'; content = '' }) }
+            $null = Sync-AgentCapabilities -State $schemaState -Root $workspacePath
+            $schemaBody = @{ model = 'test-model'; messages = $schemaState.messages; tools = @(Get-AgentTools); stream = $false } | ConvertTo-Json -Depth 40 -Compress
+            $schemaBase = Get-AgentRequestEstimatedTokens -Body $schemaBody -MessageCount 2
+            $schemaState.messages[1].content = 'x' * (4 * (3750 - $schemaBase))
+            $rejected = $false
+            try { Invoke-AgentTurn @turnArgs -State $schemaState }
+            catch {
+                if ($_.Exception.Message -notlike 'Required context exceeds*3750 estimated input tokens plus 500 reserved*') { throw }
+                $rejected = $true
+            }
+            Assert-True ($rejected -and $mock.chat.Count -eq 0) 'Tool schemas or the reply reserve were left out of the budget.'
+            $script:NoTools = $true
+            Invoke-AgentTurn @turnArgs -State $schemaState
+            Assert-True ($mock.chat.Count -eq 1) 'The same input did not fit with tools disabled.'
+
+            $mock.chat = @()
+            $null = Set-AgentContextLimits -WindowSpec '8k' -CompactSpec '2k'
+            Set-Content -LiteralPath $attachment -Value 'New attachment content.' -Encoding Ascii -NoNewline
+            $expanded = Expand-UserPrompt -Root $workspacePath -Prompt 'Review @context-budget.txt'
+            $shortState = @{ messages = @(
+                @{ role = 'system'; content = 'sys' },
+                @{ role = 'user'; content = 'x' * 28500 },
+                @{ role = 'assistant'; content = 'Old reply.' },
+                @{ role = 'user'; content = $expanded }
+            ) }
+            Invoke-AgentTurn @turnArgs -State $shortState
+            Assert-True ($mock.compactions -gt 0 -and $mock.chat.Count -eq 1 -and $mock.chat[0].messages[1].content.StartsWith('[Compacted Conversation Summary]')) 'Short history did not compact before step zero.'
+            Assert-True ($mock.chat[0].messages[-1].content -ceq $expanded) 'Preflight compaction changed the newest prompt or its attachment.'
+
+            $mock.chat = @()
+            $mock.compactions = 0
+            $mock.serverWindow = 4000
+            $retryState = @{ messages = @(
+                @{ role = 'system'; content = 'sys' },
+                @{ role = 'user'; content = 'x' * 3500 },
+                @{ role = 'assistant'; content = 'Old reply.' },
+                @{ role = 'user'; content = 'New question.' }
+            ) }
+            Invoke-AgentTurn @turnArgs -State $retryState
+            Assert-True ($mock.chat.Count -eq 2 -and $mock.compactions -gt 0 -and $mock.chat[1].messages[1].content.StartsWith('[Compacted Conversation Summary]')) 'The server context rejection did not rebuild and retry the same step.'
+            Assert-True ($mock.chat[1].messages[-1].content -ceq 'New question.') 'Server overflow recovery changed the pending user message.'
+
+            $mock.chat = @()
+            $mock.compactions = 0
+            $mock.summary = 's' * 900
+            $null = Set-AgentContextLimits -WindowSpec '4k' -CompactSpec '75%'
+            $mandatoryState = @{ messages = @(@{ role = 'system'; content = 'sys' }, @{ role = 'user'; content = '' }) }
+            $null = Sync-AgentCapabilities -State $mandatoryState -Root $workspacePath
+            $mandatoryBody = @{ model = 'test-model'; messages = $mandatoryState.messages; tools = @(); stream = $false } | ConvertTo-Json -Depth 40 -Compress
+            $mandatoryBase = Get-AgentRequestEstimatedTokens -Body $mandatoryBody -MessageCount 2
+            $nearLimitState = @{ messages = @(
+                $mandatoryState.messages[0],
+                @{ role = 'user'; content = 'x' * 1000 },
+                @{ role = 'assistant'; content = 'Old reply.' },
+                @{ role = 'user'; content = 'x' * (4 * (3400 - $mandatoryBase)) }
+            ) }
+            $rejected = $false
+            try { Invoke-AgentTurn @turnArgs -State $nearLimitState }
+            catch {
+                if ($_.Exception.Message -notlike 'Context after compaction exceeds the 4000-token window*') { throw }
+                $rejected = $true
+            }
+            Assert-True ($rejected -and $mock.compactions -gt 0 -and $mock.chat.Count -eq 0) 'A request still over budget after compaction reached the chat API.'
+            Assert-True (-not $nearLimitState.ContainsKey('tree_entries') -and $nearLimitState.messages[1].content.Length -eq 1000) 'Rejected compaction replaced the active history.'
+
+            $mock.compactions = 0
+            $nearLimitState.messages[1].content = 'Short earlier task.'
+            Invoke-AgentTurn @turnArgs -State $nearLimitState
+            Assert-True ($mock.compactions -gt 0 -and $mock.chat.Count -eq 1 -and $mock.chat[0].messages[1].content -eq 'Short earlier task.') 'Optional compaction displaced an original request that fit.'
+        }
+        finally {
+            $script:ContextWindowTokens = $savedWindow
+            $script:CompactThresholdTokens = $savedThreshold
+            $script:NoTools = $savedNoTools
+        }
+    }
+
     # Operator shortcuts retain OS access while the model's shell tool is gated.
     $script:AgentPermission = 'ReadOnly'
     $script:OutputMode = 'text'
@@ -1461,6 +1597,8 @@ param(
     $Mode,
     [switch]$NoSession,
     $MaxSteps,
+    $ContextWindow,
+    $CompactThreshold,
     $Tools,
     [switch]$NoTools,
     $ExcludeTools,
@@ -1479,6 +1617,8 @@ $passedNoSkills = [bool]$NoSkills
 $passedNoTemplates = [bool]$NoPromptTemplates
 $passedNoContext = [bool]$NoContextFiles
 $passedReasoning = [string]$ReasoningEffort
+$passedWindow = [string]$ContextWindow
+$passedThreshold = [string]$CompactThreshold
 $passedPrompt = [string]$Prompt
 $passedLiteralPrompt = [bool]$LiteralPrompt
 . '__LIBRARY__' -LibraryOnly
@@ -1499,6 +1639,8 @@ $payload = @{
     no_templates = $passedNoTemplates
     no_context = $passedNoContext
     reasoning_effort = $passedReasoning
+    context_window = $passedWindow
+    compact_threshold = $passedThreshold
     user_prompt = $passedPrompt
     literal_prompt = $passedLiteralPrompt
     sys_has_role = $sysPrompt.Contains("[Subagent Role: $($env:SHELLOSSUS_SUB_ROLE)]")
@@ -1515,6 +1657,9 @@ $payload = @{
     $script:NoContextFiles = $true
     $script:ReasoningEffort = 'high'
     $script:AutoApproveWeb = $true
+    $savedWorkerWindow = $script:ContextWindowTokens
+    $savedWorkerThreshold = $script:CompactThresholdTokens
+    $null = Set-AgentContextLimits -WindowSpec '8k' -CompactSpec '4k'
     $parentStateForParallel = @{ usage_input_tokens = 10; usage_output_tokens = 5 }
     $script:ActiveState = $parentStateForParallel
     try {
@@ -1526,6 +1671,7 @@ $payload = @{
         Assert-True (($reader.tools -join ',') -eq 'read_file') 'Worker did not inherit aliases, wildcard filters, or exclusions.'
         Assert-True ($writer.no_tools -and $writer.tools.Count -eq 0) 'Empty worker allowlist enabled tools.'
         Assert-True ($reader.no_skills -and $reader.no_templates -and $reader.no_context -and $reader.reasoning_effort -eq 'high') 'Worker did not receive -NoSkills, -NoPromptTemplates, -NoContextFiles, or -ReasoningEffort.'
+        Assert-True ($reader.context_window -eq '8000' -and $reader.compact_threshold -eq '4000') 'Worker did not inherit the active context limits.'
         Assert-True ($reader.user_prompt -ceq '/check-files @model-only.txt' -and $reader.literal_prompt -and $reader.sys_has_role) ("Parallel worker did not receive a literal user prompt and separate role: " + ($reader | ConvertTo-Json -Compress))
         Assert-True ($parentStateForParallel.usage_input_tokens -eq 260 -and $parentStateForParallel.usage_output_tokens -eq 75) "Parallel worker token usage was not aggregated into parent state (got in=$($parentStateForParallel.usage_input_tokens), out=$($parentStateForParallel.usage_output_tokens))."
 
@@ -1570,6 +1716,8 @@ exit 1
         $script:NoContextFiles = $false
         $script:ReasoningEffort = ''
         $script:AutoApproveWeb = $false
+        $script:ContextWindowTokens = $savedWorkerWindow
+        $script:CompactThresholdTokens = $savedWorkerThreshold
         $script:ActiveState = $null
     }
 

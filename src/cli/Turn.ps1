@@ -132,22 +132,91 @@ function Invoke-AgentTurnRollback {
     }
 }
 
-function Invoke-ThresholdAutoCompact {
-    param($State, [string]$Endpoint, [string]$ModelId, [string]$ApiKey)
-    $stats = Get-ContextStats -State $State
-    if ($stats.est_tokens -gt $stats.compact_threshold_tokens) {
-        if ($script:OutputMode -ne 'json') {
-            $limStr = Format-TokenCount -Tokens $stats.compact_threshold_tokens
-            Write-Host ($script:Gm.Yellow + "  [auto-compact] Context exceeds $limStr tokens, compacting older history..." + $script:Gm.Reset)
-        }
-        try {
-            if (Invoke-AgentCompact -State $State -Endpoint $Endpoint -ModelId $ModelId -ApiKey $ApiKey) {
-                return $true
+function Get-AgentRequestEstimatedTokens {
+    param([string]$Body, [int]$MessageCount)
+    # Gateways use different tokenizers. Estimate from the serialized request
+    # before transport escaping and leave room for the chat template.
+    return [int](((Get-AgentUtf8TextSize $Body) + 3) / 4) + (4 * $MessageCount) + 16
+}
+
+function New-AgentTurnRequest {
+    param($State, [string]$Endpoint, [string]$ModelId, [string]$ApiKey, [array]$Tools, [switch]$RecoverOverflow)
+    $request = @{
+        model = $ModelId
+        messages = @(ConvertTo-AgentApiMessages -Messages $State.messages)
+        tools = $Tools
+        stream = $false
+    }
+    if ($script:ReasoningEffort) { $request.reasoning_effort = $script:ReasoningEffort }
+    $body = $request | ConvertTo-Json -Depth 40 -Compress
+    $estimated = Get-AgentRequestEstimatedTokens -Body $body -MessageCount $request.messages.Count
+    if ($State.last_prompt_tokens -gt 0) {
+        $measuredEstimate = (Get-ContextStats -State $State).est_tokens
+        if ($measuredEstimate -gt $estimated) { $estimated = $measuredEstimate }
+    }
+    $window = $script:ContextWindowTokens
+    $reserve = [int]($window / 8)
+    if ($reserve -gt 4096) { $reserve = 4096 }
+    $inputLimit = $window - $reserve
+    $overBudget = $estimated -gt $inputLimit
+    $advice = 'Shorten the prompt, attachments or tool output, reduce enabled tools, or use a larger context window if the model supports it.'
+    $needCompaction = $overBudget -or $RecoverOverflow
+    if ($needCompaction -or $estimated -gt $script:CompactThresholdTokens) {
+        $keepRecent = if ($needCompaction) { 1 } else { 4 }
+        $cut = (Find-CompactionCutPoint -Messages $State.messages -KeepRecent $keepRecent).cut_index
+        if ($cut -gt 1 -and $request.messages[0].role -eq 'system') {
+            if ($needCompaction) {
+                # Keep the newest prompt verbatim, or the newest assistant message
+                # together with its tool results. Older history is compressible.
+                $request.messages = @($request.messages[0]) + @($request.messages[$cut..($request.messages.Count - 1)])
+                $requiredBody = $request | ConvertTo-Json -Depth 40 -Compress
+                $required = Get-AgentRequestEstimatedTokens -Body $requiredBody -MessageCount $request.messages.Count
+                if ($required -gt $inputLimit) {
+                    throw "Required context exceeds the $window-token window ($required estimated input tokens plus $reserve reserved for the reply). $advice"
+                }
+            }
+            if ($script:OutputMode -ne 'json') {
+                Write-Host ($script:Gm.Yellow + '  [auto-compact] Compacting older history before sending the request...' + $script:Gm.Reset)
+            }
+            # Stage the candidate. Compaction may assign message IDs and grow a short history.
+            $candidate = @{} + $State
+            $candidate.messages = @(Copy-SessionHashtableArray -Items $State.messages)
+            $compacted = $false
+            try {
+                $compacted = Invoke-AgentCompact -State $candidate -Endpoint $Endpoint -ModelId $ModelId -ApiKey $ApiKey -KeepRecent $keepRecent
+            }
+            catch {
+                if ($needCompaction) {
+                    $detail = Format-AgentError -ErrorRecord $_
+                    throw "The request needs context compaction before it can fit the model window. Compaction failed. $detail"
+                }
+            }
+            finally {
+                foreach ($key in @('usage_input_tokens', 'usage_output_tokens')) {
+                    if ($candidate[$key] -ne $State[$key]) { $State[$key] = $candidate[$key] }
+                }
+            }
+            if ($compacted) {
+                $request.messages = @(ConvertTo-AgentApiMessages -Messages $candidate.messages)
+                $compactedBody = $request | ConvertTo-Json -Depth 40 -Compress
+                $compactedEstimate = Get-AgentRequestEstimatedTokens -Body $compactedBody -MessageCount $request.messages.Count
+                if ($compactedEstimate -le $inputLimit) {
+                    foreach ($key in $candidate.Keys) { $State[$key] = $candidate[$key] }
+                    return @{ body = $compactedBody; compacted = $true }
+                }
+                if ($needCompaction) {
+                    throw "Context after compaction exceeds the $window-token window ($compactedEstimate estimated input tokens plus $reserve reserved for the reply). $advice"
+                }
             }
         }
-        catch {}
     }
-    return $false
+    if ($overBudget) {
+        throw "Required context exceeds the $window-token window ($estimated estimated input tokens plus $reserve reserved for the reply). $advice"
+    }
+    if ($RecoverOverflow) {
+        throw "The model rejected the request for context length and no older history could be compacted. $advice"
+    }
+    return @{ body = $body; compacted = $false }
 }
 
 function Invoke-AgentTurn {
@@ -156,6 +225,7 @@ function Invoke-AgentTurn {
         throw 'Cannot send conversation with inconsistent tool calls or results.'
     }
     $overflowRetried = $false
+    $recoverOverflow = $false
     $script:ActiveModelId = $ModelId
     $script:ActiveEndpoint = $Endpoint
     $script:ActiveState = $State
@@ -175,14 +245,14 @@ function Invoke-AgentTurn {
     }
     $scopedInstrCache = $State.scoped_instr_cache
     for ($step = 0; $step -lt $Steps; $step++) {
-        if ($step -gt 0) {
-            if (Invoke-ThresholdAutoCompact -State $State -Endpoint $Endpoint -ModelId $ModelId -ApiKey $ApiKey) {
-                $mutationEpoch++
-                $toolCallCounts = @{}
-            }
-        }
         $capSync = Sync-AgentCapabilities -State $State -Root $Root
         $activeTools = @(Get-AgentTools)
+        $request = New-AgentTurnRequest -State $State -Endpoint $Endpoint -ModelId $ModelId -ApiKey $ApiKey -Tools $activeTools -RecoverOverflow:$recoverOverflow
+        $recoverOverflow = $false
+        if ($request.compacted) {
+            $mutationEpoch++
+            $toolCallCounts = @{}
+        }
         $diagEntry = @{
             step = $step
             model = $ModelId
@@ -207,14 +277,6 @@ function Invoke-AgentTurn {
             }
         }
         Write-AgentJsonEvent -EventType 'turn_start' -Payload @{ model = $ModelId; step = $step }
-        $bodyObj = @{
-            model = $ModelId
-            messages = @(ConvertTo-AgentApiMessages -Messages $State.messages)
-            tools = $activeTools
-            stream = $false
-        }
-        if ($script:ReasoningEffort) { $bodyObj.reasoning_effort = $script:ReasoningEffort }
-        $body = $bodyObj | ConvertTo-Json -Depth 40 -Compress
         $statusLabel = "[step {0}/{1}] Waiting for {2}" -f ($step + 1), $Steps, $ModelId
         $tempResponse = New-AgentTempFile
         $reply = $null
@@ -222,7 +284,8 @@ function Invoke-AgentTurn {
             $maxRetries = 2
             for ($attempt = 0; $attempt -le $maxRetries; $attempt++) {
                 try {
-                    Invoke-AgentHttpRequest -Uri $Endpoint -ApiKey $ApiKey -Body $body -OutFile $tempResponse.FullName -TimeoutSec 180 -StatusLabel $statusLabel
+                    # Transient retries reuse the checked body. Context recovery rebuilds it.
+                    Invoke-AgentHttpRequest -Uri $Endpoint -ApiKey $ApiKey -Body $request.body -OutFile $tempResponse.FullName -TimeoutSec 180 -StatusLabel $statusLabel
                     $responseBytes = (Get-Item -LiteralPath $tempResponse.FullName -ErrorAction Stop).Length
                     if ($turnPayloadBytes + $responseBytes -gt $script:AgentMaxTurnPayloadBytes) {
                         throw "Turn exceeds the $($script:AgentMaxTurnPayloadBytes)-byte payload limit."
@@ -233,7 +296,8 @@ function Invoke-AgentTurn {
                 }
                 catch {
                     $errFormatted = Format-AgentError -ErrorRecord $_
-                    if (($attempt -lt $maxRetries) -and ($errFormatted -match '(?i)\b(408|429|500|502|503|504|timeout|timed out)\b')) {
+                    $contextError = $errFormatted -match '(?i)(context_length|maximum context|context window)'
+                    if (-not $contextError -and ($attempt -lt $maxRetries) -and ($errFormatted -match '(?i)\b(408|429|500|502|503|504|timeout|timed out)\b')) {
                         $delay = ($attempt + 1) * 2
                         if ($script:OutputMode -ne 'json') {
                             Write-Host ($script:Gm.Yellow + ("  [retry {0}/{1}] Transient error ({2}); waiting {3}s..." -f ($attempt + 1), $maxRetries, (Format-TuiText $errFormatted), $delay) + $script:Gm.Reset)
@@ -241,24 +305,23 @@ function Invoke-AgentTurn {
                         Start-Sleep -Seconds $delay
                         continue
                     }
-                    if ((-not $overflowRetried) -and ($errFormatted -match '(?i)(context_length|maximum context|too many tokens|token limit)')) {
+                    if (-not $overflowRetried -and ($contextError -or $errFormatted -match '(?i)(too many tokens|token limit)')) {
                         $overflowRetried = $true
-                        if ($errFormatted -match '(?i)maximum context length is (\d+)') {
+                        if ($errFormatted -match '(?i)maximum context length is (\d{1,9})\b') {
                             $srvLim = [int]$Matches[1]
+                            if ($srvLim -gt 0 -and $srvLim -lt 4000) {
+                                throw "The model reported a $srvLim-token context window. The minimum supported window is 4000 tokens."
+                            }
                             if ($srvLim -ge 4000 -and $srvLim -lt $script:ContextWindowTokens) {
                                 $null = Set-AgentContextLimits -WindowSpec ([string]$srvLim) -CompactSpec '75%'
                             }
                         }
                         if ($script:OutputMode -ne 'json') {
-                            Write-Host ($script:Gm.Yellow + '  [auto-recovery] Context overflow detected; compacting history and retrying...' + $script:Gm.Reset)
+                            Write-Host ($script:Gm.Yellow + '  [auto-recovery] Model reported a context overflow. Checking the request again...' + $script:Gm.Reset)
                         }
-                        if (Invoke-AgentCompact -State $State -Endpoint $Endpoint -ModelId $ModelId -ApiKey $ApiKey) {
-                            $mutationEpoch++
-                            $toolCallCounts = @{}
-                            $step--
-                            $reply = $null
-                            break
-                        }
+                        $recoverOverflow = $true
+                        $step--
+                        break
                     }
                     throw
                 }

@@ -257,7 +257,6 @@ if (-not $LibraryOnly) {
         if ($Prompt) {
             Ensure-SessionTree -State $state
             $turnSnapshot = New-AgentTurnSnapshot -State $state
-            $null = Invoke-ThresholdAutoCompact -State $state -Endpoint $endpoint -ModelId $Model -ApiKey $agentKey
             $script:CurrentTurnWrites = @()
             $expandedPrompt = $Prompt
             if (-not $LiteralPrompt) {
@@ -401,7 +400,6 @@ if (-not $LibraryOnly) {
             }
             Ensure-SessionTree -State $state
             $turnSnapshot = New-AgentTurnSnapshot -State $state
-            $null = Invoke-ThresholdAutoCompact -State $state -Endpoint $endpoint -ModelId $Model -ApiKey $agentKey
             $script:CurrentTurnWrites = @()
             $expandedQuestion = Expand-UserPrompt -Root $rootPath -Prompt $question -AttachmentSource $attachmentSource
             $state.messages += @{ role = 'user'; content = $expandedQuestion }
