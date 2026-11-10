@@ -71,6 +71,10 @@ shellossus -Prompt "Explain @src/tools/Files.ps1" # Single-shot non-interactive 
 shellossus -Mascot                          # Display the 20x16 half-block mascot without starting a chat
 ```
 
+`-MaxRepeatCalls N` accepts 1 through 50 and defaults to 3. For identical tool calls without a state change, the first call runs. The warning replaces attempt `N` for values of 2 or more, or the first repeat when set to 1. Another identical attempt stops the turn.
+
+`-NoContextFiles` skips automatic loading of `SYSTEM.md`, `APPEND_SYSTEM.md`, `AGENTS.md`, `SOUL.md` (including its aliases), and `MEMORY.md` from the workspace and user configuration. Built-in capability and permission rules still apply. Skills, prompt templates, and explicit attachments are controlled separately.
+
 ## Interactive Commands
 
 | Command | Description |

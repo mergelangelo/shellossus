@@ -153,6 +153,8 @@ function Invoke-AgentTurn {
     $State.loop_detected = $false
     $State.repeated_tool = $null
     $repeatLimit = if ($MaxRepeatCalls -gt 0) { $MaxRepeatCalls } elseif ($script:MaxRepeatToolCalls -gt 0) { [int]$script:MaxRepeatToolCalls } else { 3 }
+    # Count attempts, with a warning on a repeat and a stop on the next attempt.
+    $repeatWarningAt = if ($repeatLimit -eq 1) { 2 } else { $repeatLimit }
     $mutationEpoch = 0
     $toolCallCounts = @{}
     if ($null -eq $State.scoped_instr_cache -or $State.scoped_instr_cache -isnot [hashtable]) {
@@ -333,7 +335,7 @@ function Invoke-AgentTurn {
             $newCount = $prevCount + 1
             $toolCallCounts[$sig] = $newCount
             Write-AgentJsonEvent -EventType 'tool_execution_start' -Payload @{ id = [string]$call.id; name = [string]$call.function.name }
-            if ($loopAborted -or ($newCount -gt $repeatLimit)) {
+            if ($loopAborted -or ($newCount -gt $repeatWarningAt)) {
                 if (-not $loopAborted) {
                     $State.loop_detected = $true
                     $State.repeated_tool = $canonToolName
@@ -349,7 +351,7 @@ function Invoke-AgentTurn {
                 Ensure-SessionTree -State $State
                 continue
             }
-            if ($newCount -eq $repeatLimit) {
+            if ($newCount -eq $repeatWarningAt) {
                 $warnObj = @{
                     status = 'repeated_call_warning'
                     warning = "Repeated identical tool call '$canonToolName' with the same arguments without any intervening file or state changes. Do not repeat identical calls; use the result already in context, try different arguments, or explain why you cannot proceed."

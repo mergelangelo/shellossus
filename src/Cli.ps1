@@ -158,7 +158,6 @@ if (-not $LibraryOnly) {
     $script:ExcludedTools = @(if ($ExcludeTools) { $ExcludeTools -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ } })
     $script:NoSkills = [bool]$NoSkills
     $script:NoPromptTemplates = [bool]$NoPromptTemplates
-    $script:NoContextFiles = [bool]$NoContextFiles
     if ($HideReasoning) { $script:ShowReasoning = 'hide' }
     if ($ReasoningEffort) {
         if ($ReasoningEffort -notin @('low', 'medium', 'high')) { throw 'ReasoningEffort must be low, medium, or high.' }
