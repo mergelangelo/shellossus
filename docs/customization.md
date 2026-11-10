@@ -56,7 +56,8 @@ See [`examples/skills/powershell-51/SKILL.md`](../examples/skills/powershell-51/
 Create Markdown files in `<workspace>\.shellossus\prompts\<name>.md` or `%USERPROFILE%\.shellossus\prompts\<name>.md` to define reusable slash commands.
 
 - Invoke a template in interactive mode or via `-Prompt` by typing `/<name> [arguments]`.
-- If the template contains `$ARGUMENTS`, it is replaced with the arguments passed after `/<name>`. Otherwise, arguments are appended to the end of the template.
+- Arguments fill placeholders such as `$ARGUMENTS` and `$1`. A template without placeholders appends its arguments once.
+- For `/skill:<name>` without placeholders, arguments appear after the skill body. For `/agent:<role>`, arguments already used by placeholders appear in the role text. The delegation includes any remaining arguments separately.
 
 Example `.shellossus/prompts/review.md`:
 

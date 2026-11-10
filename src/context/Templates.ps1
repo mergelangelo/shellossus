@@ -1,12 +1,13 @@
 # Reusable slash prompt templates and inline @file / !cmd prompt expansion.
 
 function Split-CommandArgs {
-    param([string]$ArgsString)
+    param([string]$ArgsString, [switch]$WithSource)
     $argsList = @()
     if (-not $ArgsString) { return $argsList }
     $current = ''
     $hasToken = $false
     $inQuote = ''
+    $tokenStart = 0
     for ($i = 0; $i -lt $ArgsString.Length; $i++) {
         $ch = $ArgsString[$i]
         if ($inQuote) {
@@ -23,10 +24,13 @@ function Split-CommandArgs {
         }
         elseif ([string]$ch -match '^\s$') {
             if ($hasToken) {
-                $argsList += $current
+                $argsList += $(if ($WithSource) {
+                    @{ value = $current; source = $ArgsString.Substring($tokenStart, $i - $tokenStart) }
+                } else { $current })
                 $current = ''
                 $hasToken = $false
             }
+            $tokenStart = $i + 1
         }
         else {
             $current += $ch
@@ -34,29 +38,34 @@ function Split-CommandArgs {
         }
     }
     if ($hasToken) {
-        $argsList += $current
+        $argsList += $(if ($WithSource) {
+            @{ value = $current; source = $ArgsString.Substring($tokenStart) }
+        } else { $current })
     }
     return $argsList
 }
 
 function Expand-TemplateArgs {
-    param([string]$Content, [string]$ArgsString = '')
-    if (-not $Content) { return '' }
-    $argsList = @(Split-CommandArgs -ArgsString $ArgsString)
-    $allArgs = $argsList -join ' '
+    param([string]$Content, [string]$ArgsString = '', [switch]$ForCommand)
     $pattern = '\$\{(\d+|ARGUMENTS|@):-([^}]*)\}|\$\{@:(\d+)(?::(\d+))?\}|\$(ARGUMENTS|@|\d+)'
-    $hasPlaceholders = ($Content -match $pattern)
-    if (-not $hasPlaceholders) {
-        if ($ArgsString -and $ArgsString.Trim()) {
+    if ($Content -notmatch $pattern) {
+        if ($ForCommand) {
+            return @{ text = $Content.Trim(); has_placeholders = $false; remaining_args = $ArgsString.Trim() }
+        }
+        if ($Content -and $ArgsString.Trim()) {
             return ($Content.Trim() + "`n`n" + $ArgsString.Trim())
         }
         return $Content.Trim()
     }
+    $tokens = @(Split-CommandArgs -ArgsString $ArgsString -WithSource:$ForCommand)
+    $argsList = @(if ($ForCommand) { $tokens | ForEach-Object { $_.value } } else { $tokens })
+    $allArgs = $argsList -join ' '
+    $used = @{}
+    $usedAll = $false
     $out = ''
     $pos = 0
-    $work = $Content
-    while ($pos -lt $work.Length) {
-        $rem = $work.Substring($pos)
+    while ($pos -lt $Content.Length) {
+        $rem = $Content.Substring($pos)
         if ($rem -match $pattern) {
             $fullMatch = [string]$Matches[0]
             $matchIdx = $rem.IndexOf($fullMatch, [StringComparison]::Ordinal)
@@ -64,45 +73,36 @@ function Expand-TemplateArgs {
                 $out += $rem.Substring(0, $matchIdx)
             }
             $replacement = ''
-            if ($Matches[1]) {
-                $defTarget = [string]$Matches[1]
-                $defVal = [string]$Matches[2]
-                $actual = if ($defTarget -eq '@' -or $defTarget -eq 'ARGUMENTS') {
-                    $allArgs
-                }
-                else {
-                    $idx = [int]$defTarget - 1
-                    if ($idx -ge 0 -and $idx -lt $argsList.Count) { [string]$argsList[$idx] } else { '' }
-                }
-                $replacement = if ($actual) { $actual } else { $defVal }
-            }
-            elseif ($Matches[3]) {
+            if ($Matches[3]) {
                 $sliceStart = [int]$Matches[3] - 1
                 if ($sliceStart -lt 0) { $sliceStart = 0 }
-                if ($sliceStart -ge $argsList.Count) {
-                    $replacement = ''
+                $sliceEnd = $argsList.Count - 1
+                if ($Matches[4]) {
+                    $requestedEnd = $sliceStart + [int]$Matches[4] - 1
+                    if ($requestedEnd -lt $sliceEnd) { $sliceEnd = $requestedEnd }
                 }
-                elseif ($Matches[4]) {
-                    $sliceLen = [int]$Matches[4]
-                    $endIdx = $sliceStart + $sliceLen - 1
-                    if ($endIdx -ge $argsList.Count) { $endIdx = $argsList.Count - 1 }
-                    if ($endIdx -ge $sliceStart) {
-                        $replacement = (@($argsList[$sliceStart..$endIdx]) -join ' ')
+                if ($sliceEnd -ge $sliceStart) {
+                    $indices = $sliceStart..$sliceEnd
+                    $replacement = $argsList[$indices] -join ' '
+                    if ($ForCommand) {
+                        foreach ($idx in $indices) { $used[$idx] = $true }
                     }
                 }
-                else {
-                    $replacement = (@($argsList[$sliceStart..($argsList.Count - 1)]) -join ' ')
-                }
             }
-            elseif ($Matches[5]) {
-                $simple = [string]$Matches[5]
-                if ($simple -eq 'ARGUMENTS' -or $simple -eq '@') {
+            else {
+                $target = if ($Matches[1]) { [string]$Matches[1] } else { [string]$Matches[5] }
+                if ($target -eq '@' -or $target -eq 'ARGUMENTS') {
                     $replacement = $allArgs
+                    $usedAll = $true
                 }
                 else {
-                    $idx = [int]$simple - 1
-                    $replacement = if ($idx -ge 0 -and $idx -lt $argsList.Count) { [string]$argsList[$idx] } else { '' }
+                    $idx = [int]$target - 1
+                    if ($idx -ge 0 -and $idx -lt $argsList.Count) {
+                        $replacement = [string]$argsList[$idx]
+                        if ($ForCommand) { $used[$idx] = $true }
+                    }
                 }
+                if (-not $replacement -and $Matches[1]) { $replacement = [string]$Matches[2] }
             }
             $out += $replacement
             $pos += $matchIdx + $fullMatch.Length
@@ -111,6 +111,15 @@ function Expand-TemplateArgs {
             $out += $rem
             break
         }
+    }
+    if ($ForCommand) {
+        # Preserve quoting on arguments that were not rendered into the role.
+        $remaining = if ($usedAll) { '' } else {
+            @(for ($i = 0; $i -lt $tokens.Count; $i++) {
+                if (-not $used.ContainsKey($i)) { $tokens[$i].source }
+            }) -join ' '
+        }
+        return @{ text = $out.Trim(); has_placeholders = $true; remaining_args = $remaining }
     }
     return $out.Trim()
 }

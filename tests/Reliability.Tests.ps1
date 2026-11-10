@@ -1370,11 +1370,13 @@ try {
 
     function Invoke-WebRequest {
         param($Uri, $Method, $Headers, $ContentType, $Body, $TimeoutSec, $ErrorAction, [switch]$UseBasicParsing, $OutFile)
+        Assert-True ($Headers.Authorization -ceq 'Bearer failure-fixture-key') 'The failing subagent lost its explicit credential.'
         throw 'Injected subagent transport failure.'
     }
     try {
-        $res = Invoke-AgentTool -Root $workspacePath -Call @{ function = @{ name = 'run_agent'; arguments = '{"role":"writer-only","prompt":"Fail the request"}' } } | ConvertFrom-Json
+        $res = Invoke-AgentTool -Root $workspacePath -ApiKey 'failure-fixture-key' -Call @{ function = @{ name = 'run_agent'; arguments = '{"role":"writer-only","prompt":"Fail the request"}' } } | ConvertFrom-Json
         Assert-True ($res.error -like '*Injected subagent transport failure*') 'Failed subagent request did not propagate its error.'
+        Assert-True (-not (Get-Variable -Name ActiveApiKey -Scope Script -ErrorAction SilentlyContinue)) 'A failed library turn retained its credential in script scope.'
         Assert-True (-not $script:NoTools -and $script:AgentPermission -eq 'AutoEdit' -and $script:SubagentDepth -eq 0 -and ($script:EnabledTools -join ',') -eq 'read_file,run_agent') 'Failed subagent leaked restricted state into the parent.'
     }
     finally { Remove-Item Function:\Invoke-WebRequest -ErrorAction SilentlyContinue }
@@ -1500,6 +1502,7 @@ $payload = @{
     user_prompt = $passedPrompt
     literal_prompt = $passedLiteralPrompt
     sys_has_role = $sysPrompt.Contains("[Subagent Role: $($env:SHELLOSSUS_SUB_ROLE)]")
+    key_matches_fixture = ($env:SHELLOSSUS_API_KEY -ceq 'worker-fixture-key')
 }
 @{ type = 'message_end'; role = 'assistant'; content = ($payload | ConvertTo-Json -Compress) } | ConvertTo-Json -Compress
 @{ type = 'turn_end'; status = 'completed'; usage_input_tokens = 125; usage_output_tokens = 35 } | ConvertTo-Json -Compress
@@ -1515,10 +1518,11 @@ $payload = @{
     $parentStateForParallel = @{ usage_input_tokens = 10; usage_output_tokens = 5 }
     $script:ActiveState = $parentStateForParallel
     try {
-        $workerResults = @(Invoke-ParallelSubagentProcesses -Root $workspacePath -Tasks @(@{ role = 'reader'; prompt = '/check-files @model-only.txt' }, @{ role = 'writer-only'; prompt = 'inspect' }) -ScriptPath $workerScript)
+        $workerResults = @(Invoke-ParallelSubagentProcesses -Root $workspacePath -Tasks @(@{ role = 'reader'; prompt = '/check-files @model-only.txt' }, @{ role = 'writer-only'; prompt = 'inspect' }) -ScriptPath $workerScript -ApiKey 'worker-fixture-key')
         Assert-True ($workerResults.Count -eq 2) 'Parallel worker filter test did not return two results.'
         $reader = $workerResults[0].output | ConvertFrom-Json
         $writer = $workerResults[1].output | ConvertFrom-Json
+        Assert-True ($reader.key_matches_fixture -and $writer.key_matches_fixture) 'Parallel workers did not receive the explicit credential.'
         Assert-True (($reader.tools -join ',') -eq 'read_file') 'Worker did not inherit aliases, wildcard filters, or exclusions.'
         Assert-True ($writer.no_tools -and $writer.tools.Count -eq 0) 'Empty worker allowlist enabled tools.'
         Assert-True ($reader.no_skills -and $reader.no_templates -and $reader.no_context -and $reader.reasoning_effort -eq 'high') 'Worker did not receive -NoSkills, -NoPromptTemplates, -NoContextFiles, or -ReasoningEffort.'

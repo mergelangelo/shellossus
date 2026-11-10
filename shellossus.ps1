@@ -2298,7 +2298,6 @@ $script:Diagnostics = $false
 $script:MaxRepeatToolCalls = 3
 $script:ActiveWorkspace = ''
 $script:ActiveEndpoint = ''
-$script:ActiveApiKey = ''
 $script:ActiveState = $null
 $script:SubagentDepth = 0
 $script:MaxSubagentDepth = 1
@@ -6671,12 +6670,12 @@ function Get-AgentWorkerErrorText {
 }
 
 function Invoke-ParallelSubagentProcesses {
-    param([string]$Root, [array]$Tasks, [int]$MaxSteps = 15, [string]$ScriptPath, [int]$TimeoutSec = 180)
+    param([string]$Root, [array]$Tasks, [int]$MaxSteps = 15, [string]$ScriptPath, [int]$TimeoutSec = 180, [string]$ApiKey)
     $configDir = if ($script:AgentConfigPath) { Split-Path $script:AgentConfigPath -Parent } else { '' }
     $shellExe = Get-AgentPowerShellExecutable
     $effEndpoint = if ($script:ActiveEndpoint) { $script:ActiveEndpoint } else { 'https://example.invalid/v1/chat/completions' }
     $baseUrl = $effEndpoint -replace '/chat/completions/?$', ''
-    $effKey = if ($script:ActiveApiKey) { $script:ActiveApiKey } else { 'subagent-key' }
+    $effKey = if ($ApiKey) { $ApiKey } else { 'subagent-key' }
     $workerCmd = @'
 $ErrorActionPreference = 'Stop'
 $pText = Get-Content -LiteralPath $env:SHELLOSSUS_SUB_PROMPT -Raw -Encoding UTF8
@@ -6963,7 +6962,8 @@ function Invoke-SubagentInProcess {
         [string]$TaskPrompt,
         [string]$ContextMode = 'clean',
         [int]$MaxSteps = 15,
-        [switch]$ForceReadOnly
+        [switch]$ForceReadOnly,
+        [string]$ApiKey
     )
     $configDir = if ($script:AgentConfigPath) { Split-Path $script:AgentConfigPath -Parent } else { '' }
     $roleObj = Resolve-AgentRole -Name $RoleName -Root $Root -ConfigDir $configDir
@@ -6975,7 +6975,7 @@ function Invoke-SubagentInProcess {
     }
     $effEndpoint = if ($script:ActiveEndpoint) { $script:ActiveEndpoint } else { 'https://example.invalid/v1/chat/completions' }
     $effModel = if ($roleObj.model) { [string]$roleObj.model } elseif ($script:ActiveModelId) { $script:ActiveModelId } else { 'test-model' }
-    $effKey = if ($script:ActiveApiKey) { $script:ActiveApiKey } else { 'subagent-key' }
+    $effKey = if ($ApiKey) { $ApiKey } else { 'subagent-key' }
     $savedPerm = $script:AgentPermission
     $savedDepth = $script:SubagentDepth
     $savedTools = @($script:EnabledTools)
@@ -7065,7 +7065,7 @@ function Invoke-SubagentInProcess {
 }
 
 function Invoke-AgentSubagent {
-    param([string]$Root, $Arguments)
+    param([string]$Root, $Arguments, [string]$ApiKey)
     if ($script:SubagentDepth -ge $script:MaxSubagentDepth) {
         throw 'Maximum subagent nesting depth reached.'
     }
@@ -7086,7 +7086,7 @@ function Invoke-AgentSubagent {
         $readSet = @{}
         $modSet = @{}
         if ($useWorkerProcs) {
-            $results = @(Invoke-ParallelSubagentProcesses -Root $Root -Tasks @($Arguments.parallel) -MaxSteps $maxSteps -ScriptPath $standaloneScript)
+            $results = @(Invoke-ParallelSubagentProcesses -Root $Root -Tasks @($Arguments.parallel) -MaxSteps $maxSteps -ScriptPath $standaloneScript -ApiKey $ApiKey)
             foreach ($subRes in $results) {
                 foreach ($rf in @($subRes.read_files)) {
                     if ($rf) { $readSet[[string]$rf] = $true }
@@ -7101,7 +7101,7 @@ function Invoke-AgentSubagent {
                 $rName = if ($pt.role) { [string]$pt.role } else { 'recon' }
                 $writeStart = @($script:CurrentTurnWrites).Count
                 try {
-                    $subRes = Invoke-SubagentInProcess -Root $Root -RoleName $rName -TaskPrompt ([string]$pt.prompt) -ContextMode 'clean' -MaxSteps $maxSteps -ForceReadOnly
+                    $subRes = Invoke-SubagentInProcess -Root $Root -RoleName $rName -TaskPrompt ([string]$pt.prompt) -ContextMode 'clean' -MaxSteps $maxSteps -ForceReadOnly -ApiKey $ApiKey
                 }
                 catch {
                     $written = Get-CurrentTurnWritePathsSince -StartCount $writeStart
@@ -7158,7 +7158,7 @@ function Invoke-AgentSubagent {
             $resolvedPrompt = $rawPrompt.Replace('{previous}', $prevOutput).Replace('$PREVIOUS', $prevOutput)
             $writeStart = @($script:CurrentTurnWrites).Count
             try {
-                $stepRes = Invoke-SubagentInProcess -Root $Root -RoleName $rName -TaskPrompt $resolvedPrompt -ContextMode $stepCtx -MaxSteps $maxSteps
+                $stepRes = Invoke-SubagentInProcess -Root $Root -RoleName $rName -TaskPrompt $resolvedPrompt -ContextMode $stepCtx -MaxSteps $maxSteps -ApiKey $ApiKey
             }
             catch {
                 $written = Get-CurrentTurnWritePathsSince -StartCount $writeStart
@@ -7192,7 +7192,7 @@ function Invoke-AgentSubagent {
         } | ConvertTo-Json -Depth 10 -Compress)
     }
     $roleName = if ($Arguments.role) { [string]$Arguments.role } else { 'craft' }
-    $singleRes = Invoke-SubagentInProcess -Root $Root -RoleName $roleName -TaskPrompt ([string]$Arguments.prompt) -ContextMode $ctxMode -MaxSteps $maxSteps
+    $singleRes = Invoke-SubagentInProcess -Root $Root -RoleName $roleName -TaskPrompt ([string]$Arguments.prompt) -ContextMode $ctxMode -MaxSteps $maxSteps -ApiKey $ApiKey
     return (@{
         status = $singleRes.status
         mode = 'single'
@@ -7212,7 +7212,7 @@ function Invoke-AgentSubagent {
 # Master tool call dispatcher.
 
 function Invoke-AgentTool {
-    param([string]$Root, $Call)
+    param([string]$Root, $Call, [string]$ApiKey)
     $cardName = 'tool'
     $cardTarget = ''
     $writesAtStart = @($script:CurrentTurnWrites).Count
@@ -7246,7 +7246,7 @@ function Invoke-AgentTool {
         if ($name -eq 'todo') { return (Invoke-AgentTodo -Arguments $arguments) }
         if ($name -eq 'fetch_url') { return (Invoke-AgentFetchUrl -Arguments $arguments) }
         if ($name -eq 'web_search') { return (Invoke-AgentWebSearch -Arguments $arguments) }
-        if ($name -eq 'run_agent') { return (Invoke-AgentSubagent -Root $Root -Arguments $arguments) }
+        if ($name -eq 'run_agent') { return (Invoke-AgentSubagent -Root $Root -Arguments $arguments -ApiKey $ApiKey) }
         if ($name -eq 'run_command') { return (Invoke-AgentCommand -Root $Root -Arguments $arguments) }
         if ($name -in @('write_file', 'edit_file')) { return (Invoke-AgentWrite -Root $Root -Name $name -Arguments $arguments) }
         $toolStart = Get-Date
@@ -7764,13 +7764,13 @@ function Resolve-SkillCommand {
     $raw = Get-Content -LiteralPath $skillInfo.file_path -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
     if (-not $raw) { return $null }
     $body = $raw -replace '(?s)^---\r?\n.*?\r?\n---\r?\n?', ''
-    $expanded = Expand-TemplateArgs -Content $body.Trim() -ArgsString $skillArgs
+    $expanded = Expand-TemplateArgs -Content $body -ArgsString $skillArgs -ForCommand
     $rawSkillName = if ($skillInfo.name) { [string]$skillInfo.name } else { $skillName }
     $escapedSkillName = Escape-XmlText -Text $rawSkillName
     $escapedSkillPath = Escape-XmlText -Text $skillInfo.rel_path
-    $outXml = "<skill name=`"$escapedSkillName`" path=`"$escapedSkillPath`">`n" + $expanded + "`n</skill>"
-    if ($skillArgs -and ($body -notmatch '\$(?:\d+|@|ARGUMENTS|\{)')) {
-        $outXml += "`n`nUser: $skillArgs"
+    $outXml = "<skill name=`"$escapedSkillName`" path=`"$escapedSkillPath`">`n" + $expanded.text + "`n</skill>"
+    if (-not $expanded.has_placeholders -and $expanded.remaining_args) {
+        $outXml += "`n`nUser: $($expanded.remaining_args)"
     }
     return $outXml
 }
@@ -7945,12 +7945,21 @@ function Resolve-AgentRoleCommand {
     $roleArgs = if ($Matches[2]) { $Matches[2].Trim() } else { '' }
     $roleInfo = Get-CatalogAgentRole -Name $rawRole -Root $Root -ConfigDir $ConfigDir
     if ($null -eq $roleInfo) { return $null }
-    $expanded = Expand-TemplateArgs -Content $roleInfo.system_prompt -ArgsString $roleArgs
+    $expanded = Expand-TemplateArgs -Content $roleInfo.system_prompt -ArgsString $roleArgs -ForCommand
     $escapedRoleName = Escape-XmlText -Text $roleInfo.name
     $escapedRolePerm = Escape-XmlText -Text $roleInfo.permission
-    $outXml = "<agent_role name=`"$escapedRoleName`" permission=`"$escapedRolePerm`">`n" + $expanded + "`n</agent_role>"
+    $outXml = "<agent_role name=`"$escapedRoleName`" permission=`"$escapedRolePerm`">`n" + $expanded.text + "`n</agent_role>"
     if ($roleArgs) {
-        $outXml += "`n`nDelegate this task using run_agent with role=`"$($roleInfo.name)`": $roleArgs"
+        $outXml += "`n`nDelegate this task using run_agent with role=`"$($roleInfo.name)`""
+        if ($expanded.has_placeholders) {
+            $outXml += '. Use the task details from the role above.'
+            if ($expanded.remaining_args) {
+                $outXml += "`nAdditional arguments: $($expanded.remaining_args)"
+            }
+        }
+        else {
+            $outXml += ": $($expanded.remaining_args)"
+        }
     }
     return $outXml
 }
@@ -7959,12 +7968,13 @@ function Resolve-AgentRoleCommand {
 # Reusable slash prompt templates and inline @file / !cmd prompt expansion.
 
 function Split-CommandArgs {
-    param([string]$ArgsString)
+    param([string]$ArgsString, [switch]$WithSource)
     $argsList = @()
     if (-not $ArgsString) { return $argsList }
     $current = ''
     $hasToken = $false
     $inQuote = ''
+    $tokenStart = 0
     for ($i = 0; $i -lt $ArgsString.Length; $i++) {
         $ch = $ArgsString[$i]
         if ($inQuote) {
@@ -7981,10 +7991,13 @@ function Split-CommandArgs {
         }
         elseif ([string]$ch -match '^\s$') {
             if ($hasToken) {
-                $argsList += $current
+                $argsList += $(if ($WithSource) {
+                    @{ value = $current; source = $ArgsString.Substring($tokenStart, $i - $tokenStart) }
+                } else { $current })
                 $current = ''
                 $hasToken = $false
             }
+            $tokenStart = $i + 1
         }
         else {
             $current += $ch
@@ -7992,29 +8005,34 @@ function Split-CommandArgs {
         }
     }
     if ($hasToken) {
-        $argsList += $current
+        $argsList += $(if ($WithSource) {
+            @{ value = $current; source = $ArgsString.Substring($tokenStart) }
+        } else { $current })
     }
     return $argsList
 }
 
 function Expand-TemplateArgs {
-    param([string]$Content, [string]$ArgsString = '')
-    if (-not $Content) { return '' }
-    $argsList = @(Split-CommandArgs -ArgsString $ArgsString)
-    $allArgs = $argsList -join ' '
+    param([string]$Content, [string]$ArgsString = '', [switch]$ForCommand)
     $pattern = '\$\{(\d+|ARGUMENTS|@):-([^}]*)\}|\$\{@:(\d+)(?::(\d+))?\}|\$(ARGUMENTS|@|\d+)'
-    $hasPlaceholders = ($Content -match $pattern)
-    if (-not $hasPlaceholders) {
-        if ($ArgsString -and $ArgsString.Trim()) {
+    if ($Content -notmatch $pattern) {
+        if ($ForCommand) {
+            return @{ text = $Content.Trim(); has_placeholders = $false; remaining_args = $ArgsString.Trim() }
+        }
+        if ($Content -and $ArgsString.Trim()) {
             return ($Content.Trim() + "`n`n" + $ArgsString.Trim())
         }
         return $Content.Trim()
     }
+    $tokens = @(Split-CommandArgs -ArgsString $ArgsString -WithSource:$ForCommand)
+    $argsList = @(if ($ForCommand) { $tokens | ForEach-Object { $_.value } } else { $tokens })
+    $allArgs = $argsList -join ' '
+    $used = @{}
+    $usedAll = $false
     $out = ''
     $pos = 0
-    $work = $Content
-    while ($pos -lt $work.Length) {
-        $rem = $work.Substring($pos)
+    while ($pos -lt $Content.Length) {
+        $rem = $Content.Substring($pos)
         if ($rem -match $pattern) {
             $fullMatch = [string]$Matches[0]
             $matchIdx = $rem.IndexOf($fullMatch, [StringComparison]::Ordinal)
@@ -8022,45 +8040,36 @@ function Expand-TemplateArgs {
                 $out += $rem.Substring(0, $matchIdx)
             }
             $replacement = ''
-            if ($Matches[1]) {
-                $defTarget = [string]$Matches[1]
-                $defVal = [string]$Matches[2]
-                $actual = if ($defTarget -eq '@' -or $defTarget -eq 'ARGUMENTS') {
-                    $allArgs
-                }
-                else {
-                    $idx = [int]$defTarget - 1
-                    if ($idx -ge 0 -and $idx -lt $argsList.Count) { [string]$argsList[$idx] } else { '' }
-                }
-                $replacement = if ($actual) { $actual } else { $defVal }
-            }
-            elseif ($Matches[3]) {
+            if ($Matches[3]) {
                 $sliceStart = [int]$Matches[3] - 1
                 if ($sliceStart -lt 0) { $sliceStart = 0 }
-                if ($sliceStart -ge $argsList.Count) {
-                    $replacement = ''
+                $sliceEnd = $argsList.Count - 1
+                if ($Matches[4]) {
+                    $requestedEnd = $sliceStart + [int]$Matches[4] - 1
+                    if ($requestedEnd -lt $sliceEnd) { $sliceEnd = $requestedEnd }
                 }
-                elseif ($Matches[4]) {
-                    $sliceLen = [int]$Matches[4]
-                    $endIdx = $sliceStart + $sliceLen - 1
-                    if ($endIdx -ge $argsList.Count) { $endIdx = $argsList.Count - 1 }
-                    if ($endIdx -ge $sliceStart) {
-                        $replacement = (@($argsList[$sliceStart..$endIdx]) -join ' ')
+                if ($sliceEnd -ge $sliceStart) {
+                    $indices = $sliceStart..$sliceEnd
+                    $replacement = $argsList[$indices] -join ' '
+                    if ($ForCommand) {
+                        foreach ($idx in $indices) { $used[$idx] = $true }
                     }
                 }
-                else {
-                    $replacement = (@($argsList[$sliceStart..($argsList.Count - 1)]) -join ' ')
-                }
             }
-            elseif ($Matches[5]) {
-                $simple = [string]$Matches[5]
-                if ($simple -eq 'ARGUMENTS' -or $simple -eq '@') {
+            else {
+                $target = if ($Matches[1]) { [string]$Matches[1] } else { [string]$Matches[5] }
+                if ($target -eq '@' -or $target -eq 'ARGUMENTS') {
                     $replacement = $allArgs
+                    $usedAll = $true
                 }
                 else {
-                    $idx = [int]$simple - 1
-                    $replacement = if ($idx -ge 0 -and $idx -lt $argsList.Count) { [string]$argsList[$idx] } else { '' }
+                    $idx = [int]$target - 1
+                    if ($idx -ge 0 -and $idx -lt $argsList.Count) {
+                        $replacement = [string]$argsList[$idx]
+                        if ($ForCommand) { $used[$idx] = $true }
+                    }
                 }
+                if (-not $replacement -and $Matches[1]) { $replacement = [string]$Matches[2] }
             }
             $out += $replacement
             $pos += $matchIdx + $fullMatch.Length
@@ -8069,6 +8078,15 @@ function Expand-TemplateArgs {
             $out += $rem
             break
         }
+    }
+    if ($ForCommand) {
+        # Preserve quoting on arguments that were not rendered into the role.
+        $remaining = if ($usedAll) { '' } else {
+            @(for ($i = 0; $i -lt $tokens.Count; $i++) {
+                if (-not $used.ContainsKey($i)) { $tokens[$i].source }
+            }) -join ' '
+        }
+        return @{ text = $out.Trim(); has_placeholders = $true; remaining_args = $remaining }
     }
     return $out.Trim()
 }
@@ -8900,6 +8918,9 @@ function Invoke-SessionResume {
     $candidate.scoped_instr_cache = @{}
     $candidate.step_limit_reached = $false
     $candidate.loop_detected = $false
+    $candidate.repeated_tool = $null
+    $candidate.last_diagnostics = $null
+    $candidate.diagnostics_log = @()
     if ($loadedHadSystem) {
         $refreshConfig = ''
         if ($script:AgentConfigPath) {
@@ -10346,7 +10367,6 @@ function Invoke-AgentTurn {
     $overflowRetried = $false
     $script:ActiveModelId = $ModelId
     $script:ActiveEndpoint = $Endpoint
-    $script:ActiveApiKey = $ApiKey
     $script:ActiveState = $State
     if ($Root) { $script:ActiveWorkspace = $Root }
     $State.step_limit_reached = $false
@@ -10654,7 +10674,7 @@ function Invoke-AgentTurn {
                     }
                 }
             }
-            if ($null -eq $output) { $output = Invoke-AgentTool -Root $Root -Call $call }
+            if ($null -eq $output) { $output = Invoke-AgentTool -Root $Root -Call $call -ApiKey $ApiKey }
             $turnPayloadBytes += Get-AgentUtf8ByteCount $output
             if ($turnPayloadBytes -gt $script:AgentMaxTurnPayloadBytes) {
                 throw "Turn exceeds the $($script:AgentMaxTurnPayloadBytes)-byte payload limit."
@@ -11323,6 +11343,9 @@ function Invoke-ReplNewSessionCommand {
     $State.scoped_instr_cache = @{}
     $State.step_limit_reached = $false
     $State.loop_detected = $false
+    $State.repeated_tool = $null
+    $State.last_diagnostics = $null
+    $State.diagnostics_log = @()
     $State.last_failed_question = ''
     $script:ActiveSessionTodos = @()
     Reset-AgentSessionApprovals -State $State

@@ -56,8 +56,9 @@ try {
     # Expand-TemplateArgs ($1, $@, $ARGUMENTS, ${2:-default}, ${@:2}, ${@:1:2}, non-recursive) & /skill:name.
     $tplOut = Expand-TemplateArgs -Content 'A=$1 B=${2:-fallback} ALL=$@ SLICE=${@:2} LEN=${@:1:2}' -ArgsString '"hello $2" world three'
     Assert-True ($tplOut -eq 'A=hello $2 B=world ALL=hello $2 world three SLICE=world three LEN=hello $2 world') 'Expand-TemplateArgs bash-style positional/slice/default substitution failed.'
+    Assert-True ((Expand-TemplateArgs -Content 'Review SQL.' -ArgsString '"orders table"') -ceq 'Review SQL.' + "`n`n" + '"orders table"') 'A plain template lost its argument fallback.'
     $skillCmdOut = Resolve-PromptTemplate -Root $workspacePath -ConfigDir $globalCfgDir -InputText '/skill:sql-tuning orders_table'
-    Assert-True ($skillCmdOut.Contains('<skill name="sql-tuning"') -and $skillCmdOut.Contains('User: orders_table')) '/skill:name command expansion failed.'
+    Assert-True ($skillCmdOut.Contains('<skill name="sql-tuning"') -and $skillCmdOut.Contains("Check indexes.`n</skill>`n`nUser: orders_table")) '/skill:name duplicated or misplaced the argument fallback.'
 
     # Session JSONL persistence roundtrip and project-scoped session lookup.
     $sessionDirTest = Join-Path $testRoot 'sessions'
@@ -300,8 +301,13 @@ try {
     $resolvedSqlAuditor = Resolve-AgentRole -Name 'sql-auditor' -Root $workspacePath -ConfigDir $globalCfgDir
     Assert-True ($resolvedSqlAuditor.permission -eq 'ReadOnly' -and $resolvedSqlAuditor.tools.Count -eq 2) 'Custom role with read-only tools did not auto-infer ReadOnly permission.'
     Assert-True ((Resolve-AgentRole -Name 'scout' -Root $workspacePath).name -eq 'recon' -and (Resolve-AgentRole -Name 'reviewer' -Root $workspacePath).name -eq 'audit' -and (Resolve-AgentRole -Name 'worker' -Root $workspacePath).name -eq 'craft') 'Built-in role alias resolution failed.'
-    $agentCmdOut = Resolve-PromptTemplate -Root $workspacePath -ConfigDir $globalCfgDir -InputText '/agent:sql-auditor orders_table'
+    $agentCmdOut = Resolve-PromptTemplate -Root $workspacePath -ConfigDir $globalCfgDir -InputText '/agent:sql-auditor orders_table "review only" tail'
     Assert-True ($agentCmdOut.Contains('<agent_role name="sql-auditor" permission="ReadOnly">') -and $agentCmdOut.Contains('Focus on orders_table lock contention.') -and $agentCmdOut.Contains('run_agent with role="sql-auditor"')) '/agent:<role> command expansion failed.'
+    Assert-True ($agentCmdOut.IndexOf('orders_table') -eq $agentCmdOut.LastIndexOf('orders_table') -and $agentCmdOut.EndsWith('Additional arguments: "review only" tail')) '/agent:<role> repeated a substituted argument or lost the unused arguments.'
+    $agentWithoutPlaceholders = Resolve-PromptTemplate -Root $workspacePath -ConfigDir $globalCfgDir -InputText '/agent:recon "find slow queries"'
+    Assert-True ($agentWithoutPlaceholders.IndexOf('find slow queries') -eq $agentWithoutPlaceholders.LastIndexOf('find slow queries') -and $agentWithoutPlaceholders.EndsWith('with role="recon": "find slow queries"')) '/agent:<role> duplicated the argument fallback.'
+    $sliceWithRemainder = Expand-TemplateArgs -Content 'Slice: ${@:2:2} ${4:-default}' -ArgsString '"first arg" two three "" last' -ForCommand
+    Assert-True ($sliceWithRemainder.text -ceq 'Slice: two three default' -and $sliceWithRemainder.remaining_args -ceq '"first arg" last') 'Argument slices or defaults did not account for the consumed positions.'
     $subOps = Get-CompactionFileOperations -Messages @(
         @{ role = 'assistant'; content = ''; tool_calls = @(@{ id = 'sub1'; type = 'function'; function = @{ name = 'run_agent'; arguments = '{"role":"craft","prompt":"fix"}' } }) },
         @{ role = 'tool'; tool_call_id = 'sub1'; content = '{"status":"completed","read_files":["sub-read.sql","sub-both.sql"],"modified_files":["sub-both.sql","sub-mod.sql"]}' }
@@ -825,6 +831,9 @@ try {
             scoped_instr_cache = @{ 'sub/AGENTS.md' = $true }
             step_limit_reached = $true
             loop_detected = $true
+            repeated_tool = 'read_file'
+            last_diagnostics = @{ step = 3 }
+            diagnostics_log = @(@{ step = 3 })
             last_failed_question = 'failed-q'
         }
         $forkDir13 = Join-Path $testRoot 'fork-nosess-13'
@@ -841,6 +850,7 @@ try {
         $script:ActiveSessionFile = 'stale-session-file'
         Invoke-SessionResume -SessionFile $savedSess13 -State $dirtyState13 -CurrentWorkspace $workspacePath | Out-Null
         Assert-True ($dirtyState13.usage_input_tokens -eq 0 -and $dirtyState13.usage_output_tokens -eq 0 -and $dirtyState13.scoped_instr_cache.Count -eq 0) 'Invoke-SessionResume did not reset usage_input_tokens, usage_output_tokens, and scoped_instr_cache.'
+        Assert-True ($null -eq $dirtyState13.last_diagnostics -and $dirtyState13.diagnostics_log.Count -eq 0 -and $null -eq $dirtyState13.repeated_tool) 'Resume carried diagnostics or repeated tool state over from the old session.'
         Assert-True ($script:ActiveSessionId -eq 'sess-saved-13' -and $script:ActiveModelId -eq 'resumed-model-13' -and $script:ActiveSessionFile -eq $savedSess13) 'Invoke-SessionResume did not sync ActiveSessionId, ActiveSessionFile, and ActiveModelId.'
 
         $dirtyState13.usage_input_tokens = 777
@@ -851,8 +861,12 @@ try {
         $dirtyState13.step_limit_reached = $true
         $dirtyState13.loop_detected = $true
         $dirtyState13.last_failed_question = 'failed-q2'
+        $dirtyState13.repeated_tool = 'grep_files'
+        $dirtyState13.last_diagnostics = @{ step = 2 }
+        $dirtyState13.diagnostics_log = @(@{ step = 2 })
         $null = Invoke-ReplNewSessionCommand -State $dirtyState13 -RootPath $workspacePath -ConfigDir '' -Model 'new-model-13' -SessionDir $forkDir13 -NoSession
         Assert-True ($dirtyState13.usage_input_tokens -eq 0 -and $dirtyState13.usage_output_tokens -eq 0 -and $dirtyState13.last_prompt_tokens -eq 0 -and $dirtyState13.last_prompt_chars -eq 0 -and $dirtyState13.scoped_instr_cache.Count -eq 0 -and (-not $dirtyState13.step_limit_reached) -and (-not $dirtyState13.loop_detected) -and $dirtyState13.last_failed_question -eq '') 'Invoke-ReplNewSessionCommand did not reset all per-session counters/flags/caches.'
+        Assert-True ($null -eq $dirtyState13.last_diagnostics -and $dirtyState13.diagnostics_log.Count -eq 0 -and $null -eq $dirtyState13.repeated_tool) '/new carried diagnostics or repeated tool state over from the old session.'
     }
     finally {
         Remove-Item Function:\Write-Host -ErrorAction SilentlyContinue

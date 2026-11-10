@@ -158,7 +158,6 @@ function Invoke-AgentTurn {
     $overflowRetried = $false
     $script:ActiveModelId = $ModelId
     $script:ActiveEndpoint = $Endpoint
-    $script:ActiveApiKey = $ApiKey
     $script:ActiveState = $State
     if ($Root) { $script:ActiveWorkspace = $Root }
     $State.step_limit_reached = $false
@@ -466,7 +465,7 @@ function Invoke-AgentTurn {
                     }
                 }
             }
-            if ($null -eq $output) { $output = Invoke-AgentTool -Root $Root -Call $call }
+            if ($null -eq $output) { $output = Invoke-AgentTool -Root $Root -Call $call -ApiKey $ApiKey }
             $turnPayloadBytes += Get-AgentUtf8ByteCount $output
             if ($turnPayloadBytes -gt $script:AgentMaxTurnPayloadBytes) {
                 throw "Turn exceeds the $($script:AgentMaxTurnPayloadBytes)-byte payload limit."

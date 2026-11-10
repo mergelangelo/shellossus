@@ -1,7 +1,7 @@
 # Master tool call dispatcher.
 
 function Invoke-AgentTool {
-    param([string]$Root, $Call)
+    param([string]$Root, $Call, [string]$ApiKey)
     $cardName = 'tool'
     $cardTarget = ''
     $writesAtStart = @($script:CurrentTurnWrites).Count
@@ -35,7 +35,7 @@ function Invoke-AgentTool {
         if ($name -eq 'todo') { return (Invoke-AgentTodo -Arguments $arguments) }
         if ($name -eq 'fetch_url') { return (Invoke-AgentFetchUrl -Arguments $arguments) }
         if ($name -eq 'web_search') { return (Invoke-AgentWebSearch -Arguments $arguments) }
-        if ($name -eq 'run_agent') { return (Invoke-AgentSubagent -Root $Root -Arguments $arguments) }
+        if ($name -eq 'run_agent') { return (Invoke-AgentSubagent -Root $Root -Arguments $arguments -ApiKey $ApiKey) }
         if ($name -eq 'run_command') { return (Invoke-AgentCommand -Root $Root -Arguments $arguments) }
         if ($name -in @('write_file', 'edit_file')) { return (Invoke-AgentWrite -Root $Root -Name $name -Arguments $arguments) }
         $toolStart = Get-Date

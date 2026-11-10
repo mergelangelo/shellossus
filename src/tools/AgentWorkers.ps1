@@ -81,12 +81,12 @@ function Get-AgentWorkerErrorText {
 }
 
 function Invoke-ParallelSubagentProcesses {
-    param([string]$Root, [array]$Tasks, [int]$MaxSteps = 15, [string]$ScriptPath, [int]$TimeoutSec = 180)
+    param([string]$Root, [array]$Tasks, [int]$MaxSteps = 15, [string]$ScriptPath, [int]$TimeoutSec = 180, [string]$ApiKey)
     $configDir = if ($script:AgentConfigPath) { Split-Path $script:AgentConfigPath -Parent } else { '' }
     $shellExe = Get-AgentPowerShellExecutable
     $effEndpoint = if ($script:ActiveEndpoint) { $script:ActiveEndpoint } else { 'https://example.invalid/v1/chat/completions' }
     $baseUrl = $effEndpoint -replace '/chat/completions/?$', ''
-    $effKey = if ($script:ActiveApiKey) { $script:ActiveApiKey } else { 'subagent-key' }
+    $effKey = if ($ApiKey) { $ApiKey } else { 'subagent-key' }
     $workerCmd = @'
 $ErrorActionPreference = 'Stop'
 $pText = Get-Content -LiteralPath $env:SHELLOSSUS_SUB_PROMPT -Raw -Encoding UTF8

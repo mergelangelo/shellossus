@@ -59,7 +59,8 @@ function Invoke-SubagentInProcess {
         [string]$TaskPrompt,
         [string]$ContextMode = 'clean',
         [int]$MaxSteps = 15,
-        [switch]$ForceReadOnly
+        [switch]$ForceReadOnly,
+        [string]$ApiKey
     )
     $configDir = if ($script:AgentConfigPath) { Split-Path $script:AgentConfigPath -Parent } else { '' }
     $roleObj = Resolve-AgentRole -Name $RoleName -Root $Root -ConfigDir $configDir
@@ -71,7 +72,7 @@ function Invoke-SubagentInProcess {
     }
     $effEndpoint = if ($script:ActiveEndpoint) { $script:ActiveEndpoint } else { 'https://example.invalid/v1/chat/completions' }
     $effModel = if ($roleObj.model) { [string]$roleObj.model } elseif ($script:ActiveModelId) { $script:ActiveModelId } else { 'test-model' }
-    $effKey = if ($script:ActiveApiKey) { $script:ActiveApiKey } else { 'subagent-key' }
+    $effKey = if ($ApiKey) { $ApiKey } else { 'subagent-key' }
     $savedPerm = $script:AgentPermission
     $savedDepth = $script:SubagentDepth
     $savedTools = @($script:EnabledTools)
@@ -161,7 +162,7 @@ function Invoke-SubagentInProcess {
 }
 
 function Invoke-AgentSubagent {
-    param([string]$Root, $Arguments)
+    param([string]$Root, $Arguments, [string]$ApiKey)
     if ($script:SubagentDepth -ge $script:MaxSubagentDepth) {
         throw 'Maximum subagent nesting depth reached.'
     }
@@ -182,7 +183,7 @@ function Invoke-AgentSubagent {
         $readSet = @{}
         $modSet = @{}
         if ($useWorkerProcs) {
-            $results = @(Invoke-ParallelSubagentProcesses -Root $Root -Tasks @($Arguments.parallel) -MaxSteps $maxSteps -ScriptPath $standaloneScript)
+            $results = @(Invoke-ParallelSubagentProcesses -Root $Root -Tasks @($Arguments.parallel) -MaxSteps $maxSteps -ScriptPath $standaloneScript -ApiKey $ApiKey)
             foreach ($subRes in $results) {
                 foreach ($rf in @($subRes.read_files)) {
                     if ($rf) { $readSet[[string]$rf] = $true }
@@ -197,7 +198,7 @@ function Invoke-AgentSubagent {
                 $rName = if ($pt.role) { [string]$pt.role } else { 'recon' }
                 $writeStart = @($script:CurrentTurnWrites).Count
                 try {
-                    $subRes = Invoke-SubagentInProcess -Root $Root -RoleName $rName -TaskPrompt ([string]$pt.prompt) -ContextMode 'clean' -MaxSteps $maxSteps -ForceReadOnly
+                    $subRes = Invoke-SubagentInProcess -Root $Root -RoleName $rName -TaskPrompt ([string]$pt.prompt) -ContextMode 'clean' -MaxSteps $maxSteps -ForceReadOnly -ApiKey $ApiKey
                 }
                 catch {
                     $written = Get-CurrentTurnWritePathsSince -StartCount $writeStart
@@ -254,7 +255,7 @@ function Invoke-AgentSubagent {
             $resolvedPrompt = $rawPrompt.Replace('{previous}', $prevOutput).Replace('$PREVIOUS', $prevOutput)
             $writeStart = @($script:CurrentTurnWrites).Count
             try {
-                $stepRes = Invoke-SubagentInProcess -Root $Root -RoleName $rName -TaskPrompt $resolvedPrompt -ContextMode $stepCtx -MaxSteps $maxSteps
+                $stepRes = Invoke-SubagentInProcess -Root $Root -RoleName $rName -TaskPrompt $resolvedPrompt -ContextMode $stepCtx -MaxSteps $maxSteps -ApiKey $ApiKey
             }
             catch {
                 $written = Get-CurrentTurnWritePathsSince -StartCount $writeStart
@@ -288,7 +289,7 @@ function Invoke-AgentSubagent {
         } | ConvertTo-Json -Depth 10 -Compress)
     }
     $roleName = if ($Arguments.role) { [string]$Arguments.role } else { 'craft' }
-    $singleRes = Invoke-SubagentInProcess -Root $Root -RoleName $roleName -TaskPrompt ([string]$Arguments.prompt) -ContextMode $ctxMode -MaxSteps $maxSteps
+    $singleRes = Invoke-SubagentInProcess -Root $Root -RoleName $roleName -TaskPrompt ([string]$Arguments.prompt) -ContextMode $ctxMode -MaxSteps $maxSteps -ApiKey $ApiKey
     return (@{
         status = $singleRes.status
         mode = 'single'

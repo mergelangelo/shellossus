@@ -72,13 +72,13 @@ function Resolve-SkillCommand {
     $raw = Get-Content -LiteralPath $skillInfo.file_path -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
     if (-not $raw) { return $null }
     $body = $raw -replace '(?s)^---\r?\n.*?\r?\n---\r?\n?', ''
-    $expanded = Expand-TemplateArgs -Content $body.Trim() -ArgsString $skillArgs
+    $expanded = Expand-TemplateArgs -Content $body -ArgsString $skillArgs -ForCommand
     $rawSkillName = if ($skillInfo.name) { [string]$skillInfo.name } else { $skillName }
     $escapedSkillName = Escape-XmlText -Text $rawSkillName
     $escapedSkillPath = Escape-XmlText -Text $skillInfo.rel_path
-    $outXml = "<skill name=`"$escapedSkillName`" path=`"$escapedSkillPath`">`n" + $expanded + "`n</skill>"
-    if ($skillArgs -and ($body -notmatch '\$(?:\d+|@|ARGUMENTS|\{)')) {
-        $outXml += "`n`nUser: $skillArgs"
+    $outXml = "<skill name=`"$escapedSkillName`" path=`"$escapedSkillPath`">`n" + $expanded.text + "`n</skill>"
+    if (-not $expanded.has_placeholders -and $expanded.remaining_args) {
+        $outXml += "`n`nUser: $($expanded.remaining_args)"
     }
     return $outXml
 }
@@ -253,12 +253,21 @@ function Resolve-AgentRoleCommand {
     $roleArgs = if ($Matches[2]) { $Matches[2].Trim() } else { '' }
     $roleInfo = Get-CatalogAgentRole -Name $rawRole -Root $Root -ConfigDir $ConfigDir
     if ($null -eq $roleInfo) { return $null }
-    $expanded = Expand-TemplateArgs -Content $roleInfo.system_prompt -ArgsString $roleArgs
+    $expanded = Expand-TemplateArgs -Content $roleInfo.system_prompt -ArgsString $roleArgs -ForCommand
     $escapedRoleName = Escape-XmlText -Text $roleInfo.name
     $escapedRolePerm = Escape-XmlText -Text $roleInfo.permission
-    $outXml = "<agent_role name=`"$escapedRoleName`" permission=`"$escapedRolePerm`">`n" + $expanded + "`n</agent_role>"
+    $outXml = "<agent_role name=`"$escapedRoleName`" permission=`"$escapedRolePerm`">`n" + $expanded.text + "`n</agent_role>"
     if ($roleArgs) {
-        $outXml += "`n`nDelegate this task using run_agent with role=`"$($roleInfo.name)`": $roleArgs"
+        $outXml += "`n`nDelegate this task using run_agent with role=`"$($roleInfo.name)`""
+        if ($expanded.has_placeholders) {
+            $outXml += '. Use the task details from the role above.'
+            if ($expanded.remaining_args) {
+                $outXml += "`nAdditional arguments: $($expanded.remaining_args)"
+            }
+        }
+        else {
+            $outXml += ": $($expanded.remaining_args)"
+        }
     }
     return $outXml
 }

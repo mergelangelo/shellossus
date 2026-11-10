@@ -15,7 +15,6 @@ $script:Diagnostics = $false
 $script:MaxRepeatToolCalls = 3
 $script:ActiveWorkspace = ''
 $script:ActiveEndpoint = ''
-$script:ActiveApiKey = ''
 $script:ActiveState = $null
 $script:SubagentDepth = 0
 $script:MaxSubagentDepth = 1

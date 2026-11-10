@@ -63,6 +63,9 @@ function Invoke-ReplNewSessionCommand {
     $State.scoped_instr_cache = @{}
     $State.step_limit_reached = $false
     $State.loop_detected = $false
+    $State.repeated_tool = $null
+    $State.last_diagnostics = $null
+    $State.diagnostics_log = @()
     $State.last_failed_question = ''
     $script:ActiveSessionTodos = @()
     Reset-AgentSessionApprovals -State $State

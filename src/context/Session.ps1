@@ -403,6 +403,9 @@ function Invoke-SessionResume {
     $candidate.scoped_instr_cache = @{}
     $candidate.step_limit_reached = $false
     $candidate.loop_detected = $false
+    $candidate.repeated_tool = $null
+    $candidate.last_diagnostics = $null
+    $candidate.diagnostics_log = @()
     if ($loadedHadSystem) {
         $refreshConfig = ''
         if ($script:AgentConfigPath) {

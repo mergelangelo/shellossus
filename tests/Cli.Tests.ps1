@@ -556,6 +556,7 @@ try {
     $script:forkedSawPriorHistory = $false
     function Invoke-WebRequest {
         param($Uri, $Method, $Headers, $ContentType, $Body, $TimeoutSec, $ErrorAction, [switch]$UseBasicParsing, $OutFile)
+        Assert-True ($Headers.Authorization -ceq 'Bearer fake') 'The parent or its in-process subagent lost the turn credential.'
         $script:forkTurnStep++
         $pObj = $Body | ConvertFrom-Json
         if ($script:forkTurnStep -eq 1) {
@@ -601,6 +602,7 @@ try {
         )
     }
     Invoke-AgentTurn -State $forkParentState -Endpoint 'https://example.invalid/v1/chat/completions' -ModelId 'test-model' -ApiKey 'fake' -Root $workspacePath -Steps 6 -MaxRepeatCalls 2
+    Assert-True (-not (Get-Variable -Name ActiveApiKey -Scope Script -ErrorAction SilentlyContinue)) 'A completed library turn retained its credential in script scope.'
     Assert-True ($script:forkedSawPriorHistory -and (-not $forkParentState.loop_detected) -and $forkParentState.messages[-1].content -eq 'Verified v2 after subagent edit.') 'run_agent context=fork or mutationEpoch advancement after subagent edit failed.'
     $script:AgentPermission = 'Ask'
 
