@@ -28,6 +28,16 @@ if (-not $LibraryOnly) {
             throw
         }
     }
+    $keyStorageWarning = ''
+    if ($config.SHELLOSSUS_API_KEY -and -not (Test-AgentConfigPrivacy -Path $script:AgentConfigPath)) {
+        $keyStorageWarning = 'The saved API key is plaintext and config privacy could not be verified. Move settings to a private location or use SHELLOSSUS_API_KEY from the environment.'
+        if (-not $Doctor) {
+            if ($script:OutputMode -eq 'json') {
+                Write-AgentJsonEvent -EventType 'diagnostics' -Payload @{ check = 'key_storage'; status = 'warn'; message = $keyStorageWarning }
+            }
+            else { Write-Warning $keyStorageWarning }
+        }
+    }
     if (-not $Theme -and $config.SHELLOSSUS_THEME) { $Theme = $config.SHELLOSSUS_THEME }
     if ($Theme) {
         try {
@@ -41,28 +51,25 @@ if (-not $LibraryOnly) {
         }
     }
     if ($Setup -and -not $Doctor) {
-        Write-Host ($script:Gm.OscInit + $script:Gm.Fg + "Save settings to: $ConfigPath" + $script:Gm.Reset)
-        Write-Host ($script:Gm.Yellow + 'API key is stored as plain text in your user profile, outside the project.' + $script:Gm.Reset)
+        Write-Host ($script:Gm.OscInit + $script:Gm.Fg + "Save settings to: $(Format-TuiText $ConfigPath)" + $script:Gm.Reset)
+        Write-Host ($script:Gm.Yellow + 'A saved API key is plaintext. Leave the key blank to keep an existing key or use SHELLOSSUS_API_KEY at launch.' + $script:Gm.Reset)
         $defaultUrl = $BaseUrl
         if (-not $defaultUrl) { $defaultUrl = $config.SHELLOSSUS_BASE_URL }
-        $inputUrl = Read-Host "API base URL including /v1 [$defaultUrl]"
+        $inputUrl = Read-Host "API base URL including /v1 [$(Format-TuiText $defaultUrl)]"
         if (-not $inputUrl) { $inputUrl = $defaultUrl }
         if (-not (Test-ValidAgentBaseUrl -Url $inputUrl)) { throw 'An HTTPS base URL (or http://localhost / http://127.0.0.1 for local servers) is required. Run: shellossus -Setup' }
         $defaultModel = $Model
         if (-not $defaultModel) { $defaultModel = $config.SHELLOSSUS_MODEL }
-        $inputModel = Read-Host "Model ID [$defaultModel]"
+        $inputModel = Read-Host "Model ID [$(Format-TuiText $defaultModel)]"
         if (-not $inputModel) { $inputModel = $defaultModel }
         if (-not $inputModel) { throw 'Model ID is required.' }
-        Write-Host ($script:Gm.Yellow + 'Key input is visible. Enter keeps the saved key, if any.' + $script:Gm.Reset)
-        $inputKey = Read-Host 'API key'
+        $inputKey = Read-AgentApiKey
         if (-not $inputKey) { $inputKey = $config.SHELLOSSUS_API_KEY }
-        if (-not $inputKey -and (Test-IsLoopbackBaseUrl -Url $inputUrl)) { $inputKey = 'local' }
-        if (-not $inputKey) { throw 'API key is required.' }
         $defaultWorkspace = ''
         if ($PSBoundParameters.Keys -contains 'Workspace') { $defaultWorkspace = $Workspace }
         elseif ($env:SHELLOSSUS_WORKSPACE) { $defaultWorkspace = $env:SHELLOSSUS_WORKSPACE }
         elseif ($config.SHELLOSSUS_WORKSPACE) { $defaultWorkspace = $config.SHELLOSSUS_WORKSPACE }
-        $wsPrompt = if ($defaultWorkspace) { "Default workspace [$defaultWorkspace] (Enter keeps saved, '-' clears)" } else { 'Default workspace (Enter = current folder at each launch)' }
+        $wsPrompt = if ($defaultWorkspace) { "Default workspace [$(Format-TuiText $defaultWorkspace)] (Enter keeps saved, '-' clears)" } else { 'Default workspace (Enter = current folder at each launch)' }
         $inputWorkspace = Read-Host $wsPrompt
         if (-not $inputWorkspace) { $inputWorkspace = $defaultWorkspace }
         elseif ($inputWorkspace.Trim() -eq '-') { $inputWorkspace = '' }
@@ -78,8 +85,12 @@ if (-not $LibraryOnly) {
         if (($PSBoundParameters.Keys -contains 'ContextWindow') -and $ContextWindow) { $newCfg['SHELLOSSUS_CONTEXT_WINDOW'] = $ContextWindow }
         if (($PSBoundParameters.Keys -contains 'CompactThreshold') -and $CompactThreshold) { $newCfg['SHELLOSSUS_COMPACT_THRESHOLD'] = $CompactThreshold }
         if (($PSBoundParameters.Keys -contains 'Theme') -and $Theme -and $script:ActiveTheme) { $newCfg['SHELLOSSUS_THEME'] = $script:ActiveTheme }
-        Save-AgentConfig -Path $ConfigPath -Config $newCfg
-        Remove-Variable inputKey -ErrorAction SilentlyContinue
+        try { Save-AgentConfig -Path $ConfigPath -Config $newCfg }
+        finally {
+            $newCfg.Clear()
+            $config.Clear()
+            Remove-Variable inputKey -ErrorAction SilentlyContinue
+        }
         Write-Host ($script:Gm.BoldGreen + 'Settings saved. Run shellossus -Doctor to check them, then start shellossus from your working folder.' + $script:Gm.Reset)
         return
     }
@@ -104,10 +115,9 @@ if (-not $LibraryOnly) {
         $sessionDir = $SessionDir
     }
     if ($Doctor) {
-        $doctorKey = $env:SHELLOSSUS_API_KEY
-        if (-not $doctorKey) { $doctorKey = $config.SHELLOSSUS_API_KEY }
+        $doctorKey = Get-AgentConfiguredApiKey -Config $config
         try {
-            $report = Get-AgentDoctorReport -BaseUrl $BaseUrl -ModelId $Model -ApiKey $doctorKey -Workspace $Workspace -SessionDir $sessionDir -NoSession:$NoSession -ConfigState $doctorConfigState
+            $report = Get-AgentDoctorReport -BaseUrl $BaseUrl -ModelId $Model -ApiKey $doctorKey -Workspace $Workspace -SessionDir $sessionDir -NoSession:$NoSession -ConfigState $doctorConfigState -KeyStorageWarning $keyStorageWarning
             Write-AgentDoctorReport -Report $report -Mode $Mode
         }
         finally { Remove-Variable doctorKey -ErrorAction SilentlyContinue; $config.Clear() }
@@ -167,15 +177,13 @@ if (-not $LibraryOnly) {
     $agentKey = ''
     if (-not $Export) {
         $endpoint = $BaseUrl.TrimEnd('/') + '/chat/completions'
-        $agentKey = $env:SHELLOSSUS_API_KEY
-        if (-not $agentKey) { $agentKey = $config.SHELLOSSUS_API_KEY }
+        $agentKey = Get-AgentConfiguredApiKey -Config $config
         $config.Clear()
         if (-not $agentKey -and (Test-IsLoopbackBaseUrl -Url $BaseUrl)) {
             $agentKey = 'local'
         }
         if (-not $agentKey -and $script:OutputMode -ne 'json') {
-            Write-Host ($script:Gm.Yellow + 'Key input is visible. Run shellossus -Setup to save settings for next time.' + $script:Gm.Reset)
-            $agentKey = Read-Host 'API key'
+            $agentKey = Read-AgentApiKey
         }
         if (-not $agentKey) {
             $keyErr = 'API key is required.'
@@ -269,11 +277,11 @@ if (-not $LibraryOnly) {
                 if (-not $rollback.succeeded) {
                     $errorPayload.rollback_error = $rollback.error
                     if ($script:OutputMode -ne 'json') {
-                        Write-Host ($script:Gm.Red + 'Rollback did not succeed: ' + $rollback.error + $script:Gm.Reset)
+                        Write-Host ($script:Gm.Red + 'Rollback did not succeed: ' + (Format-TuiText $rollback.error) + $script:Gm.Reset)
                     }
                 }
                 Write-AgentJsonEvent -EventType 'turn_end' -Payload $errorPayload
-                throw
+                throw (Format-TuiText $errMsg)
             }
             return
         }
@@ -304,7 +312,7 @@ if (-not $LibraryOnly) {
             if ($trimmedQ -eq '/help' -or $trimmedQ -eq '/hotkeys') { Write-TuiHelpCard; continue }
             if ($trimmedQ -eq '/doctor') {
                 $doctorSessionDir = if ($sessionFile) { Split-Path $sessionFile -Parent } else { $sessionDir }
-                $report = Get-AgentDoctorReport -BaseUrl $BaseUrl -ModelId $Model -ApiKey $agentKey -Workspace $rootPath -SessionDir $doctorSessionDir -NoSession:(-not $sessionFile) -ConfigState $doctorConfigState
+                $report = Get-AgentDoctorReport -BaseUrl $BaseUrl -ModelId $Model -ApiKey $agentKey -Workspace $rootPath -SessionDir $doctorSessionDir -NoSession:(-not $sessionFile) -ConfigState $doctorConfigState -KeyStorageWarning $keyStorageWarning
                 Write-AgentDoctorReport -Report $report -Mode $script:OutputMode
                 continue
             }
@@ -381,10 +389,10 @@ if (-not $LibraryOnly) {
             elseif ($trimmedQ.StartsWith('/')) {
                 $tplText = Resolve-PromptTemplate -Root $rootPath -ConfigDir $configDir -InputText $trimmedQ
                 if ($null -eq $tplText) {
-                    Write-Host ($script:Gm.Red + "  Unknown command or prompt template: $trimmedQ (use /help)" + $script:Gm.Reset)
+                    Write-Host ($script:Gm.Red + "  Unknown command or prompt template: $(Format-TuiText $trimmedQ) (use /help)" + $script:Gm.Reset)
                     continue
                 }
-                Write-Host ($script:Gm.Aqua + "  [template] Expanded $trimmedQ" + $script:Gm.Reset)
+                Write-Host ($script:Gm.Aqua + "  [template] Expanded $(Format-TuiText $trimmedQ)" + $script:Gm.Reset)
                 $question = $tplText
             }
             if ($trimmedQ.StartsWith('!')) {
@@ -408,10 +416,10 @@ if (-not $LibraryOnly) {
                 $rollback = Invoke-AgentTurnRollback -State $state -Snapshot $turnSnapshot -Writes @($script:CurrentTurnWrites) -UndoStack $undoStack
                 $undoStack = @($rollback.undo_stack)
                 if ($rollback.succeeded) {
-                    Write-Host ($script:Gm.Red + 'Request failed; turn rolled back (use /retry to resend): ' + $requestErr + $script:Gm.Reset)
+                    Write-Host ($script:Gm.Red + 'Request failed; turn rolled back (use /retry to resend): ' + (Format-TuiText $requestErr) + $script:Gm.Reset)
                 }
                 else {
-                    Write-Host ($script:Gm.Red + 'Request failed; rollback did not succeed: ' + $rollback.error + $script:Gm.Reset)
+                    Write-Host ($script:Gm.Red + 'Request failed; rollback did not succeed: ' + (Format-TuiText $rollback.error) + $script:Gm.Reset)
                 }
                 continue
             }

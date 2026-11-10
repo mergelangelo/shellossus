@@ -26,6 +26,81 @@ function Read-AgentConfig {
     return $config
 }
 
+function Test-AgentPrivateWindowsAcl {
+    param([string]$Path)
+    $acl = Get-Acl -LiteralPath $Path -ErrorAction Stop
+    if ($acl.Sddl -notmatch '^O:(?<owner>[^:]+)G:[^:]+D:(?<dacl>[^:]+)(?:S:.*)?$') { return $false }
+    $owner = $Matches.owner
+    $dacl = $Matches.dacl
+    $trusted = @('SY', 'BA', 'S-1-5-18', 'S-1-5-32-544')
+    if ($env:USERDOMAIN -and $env:USERNAME -and $acl.Owner -ieq "$env:USERDOMAIN\$env:USERNAME") {
+        $trusted += $owner
+    }
+    if ($owner -notin $trusted -or $dacl -notmatch '^(?:P|AI|AR)*(?<rules>(?:\([^()]+\))+)$') { return $false }
+    foreach ($rule in ($Matches.rules.Trim('(', ')') -split '\)\(')) {
+        $parts = $rule -split ';'
+        if ($parts.Count -ne 6 -or $parts[0] -notin @('A', 'D')) { return $false }
+        # Inherit-only rules do not grant access to this object. The file is checked separately.
+        if ($parts[0] -eq 'A' -and $parts[1] -notmatch 'IO' -and $parts[5] -notin $trusted) { return $false }
+    }
+    return $true
+}
+
+function Test-AgentConfigPrivacy {
+    param([string]$Path, [switch]$ParentOnly)
+    try {
+        $full = Format-ConfigPath -Path $Path
+        if (-not $full -or $full -match '^[\\/]{2}' -or (Test-PathHasReparsePoint -Path $full)) { return $false }
+        $parent = Get-Item -LiteralPath (Split-Path $full -Parent) -Force -ErrorAction Stop
+        if (-not $parent.PSIsContainer) { return $false }
+        if (-not $ParentOnly) {
+            $file = Get-Item -LiteralPath $full -Force -ErrorAction Stop
+            if ($file.PSIsContainer -or ($file.Attributes -band 1024)) { return $false }
+        }
+        if ($env:OS -eq 'Windows_NT') {
+            if ($parent.PSDrive.DisplayRoot -match '^[\\/]{2}') { return $false }
+            return ((Test-AgentPrivateWindowsAcl -Path $parent.FullName) -and ($ParentOnly -or (Test-AgentPrivateWindowsAcl -Path $file.FullName)))
+        }
+        if ($null -eq $parent.UnixFileMode -or $parent.User -cne [Environment]::UserName -or ([int]$parent.UnixFileMode -band 18)) {
+            return $false
+        }
+        # Parent directories must not be replaceable by another user.
+        $ancestorPath = Split-Path $parent.FullName -Parent
+        while ($ancestorPath) {
+            $ancestor = Get-Item -LiteralPath $ancestorPath -Force -ErrorAction Stop
+            if ($null -eq $ancestor.UnixFileMode -or
+                ($ancestor.User -cne [Environment]::UserName -and $ancestor.UnixStat.UserId -ne 0) -or
+                (([int]$ancestor.UnixFileMode -band 18) -and -not ($ancestor.UnixStat.UserId -eq 0 -and $ancestor.UnixStat.IsSticky))) {
+                return $false
+            }
+            $ancestorPath = Split-Path $ancestor.FullName -Parent
+        }
+        return ($ParentOnly -or ($null -ne $file.UnixFileMode -and $file.User -ceq [Environment]::UserName -and
+            -not ([int]$file.UnixFileMode -band 63) -and $file.UnixStat.HardlinkCount -eq 1))
+    }
+    catch { return $false }
+}
+
+function Get-AgentConfiguredApiKey {
+    param($Config)
+    if ($env:SHELLOSSUS_API_KEY) { return $env:SHELLOSSUS_API_KEY }
+    return $Config.SHELLOSSUS_API_KEY
+}
+
+function Read-AgentApiKey {
+    param([string]$Prompt = 'API key')
+    $secret = $null
+    try {
+        $secret = Read-Host -Prompt (Format-TuiText $Prompt) -AsSecureString -ErrorAction Stop
+        if (-not $secret -or $secret.Length -eq 0) { return '' }
+        return ([pscredential]::new('shellossus', $secret)).GetNetworkCredential().Password
+    }
+    catch { throw 'Hidden key input is unavailable. Set SHELLOSSUS_API_KEY in the environment.' }
+    finally {
+        if ($secret -is [securestring]) { $secret.Dispose() }
+    }
+}
+
 function Save-AgentConfig {
     param([string]$Path, $Config)
     $lines = @('# shellossus settings. Contains an API key: do not commit or share.')
@@ -43,9 +118,38 @@ function Save-AgentConfig {
             $lines += $optKey + '="' + $optVal + '"'
         }
     }
+    $Path = Format-ConfigPath -Path $Path
     $parent = Split-Path $Path -Parent
+    if ($Config.SHELLOSSUS_API_KEY -and ($Path -match '^[\\/]{2}' -or (Test-PathHasReparsePoint -Path $Path))) {
+        throw 'Choose a local config path without reparse points or use SHELLOSSUS_API_KEY from the environment.'
+    }
     if ($parent -and -not (Test-Path -LiteralPath $parent)) { New-Item -ItemType Directory -Path $parent -ErrorAction Stop | Out-Null }
-    Set-Content -LiteralPath $Path -Value $lines -Encoding UTF8 -ErrorAction Stop
+    if (-not $Config.SHELLOSSUS_API_KEY) {
+        Set-Content -LiteralPath $Path -Value $lines -Encoding UTF8 -ErrorAction Stop
+        return
+    }
+
+    $privacyError = 'Cannot verify private API key storage. Choose a private -ConfigPath or use SHELLOSSUS_API_KEY from the environment.'
+    if (-not (Test-AgentConfigPrivacy -Path $Path -ParentOnly) -or (Test-Path -LiteralPath $Path -PathType Container)) {
+        throw $privacyError
+    }
+    $stagePath = Join-Path $parent ('.config-' + $PID + '-' + (Get-Random -Minimum 10000000 -Maximum 99999999) + '.tmp')
+    $stage = New-Item -ItemType File -Path $stagePath -ErrorAction Stop
+    try {
+        if ($env:OS -ne 'Windows_NT') {
+            try { Set-ItemProperty -LiteralPath $stage.FullName -Name UnixFileMode -Value 384 -ErrorAction Stop }
+            catch { throw $privacyError }
+        }
+        if (-not (Test-AgentConfigPrivacy -Path $stage.FullName)) { throw $privacyError }
+        Set-Content -LiteralPath $stage.FullName -Value $lines -Encoding UTF8 -ErrorAction Stop
+        if (-not (Test-AgentConfigPrivacy -Path $stage.FullName) -or (Test-PathHasReparsePoint -Path $Path) -or (Test-Path -LiteralPath $Path -PathType Container)) {
+            throw $privacyError
+        }
+        Move-Item -LiteralPath $stage.FullName -Destination $Path -Force -ErrorAction Stop
+    }
+    finally {
+        Remove-Item -LiteralPath $stage.FullName -Force -ErrorAction SilentlyContinue
+    }
 }
 
 function Get-AgentUserRoot {
@@ -182,7 +286,14 @@ function Format-AgentError {
 
 function Format-PreviewText {
     param([string]$Text)
-    return ($Text -replace '[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]', '?')
+    return ($Text -replace '[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]', '?')
+}
+
+function Format-TuiText {
+    param([string]$Text, [switch]$Multiline)
+    $clean = Format-PreviewText $Text
+    if ($Multiline) { return ($clean -replace '\r\n', "`n" -replace '[\r\u2028\u2029]', '?' -replace '\t', '    ') }
+    return ($clean -replace '\r\n|\n', '\n' -replace '\r', '\r' -replace '\t', '\t' -replace '[\u2028\u2029]', '?')
 }
 
 function Test-IsSecretFile {

@@ -131,7 +131,7 @@ if ($env:SHELLOSSUS_SUB_REASONING_EFFORT) { $workerArgs.ReasoningEffort = $env:S
                 $fullPrompt = [string]$t.prompt
                 Set-AgentUtf8Content -LiteralPath $promptTemp.FullName -Value $fullPrompt
                 if ($script:OutputMode -ne 'json') {
-                    Write-Host ($script:Gm.Aqua + ("  [run_agent:{0}] (parallel ReadOnly) " -f $roleObj.name) + $script:Gm.Grey1 + (Invoke-TruncateLine -Line ([string]$t.prompt) -MaxChars 90).text + $script:Gm.Reset)
+                    Write-Host ($script:Gm.Aqua + ("  [run_agent:{0}] (parallel ReadOnly) " -f (Format-TuiText $roleObj.name)) + $script:Gm.Grey1 + (Invoke-TruncateLine -Line (Format-TuiText $t.prompt) -MaxChars 90).text + $script:Gm.Reset)
                 }
                 $proc = Invoke-WithProcessEnvironment -Values @{
                     SHELLOSSUS_API_KEY = $effKey

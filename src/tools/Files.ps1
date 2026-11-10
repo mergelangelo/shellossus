@@ -235,7 +235,7 @@ function Invoke-AgentStagedWrite {
                 throw 'File changed before replacement. No write performed.'
             }
             if ($script:OutputMode -ne 'json') {
-                Write-Host ($script:Gm.Grey1 + 'Backup: ' + $backupPath + $script:Gm.Reset)
+                Write-Host ($script:Gm.Grey1 + 'Backup: ' + (Format-TuiText $backupPath) + $script:Gm.Reset)
             }
             $script:CurrentTurnWrites += @{
                 action = 'modified'

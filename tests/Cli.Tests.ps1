@@ -645,11 +645,16 @@ try {
     }
     $global:setupReadQueue = @('', 'updated-model', '', '')
     function global:Read-Host {
-        param($Prompt)
+        param($Prompt, [switch]$AsSecureString)
         if (-not $global:setupReadQueue -or $global:setupReadQueue.Count -eq 0) { return '' }
         $next = $global:setupReadQueue[0]
         if ($global:setupReadQueue.Count -eq 1) { $global:setupReadQueue = @() }
         else { $global:setupReadQueue = @($global:setupReadQueue[1..($global:setupReadQueue.Count - 1)]) }
+        if ($Prompt -eq 'API key') {
+            Assert-True $AsSecureString 'Setup requested a visible key.'
+            if ($next) { return (ConvertTo-SecureString -String $next -AsPlainText -Force) }
+            return
+        }
         return $next
     }
     try {
@@ -681,12 +686,17 @@ try {
     $global:task10Prompts = @()
     $global:task10ReadQueue = @('https://api.example/v1', 'task10-model', 'task10-key', '')
     function global:Read-Host {
-        param($Prompt)
+        param($Prompt, [switch]$AsSecureString)
         $global:task10Prompts += [string]$Prompt
         if (-not $global:task10ReadQueue -or $global:task10ReadQueue.Count -eq 0) { return '' }
         $next = $global:task10ReadQueue[0]
         if ($global:task10ReadQueue.Count -eq 1) { $global:task10ReadQueue = @() }
         else { $global:task10ReadQueue = @($global:task10ReadQueue[1..($global:task10ReadQueue.Count - 1)]) }
+        if ($Prompt -eq 'API key') {
+            Assert-True $AsSecureString 'Setup requested a visible key.'
+            if ($next) { return (ConvertTo-SecureString -String $next -AsPlainText -Force) }
+            return
+        }
         return $next
     }
     $task10SetupThrew = $false
@@ -718,12 +728,17 @@ try {
     $global:task10Prompts = @()
     $global:task10ReadQueue = @('https://api.example/v1', 'task10-model', 'task10-key', '')
     function global:Read-Host {
-        param($Prompt)
+        param($Prompt, [switch]$AsSecureString)
         $global:task10Prompts += [string]$Prompt
         if (-not $global:task10ReadQueue -or $global:task10ReadQueue.Count -eq 0) { return '' }
         $next = $global:task10ReadQueue[0]
         if ($global:task10ReadQueue.Count -eq 1) { $global:task10ReadQueue = @() }
         else { $global:task10ReadQueue = @($global:task10ReadQueue[1..($global:task10ReadQueue.Count - 1)]) }
+        if ($Prompt -eq 'API key') {
+            Assert-True $AsSecureString 'Setup requested a visible key.'
+            if ($next) { return (ConvertTo-SecureString -String $next -AsPlainText -Force) }
+            return
+        }
         return $next
     }
     $task10DirMsg = ''
@@ -1335,7 +1350,8 @@ try {
     # and removes names that were absent. Impossible local URI, no live network call.
     $httpEnvNames = @(
         'SHELLOSSUS_HTTP_URI',
-        'SHELLOSSUS_HTTP_KEY',
+        'SHELLOSSUS_API_KEY',
+        'OPENAI_API_KEY',
         'SHELLOSSUS_HTTP_IN',
         'SHELLOSSUS_HTTP_OUT',
         'SHELLOSSUS_HTTP_ERR',
@@ -1356,7 +1372,8 @@ try {
             Remove-Item -Path ('Env:' + $httpEnvName) -ErrorAction SilentlyContinue
         }
         $env:SHELLOSSUS_HTTP_URI = 'before'
-        $env:SHELLOSSUS_HTTP_KEY = 'before-key'
+        $env:SHELLOSSUS_API_KEY = 'before-key'
+        $env:OPENAI_API_KEY = 'before-openai'
         $env:SHELLOSSUS_HTTP_TIMEOUT = '12'
         $httpEnvThrew = $false
         $httpEnvError = ''
@@ -1369,7 +1386,8 @@ try {
         }
         Assert-True ($httpEnvThrew) "Expected failed Invoke-AgentHttpRequest to throw. Detail: $httpEnvError"
         Assert-True ($env:SHELLOSSUS_HTTP_URI -eq 'before') "Expected SHELLOSSUS_HTTP_URI to survive a failed request, got '$($env:SHELLOSSUS_HTTP_URI)'."
-        Assert-True ($env:SHELLOSSUS_HTTP_KEY -eq 'before-key') "Expected SHELLOSSUS_HTTP_KEY to survive a failed request, got '$($env:SHELLOSSUS_HTTP_KEY)'."
+        Assert-True ($env:SHELLOSSUS_API_KEY -eq 'before-key') "Expected SHELLOSSUS_API_KEY to survive a failed request, got '$($env:SHELLOSSUS_API_KEY)'."
+        Assert-True ($env:OPENAI_API_KEY -eq 'before-openai') 'The HTTP worker did not restore the alternate key variable.'
         Assert-True ($env:SHELLOSSUS_HTTP_TIMEOUT -eq '12') "Expected SHELLOSSUS_HTTP_TIMEOUT to survive a failed request, got '$($env:SHELLOSSUS_HTTP_TIMEOUT)'."
         $httpInItem = Get-Item -Path 'Env:SHELLOSSUS_HTTP_IN' -ErrorAction SilentlyContinue
         $httpOutItem = Get-Item -Path 'Env:SHELLOSSUS_HTTP_OUT' -ErrorAction SilentlyContinue
@@ -1391,6 +1409,16 @@ try {
         if (Test-Path -LiteralPath $httpOutFile) {
             Remove-Item -LiteralPath $httpOutFile -Force -ErrorAction SilentlyContinue
         }
+    }
+
+    & {
+        function Invoke-WebRequest { throw 'HTTP 400 included credential fixture-header-key' }
+        $message = ''
+        try {
+            Invoke-AgentHttpRequest -Uri 'https://example.invalid/v1/chat/completions' -ApiKey 'fixture-header-key' -Body '{}' -OutFile $httpOutFile
+        }
+        catch { $message = $_.Exception.Message }
+        Assert-True ($message -like '*HTTP 400*' -and $message.Contains('[redacted]') -and $message -notlike '*fixture-header-key*') 'A direct HTTP error exposed the API key.'
     }
 
     # Regression (Task 11): /resume with -NoSession loads the chosen session messages

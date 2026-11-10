@@ -317,10 +317,10 @@ function Format-TuiStatusBar {
     $wsName = if ($Root) { Split-Path $Root -Leaf } else { 'workspace' }
     if (-not $wsName) { $wsName = $Root }
     $branch = Get-GitBranchLabel -Root $Root
-    $branchSeg = if ($branch) { ' ' + $script:Gm.Purple + '(' + $branch + ')' + $script:Gm.Reset } else { '' }
+    $branchSeg = if ($branch) { ' ' + $script:Gm.Purple + '(' + (Format-TuiText $branch) + ')' + $script:Gm.Reset } else { '' }
     $sessLabel = if ($State -and $State.session_name) { [string]$State.session_name } elseif ($State -and $State.session_id) { [string]$State.session_id } else { '' }
-    $sessSeg = if ($sessLabel) { ' ' + $script:Gm.Grey0 + $script:Box.H + ' ' + $script:Gm.Grey1 + $sessLabel + $script:Gm.Reset } else { '' }
-    $topTitle = ' ' + $script:Gm.BoldGreen + $script:Box.Dot + ' ' + $wsName + $script:Gm.Reset + $branchSeg + $sessSeg + ' '
+    $sessSeg = if ($sessLabel) { ' ' + $script:Gm.Grey0 + $script:Box.H + ' ' + $script:Gm.Grey1 + (Format-TuiText $sessLabel) + $script:Gm.Reset } else { '' }
+    $topTitle = ' ' + $script:Gm.BoldGreen + $script:Box.Dot + ' ' + (Format-TuiText $wsName) + $script:Gm.Reset + $branchSeg + $sessSeg + ' '
     $maxTopVis = $w - 5
     $topVisLen = (Strip-AnsiCodes -Text $topTitle).Length
     if ($topVisLen -gt $maxTopVis) {
@@ -344,7 +344,7 @@ function Format-TuiStatusBar {
         @{ est_tokens = [int](($cTmp + 3) / 4); context_window_tokens = 128000; compact_threshold_tokens = 96000 }
     }
     $effStr = if ($script:ReasoningEffort) { ':' + $script:ReasoningEffort } elseif ($script:ShowReasoning -eq 'hide') { ':hide' } else { '' }
-    $modelSeg = $script:Gm.Fg1 + $Model + $script:Gm.Grey1 + $effStr + $script:Gm.Reset
+    $modelSeg = $script:Gm.Fg1 + (Format-TuiText $Model) + $script:Gm.Grey1 + $effStr + $script:Gm.Reset
     $permSeg = Format-PermissionBadge -Permission $script:AgentPermission
     $gaugeW = if ($innerW -lt 90) { 4 } else { 8 }
     $gaugeSeg = Format-ContextGauge -Tokens $stBar.est_tokens -MaxTokens $stBar.context_window_tokens -CompactTokens $stBar.compact_threshold_tokens -Width $gaugeW
@@ -393,7 +393,7 @@ function Write-TuiPromptFrame {
     if ($script:OutputMode -eq 'json') { return }
     $wsName = if ($Root) { Split-Path $Root -Leaf } else { 'workspace' }
     if (-not $wsName) { $wsName = $Root }
-    $titleSeq = "$script:Esc]0;shellossus - $wsName [$Model | $($script:AgentPermission)]$script:Bel"
+    $titleSeq = "$script:Esc]0;shellossus - $(Format-TuiText $wsName) [$(Format-TuiText $Model) | $($script:AgentPermission)]$script:Bel"
     Write-Host ("`n" + $titleSeq) -NoNewline
     foreach ($ln in @(Format-TuiStatusBar -State $State -Root $Root -Model $Model -UndoCount $UndoCount)) {
         Write-Host $ln

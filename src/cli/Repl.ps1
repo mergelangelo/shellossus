@@ -53,12 +53,12 @@ function Format-TuiStatusCard {
     $compLabel = (Format-TokenCount -Tokens $st.compact_threshold_tokens) + " ($($st.compact_pct)%)"
     $hdr = ' ' + $script:Gm.BoldOrange + 'Session Status' + $script:Gm.Reset + ' '
     $body = @(
-        ($script:Gm.Grey1 + 'Model:       ' + $script:Gm.Fg1 + $Model + $script:Gm.Grey1 + " (reasoning: view=$($script:ShowReasoning), effort=$effLabel)" + $script:Gm.Reset),
+        ($script:Gm.Grey1 + 'Model:       ' + $script:Gm.Fg1 + (Format-TuiText $Model) + $script:Gm.Grey1 + " (reasoning: view=$($script:ShowReasoning), effort=$effLabel)" + $script:Gm.Reset),
         ($script:Gm.Grey1 + 'Permission:  ' + (Format-PermissionBadge -Permission $script:AgentPermission) + $script:Gm.Grey1 + " | Theme: $($script:ActiveTheme) | MaxSteps: $MaxSteps | Undo stack: $UndoCount" + $script:Gm.Reset),
         ($script:Gm.Grey1 + 'Context:     ' + (Format-ContextGauge -Tokens $st.est_tokens -MaxTokens $st.context_window_tokens -CompactTokens $st.compact_threshold_tokens -Width 12) + $script:Gm.Grey1 + " | Auto-compact: $compLabel | Msgs: $($st.messages)" + $script:Gm.Reset),
         ($script:Gm.Grey1 + 'API Tokens:  ' + $script:Gm.Aqua + "in=$inTok out=$outTok" + $script:Gm.Grey1 + " (total=$(Format-TokenCount -Tokens ($inTok + $outTok)))" + $script:Gm.Reset),
-        ($script:Gm.Grey1 + 'Session:     ' + $script:Gm.Fg + "$($State.session_id) " + $script:Gm.Grey1 + "| Name: $nmInfo | Leaf: $leafInfo" + $script:Gm.Reset),
-        ($script:Gm.Grey1 + 'File:        ' + $script:Gm.Grey2 + $sessFileStr + $script:Gm.Reset),
+        ($script:Gm.Grey1 + 'Session:     ' + $script:Gm.Fg + "$(Format-TuiText $State.session_id) " + $script:Gm.Grey1 + "| Name: $(Format-TuiText $nmInfo) | Leaf: $(Format-TuiText $leafInfo)" + $script:Gm.Reset),
+        ($script:Gm.Grey1 + 'File:        ' + $script:Gm.Grey2 + (Format-TuiText $sessFileStr) + $script:Gm.Reset),
         ($script:Gm.Grey1 + 'Tools:       ' + $script:Gm.Aqua + $toolsStr + $script:Gm.Reset)
     )
     $tdList = @(if ($script:ActiveSessionTodos -and @($script:ActiveSessionTodos).Count -gt 0) { @($script:ActiveSessionTodos) } elseif ($State -and $State.todos -and @($State.todos).Count -gt 0) { @($State.todos) })
@@ -82,9 +82,9 @@ function Format-TuiTreeCard {
     else {
         foreach ($node in $treeNodes) {
             $marker = if ($node.is_leaf) { $script:Box.Dot } elseif ($node.active) { $script:Box.Arrow } else { '-' }
-            $parentInfo = if ($node.parent_id) { " <- $($node.parent_id)" } else { ' (root)' }
+            $parentInfo = if ($node.parent_id) { " <- $(Format-TuiText $node.parent_id)" } else { ' (root)' }
             $color = if ($node.is_leaf) { $script:Gm.BoldGreen } elseif ($node.active) { $script:Gm.Aqua } else { $script:Gm.Grey1 }
-            $body += ($color + ("{0} [{1}] ({2}{3}) " -f $marker, $node.id, $node.role, $parentInfo) + $script:Gm.Fg + $node.preview + $script:Gm.Reset)
+            $body += ($color + ("{0} [{1}] ({2}{3}) " -f $marker, (Format-TuiText $node.id), (Format-TuiText $node.role), $parentInfo) + $script:Gm.Fg + (Format-TuiText $node.preview) + $script:Gm.Reset)
         }
         $body += ($script:Gm.Grey1 + '(Use /tree <entry-id> to switch branch, or /fork <entry-id> to fork)' + $script:Gm.Reset)
     }
@@ -152,7 +152,7 @@ function Write-TuiStartupBanner {
     $null = Get-AgentRolesCatalog -Root $RootPath -ConfigDir $ConfigDir
     if ($script:AgentRolesByName -and $script:AgentRolesByName.Count -gt 0) { $ctxLoaded += "agents ($($script:AgentRolesByName.Count))" }
     $loadedStr = if ($ctxLoaded.Count -gt 0) { $script:Gm.Aqua + 'Loaded: ' + $script:Gm.Fg + ($ctxLoaded -join ' | ') + $script:Gm.Reset } else { $script:Gm.Grey1 + 'Workspace ready' + $script:Gm.Reset }
-    $modelStr = $script:Gm.Aqua + 'Model: ' + $script:Gm.Fg + $Model + $script:Gm.Grey1 + ' | ' + $script:Gm.Aqua + 'Mode: ' + $script:Gm.Fg + $script:AgentPermission + $script:Gm.Reset
+    $modelStr = $script:Gm.Aqua + 'Model: ' + $script:Gm.Fg + (Format-TuiText $Model) + $script:Gm.Grey1 + ' | ' + $script:Gm.Aqua + 'Mode: ' + $script:Gm.Fg + $script:AgentPermission + $script:Gm.Reset
     $shortcutsStr = $script:Gm.Grey1 + 'Shortcuts: ' + $script:Gm.Aqua + '? (/help)' + $script:Gm.Grey1 + ' | ' + $script:Gm.Aqua + '/p' + $script:Gm.Grey1 + ' mode | ' + $script:Gm.Aqua + '/m' + $script:Gm.Grey1 + ' model | ' + $script:Gm.Aqua + '/s' + $script:Gm.Grey1 + ' status | ' + $script:Gm.Aqua + '/u' + $script:Gm.Grey1 + ' undo' + $script:Gm.Reset
     $textLines = @($loadedStr, $modelStr, $shortcutsStr)
 
@@ -194,7 +194,7 @@ function Write-TuiAgentsCard {
     foreach ($rKey in @($script:AgentRolesByName.Keys | Sort-Object)) {
         $rObj = $script:AgentRolesByName[$rKey]
         $srcTag = if ($rObj.builtin) { 'built-in' } else { $rObj.rel_path }
-        $body += ($script:Gm.Aqua + ("{0,-12} " -f $rObj.name) + $script:Gm.Yellow + ("[{0}; {1}] " -f $rObj.permission, $srcTag) + $script:Gm.Fg + $rObj.description + $script:Gm.Reset)
+        $body += ($script:Gm.Aqua + ("{0,-12} " -f (Format-TuiText $rObj.name)) + $script:Gm.Yellow + ("[{0}; {1}] " -f (Format-TuiText $rObj.permission), (Format-TuiText $srcTag)) + $script:Gm.Fg + (Format-TuiText $rObj.description) + $script:Gm.Reset)
     }
     $body += ($script:Gm.Grey1 + '(Invoke via /agent:<role> <task> or let the model call run_agent)' + $script:Gm.Reset)
     foreach ($ln in @(Format-TuiCardBox -Header $hdr -BodyLines $body -Width $w)) {
@@ -214,7 +214,7 @@ function Write-TuiSkillsCard {
     else {
         foreach ($sKey in @($script:SkillsByName.Keys | Sort-Object)) {
             $sObj = $script:SkillsByName[$sKey]
-            $body += ($script:Gm.Aqua + ("{0,-18} " -f $sObj.name) + $script:Gm.Fg + $sObj.description + $script:Gm.Reset)
+            $body += ($script:Gm.Aqua + ("{0,-18} " -f (Format-TuiText $sObj.name)) + $script:Gm.Fg + (Format-TuiText $sObj.description) + $script:Gm.Reset)
         }
         $body += ($script:Gm.Grey1 + '(Invoke via /skill:<name> [args])' + $script:Gm.Reset)
     }
@@ -307,7 +307,7 @@ function Invoke-ReplMemoryCommand {
         }
     }
     catch {
-        Write-Host ($script:Gm.Red + '  ' + $_.Exception.Message + $script:Gm.Reset)
+        Write-Host ($script:Gm.Red + '  ' + (Format-TuiText $_.Exception.Message) + $script:Gm.Reset)
     }
 }
 
@@ -363,7 +363,7 @@ function Invoke-ReplDiagnosticsCommand {
     else {
         $capNow = Get-AgentCapabilities -Root $RootPath
         $tList = if ($capNow.tool_names.Count -gt 0) { $capNow.tool_names -join ', ' } else { 'none' }
-        Write-Host ($script:Gm.Aqua + "  Diagnostics: $($script:Diagnostics) | Mode: $($capNow.permission) | Shell: $($capNow.environment.shell_exe) $($capNow.environment.shell_version) | Tools: $tList" + $script:Gm.Reset)
+        Write-Host ($script:Gm.Aqua + "  Diagnostics: $($script:Diagnostics) | Mode: $($capNow.permission) | Shell: $(Format-TuiText $capNow.environment.shell_exe) $(Format-TuiText $capNow.environment.shell_version) | Tools: $tList" + $script:Gm.Reset)
     }
 }
 
@@ -448,7 +448,7 @@ function Invoke-ReplContextCommand {
             Write-Host ($script:Gm.Green + "  Context window set to $wFmt tokens | Auto-compact threshold: $cFmt ($($limRes.compact_pct)%)" + $script:Gm.Reset)
         }
         catch {
-            Write-Host ($script:Gm.Red + '  ' + $_.Exception.Message + $script:Gm.Reset)
+            Write-Host ($script:Gm.Red + '  ' + (Format-TuiText $_.Exception.Message) + $script:Gm.Reset)
         }
     }
 }
@@ -512,7 +512,7 @@ function Invoke-ReplThemeCommand {
             Write-Host ($script:Gm.Green + "  Theme set to: $($applied.id) ($($applied.label))" + $script:Gm.Reset)
         }
         catch {
-            Write-Host ($script:Gm.Red + '  ' + $_.Exception.Message + $script:Gm.Reset)
+            Write-Host ($script:Gm.Red + '  ' + (Format-TuiText $_.Exception.Message) + $script:Gm.Reset)
         }
     }
 }

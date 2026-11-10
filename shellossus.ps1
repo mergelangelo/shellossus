@@ -70,6 +70,81 @@ function Read-AgentConfig {
     return $config
 }
 
+function Test-AgentPrivateWindowsAcl {
+    param([string]$Path)
+    $acl = Get-Acl -LiteralPath $Path -ErrorAction Stop
+    if ($acl.Sddl -notmatch '^O:(?<owner>[^:]+)G:[^:]+D:(?<dacl>[^:]+)(?:S:.*)?$') { return $false }
+    $owner = $Matches.owner
+    $dacl = $Matches.dacl
+    $trusted = @('SY', 'BA', 'S-1-5-18', 'S-1-5-32-544')
+    if ($env:USERDOMAIN -and $env:USERNAME -and $acl.Owner -ieq "$env:USERDOMAIN\$env:USERNAME") {
+        $trusted += $owner
+    }
+    if ($owner -notin $trusted -or $dacl -notmatch '^(?:P|AI|AR)*(?<rules>(?:\([^()]+\))+)$') { return $false }
+    foreach ($rule in ($Matches.rules.Trim('(', ')') -split '\)\(')) {
+        $parts = $rule -split ';'
+        if ($parts.Count -ne 6 -or $parts[0] -notin @('A', 'D')) { return $false }
+        # Inherit-only rules do not grant access to this object. The file is checked separately.
+        if ($parts[0] -eq 'A' -and $parts[1] -notmatch 'IO' -and $parts[5] -notin $trusted) { return $false }
+    }
+    return $true
+}
+
+function Test-AgentConfigPrivacy {
+    param([string]$Path, [switch]$ParentOnly)
+    try {
+        $full = Format-ConfigPath -Path $Path
+        if (-not $full -or $full -match '^[\\/]{2}' -or (Test-PathHasReparsePoint -Path $full)) { return $false }
+        $parent = Get-Item -LiteralPath (Split-Path $full -Parent) -Force -ErrorAction Stop
+        if (-not $parent.PSIsContainer) { return $false }
+        if (-not $ParentOnly) {
+            $file = Get-Item -LiteralPath $full -Force -ErrorAction Stop
+            if ($file.PSIsContainer -or ($file.Attributes -band 1024)) { return $false }
+        }
+        if ($env:OS -eq 'Windows_NT') {
+            if ($parent.PSDrive.DisplayRoot -match '^[\\/]{2}') { return $false }
+            return ((Test-AgentPrivateWindowsAcl -Path $parent.FullName) -and ($ParentOnly -or (Test-AgentPrivateWindowsAcl -Path $file.FullName)))
+        }
+        if ($null -eq $parent.UnixFileMode -or $parent.User -cne [Environment]::UserName -or ([int]$parent.UnixFileMode -band 18)) {
+            return $false
+        }
+        # Parent directories must not be replaceable by another user.
+        $ancestorPath = Split-Path $parent.FullName -Parent
+        while ($ancestorPath) {
+            $ancestor = Get-Item -LiteralPath $ancestorPath -Force -ErrorAction Stop
+            if ($null -eq $ancestor.UnixFileMode -or
+                ($ancestor.User -cne [Environment]::UserName -and $ancestor.UnixStat.UserId -ne 0) -or
+                (([int]$ancestor.UnixFileMode -band 18) -and -not ($ancestor.UnixStat.UserId -eq 0 -and $ancestor.UnixStat.IsSticky))) {
+                return $false
+            }
+            $ancestorPath = Split-Path $ancestor.FullName -Parent
+        }
+        return ($ParentOnly -or ($null -ne $file.UnixFileMode -and $file.User -ceq [Environment]::UserName -and
+            -not ([int]$file.UnixFileMode -band 63) -and $file.UnixStat.HardlinkCount -eq 1))
+    }
+    catch { return $false }
+}
+
+function Get-AgentConfiguredApiKey {
+    param($Config)
+    if ($env:SHELLOSSUS_API_KEY) { return $env:SHELLOSSUS_API_KEY }
+    return $Config.SHELLOSSUS_API_KEY
+}
+
+function Read-AgentApiKey {
+    param([string]$Prompt = 'API key')
+    $secret = $null
+    try {
+        $secret = Read-Host -Prompt (Format-TuiText $Prompt) -AsSecureString -ErrorAction Stop
+        if (-not $secret -or $secret.Length -eq 0) { return '' }
+        return ([pscredential]::new('shellossus', $secret)).GetNetworkCredential().Password
+    }
+    catch { throw 'Hidden key input is unavailable. Set SHELLOSSUS_API_KEY in the environment.' }
+    finally {
+        if ($secret -is [securestring]) { $secret.Dispose() }
+    }
+}
+
 function Save-AgentConfig {
     param([string]$Path, $Config)
     $lines = @('# shellossus settings. Contains an API key: do not commit or share.')
@@ -87,9 +162,38 @@ function Save-AgentConfig {
             $lines += $optKey + '="' + $optVal + '"'
         }
     }
+    $Path = Format-ConfigPath -Path $Path
     $parent = Split-Path $Path -Parent
+    if ($Config.SHELLOSSUS_API_KEY -and ($Path -match '^[\\/]{2}' -or (Test-PathHasReparsePoint -Path $Path))) {
+        throw 'Choose a local config path without reparse points or use SHELLOSSUS_API_KEY from the environment.'
+    }
     if ($parent -and -not (Test-Path -LiteralPath $parent)) { New-Item -ItemType Directory -Path $parent -ErrorAction Stop | Out-Null }
-    Set-Content -LiteralPath $Path -Value $lines -Encoding UTF8 -ErrorAction Stop
+    if (-not $Config.SHELLOSSUS_API_KEY) {
+        Set-Content -LiteralPath $Path -Value $lines -Encoding UTF8 -ErrorAction Stop
+        return
+    }
+
+    $privacyError = 'Cannot verify private API key storage. Choose a private -ConfigPath or use SHELLOSSUS_API_KEY from the environment.'
+    if (-not (Test-AgentConfigPrivacy -Path $Path -ParentOnly) -or (Test-Path -LiteralPath $Path -PathType Container)) {
+        throw $privacyError
+    }
+    $stagePath = Join-Path $parent ('.config-' + $PID + '-' + (Get-Random -Minimum 10000000 -Maximum 99999999) + '.tmp')
+    $stage = New-Item -ItemType File -Path $stagePath -ErrorAction Stop
+    try {
+        if ($env:OS -ne 'Windows_NT') {
+            try { Set-ItemProperty -LiteralPath $stage.FullName -Name UnixFileMode -Value 384 -ErrorAction Stop }
+            catch { throw $privacyError }
+        }
+        if (-not (Test-AgentConfigPrivacy -Path $stage.FullName)) { throw $privacyError }
+        Set-Content -LiteralPath $stage.FullName -Value $lines -Encoding UTF8 -ErrorAction Stop
+        if (-not (Test-AgentConfigPrivacy -Path $stage.FullName) -or (Test-PathHasReparsePoint -Path $Path) -or (Test-Path -LiteralPath $Path -PathType Container)) {
+            throw $privacyError
+        }
+        Move-Item -LiteralPath $stage.FullName -Destination $Path -Force -ErrorAction Stop
+    }
+    finally {
+        Remove-Item -LiteralPath $stage.FullName -Force -ErrorAction SilentlyContinue
+    }
 }
 
 function Get-AgentUserRoot {
@@ -226,7 +330,14 @@ function Format-AgentError {
 
 function Format-PreviewText {
     param([string]$Text)
-    return ($Text -replace '[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]', '?')
+    return ($Text -replace '[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]', '?')
+}
+
+function Format-TuiText {
+    param([string]$Text, [switch]$Multiline)
+    $clean = Format-PreviewText $Text
+    if ($Multiline) { return ($clean -replace '\r\n', "`n" -replace '[\r\u2028\u2029]', '?' -replace '\t', '    ') }
+    return ($clean -replace '\r\n|\n', '\n' -replace '\r', '\r' -replace '\t', '\t' -replace '[\u2028\u2029]', '?')
 }
 
 function Test-IsSecretFile {
@@ -1134,10 +1245,10 @@ function Format-TuiStatusBar {
     $wsName = if ($Root) { Split-Path $Root -Leaf } else { 'workspace' }
     if (-not $wsName) { $wsName = $Root }
     $branch = Get-GitBranchLabel -Root $Root
-    $branchSeg = if ($branch) { ' ' + $script:Gm.Purple + '(' + $branch + ')' + $script:Gm.Reset } else { '' }
+    $branchSeg = if ($branch) { ' ' + $script:Gm.Purple + '(' + (Format-TuiText $branch) + ')' + $script:Gm.Reset } else { '' }
     $sessLabel = if ($State -and $State.session_name) { [string]$State.session_name } elseif ($State -and $State.session_id) { [string]$State.session_id } else { '' }
-    $sessSeg = if ($sessLabel) { ' ' + $script:Gm.Grey0 + $script:Box.H + ' ' + $script:Gm.Grey1 + $sessLabel + $script:Gm.Reset } else { '' }
-    $topTitle = ' ' + $script:Gm.BoldGreen + $script:Box.Dot + ' ' + $wsName + $script:Gm.Reset + $branchSeg + $sessSeg + ' '
+    $sessSeg = if ($sessLabel) { ' ' + $script:Gm.Grey0 + $script:Box.H + ' ' + $script:Gm.Grey1 + (Format-TuiText $sessLabel) + $script:Gm.Reset } else { '' }
+    $topTitle = ' ' + $script:Gm.BoldGreen + $script:Box.Dot + ' ' + (Format-TuiText $wsName) + $script:Gm.Reset + $branchSeg + $sessSeg + ' '
     $maxTopVis = $w - 5
     $topVisLen = (Strip-AnsiCodes -Text $topTitle).Length
     if ($topVisLen -gt $maxTopVis) {
@@ -1161,7 +1272,7 @@ function Format-TuiStatusBar {
         @{ est_tokens = [int](($cTmp + 3) / 4); context_window_tokens = 128000; compact_threshold_tokens = 96000 }
     }
     $effStr = if ($script:ReasoningEffort) { ':' + $script:ReasoningEffort } elseif ($script:ShowReasoning -eq 'hide') { ':hide' } else { '' }
-    $modelSeg = $script:Gm.Fg1 + $Model + $script:Gm.Grey1 + $effStr + $script:Gm.Reset
+    $modelSeg = $script:Gm.Fg1 + (Format-TuiText $Model) + $script:Gm.Grey1 + $effStr + $script:Gm.Reset
     $permSeg = Format-PermissionBadge -Permission $script:AgentPermission
     $gaugeW = if ($innerW -lt 90) { 4 } else { 8 }
     $gaugeSeg = Format-ContextGauge -Tokens $stBar.est_tokens -MaxTokens $stBar.context_window_tokens -CompactTokens $stBar.compact_threshold_tokens -Width $gaugeW
@@ -1210,7 +1321,7 @@ function Write-TuiPromptFrame {
     if ($script:OutputMode -eq 'json') { return }
     $wsName = if ($Root) { Split-Path $Root -Leaf } else { 'workspace' }
     if (-not $wsName) { $wsName = $Root }
-    $titleSeq = "$script:Esc]0;shellossus - $wsName [$Model | $($script:AgentPermission)]$script:Bel"
+    $titleSeq = "$script:Esc]0;shellossus - $(Format-TuiText $wsName) [$(Format-TuiText $Model) | $($script:AgentPermission)]$script:Bel"
     Write-Host ("`n" + $titleSeq) -NoNewline
     foreach ($ln in @(Format-TuiStatusBar -State $State -Root $Root -Model $Model -UndoCount $UndoCount)) {
         Write-Host $ln
@@ -1229,9 +1340,10 @@ function Format-ToolCallCard {
         [string]$Summary = '',
         [int]$ElapsedMs = -1
     )
-    if ($Target) { $Target = (Format-PreviewText -Text $Target) -replace '[\r\n\t]+', ' ' }
-    if ($Detail) { $Detail = (Format-PreviewText -Text $Detail) -replace '[\r\n\t]+', ' ' }
-    if ($Summary) { $Summary = (Format-PreviewText -Text $Summary) -replace '[\r\n\t]+', ' ' }
+    $Name = Format-TuiText $Name
+    $Target = Format-TuiText $Target
+    $Detail = Format-TuiText $Detail
+    $Summary = Format-TuiText $Summary
     $targetPart = if ($Target) { ' ' + $script:Gm.Fg1 + $Target + $script:Gm.Reset } else { '' }
     $detailPart = if ($Detail) { ' ' + $script:Gm.Grey1 + '(' + $Detail + ')' + $script:Gm.Reset } else { '' }
     $top = '  ' + $script:Gm.Grey0 + $script:Box.TL + $script:Box.H + ' ' + $script:Gm.Yellow + $script:Box.Arrow + ' ' + $Name + $script:Gm.Reset + $targetPart + $detailPart
@@ -1284,7 +1396,7 @@ function Format-TodoCard {
             'in_progress' { $script:Gm.BoldYellow }
             default       { $script:Gm.Fg1 }
         }
-        $body += ($icon + ' ' + $txtColor + (Format-PreviewText $item.content) + $script:Gm.Reset)
+        $body += ($icon + ' ' + $txtColor + (Format-TuiText $item.content) + $script:Gm.Reset)
     }
     return @(Format-TuiCardBox -Header $hdr -BodyLines $body -Width $w)
 }
@@ -1303,7 +1415,7 @@ function Format-PlanReviewCard {
     $hdr = ' ' + $script:Gm.BoldOrange + 'PLAN REVIEW' + $script:Gm.Reset + ' '
     $body = @()
     if ($Question) {
-        $qClean = Format-PreviewText $Question
+        $qClean = Format-TuiText $Question
         $body += ($script:Gm.BoldYellow + $qClean + $script:Gm.Reset)
         if ($Plan) {
             $body += ''
@@ -1332,7 +1444,7 @@ function Format-MemoryCard {
     param([string]$Scope, [string]$Action, [string]$Content)
     $w = Get-TerminalWidth
     $scopeLabel = if ($Scope) { [string]$Scope.ToUpper() } else { 'WORKSPACE' }
-    $hdr = ' ' + $script:Gm.BoldPurple + 'MEMORY (' + $scopeLabel + ')' + $script:Gm.Reset + ' '
+    $hdr = ' ' + $script:Gm.BoldPurple + 'MEMORY (' + (Format-TuiText $scopeLabel) + ')' + $script:Gm.Reset + ' '
     $body = @()
     if ($Content) {
         $lines = @($Content -split "`r?`n")
@@ -1451,7 +1563,7 @@ function Format-UnifiedDiff {
     $newLines = @(if ($afterNorm.Length -gt 0) { $afterNorm -split "`n" } else { @() })
     if ($null -eq $Before) {
         $addedCount = $newLines.Count
-        $hdr = ' ' + $script:Gm.BoldGreen + 'DIFF ' + $ToolName + ': ' + $script:Gm.Fg1 + $Path + ' ' + $script:Gm.Green + ("(+{0} new)" -f $addedCount) + $script:Gm.Reset + ' '
+        $hdr = ' ' + $script:Gm.BoldGreen + 'DIFF ' + (Format-TuiText $ToolName) + ': ' + $script:Gm.Fg1 + (Format-TuiText $Path) + ' ' + $script:Gm.Green + ("(+{0} new)" -f $addedCount) + $script:Gm.Reset + ' '
         $body = @()
         $showCount = if ($newLines.Count -gt $MaxLines) { $MaxLines } else { $newLines.Count }
         for ($i = 0; $i -lt $showCount; $i++) {
@@ -1584,7 +1696,7 @@ function Format-UnifiedDiff {
         }
     }
 
-    $hdr = ' ' + $script:Gm.BoldYellow + 'DIFF ' + $ToolName + ': ' + $script:Gm.Fg1 + $Path + ' ' + $script:Gm.Green + ("+{0}" -f $addedCount) + ' ' + $script:Gm.Red + ("-{0}" -f $removedCount) + $script:Gm.Reset + ' '
+    $hdr = ' ' + $script:Gm.BoldYellow + 'DIFF ' + (Format-TuiText $ToolName) + ': ' + $script:Gm.Fg1 + (Format-TuiText $Path) + ' ' + $script:Gm.Green + ("+{0}" -f $addedCount) + ' ' + $script:Gm.Red + ("-{0}" -f $removedCount) + $script:Gm.Reset + ' '
     $body = @()
     $emitted = 0
     for ($hIdx = 0; $hIdx -lt $hunks.Count; $hIdx++) {
@@ -1738,20 +1850,20 @@ function Invoke-TuiSelector {
     if ($script:OutputMode -eq 'json') { return $null }
     if ($script:OutputMode -ne 'json') {
         $w = Get-TerminalWidth
-        $hdr = ' ' + $script:Gm.BoldOrange + $Title + $script:Gm.Reset + ' '
+        $hdr = ' ' + $script:Gm.BoldOrange + (Format-TuiText $Title) + $script:Gm.Reset + ' '
         $body = @()
         for ($i = 0; $i -lt $Items.Count; $i++) {
             $it = $Items[$i]
             $marker = if ($it.active) { $script:Gm.BoldGreen + $script:Box.Dot + $script:Gm.Reset } else { ' ' }
             $numStr = $script:Gm.Yellow + ("[{0}]" -f ($i + 1)) + $script:Gm.Reset
-            $lblStr = $script:Gm.Aqua + [string]$it.label + $script:Gm.Reset
-            $descStr = if ($it.description) { $script:Gm.Grey1 + ' - ' + [string]$it.description + $script:Gm.Reset } else { '' }
+            $lblStr = $script:Gm.Aqua + (Format-TuiText $it.label) + $script:Gm.Reset
+            $descStr = if ($it.description) { $script:Gm.Grey1 + ' - ' + (Format-TuiText $it.description) + $script:Gm.Reset } else { '' }
             $body += "$marker $numStr $lblStr$descStr"
         }
         foreach ($ln in @(Format-TuiCardBox -Header $hdr -BodyLines $body -Width $w)) {
             Write-Host $ln
         }
-        Write-Host ('  ' + $script:Gm.BoldYellow + $PromptText + ': ' + $script:Gm.Fg) -NoNewline
+        Write-Host ('  ' + $script:Gm.BoldYellow + (Format-TuiText $PromptText) + ': ' + $script:Gm.Fg) -NoNewline
     }
     $rawChoice = Read-Host
     if ($script:OutputMode -ne 'json') {
@@ -1868,6 +1980,7 @@ function Get-VisibleLength {
 
 function Format-MarkdownInline {
     param([string]$Text, [string]$BaseColor = $script:Gm.Fg)
+    $Text = Format-TuiText -Text $Text -Multiline
     $out = $BaseColor
     foreach ($part in @($Text -split '(`[^`]+`)')) {
         if (-not $part) { continue }
@@ -1999,7 +2112,7 @@ function Write-AgentReply {
     $lines = @($Content -split "`r?`n")
     for ($idx = 0; $idx -lt $lines.Count; $idx++) {
         $rawLine = $lines[$idx]
-        $line = (Format-PreviewText -Text ([string]$rawLine)).Replace("`r", '')
+        $line = Format-TuiText -Text $rawLine -Multiline
         $isTableLine = (-not $inCode) -and ($line -match '^\s*\|.*\|\s*$')
         if ($isTableLine) {
             $tableBuf += $line
@@ -2072,14 +2185,14 @@ function Write-AgentReasoning {
     if ($script:ShowReasoning -eq 'full' -or $lines.Count -le 3) {
         Write-Host ("`n  " + $script:Gm.Grey0 + $script:Box.TL + $script:Box.H + ' [reasoning]' + $script:Gm.Reset)
         foreach ($l in $lines) {
-            Write-Host ('  ' + $script:Gm.Grey0 + $script:Box.V + ' ' + $script:Gm.Grey1 + (Format-PreviewText $l) + $script:Gm.Reset)
+            Write-Host ('  ' + $script:Gm.Grey0 + $script:Box.V + ' ' + $script:Gm.Grey1 + (Format-TuiText -Text $l -Multiline) + $script:Gm.Reset)
         }
         Write-Host ('  ' + $script:Gm.Grey0 + $script:Box.BL + ($script:Box.H * 12) + $script:Gm.Reset)
     }
     else {
         Write-Host ("`n  " + $script:Gm.Grey0 + $script:Box.TL + $script:Box.H + " [reasoning: last 3 of $($lines.Count) lines | /reasoning full to expand]" + $script:Gm.Reset)
         foreach ($l in @($lines | Select-Object -Last 3)) {
-            Write-Host ('  ' + $script:Gm.Grey0 + $script:Box.V + ' ' + $script:Gm.Grey1 + (Format-PreviewText $l) + $script:Gm.Reset)
+            Write-Host ('  ' + $script:Gm.Grey0 + $script:Box.V + ' ' + $script:Gm.Grey1 + (Format-TuiText -Text $l -Multiline) + $script:Gm.Reset)
         }
         Write-Host ('  ' + $script:Gm.Grey0 + $script:Box.BL + ($script:Box.H * 12) + $script:Gm.Reset)
     }
@@ -4209,7 +4322,7 @@ function Invoke-AgentStagedWrite {
                 throw 'File changed before replacement. No write performed.'
             }
             if ($script:OutputMode -ne 'json') {
-                Write-Host ($script:Gm.Grey1 + 'Backup: ' + $backupPath + $script:Gm.Reset)
+                Write-Host ($script:Gm.Grey1 + 'Backup: ' + (Format-TuiText $backupPath) + $script:Gm.Reset)
             }
             $script:CurrentTurnWrites += @{
                 action = 'modified'
@@ -5064,8 +5177,8 @@ function Invoke-AgentCommand {
         if ($timeoutSec -lt 1 -or $timeoutSec -gt 600) { throw 'timeout_sec must be between 1 and 600.' }
     }
     if ($script:OutputMode -ne 'json') {
-        Write-Host ("`n  " + $script:Gm.Grey0 + $script:Box.TL + $script:Box.H + ' ' + $script:Gm.BoldYellow + $script:Box.Arrow + ' run_command ' + $script:Gm.Grey1 + '(' + $Root + ')' + $script:Gm.Reset)
-        Write-Host ('  ' + $script:Gm.Grey0 + $script:Box.V + ' ' + $script:Gm.Bg1 + $script:Gm.Yellow + '  ' + (Format-PreviewText $cmdText) + '  ' + $script:Gm.Reset)
+        Write-Host ("`n  " + $script:Gm.Grey0 + $script:Box.TL + $script:Box.H + ' ' + $script:Gm.BoldYellow + $script:Box.Arrow + ' run_command ' + $script:Gm.Grey1 + '(' + (Format-TuiText $Root) + ')' + $script:Gm.Reset)
+        Write-Host ('  ' + $script:Gm.Grey0 + $script:Box.V + ' ' + $script:Gm.Bg1 + $script:Gm.Yellow + '  ' + (Format-TuiText $cmdText) + '  ' + $script:Gm.Reset)
     }
     if ($script:AgentPermission -eq 'Auto') {
         if ($script:OutputMode -ne 'json') {
@@ -5095,7 +5208,7 @@ function Invoke-AgentCommand {
         if ($res.output) {
             $previewLines = @($res.output -split "`r?`n" | Select-Object -First 15)
             foreach ($pLine in $previewLines) {
-                Write-Host ('  ' + $script:Gm.Grey0 + $script:Box.V + '   ' + $script:Gm.Grey1 + (Format-PreviewText $pLine) + $script:Gm.Reset)
+                Write-Host ('  ' + $script:Gm.Grey0 + $script:Box.V + '   ' + $script:Gm.Grey1 + (Format-TuiText -Text $pLine -Multiline) + $script:Gm.Reset)
             }
             if (($res.output -split "`r?`n").Count -gt 15) {
                 Write-Host ('  ' + $script:Gm.Grey0 + $script:Box.V + '   ... (output truncated in terminal preview)' + $script:Gm.Reset)
@@ -5302,14 +5415,14 @@ function Invoke-AgentUndo {
                 }
                 $w.undone = $true
                 if ($script:OutputMode -ne 'json') {
-                    Write-Host ($script:Gm.Aqua + '  [undo] Restored ' + $w.rel_path + $script:Gm.Reset)
+                    Write-Host ($script:Gm.Aqua + '  [undo] Restored ' + (Format-TuiText $w.rel_path) + $script:Gm.Reset)
                 }
             }
             elseif ($w.action -eq 'created') {
                 if (Test-Path -LiteralPath $w.full_path) {
                     Remove-Item -LiteralPath $w.full_path -Force -ErrorAction Stop
                     if ($script:OutputMode -ne 'json') {
-                        Write-Host ($script:Gm.Aqua + '  [undo] Removed created file ' + $w.rel_path + $script:Gm.Reset)
+                        Write-Host ($script:Gm.Aqua + '  [undo] Removed created file ' + (Format-TuiText $w.rel_path) + $script:Gm.Reset)
                     }
                 }
                 if ($w.created_dirs) {
@@ -5631,7 +5744,7 @@ function Request-AgentWebConfirmation {
             } | ConvertTo-Json -Compress)
         }
     }
-    Write-Host ("`n  " + $script:Gm.Grey0 + $script:Box.TL + $script:Box.H + ' ' + $script:Gm.BoldYellow + $script:Box.Arrow + " $ToolName " + $script:Gm.Fg1 + (Format-PreviewText $Target) + $script:Gm.Reset)
+    Write-Host ("`n  " + $script:Gm.Grey0 + $script:Box.TL + $script:Box.H + ' ' + $script:Gm.BoldYellow + $script:Box.Arrow + " $(Format-TuiText $ToolName) " + $script:Gm.Fg1 + (Format-TuiText $Target) + $script:Gm.Reset)
     $promptStr = '  ' + $script:Gm.Grey0 + $script:Box.V + ' ' + $script:Gm.BoldYellow + 'Confirm outbound web request [y]es, [n]o, [a]ll: ' + $script:Gm.Fg
     $choice = Read-TuiConfirmation -PromptText $promptStr -ActionType 'web'
     if ($choice -eq 'a') {
@@ -6345,7 +6458,7 @@ function Invoke-AgentMemory {
             }
             Write-MemoryCard -Scope $scope -Action $action -Content $cardContent
             $cardPrinted = $true
-            $promptStr = '  ' + $script:Gm.BoldYellow + $script:Box.Arrow + " Confirm memory $action ($displayRel) [y]es, [n]o, [a]ll edits: " + $script:Gm.Fg
+            $promptStr = '  ' + $script:Gm.BoldYellow + $script:Box.Arrow + " Confirm memory $action ($(Format-TuiText $displayRel)) [y]es, [n]o, [a]ll edits: " + $script:Gm.Fg
             $choice = Read-TuiConfirmation -PromptText $promptStr -ActionType 'write'
             if ($choice -eq 'a') {
                 $script:AgentPermission = 'AutoEdit'
@@ -6608,7 +6721,7 @@ if ($env:SHELLOSSUS_SUB_REASONING_EFFORT) { $workerArgs.ReasoningEffort = $env:S
                 $fullPrompt = [string]$t.prompt
                 Set-AgentUtf8Content -LiteralPath $promptTemp.FullName -Value $fullPrompt
                 if ($script:OutputMode -ne 'json') {
-                    Write-Host ($script:Gm.Aqua + ("  [run_agent:{0}] (parallel ReadOnly) " -f $roleObj.name) + $script:Gm.Grey1 + (Invoke-TruncateLine -Line ([string]$t.prompt) -MaxChars 90).text + $script:Gm.Reset)
+                    Write-Host ($script:Gm.Aqua + ("  [run_agent:{0}] (parallel ReadOnly) " -f (Format-TuiText $roleObj.name)) + $script:Gm.Grey1 + (Invoke-TruncateLine -Line (Format-TuiText $t.prompt) -MaxChars 90).text + $script:Gm.Reset)
                 }
                 $proc = Invoke-WithProcessEnvironment -Values @{
                     SHELLOSSUS_API_KEY = $effKey
@@ -6898,7 +7011,7 @@ function Invoke-SubagentInProcess {
         }
         Sync-AgentCapabilities -State $childState -Root $Root | Out-Null
         if ($script:OutputMode -ne 'json') {
-            Write-Host ("`n  " + $script:Gm.Grey0 + $script:Box.TL + $script:Box.H + ' ' + $script:Gm.Aqua + $script:Box.Arrow + (" run_agent:{0} " -f $roleObj.name) + $script:Gm.Yellow + ("[{0}; context={1}] " -f $effPerm, $ContextMode) + $script:Gm.Grey1 + (Invoke-TruncateLine -Line $TaskPrompt -MaxChars 80).text + $script:Gm.Reset)
+            Write-Host ("`n  " + $script:Gm.Grey0 + $script:Box.TL + $script:Box.H + ' ' + $script:Gm.Aqua + $script:Box.Arrow + (" run_agent:{0} " -f (Format-TuiText $roleObj.name)) + $script:Gm.Yellow + ("[{0}; context={1}] " -f $effPerm, $ContextMode) + $script:Gm.Grey1 + (Invoke-TruncateLine -Line (Format-TuiText $TaskPrompt) -MaxChars 80).text + $script:Gm.Reset)
         }
         Invoke-AgentTurn -State $childState -Endpoint $effEndpoint -ModelId $effModel -ApiKey $effKey -Root $Root -Steps $MaxSteps
         if ($null -ne $savedState) {
@@ -6916,7 +7029,7 @@ function Invoke-SubagentInProcess {
         $fileOps = Get-CompactionFileOperations -Messages $childState.messages
         $subStatus = if ($childState.step_limit_reached) { 'step_limit_reached' } elseif ($childState.loop_detected) { 'loop_detected' } else { 'completed' }
         if ($script:OutputMode -ne 'json') {
-            Write-Host ('  ' + $script:Gm.Grey0 + $script:Box.BL + $script:Box.H + ' ' + $script:Gm.Green + $script:Box.Check + ' ' + $script:Gm.Grey2 + ("run_agent:{0} {1} ({2} steps, read:{3}, modified:{4})" -f $roleObj.name, $subStatus, $assistantSteps, @($fileOps.read_files).Count, @($fileOps.modified_files).Count) + $script:Gm.Reset)
+            Write-Host ('  ' + $script:Gm.Grey0 + $script:Box.BL + $script:Box.H + ' ' + $script:Gm.Green + $script:Box.Check + ' ' + $script:Gm.Grey2 + ("run_agent:{0} {1} ({2} steps, read:{3}, modified:{4})" -f (Format-TuiText $roleObj.name), (Format-TuiText $subStatus), $assistantSteps, @($fileOps.read_files).Count, @($fileOps.modified_files).Count) + $script:Gm.Reset)
         }
         return @{
             role = $roleObj.name
@@ -8025,12 +8138,12 @@ function Expand-UserPrompt {
                 $escapedRel = Escape-XmlText -Text $rel
                 $attachments += "<file path=`"$escapedRel`">`n$content`n</file>"
                 if ($script:OutputMode -ne 'json') {
-                    Write-Host ($script:Gm.Aqua + '  [@file] ' + $script:Gm.Grey1 + $rel + $script:Gm.Reset)
+                    Write-Host ($script:Gm.Aqua + '  [@file] ' + $script:Gm.Grey1 + (Format-TuiText $rel) + $script:Gm.Reset)
                 }
             }
             catch {
                 if ($script:OutputMode -ne 'json') {
-                    Write-Host ($script:Gm.Yellow + '  [@file] Skipped ' + $rel + ': ' + $_.Exception.Message + $script:Gm.Reset)
+                    Write-Host ($script:Gm.Yellow + '  [@file] Skipped ' + (Format-TuiText $rel) + ': ' + (Format-TuiText $_.Exception.Message) + $script:Gm.Reset)
                 }
             }
         }
@@ -9457,7 +9570,8 @@ function Get-AgentDoctorReport {
         [string]$Workspace = '.',
         [string]$SessionDir,
         [switch]$NoSession,
-        [string]$ConfigState = 'loaded'
+        [string]$ConfigState = 'loaded',
+        [string]$KeyStorageWarning
     )
     $checks = @()
     $version = $PSVersionTable.PSVersion
@@ -9499,6 +9613,9 @@ function Get-AgentDoctorReport {
         $apiKeyMessage = 'No API key was configured for the local server; the local placeholder is used.'
     }
     $checks += @{ name = 'api_key'; status = $apiKeyStatus; message = $apiKeyMessage }
+    if ($KeyStorageWarning) {
+        $checks += @{ name = 'key_storage'; status = 'warn'; message = $KeyStorageWarning }
+    }
     $hasModel = [bool]($ModelId -and $ModelId.Trim())
     $modelCheck = @{ name = 'model'; status = $(if ($hasModel) { 'pass' } else { 'fail' }); message = $(if ($hasModel) { "Configured model: $ModelId. Availability has not been verified." } else { 'Model ID is missing. Run shellossus -Setup or pass -Model with the provider model ID.' }) }
     $checks += $modelCheck
@@ -9557,7 +9674,7 @@ function Get-AgentDoctorReport {
                 $check.message = $check.message.Replace($trimmedKey, '[redacted]')
             }
         }
-        $check.message = (Format-PreviewText -Text $check.message) -replace '[\r\n\t]', ' '
+        $check.message = Format-TuiText $check.message
     }
     $failed = @($checks | Where-Object { $_.status -eq 'fail' }).Count
     $warnings = @($checks | Where-Object { $_.status -eq 'warn' }).Count
@@ -9726,16 +9843,16 @@ function Invoke-AgentProfileInstall {
         $conflict = Get-ShortcutConflict -Name $cand -PreviousShortcut $previousShortcut -ResolvedAgent $resolvedAgent
         if ($conflict) {
             $info = if ($conflict.Detail) { " ($($conflict.Detail))" } else { '' }
-            throw "Shortcut '$cand' conflicts with existing $($conflict.CommandType) '$($conflict.Name)'$info. Choose another shortcut."
+            throw "Shortcut '$cand' conflicts with existing $($conflict.CommandType) '$(Format-TuiText $conflict.Name)'$(Format-TuiText $info). Choose another shortcut."
         }
         $chosenShortcut = if ($cand -ieq 'shellossus') { '' } else { $cand }
     }
     else {
         $needShortcutMenu = $true
         if ($previousShortcut) {
-            Write-Host ($script:Gm.Fg + "Existing shortcut detected: $previousShortcut" + $script:Gm.Reset)
+            Write-Host ($script:Gm.Fg + "Existing shortcut detected: $(Format-TuiText $previousShortcut)" + $script:Gm.Reset)
             Write-Host ''
-            Write-Host ($script:Gm.Fg + "[1] Keep '$previousShortcut'" + $script:Gm.Reset)
+            Write-Host ($script:Gm.Fg + "[1] Keep '$(Format-TuiText $previousShortcut)'" + $script:Gm.Reset)
             Write-Host ($script:Gm.Fg + '[2] Change shortcut' + $script:Gm.Reset)
             Write-Host ($script:Gm.Fg + '[3] Remove shortcut' + $script:Gm.Reset)
             Write-Host ''
@@ -9747,7 +9864,7 @@ function Invoke-AgentProfileInstall {
                     $conflict = Get-ShortcutConflict -Name $previousShortcut -PreviousShortcut $previousShortcut -ResolvedAgent $resolvedAgent
                     if ($conflict) {
                         $info = if ($conflict.Detail) { " ($($conflict.Detail))" } else { '' }
-                        Write-Host ($script:Gm.Yellow + "Shortcut '$previousShortcut' conflicts with existing $($conflict.CommandType) '$($conflict.Name)'$info. Choose another name." + $script:Gm.Reset)
+                        Write-Host ($script:Gm.Yellow + "Shortcut '$(Format-TuiText $previousShortcut)' conflicts with existing $($conflict.CommandType) '$(Format-TuiText $conflict.Name)'$(Format-TuiText $info). Choose another name." + $script:Gm.Reset)
                         $needShortcutMenu = $true
                     }
                     else {
@@ -9792,7 +9909,7 @@ function Invoke-AgentProfileInstall {
                     if ($null -eq $customInput) { continue }
                     $candidate = $customInput.Trim()
                     if (-not (Test-ShortcutSyntax -Name $candidate)) {
-                        Write-Host ($script:Gm.Yellow + "Invalid shortcut name '$candidate'. Use only letters, numbers, hyphens, or underscores (no spaces or special characters)." + $script:Gm.Reset)
+                        Write-Host ($script:Gm.Yellow + "Invalid shortcut name '$(Format-TuiText $candidate)'. Use only letters, numbers, hyphens, or underscores (no spaces or special characters)." + $script:Gm.Reset)
                         continue
                     }
                 }
@@ -9807,7 +9924,7 @@ function Invoke-AgentProfileInstall {
                 $conflict = Get-ShortcutConflict -Name $candidate -PreviousShortcut $previousShortcut -ResolvedAgent $resolvedAgent
                 if ($conflict) {
                     $info = if ($conflict.Detail) { " ($($conflict.Detail))" } else { '' }
-                    Write-Host ($script:Gm.Yellow + "Shortcut '$candidate' conflicts with existing $($conflict.CommandType) '$($conflict.Name)'$info. Choose another name." + $script:Gm.Reset)
+                    Write-Host ($script:Gm.Yellow + "Shortcut '$(Format-TuiText $candidate)' conflicts with existing $($conflict.CommandType) '$(Format-TuiText $conflict.Name)'$(Format-TuiText $info). Choose another name." + $script:Gm.Reset)
                     continue
                 }
                 $chosenShortcut = if ($candidate -ieq 'shellossus') { '' } else { $candidate }
@@ -9837,7 +9954,7 @@ function Invoke-AgentProfileInstall {
         }
         $backup = $ProfilePath + '.shellossus-backup-' + (Get-Date -Format 'yyyyMMddHHmmssfff')
         Copy-Item -LiteralPath $ProfilePath -Destination $backup -ErrorAction Stop
-        Write-Host ($script:Gm.Grey1 + "Profile backup: $backup" + $script:Gm.Reset)
+        Write-Host ($script:Gm.Grey1 + "Profile backup: $(Format-TuiText $backup)" + $script:Gm.Reset)
     }
     else {
         $updated = $block + "`r`n"
@@ -9846,7 +9963,7 @@ function Invoke-AgentProfileInstall {
     $parent = Split-Path $ProfilePath -Parent
     if ($parent -and -not (Test-Path -LiteralPath $parent)) { New-Item -ItemType Directory -Path $parent -Force | Out-Null }
     Set-Content -LiteralPath $ProfilePath -Value $updated -Encoding UTF8 -NoNewline -ErrorAction Stop
-    Write-Host ($script:Gm.Green + "Command registered in: $ProfilePath" + $script:Gm.Reset)
+    Write-Host ($script:Gm.Green + "Command registered in: $(Format-TuiText $ProfilePath)" + $script:Gm.Reset)
     if ($chosenShortcut) {
         Write-Host ($script:Gm.Green + "Registered commands: shellossus, $chosenShortcut" + $script:Gm.Reset)
         Write-Host ($script:Gm.Fg + "Open a new PowerShell window, then run: $chosenShortcut -Setup (or shellossus -Setup)" + $script:Gm.Reset)
@@ -9931,7 +10048,7 @@ function Wait-AgentProcessWithSpinner {
                 $frameIdx++
                 $maxSpinW = (Get-TerminalWidth) - 1
                 if ($maxSpinW -lt 20) { $maxSpinW = 20 }
-                $rawSpinLine = $script:Gm.Grey1 + ("  [{0}] {1} ({2:0.0}s)..." -f $spinChar, $StatusLabel, $elapsed) + $script:Gm.Reset
+                $rawSpinLine = $script:Gm.Grey1 + ("  [{0}] {1} ({2:0.0}s)..." -f $spinChar, (Format-TuiText $StatusLabel), $elapsed) + $script:Gm.Reset
                 $clampedSpinLine = Limit-AnsiLineToWidth -Text $rawSpinLine -MaxWidth $maxSpinW
                 $lastSpinVisLen = (Strip-AnsiCodes -Text $clampedSpinLine).Length
                 $statusLine = "`r" + $clampedSpinLine
@@ -9986,7 +10103,12 @@ function Invoke-AgentHttpRequest {
         if ($iwrCmd -and $iwrCmd.CommandType -ne 'Function') {
             $request['MaximumRedirection'] = 0
         }
-        Invoke-WebRequest @request -UseBasicParsing -OutFile $OutFile
+        try { Invoke-WebRequest @request -UseBasicParsing -OutFile $OutFile }
+        catch {
+            $message = Format-AgentError -ErrorRecord $_
+            if ($ApiKey) { $message = $message.Replace($ApiKey, '[redacted]') }
+            throw (Format-TuiText $message)
+        }
         Assert-AgentApiResponseSize -Path $OutFile
         return
     }
@@ -10000,7 +10122,7 @@ function Invoke-AgentHttpRequest {
         $workerCmd = @'
 $ErrorActionPreference = 'Stop'
 try {
-    Microsoft.PowerShell.Utility\Invoke-WebRequest -Uri $env:SHELLOSSUS_HTTP_URI -Method 'Post' -Headers @{ Authorization = ('Bearer ' + $env:SHELLOSSUS_HTTP_KEY) } -ContentType 'application/json; charset=utf-8' -InFile $env:SHELLOSSUS_HTTP_IN -OutFile $env:SHELLOSSUS_HTTP_OUT -MaximumRedirection 0 -TimeoutSec ([int]$env:SHELLOSSUS_HTTP_TIMEOUT) -UseBasicParsing -ErrorAction Stop
+    Microsoft.PowerShell.Utility\Invoke-WebRequest -Uri $env:SHELLOSSUS_HTTP_URI -Method 'Post' -Headers @{ Authorization = ('Bearer ' + $env:SHELLOSSUS_API_KEY) } -ContentType 'application/json; charset=utf-8' -InFile $env:SHELLOSSUS_HTTP_IN -OutFile $env:SHELLOSSUS_HTTP_OUT -MaximumRedirection 0 -TimeoutSec ([int]$env:SHELLOSSUS_HTTP_TIMEOUT) -UseBasicParsing -ErrorAction Stop
 }
 catch {
     $msg = $_.Exception.Message
@@ -10027,7 +10149,8 @@ catch {
         $argList = Get-AgentWorkerArguments -CommandText $workerCmd
         $proc = Invoke-WithProcessEnvironment -Values @{
             SHELLOSSUS_HTTP_URI = $Uri
-            SHELLOSSUS_HTTP_KEY = $ApiKey
+            SHELLOSSUS_API_KEY = $ApiKey
+            OPENAI_API_KEY = $null
             SHELLOSSUS_HTTP_IN = $reqTemp.FullName
             SHELLOSSUS_HTTP_OUT = $OutFile
             SHELLOSSUS_HTTP_ERR = $errTemp.FullName
@@ -10040,11 +10163,17 @@ catch {
         $errItem = Get-Item -LiteralPath $errTemp.FullName -Force -ErrorAction SilentlyContinue
         if ($errItem -and $errItem.Length -gt 0) {
             $errText = Get-Content -LiteralPath $errTemp.FullName -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
-            if ($errText) { throw $errText.Trim() }
+            if ($errText) {
+                if ($ApiKey) { $errText = $errText.Replace($ApiKey, '[redacted]') }
+                throw (Format-TuiText $errText.Trim())
+            }
         }
         if ($null -ne $proc.ExitCode -and [int]$proc.ExitCode -ne 0) {
             $stdErrText = Get-Content -LiteralPath $stderrTemp.FullName -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
-            if ($stdErrText -and $stdErrText.Trim()) { throw $stdErrText.Trim() }
+            if ($stdErrText -and $stdErrText.Trim()) {
+                if ($ApiKey) { $stdErrText = $stdErrText.Replace($ApiKey, '[redacted]') }
+                throw (Format-TuiText $stdErrText.Trim())
+            }
             throw "HTTP worker exited with code $($proc.ExitCode)."
         }
     }
@@ -10296,7 +10425,7 @@ function Invoke-AgentTurn {
                     if (($attempt -lt $maxRetries) -and ($errFormatted -match '(?i)\b(408|429|500|502|503|504|timeout|timed out)\b')) {
                         $delay = ($attempt + 1) * 2
                         if ($script:OutputMode -ne 'json') {
-                            Write-Host ($script:Gm.Yellow + ("  [retry {0}/{1}] Transient error ({2}); waiting {3}s..." -f ($attempt + 1), $maxRetries, $errFormatted, $delay) + $script:Gm.Reset)
+                            Write-Host ($script:Gm.Yellow + ("  [retry {0}/{1}] Transient error ({2}); waiting {3}s..." -f ($attempt + 1), $maxRetries, (Format-TuiText $errFormatted), $delay) + $script:Gm.Reset)
                         }
                         Start-Sleep -Seconds $delay
                         continue
@@ -10445,7 +10574,7 @@ function Invoke-AgentTurn {
                 }
                 $output = ($warnObj | ConvertTo-Json -Compress)
                 if ($script:OutputMode -ne 'json') {
-                    Write-Host ($script:Gm.Yellow + "  [loop-guard] Repeated identical call to $canonToolName; returning warning." + $script:Gm.Reset)
+                    Write-Host ($script:Gm.Yellow + "  [loop-guard] Repeated identical call to $(Format-TuiText $canonToolName); returning warning." + $script:Gm.Reset)
                 }
                 Write-AgentJsonEvent -EventType 'tool_execution_end' -Payload @{ id = [string]$call.id; name = [string]$call.function.name; result = $output }
                 $State.messages += @{ role = 'tool'; tool_call_id = $call.id; content = $output }
@@ -10570,7 +10699,7 @@ function Invoke-AgentTurn {
         }
         if ($loopAborted) {
             if ($script:OutputMode -ne 'json') {
-                Write-Host ($script:Gm.Yellow + "Loop detected: repeated identical calls to '$($State.repeated_tool)'. Turn stopped (completed edits are preserved; use /undo to revert)." + $script:Gm.Reset)
+                Write-Host ($script:Gm.Yellow + "Loop detected: repeated identical calls to '$(Format-TuiText $State.repeated_tool)'. Turn stopped (completed edits are preserved; use /undo to revert)." + $script:Gm.Reset)
             }
             Write-AgentJsonEvent -EventType 'turn_end' -Payload @{
                 step = $step
@@ -10664,12 +10793,12 @@ function Format-TuiStatusCard {
     $compLabel = (Format-TokenCount -Tokens $st.compact_threshold_tokens) + " ($($st.compact_pct)%)"
     $hdr = ' ' + $script:Gm.BoldOrange + 'Session Status' + $script:Gm.Reset + ' '
     $body = @(
-        ($script:Gm.Grey1 + 'Model:       ' + $script:Gm.Fg1 + $Model + $script:Gm.Grey1 + " (reasoning: view=$($script:ShowReasoning), effort=$effLabel)" + $script:Gm.Reset),
+        ($script:Gm.Grey1 + 'Model:       ' + $script:Gm.Fg1 + (Format-TuiText $Model) + $script:Gm.Grey1 + " (reasoning: view=$($script:ShowReasoning), effort=$effLabel)" + $script:Gm.Reset),
         ($script:Gm.Grey1 + 'Permission:  ' + (Format-PermissionBadge -Permission $script:AgentPermission) + $script:Gm.Grey1 + " | Theme: $($script:ActiveTheme) | MaxSteps: $MaxSteps | Undo stack: $UndoCount" + $script:Gm.Reset),
         ($script:Gm.Grey1 + 'Context:     ' + (Format-ContextGauge -Tokens $st.est_tokens -MaxTokens $st.context_window_tokens -CompactTokens $st.compact_threshold_tokens -Width 12) + $script:Gm.Grey1 + " | Auto-compact: $compLabel | Msgs: $($st.messages)" + $script:Gm.Reset),
         ($script:Gm.Grey1 + 'API Tokens:  ' + $script:Gm.Aqua + "in=$inTok out=$outTok" + $script:Gm.Grey1 + " (total=$(Format-TokenCount -Tokens ($inTok + $outTok)))" + $script:Gm.Reset),
-        ($script:Gm.Grey1 + 'Session:     ' + $script:Gm.Fg + "$($State.session_id) " + $script:Gm.Grey1 + "| Name: $nmInfo | Leaf: $leafInfo" + $script:Gm.Reset),
-        ($script:Gm.Grey1 + 'File:        ' + $script:Gm.Grey2 + $sessFileStr + $script:Gm.Reset),
+        ($script:Gm.Grey1 + 'Session:     ' + $script:Gm.Fg + "$(Format-TuiText $State.session_id) " + $script:Gm.Grey1 + "| Name: $(Format-TuiText $nmInfo) | Leaf: $(Format-TuiText $leafInfo)" + $script:Gm.Reset),
+        ($script:Gm.Grey1 + 'File:        ' + $script:Gm.Grey2 + (Format-TuiText $sessFileStr) + $script:Gm.Reset),
         ($script:Gm.Grey1 + 'Tools:       ' + $script:Gm.Aqua + $toolsStr + $script:Gm.Reset)
     )
     $tdList = @(if ($script:ActiveSessionTodos -and @($script:ActiveSessionTodos).Count -gt 0) { @($script:ActiveSessionTodos) } elseif ($State -and $State.todos -and @($State.todos).Count -gt 0) { @($State.todos) })
@@ -10693,9 +10822,9 @@ function Format-TuiTreeCard {
     else {
         foreach ($node in $treeNodes) {
             $marker = if ($node.is_leaf) { $script:Box.Dot } elseif ($node.active) { $script:Box.Arrow } else { '-' }
-            $parentInfo = if ($node.parent_id) { " <- $($node.parent_id)" } else { ' (root)' }
+            $parentInfo = if ($node.parent_id) { " <- $(Format-TuiText $node.parent_id)" } else { ' (root)' }
             $color = if ($node.is_leaf) { $script:Gm.BoldGreen } elseif ($node.active) { $script:Gm.Aqua } else { $script:Gm.Grey1 }
-            $body += ($color + ("{0} [{1}] ({2}{3}) " -f $marker, $node.id, $node.role, $parentInfo) + $script:Gm.Fg + $node.preview + $script:Gm.Reset)
+            $body += ($color + ("{0} [{1}] ({2}{3}) " -f $marker, (Format-TuiText $node.id), (Format-TuiText $node.role), $parentInfo) + $script:Gm.Fg + (Format-TuiText $node.preview) + $script:Gm.Reset)
         }
         $body += ($script:Gm.Grey1 + '(Use /tree <entry-id> to switch branch, or /fork <entry-id> to fork)' + $script:Gm.Reset)
     }
@@ -10763,7 +10892,7 @@ function Write-TuiStartupBanner {
     $null = Get-AgentRolesCatalog -Root $RootPath -ConfigDir $ConfigDir
     if ($script:AgentRolesByName -and $script:AgentRolesByName.Count -gt 0) { $ctxLoaded += "agents ($($script:AgentRolesByName.Count))" }
     $loadedStr = if ($ctxLoaded.Count -gt 0) { $script:Gm.Aqua + 'Loaded: ' + $script:Gm.Fg + ($ctxLoaded -join ' | ') + $script:Gm.Reset } else { $script:Gm.Grey1 + 'Workspace ready' + $script:Gm.Reset }
-    $modelStr = $script:Gm.Aqua + 'Model: ' + $script:Gm.Fg + $Model + $script:Gm.Grey1 + ' | ' + $script:Gm.Aqua + 'Mode: ' + $script:Gm.Fg + $script:AgentPermission + $script:Gm.Reset
+    $modelStr = $script:Gm.Aqua + 'Model: ' + $script:Gm.Fg + (Format-TuiText $Model) + $script:Gm.Grey1 + ' | ' + $script:Gm.Aqua + 'Mode: ' + $script:Gm.Fg + $script:AgentPermission + $script:Gm.Reset
     $shortcutsStr = $script:Gm.Grey1 + 'Shortcuts: ' + $script:Gm.Aqua + '? (/help)' + $script:Gm.Grey1 + ' | ' + $script:Gm.Aqua + '/p' + $script:Gm.Grey1 + ' mode | ' + $script:Gm.Aqua + '/m' + $script:Gm.Grey1 + ' model | ' + $script:Gm.Aqua + '/s' + $script:Gm.Grey1 + ' status | ' + $script:Gm.Aqua + '/u' + $script:Gm.Grey1 + ' undo' + $script:Gm.Reset
     $textLines = @($loadedStr, $modelStr, $shortcutsStr)
 
@@ -10805,7 +10934,7 @@ function Write-TuiAgentsCard {
     foreach ($rKey in @($script:AgentRolesByName.Keys | Sort-Object)) {
         $rObj = $script:AgentRolesByName[$rKey]
         $srcTag = if ($rObj.builtin) { 'built-in' } else { $rObj.rel_path }
-        $body += ($script:Gm.Aqua + ("{0,-12} " -f $rObj.name) + $script:Gm.Yellow + ("[{0}; {1}] " -f $rObj.permission, $srcTag) + $script:Gm.Fg + $rObj.description + $script:Gm.Reset)
+        $body += ($script:Gm.Aqua + ("{0,-12} " -f (Format-TuiText $rObj.name)) + $script:Gm.Yellow + ("[{0}; {1}] " -f (Format-TuiText $rObj.permission), (Format-TuiText $srcTag)) + $script:Gm.Fg + (Format-TuiText $rObj.description) + $script:Gm.Reset)
     }
     $body += ($script:Gm.Grey1 + '(Invoke via /agent:<role> <task> or let the model call run_agent)' + $script:Gm.Reset)
     foreach ($ln in @(Format-TuiCardBox -Header $hdr -BodyLines $body -Width $w)) {
@@ -10825,7 +10954,7 @@ function Write-TuiSkillsCard {
     else {
         foreach ($sKey in @($script:SkillsByName.Keys | Sort-Object)) {
             $sObj = $script:SkillsByName[$sKey]
-            $body += ($script:Gm.Aqua + ("{0,-18} " -f $sObj.name) + $script:Gm.Fg + $sObj.description + $script:Gm.Reset)
+            $body += ($script:Gm.Aqua + ("{0,-18} " -f (Format-TuiText $sObj.name)) + $script:Gm.Fg + (Format-TuiText $sObj.description) + $script:Gm.Reset)
         }
         $body += ($script:Gm.Grey1 + '(Invoke via /skill:<name> [args])' + $script:Gm.Reset)
     }
@@ -10918,7 +11047,7 @@ function Invoke-ReplMemoryCommand {
         }
     }
     catch {
-        Write-Host ($script:Gm.Red + '  ' + $_.Exception.Message + $script:Gm.Reset)
+        Write-Host ($script:Gm.Red + '  ' + (Format-TuiText $_.Exception.Message) + $script:Gm.Reset)
     }
 }
 
@@ -10974,7 +11103,7 @@ function Invoke-ReplDiagnosticsCommand {
     else {
         $capNow = Get-AgentCapabilities -Root $RootPath
         $tList = if ($capNow.tool_names.Count -gt 0) { $capNow.tool_names -join ', ' } else { 'none' }
-        Write-Host ($script:Gm.Aqua + "  Diagnostics: $($script:Diagnostics) | Mode: $($capNow.permission) | Shell: $($capNow.environment.shell_exe) $($capNow.environment.shell_version) | Tools: $tList" + $script:Gm.Reset)
+        Write-Host ($script:Gm.Aqua + "  Diagnostics: $($script:Diagnostics) | Mode: $($capNow.permission) | Shell: $(Format-TuiText $capNow.environment.shell_exe) $(Format-TuiText $capNow.environment.shell_version) | Tools: $tList" + $script:Gm.Reset)
     }
 }
 
@@ -11059,7 +11188,7 @@ function Invoke-ReplContextCommand {
             Write-Host ($script:Gm.Green + "  Context window set to $wFmt tokens | Auto-compact threshold: $cFmt ($($limRes.compact_pct)%)" + $script:Gm.Reset)
         }
         catch {
-            Write-Host ($script:Gm.Red + '  ' + $_.Exception.Message + $script:Gm.Reset)
+            Write-Host ($script:Gm.Red + '  ' + (Format-TuiText $_.Exception.Message) + $script:Gm.Reset)
         }
     }
 }
@@ -11123,7 +11252,7 @@ function Invoke-ReplThemeCommand {
             Write-Host ($script:Gm.Green + "  Theme set to: $($applied.id) ($($applied.label))" + $script:Gm.Reset)
         }
         catch {
-            Write-Host ($script:Gm.Red + '  ' + $_.Exception.Message + $script:Gm.Reset)
+            Write-Host ($script:Gm.Red + '  ' + (Format-TuiText $_.Exception.Message) + $script:Gm.Reset)
         }
     }
 }
@@ -11141,12 +11270,12 @@ function Export-AgentSessionOutput {
     )
     if ($ExportPath -match '\.jsonl$') {
         Save-AgentSession -SessionFile $ExportPath -State $State -Workspace $RootPath -Model $Model -AsExport
-        Write-Host ($script:Gm.Green + "${Indent}Exported session JSONL: $ExportPath" + $script:Gm.Reset)
+        Write-Host ($script:Gm.Green + "${Indent}Exported session JSONL: $(Format-TuiText $ExportPath)" + $script:Gm.Reset)
         return $ExportPath
     }
     $outHtml = if ($ExportPath -match '\.html?$') { $ExportPath } else { $ExportPath + '.html' }
     $exported = Export-AgentSessionHtml -State $State -OutputPath $outHtml
-    Write-Host ($script:Gm.Green + "${Indent}Exported session HTML: $exported" + $script:Gm.Reset)
+    Write-Host ($script:Gm.Green + "${Indent}Exported session HTML: $(Format-TuiText $exported)" + $script:Gm.Reset)
     return $exported
 }
 
@@ -11234,14 +11363,14 @@ function Invoke-ReplNameCommand {
         }
         catch {
             $State.session_name = $previousName
-            Write-Host ($script:Gm.Red + '  ' + $_.Exception.Message + $script:Gm.Reset)
+            Write-Host ($script:Gm.Red + '  ' + (Format-TuiText $_.Exception.Message) + $script:Gm.Reset)
             return
         }
-        Write-Host ($script:Gm.Green + "  Session name set to: $($State.session_name)" + $script:Gm.Reset)
+        Write-Host ($script:Gm.Green + "  Session name set to: $(Format-TuiText $State.session_name)" + $script:Gm.Reset)
     }
     else {
         $nm = if ($State.session_name) { $State.session_name } else { '(unnamed)' }
-        Write-Host ($script:Gm.Aqua + "  Session name: $nm (use /name <text> to set)" + $script:Gm.Reset)
+        Write-Host ($script:Gm.Aqua + "  Session name: $(Format-TuiText $nm) (use /name <text> to set)" + $script:Gm.Reset)
     }
 }
 
@@ -11254,10 +11383,10 @@ function Invoke-ReplTreeCommand {
             Clear-AgentUndoBackups -UndoEntries $UndoStack
             $UndoStack = @()
             Save-AgentSession -SessionFile $SessionFile -State $State -Workspace $RootPath -Model $Model
-            Write-Host ($script:Gm.Green + "  Switched active branch to entry $targetId ($($State.messages.Count) messages in active path)." + $script:Gm.Reset)
+            Write-Host ($script:Gm.Green + "  Switched active branch to entry $(Format-TuiText $targetId) ($($State.messages.Count) messages in active path)." + $script:Gm.Reset)
         }
         catch {
-            Write-Host ($script:Gm.Red + '  ' + $_.Exception.Message + $script:Gm.Reset)
+            Write-Host ($script:Gm.Red + '  ' + (Format-TuiText $_.Exception.Message) + $script:Gm.Reset)
         }
     }
     else {
@@ -11278,10 +11407,10 @@ function Invoke-ReplForkCommand {
         Clear-AgentUndoBackups -UndoEntries $UndoStack
         $UndoStack = @()
         Reset-AgentSessionApprovals -State $State
-        Write-Host ($script:Gm.Green + "  Forked session to: $($forkRes.session_file) (id=$($forkRes.session_id))" + $script:Gm.Reset)
+        Write-Host ($script:Gm.Green + "  Forked session to: $(Format-TuiText $forkRes.session_file) (id=$(Format-TuiText $forkRes.session_id))" + $script:Gm.Reset)
     }
     catch {
-        Write-Host ($script:Gm.Red + '  Fork failed: ' + $_.Exception.Message + $script:Gm.Reset)
+        Write-Host ($script:Gm.Red + '  Fork failed: ' + (Format-TuiText $_.Exception.Message) + $script:Gm.Reset)
     }
     return @{ state = $State; session_file = $SessionFile; undo_stack = @($UndoStack) }
 }
@@ -11300,7 +11429,7 @@ function Invoke-ReplExportCommand {
         $null = Export-AgentSessionOutput -State $State -ExportPath $expArg -RootPath $RootPath -Model $Model -Indent '  '
     }
     catch {
-        Write-Host ($script:Gm.Red + '  Export failed: ' + $_.Exception.Message + $script:Gm.Reset)
+        Write-Host ($script:Gm.Red + '  Export failed: ' + (Format-TuiText $_.Exception.Message) + $script:Gm.Reset)
     }
 }
 
@@ -11313,7 +11442,7 @@ function Invoke-ReplImportCommand {
     }
     $impPath = if (Test-Path -LiteralPath $impArg) { $impArg } else { Join-Path $RootPath $impArg }
     if (-not (Test-Path -LiteralPath $impPath)) {
-        Write-Host ($script:Gm.Red + "  File not found: $impArg" + $script:Gm.Reset)
+        Write-Host ($script:Gm.Red + "  File not found: $(Format-TuiText $impArg)" + $script:Gm.Reset)
         return @{ state = $State; session_file = $SessionFile; model = $Model; undo_stack = @($UndoStack); last_failed_question = $LastFailedQuestion }
     }
     try {
@@ -11325,10 +11454,10 @@ function Invoke-ReplImportCommand {
         $LastFailedQuestion = ''
         if ($State.model) { $Model = $State.model }
         Reset-AgentSessionApprovals -State $State
-        Write-Host ($script:Gm.Green + "  Imported session: $impPath ($($State.messages.Count) messages)" + $script:Gm.Reset)
+        Write-Host ($script:Gm.Green + "  Imported session: $(Format-TuiText $impPath) ($($State.messages.Count) messages)" + $script:Gm.Reset)
     }
     catch {
-        Write-Host ($script:Gm.Red + '  Import failed: ' + $_.Exception.Message + $script:Gm.Reset)
+        Write-Host ($script:Gm.Red + '  Import failed: ' + (Format-TuiText $_.Exception.Message) + $script:Gm.Reset)
     }
     return @{ state = $State; session_file = $SessionFile; model = $Model; undo_stack = @($UndoStack); last_failed_question = $LastFailedQuestion }
 }
@@ -11351,7 +11480,7 @@ function Invoke-ReplCopyCommand {
         Write-Host ($script:Gm.Green + "  Copied last assistant response ($($lastAssistant.Length) chars) to clipboard." + $script:Gm.Reset)
     }
     catch {
-        Write-Host ($script:Gm.Red + '  Clipboard copy failed: ' + $_.Exception.Message + $script:Gm.Reset)
+        Write-Host ($script:Gm.Red + '  Clipboard copy failed: ' + (Format-TuiText $_.Exception.Message) + $script:Gm.Reset)
     }
 }
 
@@ -11382,11 +11511,11 @@ function Invoke-ReplSaveCommand {
     }
     try {
         Save-AgentSession -SessionFile $target -State $State -Workspace $RootPath -Model $Model
-        Write-Host ($script:Gm.Green + "  Saved session: $target" + $script:Gm.Reset)
+        Write-Host ($script:Gm.Green + "  Saved session: $(Format-TuiText $target)" + $script:Gm.Reset)
         return @{ session_file = $target }
     }
     catch {
-        Write-Host ($script:Gm.Red + '  ' + $_.Exception.Message + $script:Gm.Reset)
+        Write-Host ($script:Gm.Red + '  ' + (Format-TuiText $_.Exception.Message) + $script:Gm.Reset)
         return @{ session_file = $SessionFile }
     }
 }
@@ -11429,7 +11558,7 @@ function Invoke-ReplUndoCommand {
         Save-AgentSession -SessionFile $SessionFile -State $State -Workspace $RootPath -Model $Model
     }
     catch {
-        Write-Host ($script:Gm.Red + '  ' + $_.Exception.Message + $script:Gm.Reset)
+        Write-Host ($script:Gm.Red + '  ' + (Format-TuiText $_.Exception.Message) + $script:Gm.Reset)
     }
     return @{ state = $State; undo_stack = @($UndoStack) }
 }
@@ -11443,7 +11572,7 @@ function Invoke-ReplModelCommand {
             Save-AgentSession -SessionFile $SessionFile -State $State -Workspace $RootPath -Model $selectedModel
         }
         catch {
-            Write-Host ($script:Gm.Red + '  ' + $_.Exception.Message + $script:Gm.Reset)
+            Write-Host ($script:Gm.Red + '  ' + (Format-TuiText $_.Exception.Message) + $script:Gm.Reset)
             return $CurrentModel
         }
         $CurrentModel = $selectedModel
@@ -11452,7 +11581,7 @@ function Invoke-ReplModelCommand {
         if ($script:AgentConfigPath) {
             $null = Update-AgentConfigOptionalKey -Path $script:AgentConfigPath -Key 'SHELLOSSUS_MODEL' -Value $CurrentModel
         }
-        Write-Host ($script:Gm.Green + "  Model switched to: $CurrentModel" + $script:Gm.Reset)
+        Write-Host ($script:Gm.Green + "  Model switched to: $(Format-TuiText $CurrentModel)" + $script:Gm.Reset)
     }
     return $CurrentModel
 }
@@ -11478,7 +11607,7 @@ function Invoke-ReplCompactCommand {
         }
     }
     catch {
-        Write-Host ($script:Gm.Red + '  Compaction failed: ' + (Format-AgentError -ErrorRecord $_) + $script:Gm.Reset)
+        Write-Host ($script:Gm.Red + '  Compaction failed: ' + (Format-TuiText (Format-AgentError -ErrorRecord $_)) + $script:Gm.Reset)
     }
 }
 
@@ -11539,14 +11668,14 @@ function Invoke-ReplSessionsCommand {
             $LastFailedQuestion = ''
             if ($State.model) { $Model = $State.model }
             Reset-AgentSessionApprovals -State $State
-            Write-Host ($script:Gm.Green + "  Resumed session: $chosen ($($State.messages.Count) messages, model=$Model, permission=$($script:AgentPermission))" + $script:Gm.Reset)
+            Write-Host ($script:Gm.Green + "  Resumed session: $(Format-TuiText $chosen) ($($State.messages.Count) messages, model=$(Format-TuiText $Model), permission=$($script:AgentPermission))" + $script:Gm.Reset)
         }
         catch {
-            Write-Host ($script:Gm.Red + '  ' + $_.Exception.Message + $script:Gm.Reset)
+            Write-Host ($script:Gm.Red + '  ' + (Format-TuiText $_.Exception.Message) + $script:Gm.Reset)
         }
     }
     elseif ($arg) {
-        Write-Host ($script:Gm.Red + "  Session not found: $arg" + $script:Gm.Reset)
+        Write-Host ($script:Gm.Red + "  Session not found: $(Format-TuiText $arg)" + $script:Gm.Reset)
     }
     return @{ state = $State; session_file = $SessionFile; model = $Model; undo_stack = @($UndoStack); last_failed_question = $LastFailedQuestion }
 }
@@ -11585,10 +11714,10 @@ function Invoke-ReplContinueCommand {
         $rollback = Invoke-AgentTurnRollback -State $State -Snapshot $turnSnapshot -Writes @($script:CurrentTurnWrites) -UndoStack $UndoStack
         $UndoStack = @($rollback.undo_stack)
         if ($rollback.succeeded) {
-            Write-Host ($script:Gm.Red + 'Continue failed; turn rolled back: ' + $requestErr + $script:Gm.Reset)
+            Write-Host ($script:Gm.Red + 'Continue failed; turn rolled back: ' + (Format-TuiText $requestErr) + $script:Gm.Reset)
         }
         else {
-            Write-Host ($script:Gm.Red + 'Continue failed; rollback did not succeed: ' + $rollback.error + $script:Gm.Reset)
+            Write-Host ($script:Gm.Red + 'Continue failed; rollback did not succeed: ' + (Format-TuiText $rollback.error) + $script:Gm.Reset)
         }
         return @{ state = $State; undo_stack = @($UndoStack); last_failed_question = $LastFailedQuestion }
     }
@@ -11603,7 +11732,7 @@ function Invoke-ReplBangCommand {
     if (-not $cmdStr) { return }
     try {
         $res = Invoke-ShellCommand -Root $RootPath -Command $cmdStr
-        if ($res.output) { Write-Host ($script:Gm.Fg + $res.output + $script:Gm.Reset) }
+        if ($res.output) { Write-Host ($script:Gm.Fg + (Format-TuiText -Text $res.output -Multiline) + $script:Gm.Reset) }
         Write-Host ($script:Gm.Grey1 + "  [exit $($res.exit_code)]" + $script:Gm.Reset)
         if (-not $localOnly) {
             $snapshot = New-AgentTurnSnapshot -State $State
@@ -11619,7 +11748,7 @@ function Invoke-ReplBangCommand {
         }
     }
     catch {
-        Write-Host ($script:Gm.Red + '  Command error: ' + $_.Exception.Message + $script:Gm.Reset)
+        Write-Host ($script:Gm.Red + '  Command error: ' + (Format-TuiText $_.Exception.Message) + $script:Gm.Reset)
     }
 }
 
@@ -11654,6 +11783,16 @@ if (-not $LibraryOnly) {
             throw
         }
     }
+    $keyStorageWarning = ''
+    if ($config.SHELLOSSUS_API_KEY -and -not (Test-AgentConfigPrivacy -Path $script:AgentConfigPath)) {
+        $keyStorageWarning = 'The saved API key is plaintext and config privacy could not be verified. Move settings to a private location or use SHELLOSSUS_API_KEY from the environment.'
+        if (-not $Doctor) {
+            if ($script:OutputMode -eq 'json') {
+                Write-AgentJsonEvent -EventType 'diagnostics' -Payload @{ check = 'key_storage'; status = 'warn'; message = $keyStorageWarning }
+            }
+            else { Write-Warning $keyStorageWarning }
+        }
+    }
     if (-not $Theme -and $config.SHELLOSSUS_THEME) { $Theme = $config.SHELLOSSUS_THEME }
     if ($Theme) {
         try {
@@ -11667,28 +11806,25 @@ if (-not $LibraryOnly) {
         }
     }
     if ($Setup -and -not $Doctor) {
-        Write-Host ($script:Gm.OscInit + $script:Gm.Fg + "Save settings to: $ConfigPath" + $script:Gm.Reset)
-        Write-Host ($script:Gm.Yellow + 'API key is stored as plain text in your user profile, outside the project.' + $script:Gm.Reset)
+        Write-Host ($script:Gm.OscInit + $script:Gm.Fg + "Save settings to: $(Format-TuiText $ConfigPath)" + $script:Gm.Reset)
+        Write-Host ($script:Gm.Yellow + 'A saved API key is plaintext. Leave the key blank to keep an existing key or use SHELLOSSUS_API_KEY at launch.' + $script:Gm.Reset)
         $defaultUrl = $BaseUrl
         if (-not $defaultUrl) { $defaultUrl = $config.SHELLOSSUS_BASE_URL }
-        $inputUrl = Read-Host "API base URL including /v1 [$defaultUrl]"
+        $inputUrl = Read-Host "API base URL including /v1 [$(Format-TuiText $defaultUrl)]"
         if (-not $inputUrl) { $inputUrl = $defaultUrl }
         if (-not (Test-ValidAgentBaseUrl -Url $inputUrl)) { throw 'An HTTPS base URL (or http://localhost / http://127.0.0.1 for local servers) is required. Run: shellossus -Setup' }
         $defaultModel = $Model
         if (-not $defaultModel) { $defaultModel = $config.SHELLOSSUS_MODEL }
-        $inputModel = Read-Host "Model ID [$defaultModel]"
+        $inputModel = Read-Host "Model ID [$(Format-TuiText $defaultModel)]"
         if (-not $inputModel) { $inputModel = $defaultModel }
         if (-not $inputModel) { throw 'Model ID is required.' }
-        Write-Host ($script:Gm.Yellow + 'Key input is visible. Enter keeps the saved key, if any.' + $script:Gm.Reset)
-        $inputKey = Read-Host 'API key'
+        $inputKey = Read-AgentApiKey
         if (-not $inputKey) { $inputKey = $config.SHELLOSSUS_API_KEY }
-        if (-not $inputKey -and (Test-IsLoopbackBaseUrl -Url $inputUrl)) { $inputKey = 'local' }
-        if (-not $inputKey) { throw 'API key is required.' }
         $defaultWorkspace = ''
         if ($PSBoundParameters.Keys -contains 'Workspace') { $defaultWorkspace = $Workspace }
         elseif ($env:SHELLOSSUS_WORKSPACE) { $defaultWorkspace = $env:SHELLOSSUS_WORKSPACE }
         elseif ($config.SHELLOSSUS_WORKSPACE) { $defaultWorkspace = $config.SHELLOSSUS_WORKSPACE }
-        $wsPrompt = if ($defaultWorkspace) { "Default workspace [$defaultWorkspace] (Enter keeps saved, '-' clears)" } else { 'Default workspace (Enter = current folder at each launch)' }
+        $wsPrompt = if ($defaultWorkspace) { "Default workspace [$(Format-TuiText $defaultWorkspace)] (Enter keeps saved, '-' clears)" } else { 'Default workspace (Enter = current folder at each launch)' }
         $inputWorkspace = Read-Host $wsPrompt
         if (-not $inputWorkspace) { $inputWorkspace = $defaultWorkspace }
         elseif ($inputWorkspace.Trim() -eq '-') { $inputWorkspace = '' }
@@ -11704,8 +11840,12 @@ if (-not $LibraryOnly) {
         if (($PSBoundParameters.Keys -contains 'ContextWindow') -and $ContextWindow) { $newCfg['SHELLOSSUS_CONTEXT_WINDOW'] = $ContextWindow }
         if (($PSBoundParameters.Keys -contains 'CompactThreshold') -and $CompactThreshold) { $newCfg['SHELLOSSUS_COMPACT_THRESHOLD'] = $CompactThreshold }
         if (($PSBoundParameters.Keys -contains 'Theme') -and $Theme -and $script:ActiveTheme) { $newCfg['SHELLOSSUS_THEME'] = $script:ActiveTheme }
-        Save-AgentConfig -Path $ConfigPath -Config $newCfg
-        Remove-Variable inputKey -ErrorAction SilentlyContinue
+        try { Save-AgentConfig -Path $ConfigPath -Config $newCfg }
+        finally {
+            $newCfg.Clear()
+            $config.Clear()
+            Remove-Variable inputKey -ErrorAction SilentlyContinue
+        }
         Write-Host ($script:Gm.BoldGreen + 'Settings saved. Run shellossus -Doctor to check them, then start shellossus from your working folder.' + $script:Gm.Reset)
         return
     }
@@ -11730,10 +11870,9 @@ if (-not $LibraryOnly) {
         $sessionDir = $SessionDir
     }
     if ($Doctor) {
-        $doctorKey = $env:SHELLOSSUS_API_KEY
-        if (-not $doctorKey) { $doctorKey = $config.SHELLOSSUS_API_KEY }
+        $doctorKey = Get-AgentConfiguredApiKey -Config $config
         try {
-            $report = Get-AgentDoctorReport -BaseUrl $BaseUrl -ModelId $Model -ApiKey $doctorKey -Workspace $Workspace -SessionDir $sessionDir -NoSession:$NoSession -ConfigState $doctorConfigState
+            $report = Get-AgentDoctorReport -BaseUrl $BaseUrl -ModelId $Model -ApiKey $doctorKey -Workspace $Workspace -SessionDir $sessionDir -NoSession:$NoSession -ConfigState $doctorConfigState -KeyStorageWarning $keyStorageWarning
             Write-AgentDoctorReport -Report $report -Mode $Mode
         }
         finally { Remove-Variable doctorKey -ErrorAction SilentlyContinue; $config.Clear() }
@@ -11793,15 +11932,13 @@ if (-not $LibraryOnly) {
     $agentKey = ''
     if (-not $Export) {
         $endpoint = $BaseUrl.TrimEnd('/') + '/chat/completions'
-        $agentKey = $env:SHELLOSSUS_API_KEY
-        if (-not $agentKey) { $agentKey = $config.SHELLOSSUS_API_KEY }
+        $agentKey = Get-AgentConfiguredApiKey -Config $config
         $config.Clear()
         if (-not $agentKey -and (Test-IsLoopbackBaseUrl -Url $BaseUrl)) {
             $agentKey = 'local'
         }
         if (-not $agentKey -and $script:OutputMode -ne 'json') {
-            Write-Host ($script:Gm.Yellow + 'Key input is visible. Run shellossus -Setup to save settings for next time.' + $script:Gm.Reset)
-            $agentKey = Read-Host 'API key'
+            $agentKey = Read-AgentApiKey
         }
         if (-not $agentKey) {
             $keyErr = 'API key is required.'
@@ -11895,11 +12032,11 @@ if (-not $LibraryOnly) {
                 if (-not $rollback.succeeded) {
                     $errorPayload.rollback_error = $rollback.error
                     if ($script:OutputMode -ne 'json') {
-                        Write-Host ($script:Gm.Red + 'Rollback did not succeed: ' + $rollback.error + $script:Gm.Reset)
+                        Write-Host ($script:Gm.Red + 'Rollback did not succeed: ' + (Format-TuiText $rollback.error) + $script:Gm.Reset)
                     }
                 }
                 Write-AgentJsonEvent -EventType 'turn_end' -Payload $errorPayload
-                throw
+                throw (Format-TuiText $errMsg)
             }
             return
         }
@@ -11930,7 +12067,7 @@ if (-not $LibraryOnly) {
             if ($trimmedQ -eq '/help' -or $trimmedQ -eq '/hotkeys') { Write-TuiHelpCard; continue }
             if ($trimmedQ -eq '/doctor') {
                 $doctorSessionDir = if ($sessionFile) { Split-Path $sessionFile -Parent } else { $sessionDir }
-                $report = Get-AgentDoctorReport -BaseUrl $BaseUrl -ModelId $Model -ApiKey $agentKey -Workspace $rootPath -SessionDir $doctorSessionDir -NoSession:(-not $sessionFile) -ConfigState $doctorConfigState
+                $report = Get-AgentDoctorReport -BaseUrl $BaseUrl -ModelId $Model -ApiKey $agentKey -Workspace $rootPath -SessionDir $doctorSessionDir -NoSession:(-not $sessionFile) -ConfigState $doctorConfigState -KeyStorageWarning $keyStorageWarning
                 Write-AgentDoctorReport -Report $report -Mode $script:OutputMode
                 continue
             }
@@ -12007,10 +12144,10 @@ if (-not $LibraryOnly) {
             elseif ($trimmedQ.StartsWith('/')) {
                 $tplText = Resolve-PromptTemplate -Root $rootPath -ConfigDir $configDir -InputText $trimmedQ
                 if ($null -eq $tplText) {
-                    Write-Host ($script:Gm.Red + "  Unknown command or prompt template: $trimmedQ (use /help)" + $script:Gm.Reset)
+                    Write-Host ($script:Gm.Red + "  Unknown command or prompt template: $(Format-TuiText $trimmedQ) (use /help)" + $script:Gm.Reset)
                     continue
                 }
-                Write-Host ($script:Gm.Aqua + "  [template] Expanded $trimmedQ" + $script:Gm.Reset)
+                Write-Host ($script:Gm.Aqua + "  [template] Expanded $(Format-TuiText $trimmedQ)" + $script:Gm.Reset)
                 $question = $tplText
             }
             if ($trimmedQ.StartsWith('!')) {
@@ -12034,10 +12171,10 @@ if (-not $LibraryOnly) {
                 $rollback = Invoke-AgentTurnRollback -State $state -Snapshot $turnSnapshot -Writes @($script:CurrentTurnWrites) -UndoStack $undoStack
                 $undoStack = @($rollback.undo_stack)
                 if ($rollback.succeeded) {
-                    Write-Host ($script:Gm.Red + 'Request failed; turn rolled back (use /retry to resend): ' + $requestErr + $script:Gm.Reset)
+                    Write-Host ($script:Gm.Red + 'Request failed; turn rolled back (use /retry to resend): ' + (Format-TuiText $requestErr) + $script:Gm.Reset)
                 }
                 else {
-                    Write-Host ($script:Gm.Red + 'Request failed; rollback did not succeed: ' + $rollback.error + $script:Gm.Reset)
+                    Write-Host ($script:Gm.Red + 'Request failed; rollback did not succeed: ' + (Format-TuiText $rollback.error) + $script:Gm.Reset)
                 }
                 continue
             }

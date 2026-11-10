@@ -123,7 +123,7 @@ function Invoke-AgentMemory {
             }
             Write-MemoryCard -Scope $scope -Action $action -Content $cardContent
             $cardPrinted = $true
-            $promptStr = '  ' + $script:Gm.BoldYellow + $script:Box.Arrow + " Confirm memory $action ($displayRel) [y]es, [n]o, [a]ll edits: " + $script:Gm.Fg
+            $promptStr = '  ' + $script:Gm.BoldYellow + $script:Box.Arrow + " Confirm memory $action ($(Format-TuiText $displayRel)) [y]es, [n]o, [a]ll edits: " + $script:Gm.Fg
             $choice = Read-TuiConfirmation -PromptText $promptStr -ActionType 'write'
             if ($choice -eq 'a') {
                 $script:AgentPermission = 'AutoEdit'

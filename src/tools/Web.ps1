@@ -245,7 +245,7 @@ function Request-AgentWebConfirmation {
             } | ConvertTo-Json -Compress)
         }
     }
-    Write-Host ("`n  " + $script:Gm.Grey0 + $script:Box.TL + $script:Box.H + ' ' + $script:Gm.BoldYellow + $script:Box.Arrow + " $ToolName " + $script:Gm.Fg1 + (Format-PreviewText $Target) + $script:Gm.Reset)
+    Write-Host ("`n  " + $script:Gm.Grey0 + $script:Box.TL + $script:Box.H + ' ' + $script:Gm.BoldYellow + $script:Box.Arrow + " $(Format-TuiText $ToolName) " + $script:Gm.Fg1 + (Format-TuiText $Target) + $script:Gm.Reset)
     $promptStr = '  ' + $script:Gm.Grey0 + $script:Box.V + ' ' + $script:Gm.BoldYellow + 'Confirm outbound web request [y]es, [n]o, [a]ll: ' + $script:Gm.Fg
     $choice = Read-TuiConfirmation -PromptText $promptStr -ActionType 'web'
     if ($choice -eq 'a') {

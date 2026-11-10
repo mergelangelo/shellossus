@@ -256,8 +256,8 @@ function Invoke-AgentCommand {
         if ($timeoutSec -lt 1 -or $timeoutSec -gt 600) { throw 'timeout_sec must be between 1 and 600.' }
     }
     if ($script:OutputMode -ne 'json') {
-        Write-Host ("`n  " + $script:Gm.Grey0 + $script:Box.TL + $script:Box.H + ' ' + $script:Gm.BoldYellow + $script:Box.Arrow + ' run_command ' + $script:Gm.Grey1 + '(' + $Root + ')' + $script:Gm.Reset)
-        Write-Host ('  ' + $script:Gm.Grey0 + $script:Box.V + ' ' + $script:Gm.Bg1 + $script:Gm.Yellow + '  ' + (Format-PreviewText $cmdText) + '  ' + $script:Gm.Reset)
+        Write-Host ("`n  " + $script:Gm.Grey0 + $script:Box.TL + $script:Box.H + ' ' + $script:Gm.BoldYellow + $script:Box.Arrow + ' run_command ' + $script:Gm.Grey1 + '(' + (Format-TuiText $Root) + ')' + $script:Gm.Reset)
+        Write-Host ('  ' + $script:Gm.Grey0 + $script:Box.V + ' ' + $script:Gm.Bg1 + $script:Gm.Yellow + '  ' + (Format-TuiText $cmdText) + '  ' + $script:Gm.Reset)
     }
     if ($script:AgentPermission -eq 'Auto') {
         if ($script:OutputMode -ne 'json') {
@@ -287,7 +287,7 @@ function Invoke-AgentCommand {
         if ($res.output) {
             $previewLines = @($res.output -split "`r?`n" | Select-Object -First 15)
             foreach ($pLine in $previewLines) {
-                Write-Host ('  ' + $script:Gm.Grey0 + $script:Box.V + '   ' + $script:Gm.Grey1 + (Format-PreviewText $pLine) + $script:Gm.Reset)
+                Write-Host ('  ' + $script:Gm.Grey0 + $script:Box.V + '   ' + $script:Gm.Grey1 + (Format-TuiText -Text $pLine -Multiline) + $script:Gm.Reset)
             }
             if (($res.output -split "`r?`n").Count -gt 15) {
                 Write-Host ('  ' + $script:Gm.Grey0 + $script:Box.V + '   ... (output truncated in terminal preview)' + $script:Gm.Reset)

@@ -237,7 +237,7 @@ function Invoke-AgentTurn {
                     if (($attempt -lt $maxRetries) -and ($errFormatted -match '(?i)\b(408|429|500|502|503|504|timeout|timed out)\b')) {
                         $delay = ($attempt + 1) * 2
                         if ($script:OutputMode -ne 'json') {
-                            Write-Host ($script:Gm.Yellow + ("  [retry {0}/{1}] Transient error ({2}); waiting {3}s..." -f ($attempt + 1), $maxRetries, $errFormatted, $delay) + $script:Gm.Reset)
+                            Write-Host ($script:Gm.Yellow + ("  [retry {0}/{1}] Transient error ({2}); waiting {3}s..." -f ($attempt + 1), $maxRetries, (Format-TuiText $errFormatted), $delay) + $script:Gm.Reset)
                         }
                         Start-Sleep -Seconds $delay
                         continue
@@ -386,7 +386,7 @@ function Invoke-AgentTurn {
                 }
                 $output = ($warnObj | ConvertTo-Json -Compress)
                 if ($script:OutputMode -ne 'json') {
-                    Write-Host ($script:Gm.Yellow + "  [loop-guard] Repeated identical call to $canonToolName; returning warning." + $script:Gm.Reset)
+                    Write-Host ($script:Gm.Yellow + "  [loop-guard] Repeated identical call to $(Format-TuiText $canonToolName); returning warning." + $script:Gm.Reset)
                 }
                 Write-AgentJsonEvent -EventType 'tool_execution_end' -Payload @{ id = [string]$call.id; name = [string]$call.function.name; result = $output }
                 $State.messages += @{ role = 'tool'; tool_call_id = $call.id; content = $output }
@@ -511,7 +511,7 @@ function Invoke-AgentTurn {
         }
         if ($loopAborted) {
             if ($script:OutputMode -ne 'json') {
-                Write-Host ($script:Gm.Yellow + "Loop detected: repeated identical calls to '$($State.repeated_tool)'. Turn stopped (completed edits are preserved; use /undo to revert)." + $script:Gm.Reset)
+                Write-Host ($script:Gm.Yellow + "Loop detected: repeated identical calls to '$(Format-TuiText $State.repeated_tool)'. Turn stopped (completed edits are preserved; use /undo to revert)." + $script:Gm.Reset)
             }
             Write-AgentJsonEvent -EventType 'turn_end' -Payload @{
                 step = $step

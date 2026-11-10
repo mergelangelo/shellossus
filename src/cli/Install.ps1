@@ -130,16 +130,16 @@ function Invoke-AgentProfileInstall {
         $conflict = Get-ShortcutConflict -Name $cand -PreviousShortcut $previousShortcut -ResolvedAgent $resolvedAgent
         if ($conflict) {
             $info = if ($conflict.Detail) { " ($($conflict.Detail))" } else { '' }
-            throw "Shortcut '$cand' conflicts with existing $($conflict.CommandType) '$($conflict.Name)'$info. Choose another shortcut."
+            throw "Shortcut '$cand' conflicts with existing $($conflict.CommandType) '$(Format-TuiText $conflict.Name)'$(Format-TuiText $info). Choose another shortcut."
         }
         $chosenShortcut = if ($cand -ieq 'shellossus') { '' } else { $cand }
     }
     else {
         $needShortcutMenu = $true
         if ($previousShortcut) {
-            Write-Host ($script:Gm.Fg + "Existing shortcut detected: $previousShortcut" + $script:Gm.Reset)
+            Write-Host ($script:Gm.Fg + "Existing shortcut detected: $(Format-TuiText $previousShortcut)" + $script:Gm.Reset)
             Write-Host ''
-            Write-Host ($script:Gm.Fg + "[1] Keep '$previousShortcut'" + $script:Gm.Reset)
+            Write-Host ($script:Gm.Fg + "[1] Keep '$(Format-TuiText $previousShortcut)'" + $script:Gm.Reset)
             Write-Host ($script:Gm.Fg + '[2] Change shortcut' + $script:Gm.Reset)
             Write-Host ($script:Gm.Fg + '[3] Remove shortcut' + $script:Gm.Reset)
             Write-Host ''
@@ -151,7 +151,7 @@ function Invoke-AgentProfileInstall {
                     $conflict = Get-ShortcutConflict -Name $previousShortcut -PreviousShortcut $previousShortcut -ResolvedAgent $resolvedAgent
                     if ($conflict) {
                         $info = if ($conflict.Detail) { " ($($conflict.Detail))" } else { '' }
-                        Write-Host ($script:Gm.Yellow + "Shortcut '$previousShortcut' conflicts with existing $($conflict.CommandType) '$($conflict.Name)'$info. Choose another name." + $script:Gm.Reset)
+                        Write-Host ($script:Gm.Yellow + "Shortcut '$(Format-TuiText $previousShortcut)' conflicts with existing $($conflict.CommandType) '$(Format-TuiText $conflict.Name)'$(Format-TuiText $info). Choose another name." + $script:Gm.Reset)
                         $needShortcutMenu = $true
                     }
                     else {
@@ -196,7 +196,7 @@ function Invoke-AgentProfileInstall {
                     if ($null -eq $customInput) { continue }
                     $candidate = $customInput.Trim()
                     if (-not (Test-ShortcutSyntax -Name $candidate)) {
-                        Write-Host ($script:Gm.Yellow + "Invalid shortcut name '$candidate'. Use only letters, numbers, hyphens, or underscores (no spaces or special characters)." + $script:Gm.Reset)
+                        Write-Host ($script:Gm.Yellow + "Invalid shortcut name '$(Format-TuiText $candidate)'. Use only letters, numbers, hyphens, or underscores (no spaces or special characters)." + $script:Gm.Reset)
                         continue
                     }
                 }
@@ -211,7 +211,7 @@ function Invoke-AgentProfileInstall {
                 $conflict = Get-ShortcutConflict -Name $candidate -PreviousShortcut $previousShortcut -ResolvedAgent $resolvedAgent
                 if ($conflict) {
                     $info = if ($conflict.Detail) { " ($($conflict.Detail))" } else { '' }
-                    Write-Host ($script:Gm.Yellow + "Shortcut '$candidate' conflicts with existing $($conflict.CommandType) '$($conflict.Name)'$info. Choose another name." + $script:Gm.Reset)
+                    Write-Host ($script:Gm.Yellow + "Shortcut '$(Format-TuiText $candidate)' conflicts with existing $($conflict.CommandType) '$(Format-TuiText $conflict.Name)'$(Format-TuiText $info). Choose another name." + $script:Gm.Reset)
                     continue
                 }
                 $chosenShortcut = if ($candidate -ieq 'shellossus') { '' } else { $candidate }
@@ -241,7 +241,7 @@ function Invoke-AgentProfileInstall {
         }
         $backup = $ProfilePath + '.shellossus-backup-' + (Get-Date -Format 'yyyyMMddHHmmssfff')
         Copy-Item -LiteralPath $ProfilePath -Destination $backup -ErrorAction Stop
-        Write-Host ($script:Gm.Grey1 + "Profile backup: $backup" + $script:Gm.Reset)
+        Write-Host ($script:Gm.Grey1 + "Profile backup: $(Format-TuiText $backup)" + $script:Gm.Reset)
     }
     else {
         $updated = $block + "`r`n"
@@ -250,7 +250,7 @@ function Invoke-AgentProfileInstall {
     $parent = Split-Path $ProfilePath -Parent
     if ($parent -and -not (Test-Path -LiteralPath $parent)) { New-Item -ItemType Directory -Path $parent -Force | Out-Null }
     Set-Content -LiteralPath $ProfilePath -Value $updated -Encoding UTF8 -NoNewline -ErrorAction Stop
-    Write-Host ($script:Gm.Green + "Command registered in: $ProfilePath" + $script:Gm.Reset)
+    Write-Host ($script:Gm.Green + "Command registered in: $(Format-TuiText $ProfilePath)" + $script:Gm.Reset)
     if ($chosenShortcut) {
         Write-Host ($script:Gm.Green + "Registered commands: shellossus, $chosenShortcut" + $script:Gm.Reset)
         Write-Host ($script:Gm.Fg + "Open a new PowerShell window, then run: $chosenShortcut -Setup (or shellossus -Setup)" + $script:Gm.Reset)

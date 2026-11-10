@@ -21,6 +21,7 @@ function Get-VisibleLength {
 
 function Format-MarkdownInline {
     param([string]$Text, [string]$BaseColor = $script:Gm.Fg)
+    $Text = Format-TuiText -Text $Text -Multiline
     $out = $BaseColor
     foreach ($part in @($Text -split '(`[^`]+`)')) {
         if (-not $part) { continue }
@@ -152,7 +153,7 @@ function Write-AgentReply {
     $lines = @($Content -split "`r?`n")
     for ($idx = 0; $idx -lt $lines.Count; $idx++) {
         $rawLine = $lines[$idx]
-        $line = (Format-PreviewText -Text ([string]$rawLine)).Replace("`r", '')
+        $line = Format-TuiText -Text $rawLine -Multiline
         $isTableLine = (-not $inCode) -and ($line -match '^\s*\|.*\|\s*$')
         if ($isTableLine) {
             $tableBuf += $line
@@ -225,14 +226,14 @@ function Write-AgentReasoning {
     if ($script:ShowReasoning -eq 'full' -or $lines.Count -le 3) {
         Write-Host ("`n  " + $script:Gm.Grey0 + $script:Box.TL + $script:Box.H + ' [reasoning]' + $script:Gm.Reset)
         foreach ($l in $lines) {
-            Write-Host ('  ' + $script:Gm.Grey0 + $script:Box.V + ' ' + $script:Gm.Grey1 + (Format-PreviewText $l) + $script:Gm.Reset)
+            Write-Host ('  ' + $script:Gm.Grey0 + $script:Box.V + ' ' + $script:Gm.Grey1 + (Format-TuiText -Text $l -Multiline) + $script:Gm.Reset)
         }
         Write-Host ('  ' + $script:Gm.Grey0 + $script:Box.BL + ($script:Box.H * 12) + $script:Gm.Reset)
     }
     else {
         Write-Host ("`n  " + $script:Gm.Grey0 + $script:Box.TL + $script:Box.H + " [reasoning: last 3 of $($lines.Count) lines | /reasoning full to expand]" + $script:Gm.Reset)
         foreach ($l in @($lines | Select-Object -Last 3)) {
-            Write-Host ('  ' + $script:Gm.Grey0 + $script:Box.V + ' ' + $script:Gm.Grey1 + (Format-PreviewText $l) + $script:Gm.Reset)
+            Write-Host ('  ' + $script:Gm.Grey0 + $script:Box.V + ' ' + $script:Gm.Grey1 + (Format-TuiText -Text $l -Multiline) + $script:Gm.Reset)
         }
         Write-Host ('  ' + $script:Gm.Grey0 + $script:Box.BL + ($script:Box.H * 12) + $script:Gm.Reset)
     }

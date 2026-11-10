@@ -57,7 +57,7 @@ With a configured key, it sends one direct authenticated `GET <BaseUrl>/models` 
 
 The report lists untested capabilities separately (`not_tested` in JSON). These include the chat HTTP worker and its Unicode, error, and cancellation handling, model completion and tool-call compatibility, and web tools in ConstrainedLanguage. Reports show local paths, the validated API base URL, and the configured model ID. They hide the API key and omit server response bodies.
 
-Settings use the same precedence as normal startup: launch arguments for endpoint/model/workspace, then `SHELLOSSUS_*` environment variables, then the saved configuration. The API key comes from `SHELLOSSUS_API_KEY` or the configuration file. Remote endpoints require an **HTTPS API base URL** (normally ending in `/v1`), while local loopback servers (`http://localhost`, `http://127.0.0.1`, `http://[::1]`) are also supported over `http://`.
+Settings use the same precedence as normal startup: launch arguments for endpoint/model/workspace, then `SHELLOSSUS_*` environment variables, then the saved configuration. The API key comes from `SHELLOSSUS_API_KEY` first, then the configuration file. Interactive input is masked. Saving a key requires a verified private config location. Leave the key blank in a fresh setup to use an environment key or enter it at launch. Remote endpoints require an **HTTPS API base URL** (normally ending in `/v1`), while local loopback servers (`http://localhost`, `http://127.0.0.1`, `http://[::1]`) are also supported over `http://`.
 
 ### 2. Run in Any Project
 

@@ -70,7 +70,7 @@ function Wait-AgentProcessWithSpinner {
                 $frameIdx++
                 $maxSpinW = (Get-TerminalWidth) - 1
                 if ($maxSpinW -lt 20) { $maxSpinW = 20 }
-                $rawSpinLine = $script:Gm.Grey1 + ("  [{0}] {1} ({2:0.0}s)..." -f $spinChar, $StatusLabel, $elapsed) + $script:Gm.Reset
+                $rawSpinLine = $script:Gm.Grey1 + ("  [{0}] {1} ({2:0.0}s)..." -f $spinChar, (Format-TuiText $StatusLabel), $elapsed) + $script:Gm.Reset
                 $clampedSpinLine = Limit-AnsiLineToWidth -Text $rawSpinLine -MaxWidth $maxSpinW
                 $lastSpinVisLen = (Strip-AnsiCodes -Text $clampedSpinLine).Length
                 $statusLine = "`r" + $clampedSpinLine
@@ -125,7 +125,12 @@ function Invoke-AgentHttpRequest {
         if ($iwrCmd -and $iwrCmd.CommandType -ne 'Function') {
             $request['MaximumRedirection'] = 0
         }
-        Invoke-WebRequest @request -UseBasicParsing -OutFile $OutFile
+        try { Invoke-WebRequest @request -UseBasicParsing -OutFile $OutFile }
+        catch {
+            $message = Format-AgentError -ErrorRecord $_
+            if ($ApiKey) { $message = $message.Replace($ApiKey, '[redacted]') }
+            throw (Format-TuiText $message)
+        }
         Assert-AgentApiResponseSize -Path $OutFile
         return
     }
@@ -139,7 +144,7 @@ function Invoke-AgentHttpRequest {
         $workerCmd = @'
 $ErrorActionPreference = 'Stop'
 try {
-    Microsoft.PowerShell.Utility\Invoke-WebRequest -Uri $env:SHELLOSSUS_HTTP_URI -Method 'Post' -Headers @{ Authorization = ('Bearer ' + $env:SHELLOSSUS_HTTP_KEY) } -ContentType 'application/json; charset=utf-8' -InFile $env:SHELLOSSUS_HTTP_IN -OutFile $env:SHELLOSSUS_HTTP_OUT -MaximumRedirection 0 -TimeoutSec ([int]$env:SHELLOSSUS_HTTP_TIMEOUT) -UseBasicParsing -ErrorAction Stop
+    Microsoft.PowerShell.Utility\Invoke-WebRequest -Uri $env:SHELLOSSUS_HTTP_URI -Method 'Post' -Headers @{ Authorization = ('Bearer ' + $env:SHELLOSSUS_API_KEY) } -ContentType 'application/json; charset=utf-8' -InFile $env:SHELLOSSUS_HTTP_IN -OutFile $env:SHELLOSSUS_HTTP_OUT -MaximumRedirection 0 -TimeoutSec ([int]$env:SHELLOSSUS_HTTP_TIMEOUT) -UseBasicParsing -ErrorAction Stop
 }
 catch {
     $msg = $_.Exception.Message
@@ -166,7 +171,8 @@ catch {
         $argList = Get-AgentWorkerArguments -CommandText $workerCmd
         $proc = Invoke-WithProcessEnvironment -Values @{
             SHELLOSSUS_HTTP_URI = $Uri
-            SHELLOSSUS_HTTP_KEY = $ApiKey
+            SHELLOSSUS_API_KEY = $ApiKey
+            OPENAI_API_KEY = $null
             SHELLOSSUS_HTTP_IN = $reqTemp.FullName
             SHELLOSSUS_HTTP_OUT = $OutFile
             SHELLOSSUS_HTTP_ERR = $errTemp.FullName
@@ -179,11 +185,17 @@ catch {
         $errItem = Get-Item -LiteralPath $errTemp.FullName -Force -ErrorAction SilentlyContinue
         if ($errItem -and $errItem.Length -gt 0) {
             $errText = Get-Content -LiteralPath $errTemp.FullName -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
-            if ($errText) { throw $errText.Trim() }
+            if ($errText) {
+                if ($ApiKey) { $errText = $errText.Replace($ApiKey, '[redacted]') }
+                throw (Format-TuiText $errText.Trim())
+            }
         }
         if ($null -ne $proc.ExitCode -and [int]$proc.ExitCode -ne 0) {
             $stdErrText = Get-Content -LiteralPath $stderrTemp.FullName -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
-            if ($stdErrText -and $stdErrText.Trim()) { throw $stdErrText.Trim() }
+            if ($stdErrText -and $stdErrText.Trim()) {
+                if ($ApiKey) { $stdErrText = $stdErrText.Replace($ApiKey, '[redacted]') }
+                throw (Format-TuiText $stdErrText.Trim())
+            }
             throw "HTTP worker exited with code $($proc.ExitCode)."
         }
     }

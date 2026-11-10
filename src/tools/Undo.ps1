@@ -181,14 +181,14 @@ function Invoke-AgentUndo {
                 }
                 $w.undone = $true
                 if ($script:OutputMode -ne 'json') {
-                    Write-Host ($script:Gm.Aqua + '  [undo] Restored ' + $w.rel_path + $script:Gm.Reset)
+                    Write-Host ($script:Gm.Aqua + '  [undo] Restored ' + (Format-TuiText $w.rel_path) + $script:Gm.Reset)
                 }
             }
             elseif ($w.action -eq 'created') {
                 if (Test-Path -LiteralPath $w.full_path) {
                     Remove-Item -LiteralPath $w.full_path -Force -ErrorAction Stop
                     if ($script:OutputMode -ne 'json') {
-                        Write-Host ($script:Gm.Aqua + '  [undo] Removed created file ' + $w.rel_path + $script:Gm.Reset)
+                        Write-Host ($script:Gm.Aqua + '  [undo] Removed created file ' + (Format-TuiText $w.rel_path) + $script:Gm.Reset)
                     }
                 }
                 if ($w.created_dirs) {

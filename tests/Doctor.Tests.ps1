@@ -51,6 +51,16 @@ function Invoke-WebRequest {
 }
 
 try {
+    & {
+        function Read-Host {
+            [CmdletBinding()]
+            param([string]$Prompt, [switch]$AsSecureString)
+            Assert-True ($Prompt -eq 'API key' -and $AsSecureString) 'Credential prompt requested visible input.'
+            return (ConvertTo-SecureString -String 'secret-fixture' -AsPlainText -Force)
+        }
+        Assert-True ((Read-AgentApiKey) -ceq 'secret-fixture') 'Hidden key did not round trip in this language mode.'
+    }
+
     $argsDoctor = @{ BaseUrl = 'https://example.invalid/v1/'; ModelId = 'test-model'; ApiKey = 'doctor-secret-key'; Workspace = $workspacePath; SessionDir = $sessionPath }
     $report = Get-AgentDoctorReport @argsDoctor
     Assert-True ($report.failures -eq 0 -and $report.warnings -eq 0 -and $report.exit_code -eq 0) ("Healthy doctor check failed: " + ($report | ConvertTo-Json -Depth 6 -Compress))
@@ -200,7 +210,11 @@ try {
     try {
         $entryPoint = "$PSScriptRoot\..\shellossus.ps1"
         $cliConfig = Join-Path $envData.TestRoot 'doctor.env'
-        Set-Content -LiteralPath $cliConfig -Value @('SHELLOSSUS_BASE_URL="https://example.invalid/v1"', 'SHELLOSSUS_MODEL="test-model"', 'SHELLOSSUS_API_KEY="doctor-secret-key"') -Encoding Ascii
+        Save-AgentConfig -Path $cliConfig -Config @{
+            SHELLOSSUS_BASE_URL = 'https://example.invalid/v1'
+            SHELLOSSUS_MODEL = 'test-model'
+            SHELLOSSUS_API_KEY = 'doctor-secret-key'
+        }
         $cliReport = & $entryPoint -Doctor -ConfigPath $cliConfig -Workspace $workspacePath -NoSession -Mode json | ConvertFrom-Json
         Assert-True ($LASTEXITCODE -eq 0 -and $cliReport.type -eq 'doctor' -and $cliReport.failures -eq 0) ("Standalone -Doctor failed: " + ($cliReport | ConvertTo-Json -Depth 6 -Compress))
         $cliReport = & $entryPoint -Doctor -ConfigPath $cliConfig -Workspace $workspacePath -Model override-model -NoSession -Mode json | ConvertFrom-Json
@@ -212,6 +226,13 @@ try {
         Assert-True ($replOutput -like '*Shellossus doctor*' -and $replOutput -like '*Configured model is not in /models: active-model*') '/doctor did not inspect the active model.'
         Assert-True ((Read-AgentConfig -Path $cliConfig).SHELLOSSUS_MODEL -eq 'active-model') '/model in REPL did not persist SHELLOSSUS_MODEL to ConfigPath.'
         $global:ShellossusDoctorFixture.inputs = @()
+        if ($env:OS -ne 'Windows_NT') {
+            Set-ItemProperty -LiteralPath $cliConfig -Name UnixFileMode -Value 420
+            $legacyOutput = & $entryPoint -Doctor -ConfigPath $cliConfig -Workspace $workspacePath -NoSession -Mode json
+            $legacyReport = $legacyOutput | ConvertFrom-Json
+            Assert-True ($LASTEXITCODE -eq 0 -and (Get-DoctorCheck $legacyReport 'key_storage').status -eq 'warn') 'Doctor did not warn about a legacy key with broad read permissions.'
+            Assert-True ((Get-DoctorCheck $legacyReport 'endpoint').status -eq 'pass' -and $legacyOutput -notlike '*doctor-secret-key*') 'Doctor discarded or exposed the legacy key.'
+        }
         Set-Content -LiteralPath $cliConfig -Value 'INVALID_CONFIG=doctor-secret-key' -Encoding Ascii
         $cliOutput = & $entryPoint -Doctor -ConfigPath $cliConfig -Workspace $blockedPath -NoSession -Mode json
         $cliReport = $cliOutput | ConvertFrom-Json

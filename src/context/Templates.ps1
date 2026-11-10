@@ -180,12 +180,12 @@ function Expand-UserPrompt {
                 $escapedRel = Escape-XmlText -Text $rel
                 $attachments += "<file path=`"$escapedRel`">`n$content`n</file>"
                 if ($script:OutputMode -ne 'json') {
-                    Write-Host ($script:Gm.Aqua + '  [@file] ' + $script:Gm.Grey1 + $rel + $script:Gm.Reset)
+                    Write-Host ($script:Gm.Aqua + '  [@file] ' + $script:Gm.Grey1 + (Format-TuiText $rel) + $script:Gm.Reset)
                 }
             }
             catch {
                 if ($script:OutputMode -ne 'json') {
-                    Write-Host ($script:Gm.Yellow + '  [@file] Skipped ' + $rel + ': ' + $_.Exception.Message + $script:Gm.Reset)
+                    Write-Host ($script:Gm.Yellow + '  [@file] Skipped ' + (Format-TuiText $rel) + ': ' + (Format-TuiText $_.Exception.Message) + $script:Gm.Reset)
                 }
             }
         }

@@ -9,9 +9,10 @@ function Format-ToolCallCard {
         [string]$Summary = '',
         [int]$ElapsedMs = -1
     )
-    if ($Target) { $Target = (Format-PreviewText -Text $Target) -replace '[\r\n\t]+', ' ' }
-    if ($Detail) { $Detail = (Format-PreviewText -Text $Detail) -replace '[\r\n\t]+', ' ' }
-    if ($Summary) { $Summary = (Format-PreviewText -Text $Summary) -replace '[\r\n\t]+', ' ' }
+    $Name = Format-TuiText $Name
+    $Target = Format-TuiText $Target
+    $Detail = Format-TuiText $Detail
+    $Summary = Format-TuiText $Summary
     $targetPart = if ($Target) { ' ' + $script:Gm.Fg1 + $Target + $script:Gm.Reset } else { '' }
     $detailPart = if ($Detail) { ' ' + $script:Gm.Grey1 + '(' + $Detail + ')' + $script:Gm.Reset } else { '' }
     $top = '  ' + $script:Gm.Grey0 + $script:Box.TL + $script:Box.H + ' ' + $script:Gm.Yellow + $script:Box.Arrow + ' ' + $Name + $script:Gm.Reset + $targetPart + $detailPart
@@ -64,7 +65,7 @@ function Format-TodoCard {
             'in_progress' { $script:Gm.BoldYellow }
             default       { $script:Gm.Fg1 }
         }
-        $body += ($icon + ' ' + $txtColor + (Format-PreviewText $item.content) + $script:Gm.Reset)
+        $body += ($icon + ' ' + $txtColor + (Format-TuiText $item.content) + $script:Gm.Reset)
     }
     return @(Format-TuiCardBox -Header $hdr -BodyLines $body -Width $w)
 }
@@ -83,7 +84,7 @@ function Format-PlanReviewCard {
     $hdr = ' ' + $script:Gm.BoldOrange + 'PLAN REVIEW' + $script:Gm.Reset + ' '
     $body = @()
     if ($Question) {
-        $qClean = Format-PreviewText $Question
+        $qClean = Format-TuiText $Question
         $body += ($script:Gm.BoldYellow + $qClean + $script:Gm.Reset)
         if ($Plan) {
             $body += ''
@@ -112,7 +113,7 @@ function Format-MemoryCard {
     param([string]$Scope, [string]$Action, [string]$Content)
     $w = Get-TerminalWidth
     $scopeLabel = if ($Scope) { [string]$Scope.ToUpper() } else { 'WORKSPACE' }
-    $hdr = ' ' + $script:Gm.BoldPurple + 'MEMORY (' + $scopeLabel + ')' + $script:Gm.Reset + ' '
+    $hdr = ' ' + $script:Gm.BoldPurple + 'MEMORY (' + (Format-TuiText $scopeLabel) + ')' + $script:Gm.Reset + ' '
     $body = @()
     if ($Content) {
         $lines = @($Content -split "`r?`n")
@@ -231,7 +232,7 @@ function Format-UnifiedDiff {
     $newLines = @(if ($afterNorm.Length -gt 0) { $afterNorm -split "`n" } else { @() })
     if ($null -eq $Before) {
         $addedCount = $newLines.Count
-        $hdr = ' ' + $script:Gm.BoldGreen + 'DIFF ' + $ToolName + ': ' + $script:Gm.Fg1 + $Path + ' ' + $script:Gm.Green + ("(+{0} new)" -f $addedCount) + $script:Gm.Reset + ' '
+        $hdr = ' ' + $script:Gm.BoldGreen + 'DIFF ' + (Format-TuiText $ToolName) + ': ' + $script:Gm.Fg1 + (Format-TuiText $Path) + ' ' + $script:Gm.Green + ("(+{0} new)" -f $addedCount) + $script:Gm.Reset + ' '
         $body = @()
         $showCount = if ($newLines.Count -gt $MaxLines) { $MaxLines } else { $newLines.Count }
         for ($i = 0; $i -lt $showCount; $i++) {
@@ -364,7 +365,7 @@ function Format-UnifiedDiff {
         }
     }
 
-    $hdr = ' ' + $script:Gm.BoldYellow + 'DIFF ' + $ToolName + ': ' + $script:Gm.Fg1 + $Path + ' ' + $script:Gm.Green + ("+{0}" -f $addedCount) + ' ' + $script:Gm.Red + ("-{0}" -f $removedCount) + $script:Gm.Reset + ' '
+    $hdr = ' ' + $script:Gm.BoldYellow + 'DIFF ' + (Format-TuiText $ToolName) + ': ' + $script:Gm.Fg1 + (Format-TuiText $Path) + ' ' + $script:Gm.Green + ("+{0}" -f $addedCount) + ' ' + $script:Gm.Red + ("-{0}" -f $removedCount) + $script:Gm.Reset + ' '
     $body = @()
     $emitted = 0
     for ($hIdx = 0; $hIdx -lt $hunks.Count; $hIdx++) {

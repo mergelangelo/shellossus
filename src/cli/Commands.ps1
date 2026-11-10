@@ -10,12 +10,12 @@ function Export-AgentSessionOutput {
     )
     if ($ExportPath -match '\.jsonl$') {
         Save-AgentSession -SessionFile $ExportPath -State $State -Workspace $RootPath -Model $Model -AsExport
-        Write-Host ($script:Gm.Green + "${Indent}Exported session JSONL: $ExportPath" + $script:Gm.Reset)
+        Write-Host ($script:Gm.Green + "${Indent}Exported session JSONL: $(Format-TuiText $ExportPath)" + $script:Gm.Reset)
         return $ExportPath
     }
     $outHtml = if ($ExportPath -match '\.html?$') { $ExportPath } else { $ExportPath + '.html' }
     $exported = Export-AgentSessionHtml -State $State -OutputPath $outHtml
-    Write-Host ($script:Gm.Green + "${Indent}Exported session HTML: $exported" + $script:Gm.Reset)
+    Write-Host ($script:Gm.Green + "${Indent}Exported session HTML: $(Format-TuiText $exported)" + $script:Gm.Reset)
     return $exported
 }
 
@@ -103,14 +103,14 @@ function Invoke-ReplNameCommand {
         }
         catch {
             $State.session_name = $previousName
-            Write-Host ($script:Gm.Red + '  ' + $_.Exception.Message + $script:Gm.Reset)
+            Write-Host ($script:Gm.Red + '  ' + (Format-TuiText $_.Exception.Message) + $script:Gm.Reset)
             return
         }
-        Write-Host ($script:Gm.Green + "  Session name set to: $($State.session_name)" + $script:Gm.Reset)
+        Write-Host ($script:Gm.Green + "  Session name set to: $(Format-TuiText $State.session_name)" + $script:Gm.Reset)
     }
     else {
         $nm = if ($State.session_name) { $State.session_name } else { '(unnamed)' }
-        Write-Host ($script:Gm.Aqua + "  Session name: $nm (use /name <text> to set)" + $script:Gm.Reset)
+        Write-Host ($script:Gm.Aqua + "  Session name: $(Format-TuiText $nm) (use /name <text> to set)" + $script:Gm.Reset)
     }
 }
 
@@ -123,10 +123,10 @@ function Invoke-ReplTreeCommand {
             Clear-AgentUndoBackups -UndoEntries $UndoStack
             $UndoStack = @()
             Save-AgentSession -SessionFile $SessionFile -State $State -Workspace $RootPath -Model $Model
-            Write-Host ($script:Gm.Green + "  Switched active branch to entry $targetId ($($State.messages.Count) messages in active path)." + $script:Gm.Reset)
+            Write-Host ($script:Gm.Green + "  Switched active branch to entry $(Format-TuiText $targetId) ($($State.messages.Count) messages in active path)." + $script:Gm.Reset)
         }
         catch {
-            Write-Host ($script:Gm.Red + '  ' + $_.Exception.Message + $script:Gm.Reset)
+            Write-Host ($script:Gm.Red + '  ' + (Format-TuiText $_.Exception.Message) + $script:Gm.Reset)
         }
     }
     else {
@@ -147,10 +147,10 @@ function Invoke-ReplForkCommand {
         Clear-AgentUndoBackups -UndoEntries $UndoStack
         $UndoStack = @()
         Reset-AgentSessionApprovals -State $State
-        Write-Host ($script:Gm.Green + "  Forked session to: $($forkRes.session_file) (id=$($forkRes.session_id))" + $script:Gm.Reset)
+        Write-Host ($script:Gm.Green + "  Forked session to: $(Format-TuiText $forkRes.session_file) (id=$(Format-TuiText $forkRes.session_id))" + $script:Gm.Reset)
     }
     catch {
-        Write-Host ($script:Gm.Red + '  Fork failed: ' + $_.Exception.Message + $script:Gm.Reset)
+        Write-Host ($script:Gm.Red + '  Fork failed: ' + (Format-TuiText $_.Exception.Message) + $script:Gm.Reset)
     }
     return @{ state = $State; session_file = $SessionFile; undo_stack = @($UndoStack) }
 }
@@ -169,7 +169,7 @@ function Invoke-ReplExportCommand {
         $null = Export-AgentSessionOutput -State $State -ExportPath $expArg -RootPath $RootPath -Model $Model -Indent '  '
     }
     catch {
-        Write-Host ($script:Gm.Red + '  Export failed: ' + $_.Exception.Message + $script:Gm.Reset)
+        Write-Host ($script:Gm.Red + '  Export failed: ' + (Format-TuiText $_.Exception.Message) + $script:Gm.Reset)
     }
 }
 
@@ -182,7 +182,7 @@ function Invoke-ReplImportCommand {
     }
     $impPath = if (Test-Path -LiteralPath $impArg) { $impArg } else { Join-Path $RootPath $impArg }
     if (-not (Test-Path -LiteralPath $impPath)) {
-        Write-Host ($script:Gm.Red + "  File not found: $impArg" + $script:Gm.Reset)
+        Write-Host ($script:Gm.Red + "  File not found: $(Format-TuiText $impArg)" + $script:Gm.Reset)
         return @{ state = $State; session_file = $SessionFile; model = $Model; undo_stack = @($UndoStack); last_failed_question = $LastFailedQuestion }
     }
     try {
@@ -194,10 +194,10 @@ function Invoke-ReplImportCommand {
         $LastFailedQuestion = ''
         if ($State.model) { $Model = $State.model }
         Reset-AgentSessionApprovals -State $State
-        Write-Host ($script:Gm.Green + "  Imported session: $impPath ($($State.messages.Count) messages)" + $script:Gm.Reset)
+        Write-Host ($script:Gm.Green + "  Imported session: $(Format-TuiText $impPath) ($($State.messages.Count) messages)" + $script:Gm.Reset)
     }
     catch {
-        Write-Host ($script:Gm.Red + '  Import failed: ' + $_.Exception.Message + $script:Gm.Reset)
+        Write-Host ($script:Gm.Red + '  Import failed: ' + (Format-TuiText $_.Exception.Message) + $script:Gm.Reset)
     }
     return @{ state = $State; session_file = $SessionFile; model = $Model; undo_stack = @($UndoStack); last_failed_question = $LastFailedQuestion }
 }
@@ -220,7 +220,7 @@ function Invoke-ReplCopyCommand {
         Write-Host ($script:Gm.Green + "  Copied last assistant response ($($lastAssistant.Length) chars) to clipboard." + $script:Gm.Reset)
     }
     catch {
-        Write-Host ($script:Gm.Red + '  Clipboard copy failed: ' + $_.Exception.Message + $script:Gm.Reset)
+        Write-Host ($script:Gm.Red + '  Clipboard copy failed: ' + (Format-TuiText $_.Exception.Message) + $script:Gm.Reset)
     }
 }
 
@@ -251,11 +251,11 @@ function Invoke-ReplSaveCommand {
     }
     try {
         Save-AgentSession -SessionFile $target -State $State -Workspace $RootPath -Model $Model
-        Write-Host ($script:Gm.Green + "  Saved session: $target" + $script:Gm.Reset)
+        Write-Host ($script:Gm.Green + "  Saved session: $(Format-TuiText $target)" + $script:Gm.Reset)
         return @{ session_file = $target }
     }
     catch {
-        Write-Host ($script:Gm.Red + '  ' + $_.Exception.Message + $script:Gm.Reset)
+        Write-Host ($script:Gm.Red + '  ' + (Format-TuiText $_.Exception.Message) + $script:Gm.Reset)
         return @{ session_file = $SessionFile }
     }
 }
@@ -298,7 +298,7 @@ function Invoke-ReplUndoCommand {
         Save-AgentSession -SessionFile $SessionFile -State $State -Workspace $RootPath -Model $Model
     }
     catch {
-        Write-Host ($script:Gm.Red + '  ' + $_.Exception.Message + $script:Gm.Reset)
+        Write-Host ($script:Gm.Red + '  ' + (Format-TuiText $_.Exception.Message) + $script:Gm.Reset)
     }
     return @{ state = $State; undo_stack = @($UndoStack) }
 }
@@ -312,7 +312,7 @@ function Invoke-ReplModelCommand {
             Save-AgentSession -SessionFile $SessionFile -State $State -Workspace $RootPath -Model $selectedModel
         }
         catch {
-            Write-Host ($script:Gm.Red + '  ' + $_.Exception.Message + $script:Gm.Reset)
+            Write-Host ($script:Gm.Red + '  ' + (Format-TuiText $_.Exception.Message) + $script:Gm.Reset)
             return $CurrentModel
         }
         $CurrentModel = $selectedModel
@@ -321,7 +321,7 @@ function Invoke-ReplModelCommand {
         if ($script:AgentConfigPath) {
             $null = Update-AgentConfigOptionalKey -Path $script:AgentConfigPath -Key 'SHELLOSSUS_MODEL' -Value $CurrentModel
         }
-        Write-Host ($script:Gm.Green + "  Model switched to: $CurrentModel" + $script:Gm.Reset)
+        Write-Host ($script:Gm.Green + "  Model switched to: $(Format-TuiText $CurrentModel)" + $script:Gm.Reset)
     }
     return $CurrentModel
 }
@@ -347,7 +347,7 @@ function Invoke-ReplCompactCommand {
         }
     }
     catch {
-        Write-Host ($script:Gm.Red + '  Compaction failed: ' + (Format-AgentError -ErrorRecord $_) + $script:Gm.Reset)
+        Write-Host ($script:Gm.Red + '  Compaction failed: ' + (Format-TuiText (Format-AgentError -ErrorRecord $_)) + $script:Gm.Reset)
     }
 }
 
@@ -408,14 +408,14 @@ function Invoke-ReplSessionsCommand {
             $LastFailedQuestion = ''
             if ($State.model) { $Model = $State.model }
             Reset-AgentSessionApprovals -State $State
-            Write-Host ($script:Gm.Green + "  Resumed session: $chosen ($($State.messages.Count) messages, model=$Model, permission=$($script:AgentPermission))" + $script:Gm.Reset)
+            Write-Host ($script:Gm.Green + "  Resumed session: $(Format-TuiText $chosen) ($($State.messages.Count) messages, model=$(Format-TuiText $Model), permission=$($script:AgentPermission))" + $script:Gm.Reset)
         }
         catch {
-            Write-Host ($script:Gm.Red + '  ' + $_.Exception.Message + $script:Gm.Reset)
+            Write-Host ($script:Gm.Red + '  ' + (Format-TuiText $_.Exception.Message) + $script:Gm.Reset)
         }
     }
     elseif ($arg) {
-        Write-Host ($script:Gm.Red + "  Session not found: $arg" + $script:Gm.Reset)
+        Write-Host ($script:Gm.Red + "  Session not found: $(Format-TuiText $arg)" + $script:Gm.Reset)
     }
     return @{ state = $State; session_file = $SessionFile; model = $Model; undo_stack = @($UndoStack); last_failed_question = $LastFailedQuestion }
 }
@@ -454,10 +454,10 @@ function Invoke-ReplContinueCommand {
         $rollback = Invoke-AgentTurnRollback -State $State -Snapshot $turnSnapshot -Writes @($script:CurrentTurnWrites) -UndoStack $UndoStack
         $UndoStack = @($rollback.undo_stack)
         if ($rollback.succeeded) {
-            Write-Host ($script:Gm.Red + 'Continue failed; turn rolled back: ' + $requestErr + $script:Gm.Reset)
+            Write-Host ($script:Gm.Red + 'Continue failed; turn rolled back: ' + (Format-TuiText $requestErr) + $script:Gm.Reset)
         }
         else {
-            Write-Host ($script:Gm.Red + 'Continue failed; rollback did not succeed: ' + $rollback.error + $script:Gm.Reset)
+            Write-Host ($script:Gm.Red + 'Continue failed; rollback did not succeed: ' + (Format-TuiText $rollback.error) + $script:Gm.Reset)
         }
         return @{ state = $State; undo_stack = @($UndoStack); last_failed_question = $LastFailedQuestion }
     }
@@ -472,7 +472,7 @@ function Invoke-ReplBangCommand {
     if (-not $cmdStr) { return }
     try {
         $res = Invoke-ShellCommand -Root $RootPath -Command $cmdStr
-        if ($res.output) { Write-Host ($script:Gm.Fg + $res.output + $script:Gm.Reset) }
+        if ($res.output) { Write-Host ($script:Gm.Fg + (Format-TuiText -Text $res.output -Multiline) + $script:Gm.Reset) }
         Write-Host ($script:Gm.Grey1 + "  [exit $($res.exit_code)]" + $script:Gm.Reset)
         if (-not $localOnly) {
             $snapshot = New-AgentTurnSnapshot -State $State
@@ -488,6 +488,6 @@ function Invoke-ReplBangCommand {
         }
     }
     catch {
-        Write-Host ($script:Gm.Red + '  Command error: ' + $_.Exception.Message + $script:Gm.Reset)
+        Write-Host ($script:Gm.Red + '  Command error: ' + (Format-TuiText $_.Exception.Message) + $script:Gm.Reset)
     }
 }

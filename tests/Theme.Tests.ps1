@@ -143,6 +143,25 @@ try {
     $script:mlQueue = @('99999999999999999999')
     $largeNumPicked = Invoke-TuiSelector -Title 'Select Permission' -Items $items -AllowFreeText
     Assert-True ($largeNumPicked -eq '99999999999999999999') 'Invoke-TuiSelector -AllowFreeText overflowed on large numeric string.'
+    $esc = [string][char]27
+    $injected = $esc + ']52;fixture' + [char]7 + "`r`n" + [char]0x202e
+    $selected = @{ value = $null }
+    function Invoke-DirtySelector {
+        $selected.value = Invoke-TuiSelector -Title "Title $injected" -Items @(@{
+            label = "Label $injected"; description = "Description $injected"; value = $injected
+        }) -PromptText "Prompt $injected"
+    }
+    $script:mlQueue = @('1')
+    $menuText = @(Invoke-DirtySelector 6>&1 | ForEach-Object { [string]$_ }) -join "`n"
+    Assert-True ($selected.value -ceq $injected -and $menuText.Contains($script:Gm.BoldOrange)) 'Selector lost the original value or theme codes.'
+    $unsafeBar = @(Format-TuiStatusBar -State @{ session_name = "Session $injected" } -Root $ws -Model "Model $injected" -Width 120)
+    $unsafeDiff = @(Format-UnifiedDiff -Path "Path $injected" -Before 'one' -After 'two')
+    $unsafeTool = @(Format-ToolCallCard -Name "Tool $injected" -Summary "Summary $injected")
+    $titleText = @(Write-TuiPromptFrame -State $statusState -Root $ws -Model "Model $injected" 6>&1 | ForEach-Object { [string]$_ }) -join "`n"
+    Assert-True ($titleText.Contains($esc + ']0;')) 'Prompt frame lost its application-owned title sequence.'
+    foreach ($rendered in @($menuText, $titleText) + $unsafeBar + $unsafeDiff + $unsafeTool) {
+        Assert-True (-not $rendered.Contains($esc + ']52;') -and -not $rendered.Contains([string][char]0x202e) -and -not $rendered.Contains("`r")) 'Untrusted control characters reached a terminal renderer.'
+    }
     $script:mlQueue = @('')
     $cancelled = Invoke-TuiSelector -Title 'Select Permission' -Items $items
     Assert-True ($null -eq $cancelled) 'Invoke-TuiSelector should return $null on empty input.'

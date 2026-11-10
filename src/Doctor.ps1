@@ -83,7 +83,8 @@ function Get-AgentDoctorReport {
         [string]$Workspace = '.',
         [string]$SessionDir,
         [switch]$NoSession,
-        [string]$ConfigState = 'loaded'
+        [string]$ConfigState = 'loaded',
+        [string]$KeyStorageWarning
     )
     $checks = @()
     $version = $PSVersionTable.PSVersion
@@ -125,6 +126,9 @@ function Get-AgentDoctorReport {
         $apiKeyMessage = 'No API key was configured for the local server; the local placeholder is used.'
     }
     $checks += @{ name = 'api_key'; status = $apiKeyStatus; message = $apiKeyMessage }
+    if ($KeyStorageWarning) {
+        $checks += @{ name = 'key_storage'; status = 'warn'; message = $KeyStorageWarning }
+    }
     $hasModel = [bool]($ModelId -and $ModelId.Trim())
     $modelCheck = @{ name = 'model'; status = $(if ($hasModel) { 'pass' } else { 'fail' }); message = $(if ($hasModel) { "Configured model: $ModelId. Availability has not been verified." } else { 'Model ID is missing. Run shellossus -Setup or pass -Model with the provider model ID.' }) }
     $checks += $modelCheck
@@ -183,7 +187,7 @@ function Get-AgentDoctorReport {
                 $check.message = $check.message.Replace($trimmedKey, '[redacted]')
             }
         }
-        $check.message = (Format-PreviewText -Text $check.message) -replace '[\r\n\t]', ' '
+        $check.message = Format-TuiText $check.message
     }
     $failed = @($checks | Where-Object { $_.status -eq 'fail' }).Count
     $warnings = @($checks | Where-Object { $_.status -eq 'warn' }).Count
