@@ -6,6 +6,11 @@ $ErrorActionPreference = 'Stop'
 $envData = New-TestEnvironment
 $workspacePath = $envData.Workspace
 if ($ConstrainedLanguage) {
+    if ($PSVersionTable.PSVersion.Major -lt 6) {
+        # Load the inbox hash function before switching modes, as Windows does
+        # when application control trusts its signed module.
+        $null = Get-FileHash -LiteralPath $PSCommandPath -ErrorAction Stop
+    }
     $ExecutionContext.SessionState.LanguageMode = 'ConstrainedLanguage'
     . "$PSScriptRoot\..\shellossus.ps1" -LibraryOnly
 }
