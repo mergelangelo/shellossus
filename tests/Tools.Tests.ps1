@@ -898,7 +898,12 @@ try {
         Assert-True ($explicitErr.role -eq 'audit' -and $explicitErr.permission -eq 'Ask' -and $explicitErr.context -eq 'fork' -and $explicitErr.output -eq 'Subagent error: Child subagent failure') 'New-SubagentErrorResult did not keep explicit permission and context.'
 
         $slowWorkerScript = Join-Path $testRoot 'slow-subagent.ps1'
-        Set-Content -LiteralPath $slowWorkerScript -Value 'param([Parameter(ValueFromRemainingArguments = $true)]$Remaining) Start-Sleep -Seconds 30' -Encoding Ascii
+        $slowWorkerText = @'
+param([Parameter(ValueFromRemainingArguments = $true)]$Remaining)
+[Console]::Error.WriteLine('#< CLIXML')
+Start-Sleep -Seconds 30
+'@
+        Set-Content -LiteralPath $slowWorkerScript -Value $slowWorkerText -Encoding Ascii
         $timedOutResults = @(Invoke-ParallelSubagentProcesses -Root $workspacePath -Tasks @(@{ role = 'recon'; prompt = 'Slow task' }) -ScriptPath $slowWorkerScript -TimeoutSec 1)
         Assert-True ($timedOutResults.Count -eq 1 -and $timedOutResults[0].status -eq 'timed_out' -and $timedOutResults[0].output -eq 'Subagent timed out after 1s.') "Expected timed_out status and timeout message from Invoke-ParallelSubagentProcesses, got status=$($timedOutResults[0].status) output=$($timedOutResults[0].output)."
         Assert-True ((Resolve-SubagentAggregateStatus -Results $timedOutResults) -eq 'timed_out') 'Resolve-SubagentAggregateStatus did not return timed_out.'

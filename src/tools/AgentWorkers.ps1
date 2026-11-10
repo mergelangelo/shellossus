@@ -239,7 +239,7 @@ if ($env:SHELLOSSUS_SUB_REASONING_EFFORT) { $workerArgs.ReasoningEffort = $env:S
                         catch {}
                     }
                 }
-                if (Test-Path -LiteralPath $w.err_file) {
+                if (-not $w.timed_out -and (Test-Path -LiteralPath $w.err_file)) {
                     $errRaw = Get-Content -LiteralPath $w.err_file -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
                     if ($errRaw -and $errRaw.Trim() -and (-not $sawTurnEnd -or -not $replyText)) {
                         $wStatus = 'error'
