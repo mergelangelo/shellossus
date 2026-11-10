@@ -192,7 +192,7 @@ try {
     $cutInfo = Find-CompactionCutPoint -Messages $compactState.messages -StartIndex 1 -KeepRecentTokens 10
     Assert-True ($compactState.messages[$cutInfo.first_kept_index].role -ne 'tool') 'Find-CompactionCutPoint cut directly on a tool message.'
     $didIterativeCompact = Invoke-AgentCompact -State $compactState -Endpoint 'https://example.invalid/v1/chat/completions' -ModelId 'test-model' -ApiKey 'fake' -KeepRecent 2
-    Assert-True ($didIterativeCompact -and $script:lastCompactBody.Contains('<previous-summary>')) 'Iterative compaction did not pass <previous-summary>.'
+    Assert-True ($didIterativeCompact -and $script:lastCompactBody.Contains("[previous_compaction]: ## Goal`nCompacted goal summary")) 'Iterative compaction did not pass the previous handoff.'
     Assert-True ($compactState.messages[1].content.Contains('<read-files>') -and $compactState.messages[1].content.Contains('schema.sql') -and $compactState.messages[1].content.Contains('important-query.sql')) 'Iterative compaction lost cumulative file operations.'
 
     $compTreeState = @{

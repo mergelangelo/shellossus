@@ -174,6 +174,79 @@ try {
     Switch-SessionBranch -State $resumedCompState -TargetId $resumedCompState.leaf_id | Out-Null
     Assert-True ($resumedCompState.messages[1].content.StartsWith('[Compacted Conversation Summary]')) 'ConstrainedLanguage compaction branch switch failed.'
 
+    & {
+        $savedWindow = $script:ContextWindowTokens
+        $savedThreshold = $script:CompactThresholdTokens
+        $null = Set-AgentContextLimits -WindowSpec '4k' -CompactSpec '75%'
+        $mock = @{ calls = 0; failAt = 2; prior = ''; transcript = '' }
+        $glyph = ([string][char]0xd83d) + ([string][char]0xde00)
+        $nonAscii = [string][char]0x044f
+        $rule = 'Never run external programs.'
+        $correction = 'Correction: use staging.json.'
+        function Invoke-WebRequest {
+            param($Uri, $Method, $Headers, $ContentType, $Body, $TimeoutSec, $ErrorAction, [switch]$UseBasicParsing, $OutFile)
+            $mock.calls++
+            $payload = $Body | ConvertFrom-Json
+            $userBody = $payload.messages[1].content
+            $promptBytes = Get-AgentUtf8TextSize ($payload.messages[0].content + $userBody)
+            Assert-True ($promptBytes + 1000 + 128 -le 4000) 'A compaction request exceeded the 4k window budget.'
+            Assert-True ($userBody -cnotmatch '\ufffd|(?<![\ud800-\udbff])[\udc00-\udfff]|[\ud800-\udbff](?![\udc00-\udfff])') 'A compaction batch split a surrogate pair.'
+            Assert-True ($userBody -match '(?s)\A<previous-summary>\n(.*?)\n</previous-summary>\n\n<conversation>\n(.*?)\n</conversation>') 'Compaction request is missing its handoff or transcript.'
+            $previous = $Matches[1]
+            $transcript = $Matches[2]
+            Assert-True ($previous -ceq $mock.prior) 'Compaction did not carry the previous batch summary forward.'
+            $mock.transcript += $transcript
+            $summary = if ($previous) { $previous } else { "## Constraints & Preferences`nUse draft.json." }
+            if ($transcript.Contains($rule)) { $summary += "`n$rule" }
+            if ($transcript.Contains($correction)) { $summary = $summary.Replace('Use draft.json.', 'Use staging.json.') }
+            $mock.prior = $summary
+            if ($mock.calls -eq $mock.failAt) { $summary = $nonAscii * 501 }
+            $response = @{
+                choices = @(@{ finish_reason = 'stop'; message = @{ content = $summary } })
+                usage = @{ prompt_tokens = 11; completion_tokens = 7 }
+            } | ConvertTo-Json -Depth 5 -Compress
+            Set-Content -LiteralPath $OutFile -Value $response -Encoding UTF8 -NoNewline
+        }
+
+        try {
+            $longUser = "[Compacted Conversation Summary]`nMessage start.`n" + ($glyph * 900) + "`n$rule`n" + ('x' * 900) + "`nMessage tail."
+            $toolResult = '{"text":"tool result start ' + ('x' * 3000) + ' tool result tail"}'
+            $compactState = @{ messages = @(
+                @{ role = 'system'; content = 'sys' },
+                @{ role = 'user'; content = $longUser },
+                @{ role = 'assistant'; content = ''; tool_calls = @(@{ id = 'cl-read'; function = @{ name = 'read_file'; arguments = '{"path":"example.json"}' } }) },
+                @{ role = 'tool'; tool_call_id = 'cl-read'; content = $toolResult },
+                @{ role = 'user'; content = $correction },
+                @{ role = 'assistant'; content = 'Correction acknowledged.' },
+                @{ role = 'user'; content = 'Recent user message.' },
+                @{ role = 'assistant'; content = 'Recent assistant message.' }
+            ) }
+            $compactArgs = @{ State = $compactState; Endpoint = 'https://example.invalid'; ModelId = 'test-model'; ApiKey = 'fake'; KeepRecent = 2; Focus = 'file paths' }
+            $failed = $false
+            try { $null = Invoke-AgentCompact @compactArgs }
+            catch {
+                if ($_.Exception.Message -notlike '*summary exceeded its size limit*') { throw }
+                $failed = $true
+            }
+            Assert-True ($failed -and $mock.calls -eq 2 -and $compactState.messages.Count -eq 8 -and $compactState.messages[1].content -ceq $longUser) 'Oversized intermediate summary changed the active history.'
+            Assert-True (-not $compactState.ContainsKey('tree_entries') -and -not $compactState.ContainsKey('leaf_id')) 'A failed compaction changed the session tree.'
+            $mock.calls = 0
+            $mock.failAt = 0
+            $mock.prior = ''
+            $mock.transcript = ''
+            $didCompact = Invoke-AgentCompact @compactArgs
+            $summary = $compactState.messages[1].content
+            Assert-True ($didCompact -and $mock.calls -gt 2 -and $summary.Contains($rule) -and $summary.Contains('Use staging.json.') -and -not $summary.Contains('Use draft.json.')) 'Compaction lost a long user message constraint or its later correction.'
+            Assert-True ($mock.transcript.Contains('Message start.') -and $mock.transcript.Contains('Message tail.') -and -not $mock.transcript.Contains('Recent user message.')) 'Compaction dropped part of the long user message or summarized retained history.'
+            Assert-True ($mock.transcript.Contains('tool result start') -and -not $mock.transcript.Contains('tool result tail') -and $summary.Contains('example.json')) 'Compaction failed to shorten tool output separately while retaining file operations.'
+            Assert-True ($compactState.usage_input_tokens -eq (11 * ($mock.calls + 2)) -and $compactState.usage_output_tokens -eq (7 * ($mock.calls + 2))) 'Compaction did not count usage for each batch.'
+        }
+        finally {
+            $script:ContextWindowTokens = $savedWindow
+            $script:CompactThresholdTokens = $savedThreshold
+        }
+    }
+
     $findSubCall = @{ id = 'f-sub'; function = @{ name = 'find_files'; arguments = '{"path":"a/b","pattern":"*"}' } }
     $clFindSub = Invoke-AgentTool -Root $workspacePath -Call $findSubCall | ConvertFrom-Json
     $clFindPaths = @($clFindSub.matches | ForEach-Object { $_.path })
