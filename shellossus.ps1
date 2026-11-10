@@ -74,18 +74,31 @@ function Test-AgentPrivateWindowsAcl {
     param([string]$Path)
     $acl = Get-Acl -LiteralPath $Path -ErrorAction Stop
     if ($acl.Sddl -notmatch '^O:(?<owner>[^:]+)G:[^:]+D:(?<dacl>[^:]+)(?:S:.*)?$') { return $false }
-    $owner = $Matches.owner
+    $principals = @($Matches.owner)
     $dacl = $Matches.dacl
-    $trusted = @('SY', 'BA', 'S-1-5-18', 'S-1-5-32-544')
-    if ($env:USERDOMAIN -and $env:USERNAME -and $acl.Owner -ieq "$env:USERDOMAIN\$env:USERNAME") {
-        $trusted += $owner
-    }
-    if ($owner -notin $trusted -or $dacl -notmatch '^(?:P|AI|AR)*(?<rules>(?:\([^()]+\))+)$') { return $false }
+    if ($dacl -notmatch '^(?:P|AI|AR)*(?<rules>(?:\([^()]+\))+)$') { return $false }
     foreach ($rule in ($Matches.rules.Trim('(', ')') -split '\)\(')) {
         $parts = $rule -split ';'
         if ($parts.Count -ne 6 -or $parts[0] -notin @('A', 'D')) { return $false }
         # Inherit-only rules do not grant access to this object. The file is checked separately.
-        if ($parts[0] -eq 'A' -and $parts[1] -notmatch 'IO' -and $parts[5] -notin $trusted) { return $false }
+        if ($parts[0] -eq 'A' -and $parts[1] -notmatch 'IO') { $principals += $parts[5] }
+    }
+    $privileged = @('SY', 'BA', 'S-1-5-18', 'S-1-5-32-544')
+    $accounts = @($principals | Where-Object { $_ -notin $privileged } | Select-Object -Unique)
+    if ($accounts.Count -eq 0) { return $true }
+
+    # An elevated process can create Administrators-owned files with a separate
+    # ACE for its user. Compare that ACE with the process SID, not the owner.
+    $identity = Invoke-CimMethod -Query "SELECT * FROM Win32_Process WHERE ProcessId = $PID" -MethodName GetOwnerSid -OperationTimeoutSec 2 -ErrorAction Stop
+    if ($identity.ReturnValue -ne 0 -or -not $identity.Sid) { return $false }
+    foreach ($account in $accounts) {
+        $sid = $account
+        if ($account -cmatch '^[A-Z]{2}$') {
+            # SDDL can abbreviate an individual SID, for example LA for the local Administrator.
+            $descriptor = ConvertFrom-SddlString -Sddl "O:$account" -ErrorAction Stop
+            $sid = $descriptor.RawDescriptor.Owner.Value
+        }
+        if ($sid -ne $identity.Sid) { return $false }
     }
     return $true
 }

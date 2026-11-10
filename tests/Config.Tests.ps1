@@ -33,23 +33,31 @@ try {
         Assert-True ($refused -and @(Get-ChildItem -LiteralPath $shared -Force).Count -eq 0) 'An unsafe save wrote a key or left a staged file.'
     }
     & {
-        $envUserDomain = $env:USERDOMAIN
-        $envUserName = $env:USERNAME
-        $env:USERDOMAIN = 'test-domain'
-        $env:USERNAME = 'test-user'
-        try {
-            $aclFixture = @{ Owner = 'test-domain\test-user'; Sddl = 'O:S-1-5-21-1G:SYD:AI(A;ID;FA;;;SY)(A;ID;FA;;;BA)(A;ID;FA;;;S-1-5-21-1)' }
-            function Get-Acl { return $aclFixture }
-            Assert-True (Test-AgentPrivateWindowsAcl -Path 'fixture') 'Private Windows ACL was rejected.'
-            $aclFixture.Sddl += '(A;ID;FR;;;BU)'
-            Assert-True (-not (Test-AgentPrivateWindowsAcl -Path 'fixture')) 'Windows ACL granted read access to another principal.'
-            $aclFixture.Sddl = 'O:S-1-5-21-1G:SYD:NO_ACCESS_CONTROL'
-            Assert-True (-not (Test-AgentPrivateWindowsAcl -Path 'fixture')) 'Null Windows DACL was accepted as private.'
+        $processIdentity = @{ ReturnValue = 0; Sid = 'S-1-5-21-1-2-3-500' }
+        $aclFixture = @{ Sddl = 'O:S-1-5-21-1-2-3-500G:SYD:AI(A;ID;FA;;;SY)(A;ID;FA;;;BA)(A;ID;FA;;;S-1-5-21-1-2-3-500)' }
+        function Get-Acl { return $aclFixture }
+        function Invoke-CimMethod {
+            param($Query, $MethodName)
+            Assert-True ($Query -like "*ProcessId = $PID" -and $MethodName -eq 'GetOwnerSid') 'Privacy check did not query its own process SID.'
+            return $processIdentity
         }
-        finally {
-            $env:USERDOMAIN = $envUserDomain
-            $env:USERNAME = $envUserName
+        function ConvertFrom-SddlString {
+            param($Sddl)
+            Assert-True ($Sddl -eq 'O:LA') 'Privacy check did not resolve the abbreviated user SID.'
+            return @{ RawDescriptor = @{ Owner = @{ Value = 'S-1-5-21-1-2-3-500' } } }
         }
+        Assert-True (Test-AgentPrivateWindowsAcl -Path 'fixture') 'Private Windows ACL was rejected.'
+
+        $adminOwned = 'O:BAG:S-1-5-21-1-2-3-513D:(A;OICIID;FA;;;SY)(A;OICIID;FA;;;BA)(A;OICIID;FA;;;LA)'
+        $aclFixture.Sddl = $adminOwned
+        Assert-True (Test-AgentPrivateWindowsAcl -Path 'fixture') 'Administrators-owned ACL for the current user was rejected.'
+        $processIdentity.Sid = 'S-1-5-21-1-2-3-501'
+        Assert-True (-not (Test-AgentPrivateWindowsAcl -Path 'fixture')) 'Administrators-owned ACL granted access to a different user.'
+        $processIdentity.Sid = 'S-1-5-21-1-2-3-500'
+        $aclFixture.Sddl = $adminOwned + '(A;ID;FR;;;S-1-5-32-545)'
+        Assert-True (-not (Test-AgentPrivateWindowsAcl -Path 'fixture')) 'Windows ACL granted read access to another principal.'
+        $aclFixture.Sddl = 'O:BAG:SYD:NO_ACCESS_CONTROL'
+        Assert-True (-not (Test-AgentPrivateWindowsAcl -Path 'fixture')) 'Null Windows DACL was accepted as private.'
     }
     $absentConfig = Read-AgentConfig -Path (Join-Path $testRoot 'missing.env')
     Assert-True ($absentConfig.Count -eq 0) 'Missing config should produce empty settings.'
