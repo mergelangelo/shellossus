@@ -4760,12 +4760,18 @@ function Stop-AgentProcessTree {
         $p = Get-Process -Id $entry.id -ErrorAction SilentlyContinue
         if (-not $p) { continue }
         try {
+            # Windows throws when StartTime is read after the process has exited.
+            if ($p.HasExited) { continue }
             if ($p.StartTime.Ticks -ne $entry.start_ticks) { continue }
             Stop-Process -InputObject $p -Force -ErrorAction Stop
             Wait-Process -InputObject $p -Timeout 2 -ErrorAction SilentlyContinue
             if (-not $p.HasExited) { throw 'Process is still running.' }
         }
-        catch { $cleanupErrors += "Cannot terminate process $($entry.id): $($_.Exception.Message)" }
+        catch {
+            if ($_.Exception.Message -notlike '*has exited*') {
+                $cleanupErrors += "Cannot terminate process $($entry.id): $($_.Exception.Message)"
+            }
+        }
     }
     # Covers cancellation immediately after Start-Process, before registration.
     if ($Process -and -not $Process.HasExited) {
@@ -4773,7 +4779,11 @@ function Stop-AgentProcessTree {
             Stop-Process -InputObject $Process -Force -ErrorAction Stop
             Wait-Process -InputObject $Process -Timeout 2 -ErrorAction SilentlyContinue
         }
-        catch { $cleanupErrors += "Cannot terminate command process: $($_.Exception.Message)" }
+        catch {
+            if ($_.Exception.Message -notlike '*has exited*') {
+                $cleanupErrors += "Cannot terminate command process: $($_.Exception.Message)"
+            }
+        }
     }
     return $cleanupErrors
 }
