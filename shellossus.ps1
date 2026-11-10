@@ -4635,7 +4635,7 @@ function Invoke-AgentGrepFiles {
     $comparison = if ($isCaseSensitive) { [StringComparison]::CurrentCulture } else { [StringComparison]::CurrentCultureIgnoreCase }
     if (-not $isLiteral) {
         $regexOptions = if ($isCaseSensitive) { [System.Text.RegularExpressions.RegexOptions]::None } else { [System.Text.RegularExpressions.RegexOptions]::IgnoreCase }
-        $pattern = [regex]::new($Arguments.pattern, $regexOptions, (New-TimeSpan -Milliseconds 100))
+        $pattern = [regex]::new($Arguments.pattern, $regexOptions, [timespan]::FromMilliseconds(100))
     }
     $walk = @{ limit = $script:AgentMaxWalkEntries; visited = 0; truncated = $false }
     $includePatterns = @(if ($includeFilter) { Get-GlobCandidatePatterns -Pattern $includeFilter } else { @() })

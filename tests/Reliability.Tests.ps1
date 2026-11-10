@@ -533,7 +533,7 @@ try {
         $script:CurrentTurnWrites = @()
         $argsJson = @{ path = 'endings.txt'; content = $case.incoming; overwrite = $true } | ConvertTo-Json -Compress
         $res = Invoke-AgentTool -Root $workspacePath -Call @{ function = @{ name = 'write_file'; arguments = $argsJson } } | ConvertFrom-Json
-        Assert-True ($res.status -eq 'written') 'Overwrite failed in newline preservation test.'
+        Assert-True ($res.status -eq 'written') "Overwrite failed in newline preservation test: $($res.error)"
         $testBackups += $res.backup
         Assert-True ((Get-Content -LiteralPath $path -Raw -Encoding UTF8) -ceq $case.expected) 'Overwrite changed the existing newline convention.'
         Invoke-AgentUndo -State @{ messages = @() } -UndoEntry @{ messages = @(); writes = @($script:CurrentTurnWrites) }
