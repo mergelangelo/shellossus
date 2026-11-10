@@ -399,23 +399,24 @@ if (-not $LibraryOnly) {
             $state.messages += @{ role = 'user'; content = $expandedQuestion }
             try {
                 Invoke-AgentTurn -State $state -Endpoint $endpoint -ModelId $Model -ApiKey $agentKey -Root $rootPath -Steps $MaxSteps
-                $lastFailedQuestion = ''
                 Save-AgentSession -SessionFile $sessionFile -State $state -Workspace $rootPath -Model $Model
-                $undoStack = @(Add-AgentUndoFrame -UndoStack $undoStack -Frame (New-AgentUndoFrame -Snapshot $turnSnapshot -Writes @($script:CurrentTurnWrites)))
             }
             catch {
                 $lastFailedQuestion = $question
                 $lastFailedAttachmentSource = $attachmentSource
                 $requestErr = Format-AgentError -ErrorRecord $_
                 $rollback = Invoke-AgentTurnRollback -State $state -Snapshot $turnSnapshot -Writes @($script:CurrentTurnWrites) -UndoStack $undoStack
+                $undoStack = @($rollback.undo_stack)
                 if ($rollback.succeeded) {
                     Write-Host ($script:Gm.Red + 'Request failed; turn rolled back (use /retry to resend): ' + $requestErr + $script:Gm.Reset)
                 }
                 else {
-                    $undoStack = @($rollback.undo_stack)
                     Write-Host ($script:Gm.Red + 'Request failed; rollback did not succeed: ' + $rollback.error + $script:Gm.Reset)
                 }
+                continue
             }
+            $undoStack = @(Add-AgentUndoFrame -UndoStack $undoStack -Frame (New-AgentUndoFrame -Snapshot $turnSnapshot -Writes @($script:CurrentTurnWrites)))
+            $lastFailedQuestion = ''
         }
     }
     finally {

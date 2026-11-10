@@ -447,9 +447,7 @@ function Invoke-ReplContinueCommand {
     Write-Host ($script:Gm.Aqua + "  [continue] Continuing agent turn (up to $contSteps steps)..." + $script:Gm.Reset)
     try {
         Invoke-AgentContinue -State $State -Endpoint $Endpoint -ModelId $Model -ApiKey $ApiKey -Root $RootPath -Steps $contSteps | Out-Null
-        $LastFailedQuestion = ''
         Save-AgentSession -SessionFile $SessionFile -State $State -Workspace $RootPath -Model $Model
-        $UndoStack = @(Add-AgentUndoFrame -UndoStack $UndoStack -Frame (New-AgentUndoFrame -Snapshot $turnSnapshot -Writes @($script:CurrentTurnWrites)))
     }
     catch {
         $requestErr = Format-AgentError -ErrorRecord $_
@@ -461,8 +459,10 @@ function Invoke-ReplContinueCommand {
         else {
             Write-Host ($script:Gm.Red + 'Continue failed; rollback did not succeed: ' + $rollback.error + $script:Gm.Reset)
         }
+        return @{ state = $State; undo_stack = @($UndoStack); last_failed_question = $LastFailedQuestion }
     }
-    return @{ state = $State; undo_stack = @($UndoStack); last_failed_question = $LastFailedQuestion }
+    $UndoStack = @(Add-AgentUndoFrame -UndoStack $UndoStack -Frame (New-AgentUndoFrame -Snapshot $turnSnapshot -Writes @($script:CurrentTurnWrites)))
+    return @{ state = $State; undo_stack = @($UndoStack); last_failed_question = '' }
 }
 
 function Invoke-ReplBangCommand {

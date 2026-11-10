@@ -801,6 +801,7 @@ try {
     $global:rbNewText = ''
     $global:rbQueue = @()
     $global:rbRepairOnUndo = $false
+    $global:rbSessionSave = $null
     function Write-Host {
         param([Parameter(Position = 0, ValueFromRemainingArguments = $true)]$Object, [switch]$NoNewline, $Separator, $ForegroundColor, $BackgroundColor)
         $text = ($Object | ForEach-Object { [string]$_ }) -join ' '
@@ -829,6 +830,14 @@ try {
                 Set-Content -LiteralPath $global:rbBackup -Value 'damaged' -Encoding UTF8 -NoNewline
             }
         }
+        if ($global:rbSessionSave) {
+            if ($global:rbSessionSave.fail) {
+                New-Item -ItemType File -Path $global:rbSessionSave.lock -ErrorAction Stop | Out-Null
+            }
+            $reply = @{ choices = @(@{ finish_reason = 'stop'; message = @{ content = 'Finished edit.' } }) } | ConvertTo-Json -Depth 5 -Compress
+            Set-Content -LiteralPath $OutFile -Value $reply -Encoding UTF8 -NoNewline
+            return
+        }
         throw 'HTTP 500 Internal Server Error'
     }
     function global:Read-Host {
@@ -837,6 +846,17 @@ try {
         $next = [string]@($global:rbQueue)[0]
         if (@($global:rbQueue).Count -eq 1) { $global:rbQueue = @() }
         else { $global:rbQueue = @(@($global:rbQueue)[1..(@($global:rbQueue).Count - 1)]) }
+        if ($global:rbSessionSave -and $next -ceq $global:rbSessionSave.second_prompt) {
+            $global:rbStep = 0
+            $global:rbBackup = ''
+            $global:rbOldText = $global:rbNewText
+            $global:rbNewText = 'unsaved'
+            $global:rbSessionSave.fail = $true
+        }
+        if ($global:rbSessionSave -and $next -eq '/undo') {
+            Assert-True ((Get-Content -LiteralPath $global:rbSessionSave.edited_file -Raw -Encoding UTF8) -ceq 'saved') 'The failed save did not roll back the second edit.'
+            Remove-Item -LiteralPath $global:rbSessionSave.lock -ErrorAction Stop
+        }
         if ($global:rbRepairOnUndo -and $next -eq '/undo' -and $global:rbBackup) {
             Set-Content -LiteralPath $global:rbBackup -Value ([string]$global:rbOldText) -Encoding UTF8 -NoNewline
         }
@@ -873,7 +893,12 @@ try {
         $preTreeCount = @($failState.tree_entries).Count
         $preMsgCount = @($failState.messages).Count
         Assert-True ($preLeaf -and $preTreeCount -ge 1 -and $preMsgCount -eq 2) 'Continue fixture did not establish a pre-turn tree.'
-        $failResult = Invoke-ReplContinueCommand -State $failState -Endpoint 'https://example.invalid/v1/chat/completions' -Model 'test-model' -ApiKey 'fake' -RootPath $workspacePath -SessionFile '' -MaxSteps 4 -UndoStack @()
+        $failSession = Join-Path $rbSessDir 'continue-recovery.jsonl'
+        $global:rbSessionSave = @{ fail = $true; lock = $failSession + '.lock' }
+        $failResult = Invoke-ReplContinueCommand -State $failState -Endpoint 'https://example.invalid/v1/chat/completions' -Model 'test-model' -ApiKey 'fake' -RootPath $workspacePath -SessionFile $failSession -MaxSteps 4 -UndoStack @()
+        Assert-True ((Test-Path -LiteralPath $global:rbSessionSave.lock) -and -not (Test-Path -LiteralPath $failSession)) 'The recovery case did not reach a blocked session save.'
+        Remove-Item -LiteralPath $global:rbSessionSave.lock
+        $global:rbSessionSave = $null
         $failText = $global:rbHost -join "`n"
         Assert-True ([string]$global:rbBackup) 'Continue fixture did not record a backup path.'
         Assert-True ((Get-Content -LiteralPath $continueFailPath -Raw -Encoding UTF8) -ceq 'after-continue') 'Failed continue restored or skipped the edit.'
@@ -950,10 +975,15 @@ try {
         Ensure-SessionTree -State $okState
         $okPreLeaf = [string]$okState.leaf_id
         $priorFrame = @{ messages = @(@{ role = 'system'; content = 'prior-frame' }); leaf_id = 'prior'; tree_entries = @(); writes = @() }
-        $okResult = Invoke-ReplContinueCommand -State $okState -Endpoint 'https://example.invalid/v1/chat/completions' -Model 'test-model' -ApiKey 'fake' -RootPath $workspacePath -SessionFile '' -MaxSteps 4 -UndoStack @($priorFrame)
+        $continueSession = Join-Path $rbSessDir 'continue-save.jsonl'
+        $global:rbSessionSave = @{ fail = $true; lock = $continueSession + '.lock' }
+        $okResult = Invoke-ReplContinueCommand -State $okState -Endpoint 'https://example.invalid/v1/chat/completions' -Model 'test-model' -ApiKey 'fake' -RootPath $workspacePath -SessionFile $continueSession -MaxSteps 4 -UndoStack @($priorFrame) -LastFailedQuestion 'previous failed prompt'
+        Remove-Item -LiteralPath $global:rbSessionSave.lock -ErrorAction Stop
+        $global:rbSessionSave = $null
         $okText = $global:rbHost -join "`n"
-        Assert-True ($okText -like '*Continue failed; turn rolled back:*' -and $okText -notlike '*did not succeed*') "Successful continue did not report rollback: $okText"
-        Assert-True (@($okResult.undo_stack).Count -eq 1 -and [string]$okResult.undo_stack[0].messages[0].content -eq 'prior-frame') 'Successful continue kept a second undo frame.'
+        Assert-True ($okText -like '*Continue failed; turn rolled back:*save is locked*' -and $okText -notlike '*did not succeed*') "A failed continue save did not report rollback: $okText"
+        Assert-True (@($okResult.undo_stack).Count -eq 1 -and [string]$okResult.undo_stack[0].messages[0].content -eq 'prior-frame') 'A failed continue save kept a second undo frame.'
+        Assert-True ($okResult.last_failed_question -ceq 'previous failed prompt') 'A failed continue save discarded the pending retry.'
         Assert-True ((Get-Content -LiteralPath $continueOkPath -Raw -Encoding UTF8) -ceq 'before-ok') 'Successful continue did not restore the file.'
         Assert-True (@($okState.messages).Count -eq 2 -and [string]$okState.messages[1].content -eq 'user-ok' -and [string]$okState.leaf_id -eq $okPreLeaf) 'Successful continue did not restore history.'
         Assert-True ([string]$global:rbBackup -and -not (Test-Path -LiteralPath $global:rbBackup)) 'Successful continue left the backup file in place.'
@@ -1010,6 +1040,28 @@ try {
         Assert-True ($replOkText -like '*Request failed; turn rolled back (use /retry to resend):*' -and $replOkText -like '*Nothing to undo*' -and $replOkText -notlike '*did not succeed*') "Successful REPL rollback kept a frame or changed the success text: $replOkText"
         Assert-True ((Get-Content -LiteralPath $replOkPath -Raw -Encoding UTF8) -ceq 'before-repl-ok') 'Successful REPL rollback did not restore the file.'
         Assert-True ([string]$global:rbBackup -and -not (Test-Path -LiteralPath $global:rbBackup)) 'Successful REPL rollback left the backup file in place.'
+
+        $replSession = Join-Path $rbSessDir 'repl-save.jsonl'
+        $seed = @{ messages = @(@{ role = 'system'; content = 'sys' }) }
+        Save-AgentSession -SessionFile $replSession -State $seed -Workspace $workspacePath -Model 'test-model'
+        $global:rbFileName = 'repl-save-rollback.txt'
+        $global:rbOldText = 'original'
+        $global:rbNewText = 'saved'
+        $global:rbCorrupt = $false
+        $global:rbStep = 0
+        $global:rbBackup = ''
+        $global:rbHost = @()
+        $global:rbQueue = @('first edit', 'second edit', '/undo', '/exit')
+        $editedFile = Join-Path $workspacePath $global:rbFileName
+        Set-Content -LiteralPath $editedFile -Value $global:rbOldText -Encoding UTF8 -NoNewline
+        $global:rbSessionSave = @{ fail = $false; lock = $replSession + '.lock'; edited_file = $editedFile; second_prompt = 'second edit' }
+        & "$PSScriptRoot\..\shellossus.ps1" -Workspace $workspacePath -Session $replSession -BaseUrl 'https://example.invalid/v1' -Model 'test-model' -Permission AutoEdit -Mode text -ConfigPath $rbCfg
+        $replSaveText = $global:rbHost -join "`n"
+        Assert-True ($replSaveText -like '*Request failed; turn rolled back*save is locked*' -and $replSaveText -like '*Reverted last turn*') "Expected a failed save followed by one successful undo: $replSaveText"
+        Assert-True ((Get-Content -LiteralPath $editedFile -Raw -Encoding UTF8) -ceq 'original') 'The first undo after a failed save did not revert the last saved edit.'
+        $savedMessages = @(Read-AgentSession -SessionFile $replSession)
+        Assert-True ($savedMessages.Count -eq 1 -and $savedMessages[0].role -eq 'system') 'The transcript on disk did not reflect the undo.'
+        $global:rbSessionSave = $null
 
         $global:rbFileName = 'prompt-fail-rollback.txt'
         $global:rbOldText = 'before-prompt'
@@ -1085,7 +1137,7 @@ try {
         $script:OutputMode = 'json'
         $script:AgentPermission = 'AutoEdit'
         $script:CurrentTurnWrites = @()
-        Remove-Variable -Name rbHost, rbStep, rbBackup, rbCorrupt, rbFileName, rbOldText, rbNewText, rbQueue, rbRepairOnUndo -Scope Global -ErrorAction SilentlyContinue
+        Remove-Variable -Name rbHost, rbStep, rbBackup, rbCorrupt, rbFileName, rbOldText, rbNewText, rbQueue, rbRepairOnUndo, rbSessionSave -Scope Global -ErrorAction SilentlyContinue
     }
 
     # A copy failure after preflight must not apply history or the session tree, and must keep the backup.
