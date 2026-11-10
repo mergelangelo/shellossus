@@ -9411,8 +9411,8 @@ function Invoke-DoctorModelsRequest {
     $responseFile = $null
     try {
         $responseFile = New-AgentTempFile
-        # Do not follow redirects with the user's credentials. Use the same UTF-8
-        # file-backed response handling as the chat transport on PowerShell 5.1.
+        # The catalog probe runs in this process and stores the response in a file.
+        # Do not follow redirects with the user's credentials.
         # Avoid -PassThru: older PowerShell versions leave -OutFile empty with it.
         # A successful response has no pipeline value; HTTP failures enter catch.
         $null = Invoke-WebRequest -Uri $Uri -Method Get -Headers @{ Authorization = ('Bearer ' + $ApiKey) } -UseBasicParsing -OutFile $responseFile.FullName -MaximumRedirection 0 -TimeoutSec 10 -ErrorAction Stop
@@ -9521,14 +9521,14 @@ function Get-AgentDoctorReport {
         $message = 'Endpoint check failed. Check DNS, proxy/VPN, TLS trust, firewall rules, and the API base URL. The request has a 10-second timeout (DNS resolution may take longer).'
         if ($probe.code -eq 200) {
             $status = 'pass'
-            $message = 'GET /models succeeded. This checks connectivity; chat generation and tool calling were not tested.'
+            $message = 'Direct GET /models succeeded and returned a usable model catalog.'
             if (-not $probe.valid_catalog) {
                 $status = 'warn'
                 $message = 'Endpoint responded, but /models did not return a usable model list. Verify the API base URL and provider documentation; model availability is unverified.'
             }
             elseif ($hasModel) {
                 if (@($probe.ids) -ccontains $ModelId) {
-                    $modelCheck.message = "Configured model is listed by the endpoint: $ModelId. Chat/tool support is not verified."
+                    $modelCheck.message = "Configured model is listed by the endpoint: $ModelId."
                 }
                 else {
                     $modelCheck.status = 'warn'
@@ -9540,7 +9540,7 @@ function Get-AgentDoctorReport {
         elseif ($probe.code -eq 407) { $message = 'Proxy authentication required (HTTP 407). Check your approved proxy configuration.' }
         elseif ($probe.code -in @(404, 405, 501)) {
             $status = 'warn'
-            $message = "Endpoint returned HTTP $($probe.code) for /models. Check the base URL; this optional route may be unsupported. Chat and model availability remain unverified."
+            $message = "Endpoint returned HTTP $($probe.code) for /models. Check the base URL; this optional route may be unsupported. Model availability remains unverified."
         }
         elseif ($probe.code -eq 429) { $status = 'warn'; $message = 'Endpoint rate-limited the check (HTTP 429). Check quota and retry later; model availability is unverified.' }
         elseif ($probe.code -ge 300 -and $probe.code -lt 400) { $message = 'Endpoint redirects the request. Use the final approved HTTPS API base URL; credentials were not forwarded.' }
@@ -9561,13 +9561,18 @@ function Get-AgentDoctorReport {
     }
     $failed = @($checks | Where-Object { $_.status -eq 'fail' }).Count
     $warnings = @($checks | Where-Object { $_.status -eq 'warn' }).Count
-    return @{ checks = $checks; failures = $failed; warnings = $warnings; exit_code = $(if ($failed) { 1 } else { 0 }) }
+    $notTested = @(
+        @{ name = 'chat_transport'; message = 'Background POST /chat/completions, Unicode round trip, worker error reporting, and cancellation.' },
+        @{ name = 'chat_contract'; message = 'Completion and tool-call compatibility with the configured model.' },
+        @{ name = 'web_tools'; message = 'fetch_url and web_search, including their ConstrainedLanguage compatibility.' }
+    )
+    return @{ checks = $checks; not_tested = $notTested; failures = $failed; warnings = $warnings; exit_code = $(if ($failed) { 1 } else { 0 }) }
 }
 
 function Write-AgentDoctorReport {
     param($Report, [string]$Mode = 'text')
     if ($Mode -eq 'json') {
-        $event = @{ type = 'doctor'; checks = @($Report.checks); failures = $Report.failures; warnings = $Report.warnings; exit_code = $Report.exit_code }
+        $event = @{ type = 'doctor'; checks = @($Report.checks); not_tested = @($Report.not_tested); failures = $Report.failures; warnings = $Report.warnings; exit_code = $Report.exit_code }
         Write-Output (ConvertTo-AsciiJson -Json ($event | ConvertTo-Json -Depth 6 -Compress))
         return
     }
@@ -9581,6 +9586,9 @@ function Write-AgentDoctorReport {
             default { $script:Gm.BoldAqua }
         }
         Write-Host ('{0}[{1}]{2} {3}: {4}' -f $stColor, $stUpper, $script:Gm.Reset, $check.name, $check.message)
+    }
+    foreach ($item in $Report.not_tested) {
+        Write-Host ('{0}[NOT TESTED]{1} {2}: {3}' -f $script:Gm.BoldAqua, $script:Gm.Reset, $item.name, $item.message)
     }
     Write-Host ("Checks complete: $($Report.failures) failure(s), $($Report.warnings) warning(s). No chat request was sent.")
 }

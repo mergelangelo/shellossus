@@ -51,7 +51,11 @@ shellossus -Doctor
 shellossus -Doctor -Mode json             # One JSON report; exit 1 for failed checks
 ```
 
-Doctor checks the PowerShell version and language mode, effective endpoint/model/key settings, workspace access, and session-directory create/write/rename/read/delete access. It creates the session directory if needed, removes its temporary probe, and skips storage checks with `-NoSession`. It sends one authenticated `GET <BaseUrl>/models` with a 10-second request timeout (DNS resolution can take longer); it does not follow redirects or generate a completion. Missing `/models` support, an unlisted model, or rate limiting produces a warning, not proof that chat is broken. A successful catalog lookup does not verify chat or tool-call support. Reports hide the API key and omit server response bodies; they still contain local paths, the validated API base URL, and the configured model ID.
+Doctor checks the PowerShell version and language mode, effective endpoint/model/key settings, workspace access, and session-directory create/write/rename/read/delete access. It creates the session directory if needed, removes its temporary probe, and skips storage checks with `-NoSession`.
+
+With a configured key, it sends one direct authenticated `GET <BaseUrl>/models` with a 10-second request timeout (DNS resolution can take longer). Redirects are disabled. Missing `/models` support, an unlisted model, or rate limiting produces a warning.
+
+The report lists untested capabilities separately (`not_tested` in JSON). These include the chat HTTP worker and its Unicode, error, and cancellation handling, model completion and tool-call compatibility, and web tools in ConstrainedLanguage. Reports show local paths, the validated API base URL, and the configured model ID. They hide the API key and omit server response bodies.
 
 Settings use the same precedence as normal startup: launch arguments for endpoint/model/workspace, then `SHELLOSSUS_*` environment variables, then the saved configuration. The API key comes from `SHELLOSSUS_API_KEY` or the configuration file. Remote endpoints require an **HTTPS API base URL** (normally ending in `/v1`), while local loopback servers (`http://localhost`, `http://127.0.0.1`, `http://[::1]`) are also supported over `http://`.
 

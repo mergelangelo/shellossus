@@ -55,6 +55,11 @@ try {
     $report = Get-AgentDoctorReport @argsDoctor
     Assert-True ($report.failures -eq 0 -and $report.warnings -eq 0 -and $report.exit_code -eq 0) ("Healthy doctor check failed: " + ($report | ConvertTo-Json -Depth 6 -Compress))
     Assert-True ((Get-DoctorCheck $report 'model').message -like '*is listed*') 'Doctor did not verify the configured model.'
+    Assert-True ((Get-DoctorCheck $report 'endpoint').message -like '*Direct GET /models*') 'Doctor did not identify the transport actually checked.'
+    Assert-True ($global:ShellossusDoctorFixture.requests -eq 1) 'Healthy Doctor did not issue exactly one catalog request.'
+    $healthyJson = Write-AgentDoctorReport -Report $report -Mode json | ConvertFrom-Json
+    Assert-True (($healthyJson.not_tested.name -join ',') -ceq 'chat_transport,chat_contract,web_tools') 'Doctor marked untested capabilities as verified or omitted them from JSON.'
+    Assert-True ($healthyJson.not_tested[0].message -like '*Unicode*error reporting*cancellation*' -and $healthyJson.not_tested[2].message -like '*ConstrainedLanguage*') 'Doctor omitted untested worker or web behavior.'
     Assert-True ((Get-DoctorCheck $report 'language_mode').message -like "* $($ExecutionContext.SessionState.LanguageMode).*" ) 'Doctor reported the wrong language mode.'
     Assert-True ((Get-DoctorCheck $report 'sessions').status -eq 'pass' -and @(Get-ChildItem -LiteralPath $sessionPath -Force).Count -eq 0) 'Storage check failed or left a probe behind.'
     Assert-True (-not (Test-Path -LiteralPath $global:ShellossusDoctorFixture.responsePath)) 'Doctor left an HTTP response on disk.'
@@ -90,6 +95,9 @@ try {
 
     $textOut = @(Write-AgentDoctorReport -Report $report -Mode text 6>&1 | ForEach-Object { [string]$_ }) -join "`n"
     Assert-True ($textOut.Contains($script:Gm.BoldGreen) -and $textOut.Contains('[PASS]') -and $textOut.Contains('Shellossus doctor')) 'Write-AgentDoctorReport text mode missing ANSI status colors.'
+    foreach ($name in @('chat_transport', 'chat_contract', 'web_tools')) {
+        Assert-True ($textOut -match ('\[NOT TESTED\][^\r\n]* ' + $name + ':')) "Doctor text did not mark $name as untested."
+    }
     foreach ($body in @('<html>proxy login</html>', '{"unexpected":"shape"}', '{"data":[{}]}')) {
         $global:ShellossusDoctorFixture.body = $body
         $report = Get-AgentDoctorReport @argsDoctor -NoSession
@@ -103,6 +111,7 @@ try {
     $json = Write-AgentDoctorReport -Report $report -Mode json
     $parsed = $json | ConvertFrom-Json
     Assert-True ($parsed.type -eq 'doctor' -and $parsed.exit_code -eq 1 -and (Get-DoctorCheck $parsed 'endpoint').message -like '*DNS*') 'Network failures did not yield an actionable JSON report.'
+    Assert-True (($parsed.not_tested.name -join ',') -ceq ($healthyJson.not_tested.name -join ',')) 'A catalog failure changed the set of untested capabilities.'
     Assert-True ($json -notlike '*doctor-secret-key*' -and $json -notlike '*server-private-body*') 'Doctor leaked a secret or server body.'
     Assert-True (-not (Test-Path -LiteralPath $global:ShellossusDoctorFixture.responsePath)) 'Failure left an HTTP response file.'
     $global:ShellossusDoctorFixture.throwNetwork = $false
