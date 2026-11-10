@@ -70,11 +70,14 @@ function Get-AgentWorkerErrorText {
     $text = $Raw.Trim()
     if (-not $text) { return '' }
     # Windows PowerShell sends progress records, including "Preparing modules for first use.",
-    # to a redirected error stream as CLIXML. That host noise is not a subagent failure.
-    if ($text.StartsWith('#< CLIXML') -and $text -notmatch 'S="Error"' -and $text -notmatch "S='Error'") {
-        return ''
-    }
-    return $text
+    # to a redirected error stream as CLIXML. Drop that host noise and keep any real text.
+    if (-not $text.StartsWith('#< CLIXML')) { return $text }
+    $text = $text -replace '(?s)<Obj S="progress".*?</Obj>', ''
+    $text = $text -replace "(?s)<Obj S='progress'.*?</Obj>", ''
+    if ($text -match '<S N="Message">([^<]*)</S>') { return $Matches[1].Trim() }
+    $text = $text -replace '(?s)#< CLIXML', ''
+    $text = $text -replace '(?s)<Objs\b[^>]*>\s*</Objs>', ''
+    return $text.Trim()
 }
 
 function Invoke-ParallelSubagentProcesses {

@@ -1083,6 +1083,8 @@ exit 1
         $stderrWorkerScript = Join-Path $envData.TestRoot 'stderr-worker.ps1'
         $stderrWorkerText = @'
 param($Workspace, $BaseUrl, $Model, $Permission, $Mode, [switch]$NoSession, $MaxSteps, $Tools, [switch]$NoTools, $ExcludeTools, $Prompt, $ConfigPath, [switch]$NoSkills, [switch]$NoPromptTemplates, [switch]$NoContextFiles, $ReasoningEffort)
+[Console]::Error.WriteLine('#< CLIXML')
+[Console]::Error.WriteLine('<Objs Version="1.1.0.1" xmlns="http://schemas.microsoft.com/powershell/2004/04"><Obj S="progress" RefId="0"><AV>Preparing modules for first use.</AV></Obj></Objs>')
 [Console]::Error.WriteLine('boom')
 exit 1
 '@
