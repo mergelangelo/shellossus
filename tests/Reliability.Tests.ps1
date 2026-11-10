@@ -1070,6 +1070,8 @@ param($Workspace, $BaseUrl, $Model, $Permission, $Mode, [switch]$NoSession, $Max
     content = "auto_web=$($env:SHELLOSSUS_SUB_AUTO_WEB)"
     tool_calls = @(@{ id = 'tc-unexecuted'; type = 'function'; function = @{ name = 'read_file'; arguments = '{"path":"never-read.txt"}' } })
 } | ConvertTo-Json -Depth 10 -Compress
+[Console]::Error.WriteLine('#< CLIXML')
+[Console]::Error.WriteLine('<Objs Version="1.1.0.1" xmlns="http://schemas.microsoft.com/powershell/2004/04"><Obj S="progress" RefId="0"><AV>Preparing modules for first use.</AV></Obj></Objs>')
 exit 1
 '@
         Set-Content -LiteralPath $abortWorkerScript -Value $abortWorkerText -Encoding Ascii
@@ -1077,6 +1079,16 @@ exit 1
         Assert-True ($abortResults.Count -eq 1 -and $abortResults[0].status -eq 'error') 'Expected aborted worker status to be error.'
         Assert-True ($abortResults[0].output -eq 'auto_web=1') "Expected SHELLOSSUS_SUB_AUTO_WEB=1 in worker, got '$($abortResults[0].output)'."
         Assert-True (@($abortResults[0].read_files).Count -eq 0) 'Aborted worker before tool_execution_end must not report pending read_file as completed.'
+
+        $stderrWorkerScript = Join-Path $envData.TestRoot 'stderr-worker.ps1'
+        $stderrWorkerText = @'
+param($Workspace, $BaseUrl, $Model, $Permission, $Mode, [switch]$NoSession, $MaxSteps, $Tools, [switch]$NoTools, $ExcludeTools, $Prompt, $ConfigPath, [switch]$NoSkills, [switch]$NoPromptTemplates, [switch]$NoContextFiles, $ReasoningEffort)
+[Console]::Error.WriteLine('boom')
+exit 1
+'@
+        Set-Content -LiteralPath $stderrWorkerScript -Value $stderrWorkerText -Encoding Ascii
+        $stderrResults = @(Invoke-ParallelSubagentProcesses -Root $workspacePath -Tasks @(@{ role = 'recon'; prompt = 'stderr test' }) -ScriptPath $stderrWorkerScript)
+        Assert-True ($stderrResults.Count -eq 1 -and $stderrResults[0].status -eq 'error' -and $stderrResults[0].output -eq 'Subagent error: boom') "Plain worker stderr was not kept: $($stderrResults[0].output)"
     }
     finally {
         $script:EnabledTools = @()

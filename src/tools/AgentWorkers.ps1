@@ -64,6 +64,19 @@ function New-SubagentErrorResult {
     return $result
 }
 
+function Get-AgentWorkerErrorText {
+    param([string]$Raw)
+    if (-not $Raw) { return '' }
+    $text = $Raw.Trim()
+    if (-not $text) { return '' }
+    # Windows PowerShell sends progress records, including "Preparing modules for first use.",
+    # to a redirected error stream as CLIXML. That host noise is not a subagent failure.
+    if ($text.StartsWith('#< CLIXML') -and $text -notmatch 'S="Error"' -and $text -notmatch "S='Error'") {
+        return ''
+    }
+    return $text
+}
+
 function Invoke-ParallelSubagentProcesses {
     param([string]$Root, [array]$Tasks, [int]$MaxSteps = 15, [string]$ScriptPath, [int]$TimeoutSec = 180)
     $configDir = if ($script:AgentConfigPath) { Split-Path $script:AgentConfigPath -Parent } else { '' }
@@ -241,9 +254,10 @@ if ($env:SHELLOSSUS_SUB_REASONING_EFFORT) { $workerArgs.ReasoningEffort = $env:S
                 }
                 if (-not $w.timed_out -and (Test-Path -LiteralPath $w.err_file)) {
                     $errRaw = Get-Content -LiteralPath $w.err_file -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
-                    if ($errRaw -and $errRaw.Trim() -and (-not $sawTurnEnd -or -not $replyText)) {
+                    $errText = Get-AgentWorkerErrorText -Raw $errRaw
+                    if ($errText -and (-not $sawTurnEnd -or -not $replyText)) {
                         $wStatus = 'error'
-                        $replyText = if ($replyText) { $replyText + "`nSubagent error: " + $errRaw.Trim() } else { 'Subagent error: ' + $errRaw.Trim() }
+                        $replyText = if ($replyText) { $replyText + "`nSubagent error: " + $errText } else { 'Subagent error: ' + $errText }
                     }
                 }
                 if (-not $sawTurnEnd -and $w.timed_out) {
