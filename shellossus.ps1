@@ -3318,7 +3318,7 @@ function Get-AgentToolCallIdSet {
 }
 
 function Assert-AgentToolCallBatch {
-    param($Message, [string]$FinishReason)
+    param($Message, [string]$FinishReason, [switch]$Replay)
     if (-not (Test-IsJsonObject $Message) -or
         ($null -ne $Message.role -and ($Message.role -isnot [string] -or $Message.role -cne 'assistant')) -or
         ($null -ne $Message.content -and $Message.content -isnot [string]) -or
@@ -3336,7 +3336,7 @@ function Assert-AgentToolCallBatch {
         throw 'Invalid tool_calls batch. The call list does not match finish_reason.'
     }
     $limit = 64
-    if ($calls.Count -gt $limit) {
+    if (-not $Replay -and $calls.Count -gt $limit) {
         throw "Invalid tool_calls batch. A response may contain at most $limit calls."
     }
     if ($calls.Count -eq 0) { return }
@@ -8004,6 +8004,64 @@ function Test-ValidConversationBoundary {
     return $true
 }
 
+function Assert-AgentSessionTree {
+    param([array]$Entries, [string]$LeafId)
+    $byId = @{}
+    $parents = @{}
+    foreach ($entry in $Entries) {
+        $byId[$entry.id] = $entry
+        if ($entry.parent_id) { $parents[$entry.parent_id] = $true }
+    }
+    $pendingById = @{}
+    $path = [object[]]::new($Entries.Count)
+    foreach ($entry in $Entries) {
+        $node = $entry
+        $depth = 0
+        while ($node -and -not $pendingById.ContainsKey($node.id)) {
+            $pendingById[$node.id] = $false # Visiting, before the parent's state is known.
+            $path[$depth] = $node
+            $depth++
+            $parentId = $node.parent_id
+            if ($parentId -and -not $byId.ContainsKey($parentId)) {
+                throw "Session entry '$($node.id)' has a missing parent."
+            }
+            $node = if ($parentId) { $byId[$parentId] }
+        }
+        $pending = if ($node) { $pendingById[$node.id] }
+        if ($pending -is [bool]) { throw "Parent cycle in session tree at entry '$($node.id)'." }
+        for ($i = $depth - 1; $i -ge 0; $i--) {
+            $node = $path[$i]
+            if ($node.role -eq 'tool') {
+                if (-not $pending -or -not $pending.ContainsKey($node.tool_call_id)) {
+                    throw "Session entry '$($node.id)' has a mismatched tool result."
+                }
+                # Siblings may answer the same pending call on separate branches.
+                $pending = $pending.Clone()
+                $pending.Remove($node.tool_call_id)
+            }
+            else {
+                if ($pending.Count -gt 0) { throw "Incomplete tool calls before session entry '$($node.id)'." }
+                $pending = if ($node.tool_calls) { Get-AgentToolCallIdSet -Calls $node.tool_calls }
+            }
+            if ($pending.Count -gt 0 -and ($node.id -eq $LeafId -or -not $parents.ContainsKey($node.id))) {
+                throw "Incomplete tool calls at session leaf '$($node.id)'."
+            }
+            $pendingById[$node.id] = $pending
+        }
+    }
+    foreach ($entry in $Entries) {
+        $firstKept = $entry.first_kept_entry_id
+        if (-not $firstKept) { continue }
+        $ancestor = $byId[$entry.parent_id]
+        while ($ancestor -and $ancestor.id -ine $firstKept) {
+            $ancestor = if ($ancestor.parent_id) { $byId[$ancestor.parent_id] }
+        }
+        if (-not $ancestor -or $ancestor.role -eq 'tool' -or $ancestor.entry_type -eq 'compaction') {
+            throw "Invalid first kept entry for session compaction '$($entry.id)'."
+        }
+    }
+}
+
 function Build-BranchContextMessages {
     param($State, [string]$LeafId)
     $sysMsg = if ($State.messages -and $State.messages.Count -gt 0 -and $State.messages[0].role -eq 'system') {
@@ -8015,28 +8073,29 @@ function Build-BranchContextMessages {
     if (-not $LeafId) { return @($sysMsg) }
     $byId = @{}
     foreach ($te in @($State.tree_entries)) {
-        if ($te -and $te.id) { $byId[[string]$te.id] = $te }
+        if ($te -and $te.id) {
+            if ($byId.ContainsKey([string]$te.id)) { throw "Duplicate session entry ID '$($te.id)'." }
+            $byId[[string]$te.id] = $te
+        }
     }
     if (-not $byId.ContainsKey($LeafId)) {
         throw "Entry ID '$LeafId' not found in session tree."
     }
-    $chainRev = @()
+    $path = [object[]]::new($byId.Count)
+    $start = $path.Count
+    $visited = @{}
     $curr = $byId[$LeafId]
-    $guard = 0
-    while ($null -ne $curr -and $guard -lt 5000) {
-        $guard++
-        $chainRev += $curr
-        if ($curr.parent_id -and $byId.ContainsKey([string]$curr.parent_id)) {
-            $curr = $byId[[string]$curr.parent_id]
+    while ($curr) {
+        if ($visited.ContainsKey($curr.id)) { throw "Parent cycle in session tree at entry '$($curr.id)'." }
+        $visited[$curr.id] = $true
+        $start--
+        $path[$start] = $curr
+        if ($curr.parent_id -and -not $byId.ContainsKey([string]$curr.parent_id)) {
+            throw "Session entry '$($curr.id)' has a missing parent."
         }
-        else {
-            $curr = $null
-        }
+        $curr = if ($curr.parent_id) { $byId[[string]$curr.parent_id] }
     }
-    $path = @()
-    for ($i = $chainRev.Count - 1; $i -ge 0; $i--) {
-        $path += $chainRev[$i]
-    }
+    $path = @($path[$start..($path.Count - 1)])
     $compIdx = -1
     for ($i = 0; $i -lt $path.Count; $i++) {
         if ($path[$i].entry_type -eq 'compaction') {
@@ -8227,13 +8286,50 @@ function Test-CapabilityNoteInsideOpenToolCalls {
     return $false
 }
 
+function Assert-AgentSessionRevision {
+    param([string]$Path, $Expected)
+    $current = Read-AgentUndoContent -Path $Path -Hash
+    if ($current -cne $Expected) {
+        throw "Session save conflict for '$Path'. Resume the current file or save under a new name."
+    }
+}
+
 function Save-AgentSession {
-    param([string]$SessionFile, $State, [string]$Workspace = '', [string]$Model = '', [string]$SessionId = '')
+    param([string]$SessionFile, $State, [string]$Workspace = '', [string]$Model = '', [string]$SessionId = '', [switch]$AsExport)
     if (-not $SessionFile) { return }
     $parent = Split-Path $SessionFile -Parent
-    if ($parent -and -not (Test-Path -LiteralPath $parent)) {
+    if (-not $parent) { $parent = (Get-Location).Path }
+    if (-not (Test-Path -LiteralPath $parent)) {
         New-Item -ItemType Directory -Path $parent -Force -ErrorAction Stop | Out-Null
     }
+    $parent = Convert-Path -LiteralPath $parent -ErrorAction Stop
+    $target = Join-Path $parent (Split-Path $SessionFile -Leaf)
+    $lock = $target + '.lock'
+    try {
+        # Without -Force the file is created exclusively by the filesystem provider.
+        $lockItem = New-Item -ItemType File -Path $lock -ErrorAction Stop
+        if (-not $lockItem) { throw "Could not acquire session save lock '$lock'." }
+    }
+    catch {
+        if (Test-Path -LiteralPath $lock) {
+            throw "Session save is locked by '$lock'. Retry after the writer finishes."
+        }
+        throw
+    }
+    try {
+        $expected = if ($State.session_revision_path -ieq $target) { $State.session_revision_hash }
+        elseif ($AsExport) { Read-AgentUndoContent -Path $target -Hash }
+        Assert-AgentSessionRevision -Path $target -Expected $expected
+        Write-AgentSessionFile -Path $target -State $State -Workspace $Workspace -Model $Model -SessionId $SessionId -Expected $expected -AsExport:$AsExport
+        if (-not $AsExport) { $script:ActiveSessionFile = $SessionFile }
+    }
+    finally {
+        Remove-Item -LiteralPath $lock -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Write-AgentSessionFile {
+    param([string]$Path, $State, [string]$Workspace, [string]$Model, [string]$SessionId, $Expected, [switch]$AsExport)
     Ensure-SessionTree -State $State
     $sid = if ($SessionId) { $SessionId } elseif ($State.session_id) { [string]$State.session_id } else { 'sess-' + (Get-Date -Format 'yyyyMMddHHmmss') + '-' + (Get-Random -Minimum 100000 -Maximum 999999) }
     $ws = if ($Workspace) { $Workspace } elseif ($State.workspace) { [string]$State.workspace } else { '' }
@@ -8241,12 +8337,6 @@ function Save-AgentSession {
     $mdl = if ($Model) { $Model } elseif ($State.model) { [string]$State.model } else { '' }
     $sName = if ($State.session_name) { [string]$State.session_name } else { '' }
     $parentSess = if ($State.parent_session) { [string]$State.parent_session } else { '' }
-    $State.session_id = $sid
-    $State.workspace = $ws
-    $State.model = $mdl
-    $script:ActiveSessionId = $sid
-    $script:ActiveSessionFile = $SessionFile
-    $script:ActiveModelId = $mdl
     $meta = @{
         type = 'session_meta'
         version = 1
@@ -8289,19 +8379,28 @@ function Save-AgentSession {
             $lines += ($bEntry | ConvertTo-Json -Depth 20 -Compress)
         }
     }
-    $parentDir = if ($parent) { $parent } else { (Get-Location).Path }
-    $tempPath = Join-Path $parentDir ('.session-tmp-' + $PID + '-' + (Get-Random -Minimum 100000 -Maximum 999999) + '.jsonl')
+    $tempPath = Join-Path (Split-Path $Path -Parent) ('.session-tmp-' + $PID + '-' + (Get-Random -Minimum 100000 -Maximum 999999) + '.tmp')
     try {
         Set-Content -LiteralPath $tempPath -Value $lines -Encoding UTF8 -ErrorAction Stop
-        if (-not (Test-Path -LiteralPath $tempPath)) {
-            throw "Failed to stage session file: $tempPath"
-        }
-        Move-Item -LiteralPath $tempPath -Destination $SessionFile -Force -ErrorAction Stop
+        $revision = (Get-FileHash -LiteralPath $tempPath -Algorithm SHA256 -ErrorAction Stop).Hash
+        Assert-AgentSessionRevision -Path $Path -Expected $Expected
+        Move-Item -LiteralPath $tempPath -Destination $Path -Force -ErrorAction Stop
     }
     finally {
         if (Test-Path -LiteralPath $tempPath) {
             Remove-Item -LiteralPath $tempPath -Force -ErrorAction SilentlyContinue
         }
+    }
+    if (-not $AsExport -or $State.session_revision_path -ieq $Path) {
+        $State.session_revision_path = $Path
+        $State.session_revision_hash = $revision
+    }
+    if (-not $AsExport) {
+        $State.session_id = $sid
+        $State.workspace = $ws
+        $State.model = $mdl
+        $script:ActiveSessionId = $sid
+        $script:ActiveModelId = $mdl
     }
 }
 
@@ -8334,67 +8433,151 @@ function Get-AgentSessionMeta {
     return $null
 }
 
-function Read-AgentSession {
-    param([string]$SessionFile, $State = $null)
-    if (-not (Test-Path -LiteralPath $SessionFile)) { throw "Session file not found: $SessionFile" }
-    $messages = @()
-    $loadedTodos = @()
-    $loadedTree = @()
-    $sawMeta = $false
-    $loadedSessionId = ''
-    $loadedWorkspace = ''
-    $loadedModel = ''
-    $loadedName = ''
-    $loadedParent = ''
-    $loadedLeaf = ''
-    foreach ($line in @(Get-Content -LiteralPath $SessionFile -Encoding UTF8 -ErrorAction Stop)) {
+function ConvertFrom-AgentSessionLines {
+    param([string[]]$Lines)
+    $candidate = @{ messages = @(); tree_entries = @(); todos = @(); leaf_id = ''; session_name = ''; parent_session = '' }
+    $jsonOptions = @{ ErrorAction = 'Stop' }
+    if ((Get-Command ConvertFrom-Json).Parameters.Keys -contains 'DateKind') { $jsonOptions.DateKind = 'String' }
+    $ids = @{}
+    $seenRecord = $false
+    $unlinked = $false
+    $lineNumber = 0
+    foreach ($line in $Lines) {
+        $lineNumber++
         $trimmed = $line.Trim()
         if (-not $trimmed) { continue }
-        $obj = $trimmed | ConvertFrom-Json -ErrorAction Stop
-        if ($obj.type -eq 'session_meta') {
-            $loadedTodos = @(if ($obj.todos) { @($obj.todos) })
-            $sawMeta = $true
-            $loadedSessionId = [string]$obj.id
-            $loadedWorkspace = [string]$obj.workspace
-            $loadedModel = [string]$obj.model
-            $loadedName = if ($obj.name) { [string]$obj.name } elseif ($obj.session_name) { [string]$obj.session_name } else { '' }
-            $loadedParent = if ($obj.parent_session) { [string]$obj.parent_session } else { '' }
-            $loadedLeaf = if ($obj.leaf_id) { [string]$obj.leaf_id } else { '' }
+        try {
+            if (-not $trimmed.StartsWith('{')) { throw 'Expected a JSON object.' }
+            $obj = $trimmed | ConvertFrom-Json @jsonOptions
+        }
+        catch { throw "Invalid session JSON object on line $lineNumber." }
+        if (-not $jsonOptions.DateKind) {
+            # Earlier parsers can coerce ISO strings into DateTime values.
+            foreach ($field in @('id', 'parent_id', 'leaf_id', 'first_kept_entry_id', 'tool_call_id', 'name', 'session_name', 'parent_session', 'model', 'content', 'reasoning_content')) {
+                if ($obj.$field -is [datetime]) { $obj.$field = $obj.$field.ToString('o') }
+            }
+            foreach ($todo in @($obj.todos)) {
+                if ($todo.content -is [datetime]) { $todo.content = $todo.content.ToString('o') }
+            }
+            foreach ($call in @($obj.tool_calls)) {
+                if ($call.id -is [datetime]) { $call.id = $call.id.ToString('o') }
+            }
+        }
+        if ($null -ne $obj.type -and $obj.type -isnot [string]) { throw "Invalid session record type on line $lineNumber." }
+        if ($obj.type -ceq 'session_meta') {
+            if ($seenRecord) { throw 'Session metadata must occur once, before all messages.' }
+            if (($obj.version -isnot [int] -and $obj.version -isnot [long]) -or $obj.version -ne 1) {
+                throw 'Unsupported session format version. Expected version 1.'
+            }
+            foreach ($field in @('id', 'workspace', 'model', 'name', 'session_name', 'parent_session', 'leaf_id')) {
+                if ($null -ne $obj.$field -and $obj.$field -isnot [string]) {
+                    throw "Invalid session metadata field '$field'. Expected a string."
+                }
+            }
+            if ($null -ne $obj.todos) {
+                Test-AgentTodoArguments -Arguments $obj
+                $candidate.todos = @($obj.todos)
+            }
+            $candidate.session_id = [string]$obj.id
+            $candidate.workspace = [string]$obj.workspace
+            $candidate.model = [string]$obj.model
+            $candidate.session_name = if ($obj.name) { $obj.name } else { [string]$obj.session_name }
+            $candidate.parent_session = [string]$obj.parent_session
+            $candidate.leaf_id = [string]$obj.leaf_id
+            $seenRecord = $true
             continue
         }
-        if ($obj.type -eq 'branch_entry') {
-            if ($null -ne $State) {
-                $bMsg = @{
-                    id = [string]$obj.id
-                    parent_id = $obj.parent_id
-                    role = [string]$obj.role
-                    content = $obj.content
-                }
-                Copy-MessageOptionalFields -Source $obj -Target $bMsg
-                $loadedTree += $bMsg
+        $seenRecord = $true
+        $isBranch = $obj.type -ceq 'branch_entry'
+        if ($null -ne $obj.type -and -not $isBranch) { throw "Unknown session record type on line $lineNumber." }
+        if ($obj.role -isnot [string] -or $obj.role -cnotin @('system', 'user', 'assistant', 'tool')) {
+            throw "Invalid session message role on line $lineNumber."
+        }
+        if ($obj.role -eq 'system' -and ($isBranch -or $candidate.messages.Count -gt 0 -or $null -ne $obj.id)) {
+            throw "A system message must be the first active message on line $lineNumber."
+        }
+        if ($obj.role -eq 'assistant') {
+            # Older sessions can store one call as an object instead of an array.
+            if (Test-IsJsonObject $obj.tool_calls) { $obj.tool_calls = @($obj.tool_calls) }
+            Assert-AgentToolCallBatch -Message $obj -Replay
+        }
+        elseif ($obj.content -isnot [string] -or $null -ne $obj.tool_calls -or
+            ($obj.role -ne 'tool' -and $null -ne $obj.tool_call_id)) {
+            throw "Invalid session message content or tool fields on line $lineNumber."
+        }
+        if ($obj.role -eq 'tool' -and ($obj.tool_call_id -isnot [string] -or -not $obj.tool_call_id.Trim())) {
+            throw "Invalid tool result ID on line $lineNumber."
+        }
+        if ($null -ne $obj.id) {
+            if ($obj.id -isnot [string] -or -not $obj.id.Trim() -or $ids.ContainsKey($obj.id)) {
+                throw "Invalid or duplicate session entry ID on line $lineNumber."
             }
-            continue
+            $ids[$obj.id] = $true
+        }
+        elseif ($isBranch -or $obj.parent_id) {
+            throw "Missing session entry ID on line $lineNumber."
+        }
+        elseif ($obj.role -ne 'system' -and -not ($obj.role -eq 'user' -and $obj.content.StartsWith('[Capability State Change]'))) {
+            $unlinked = $true
+        }
+        if (($null -ne $obj.parent_id -and $obj.parent_id -isnot [string]) -or
+            ($null -ne $obj.first_kept_entry_id -and $obj.first_kept_entry_id -isnot [string]) -or
+            ($null -ne $obj.entry_type -and ($obj.entry_type -isnot [string] -or $obj.entry_type -cnotin @('message', 'compaction'))) -or
+            ($obj.entry_type -eq 'compaction' -and ($obj.role -ne 'user' -or -not $obj.id -or -not $obj.parent_id)) -or
+            ($obj.first_kept_entry_id -and $obj.entry_type -ne 'compaction')) {
+            throw "Invalid session tree fields on line $lineNumber."
         }
         $msg = @{ role = [string]$obj.role; content = $obj.content }
         if ($obj.id) { $msg.id = [string]$obj.id }
         if ($obj.parent_id) { $msg.parent_id = [string]$obj.parent_id }
         Copy-MessageOptionalFields -Source $obj -Target $msg
-        $messages += $msg
+        if ($isBranch) { $candidate.tree_entries += $msg }
+        else { $candidate.messages += $msg }
     }
-    $script:ActiveSessionTodos = @($loadedTodos)
+    if (-not $seenRecord) { throw 'The session file is empty.' }
+    if ($unlinked -and $ids.Count -gt 0) { throw 'The session mixes linked and unlinked messages.' }
+    if ($candidate.leaf_id -and -not $ids.ContainsKey($candidate.leaf_id)) {
+        throw 'The session active leaf ID does not exist in the tree.'
+    }
+    if (-not (Test-ValidConversationBoundary -Messages $candidate.messages)) {
+        throw 'The session contains incomplete or mismatched tool results.'
+    }
+    # Ensure-SessionTree assigns IDs for legacy linear transcripts. Preserve an
+    # explicit leaf, including one serialized as an inactive branch entry.
+    $leaf = $candidate.leaf_id
+    Ensure-SessionTree -State $candidate
+    if ($leaf) { $candidate.leaf_id = $leaf }
+    Assert-AgentSessionTree -Entries $candidate.tree_entries -LeafId $candidate.leaf_id
+    return $candidate
+}
+
+function Get-AgentSessionCandidate {
+    param([string]$SessionFile)
+    if (-not (Test-Path -LiteralPath $SessionFile -PathType Leaf)) { throw "Session file not found: $SessionFile" }
+    $path = Convert-Path -LiteralPath $SessionFile -ErrorAction Stop
+    $snapshot = New-AgentTempFile
+    try {
+        Copy-Item -LiteralPath $path -Destination $snapshot.FullName -Force -ErrorAction Stop
+        $candidate = ConvertFrom-AgentSessionLines -Lines @(Get-Content -LiteralPath $snapshot.FullName -Encoding UTF8 -ErrorAction Stop)
+        $candidate.session_revision_path = $path
+        $candidate.session_revision_hash = (Get-FileHash -LiteralPath $snapshot.FullName -Algorithm SHA256 -ErrorAction Stop).Hash
+        return $candidate
+    }
+    finally {
+        Remove-Item -LiteralPath $snapshot.FullName -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Read-AgentSession {
+    param([string]$SessionFile, $State = $null)
+    $candidate = Get-AgentSessionCandidate -SessionFile $SessionFile
     if ($null -ne $State) {
-        $State.todos = @($loadedTodos)
-        $State.tree_entries = @($loadedTree)
-        $State.session_name = $loadedName
-        $State.parent_session = $loadedParent
-        $State.leaf_id = $loadedLeaf
-        if ($sawMeta) {
-            $State.session_id = $loadedSessionId
-            $State.workspace = $loadedWorkspace
-            $State.model = $loadedModel
+        foreach ($key in $candidate.Keys) {
+            if ($key -ne 'messages') { $State[$key] = $candidate[$key] }
         }
     }
-    return $messages
+    $script:ActiveSessionTodos = @($candidate.todos)
+    return $candidate.messages
 }
 
 function Find-ProjectSession {
@@ -8416,57 +8599,49 @@ function Find-ProjectSession {
 
 function Invoke-SessionResume {
     param([string]$SessionFile, $State, [string]$CurrentWorkspace = '')
-    if (-not (Test-Path -LiteralPath $SessionFile)) { throw "Session file not found: $SessionFile" }
-    $meta = Get-AgentSessionMeta -SessionFile $SessionFile
-    if ($meta -and $meta.workspace -and $CurrentWorkspace) {
-        $targetWs = if (Test-Path -LiteralPath $CurrentWorkspace) { (Get-Item -LiteralPath $CurrentWorkspace -Force).FullName } else { $CurrentWorkspace }
-        $metaNorm = ([string]$meta.workspace).TrimEnd('\').TrimEnd('/')
-        $targetNorm = ([string]$targetWs).TrimEnd('\').TrimEnd('/')
-        if ($metaNorm -ine $targetNorm) {
-            throw "Cannot resume session from a different workspace ($($meta.workspace))."
-        }
-    }
-    $loadedMessages = @(Read-AgentSession -SessionFile $SessionFile -State $State)
-    $State.usage_input_tokens = 0
-    $State.usage_output_tokens = 0
-    $State.scoped_instr_cache = @{}
-    $loadedHadSystem = $false
-    foreach ($loadedMsg in @($loadedMessages)) {
-        if ($loadedMsg.role -eq 'system') {
-            $loadedHadSystem = $true
-            break
-        }
-    }
-    $State.messages = $loadedMessages
-    Ensure-SessionTree -State $State
-    if ($State.leaf_id -and $State.tree_entries.Count -gt 0) {
-        $State.messages = @(Build-BranchContextMessages -State $State -LeafId $State.leaf_id)
-    }
+    $candidate = Get-AgentSessionCandidate -SessionFile $SessionFile
     if ($CurrentWorkspace) {
-        $State.workspace = if (Test-Path -LiteralPath $CurrentWorkspace) { (Get-Item -LiteralPath $CurrentWorkspace -Force).FullName } else { $CurrentWorkspace }
+        $targetWs = if (Test-Path -LiteralPath $CurrentWorkspace) { (Get-Item -LiteralPath $CurrentWorkspace -Force).FullName } else { $CurrentWorkspace }
+        $metaNorm = ([string]$candidate.workspace).TrimEnd('\').TrimEnd('/')
+        $targetNorm = ([string]$targetWs).TrimEnd('\').TrimEnd('/')
+        if ($metaNorm -and $metaNorm -ine $targetNorm) {
+            throw "Cannot resume session from a different workspace ($($candidate.workspace))."
+        }
+        $candidate.workspace = $targetWs
     }
-    if ($meta -and $meta.model) {
-        $State.model = [string]$meta.model
+    foreach ($key in @('session_id', 'workspace', 'model')) {
+        if (-not $candidate.ContainsKey($key)) { $candidate[$key] = $State[$key] }
     }
-    if ($State.session_id) { $script:ActiveSessionId = [string]$State.session_id }
-    if ($State.model) { $script:ActiveModelId = [string]$State.model }
-    $script:ActiveSessionFile = $SessionFile
-    $State.undo_stack = @()
-    $State.last_failed_question = ''
-    $State.last_prompt_tokens = 0
-    $State.last_prompt_chars = 0
-    $State.step_limit_reached = $false
-    $State.loop_detected = $false
-    if ($loadedHadSystem -and $State.messages -and @($State.messages).Count -gt 0 -and $State.messages[0].role -eq 'system') {
-        $refreshRoot = if ($State.workspace) { [string]$State.workspace } else { '' }
+    $loadedHadSystem = ($candidate.messages.Count -gt 0 -and $candidate.messages[0].role -eq 'system')
+    if ($candidate.leaf_id) {
+        $candidate.messages = @(Build-BranchContextMessages -State $candidate -LeafId $candidate.leaf_id)
+    }
+    if (-not (Test-ValidConversationBoundary -Messages $candidate.messages)) {
+        throw 'The session active branch contains incomplete or mismatched tool results.'
+    }
+    $candidate.undo_stack = @()
+    $candidate.last_failed_question = ''
+    $candidate.usage_input_tokens = 0
+    $candidate.usage_output_tokens = 0
+    $candidate.last_prompt_tokens = 0
+    $candidate.last_prompt_chars = 0
+    $candidate.scoped_instr_cache = @{}
+    $candidate.step_limit_reached = $false
+    $candidate.loop_detected = $false
+    if ($loadedHadSystem) {
         $refreshConfig = ''
         if ($script:AgentConfigPath) {
             $refreshConfig = [string](Split-Path -Path ([string]$script:AgentConfigPath) -Parent)
         }
         if (-not $refreshConfig) { $refreshConfig = '.' }
-        $State.messages[0].content = Build-SystemPrompt -Root $refreshRoot -ConfigDir $refreshConfig
+        $candidate.messages[0].content = Build-SystemPrompt -Root ([string]$candidate.workspace) -ConfigDir $refreshConfig
     }
-    Sync-AgentCapabilities -State $State | Out-Null
+    Sync-AgentCapabilities -State $candidate | Out-Null
+    foreach ($key in $candidate.Keys) { $State[$key] = $candidate[$key] }
+    $script:ActiveSessionTodos = @($candidate.todos)
+    if ($State.session_id) { $script:ActiveSessionId = [string]$State.session_id }
+    if ($State.model) { $script:ActiveModelId = [string]$State.model }
+    $script:ActiveSessionFile = $SessionFile
     return $State
 }
 
@@ -10740,13 +10915,7 @@ function Export-AgentSessionOutput {
         [string]$Indent = ''
     )
     if ($ExportPath -match '\.jsonl$') {
-        $keepSessionFile = $script:ActiveSessionFile
-        try {
-            Save-AgentSession -SessionFile $ExportPath -State $State -Workspace $RootPath -Model $Model
-        }
-        finally {
-            $script:ActiveSessionFile = $keepSessionFile
-        }
+        Save-AgentSession -SessionFile $ExportPath -State $State -Workspace $RootPath -Model $Model -AsExport
         Write-Host ($script:Gm.Green + "${Indent}Exported session JSONL: $ExportPath" + $script:Gm.Reset)
         return $ExportPath
     }
@@ -10790,6 +10959,8 @@ function Invoke-ReplNewSessionCommand {
     $State.messages = @($system)
     $State.tree_entries = @()
     $State.leaf_id = $null
+    $State.session_revision_path = $null
+    $State.session_revision_hash = $null
     $State.todos = @()
     $State.usage_input_tokens = 0
     $State.usage_output_tokens = 0
@@ -10831,8 +11002,16 @@ function Invoke-ReplNameCommand {
     param($State, [string]$SessionFile = '', [string]$RootPath, [string]$Model = '', [string]$NameArg = '')
     $trimmedName = if ($NameArg) { $NameArg.Trim() } else { '' }
     if ($trimmedName) {
+        $previousName = $State.session_name
         $State.session_name = $trimmedName
-        Save-AgentSession -SessionFile $SessionFile -State $State -Workspace $RootPath -Model $Model
+        try {
+            Save-AgentSession -SessionFile $SessionFile -State $State -Workspace $RootPath -Model $Model
+        }
+        catch {
+            $State.session_name = $previousName
+            Write-Host ($script:Gm.Red + '  ' + $_.Exception.Message + $script:Gm.Reset)
+            return
+        }
         Write-Host ($script:Gm.Green + "  Session name set to: $($State.session_name)" + $script:Gm.Reset)
     }
     else {
@@ -10966,18 +11145,25 @@ function Invoke-ReplReloadCommand {
 
 function Invoke-ReplSaveCommand {
     param($State, [string]$SessionDir, [string]$SessionFile = '', [string]$RootPath, [string]$Model = '', [string]$SaveArg = '')
+    $target = $SessionFile
     if ($SaveArg -and $SaveArg.Trim()) {
         $nameArg = $SaveArg.Trim()
         if ($nameArg -notmatch '\.jsonl$') { $nameArg += '.jsonl' }
-        $SessionFile = Join-Path $SessionDir (Split-Path $nameArg -Leaf)
+        $target = Join-Path $SessionDir (Split-Path $nameArg -Leaf)
     }
-    if (-not $SessionFile -or -not $SessionFile.Trim()) {
+    if (-not $target -or -not $target.Trim()) {
         Write-Host ($script:Gm.Yellow + '  Session not saved. Provide a name, or sessions are disabled (-NoSession).' + $script:Gm.Reset)
         return @{ session_file = '' }
     }
-    Save-AgentSession -SessionFile $SessionFile -State $State -Workspace $RootPath -Model $Model
-    Write-Host ($script:Gm.Green + "  Saved session: $SessionFile" + $script:Gm.Reset)
-    return @{ session_file = $SessionFile }
+    try {
+        Save-AgentSession -SessionFile $target -State $State -Workspace $RootPath -Model $Model
+        Write-Host ($script:Gm.Green + "  Saved session: $target" + $script:Gm.Reset)
+        return @{ session_file = $target }
+    }
+    catch {
+        Write-Host ($script:Gm.Red + '  ' + $_.Exception.Message + $script:Gm.Reset)
+        return @{ session_file = $SessionFile }
+    }
 }
 
 function Test-UndoDropsLaterShellMessage {
@@ -11009,13 +11195,13 @@ function Invoke-ReplUndoCommand {
     try {
         Invoke-AgentUndo -State $State -UndoEntry $lastUndo
         Restore-AgentTurnPermission -Frame $lastUndo -State $State
-        Save-AgentSession -SessionFile $SessionFile -State $State -Workspace $RootPath -Model $Model
         if ($UndoStack.Count -eq 1) { $UndoStack = @() }
         else { $UndoStack = @($UndoStack[0..($UndoStack.Count - 2)]) }
         if ($dropsLaterShell) {
             Write-Host ($script:Gm.Yellow + '  Warning: a later shell message is dropped from the transcript. The shell effect is not undone.' + $script:Gm.Reset)
         }
         Write-Host ($script:Gm.Green + '  Reverted last turn and restored tracked changes.' + $script:Gm.Reset)
+        Save-AgentSession -SessionFile $SessionFile -State $State -Workspace $RootPath -Model $Model
     }
     catch {
         Write-Host ($script:Gm.Red + '  ' + $_.Exception.Message + $script:Gm.Reset)
@@ -11028,12 +11214,16 @@ function Invoke-ReplModelCommand {
     $reqModel = if ($NewModel) { $NewModel.Trim() } else { '' }
     $selectedModel = Select-ReplModelId -CurrentModel $CurrentModel -SessionDir $SessionDir -NewModel $reqModel
     if ($selectedModel) {
+        try {
+            Save-AgentSession -SessionFile $SessionFile -State $State -Workspace $RootPath -Model $selectedModel
+        }
+        catch {
+            Write-Host ($script:Gm.Red + '  ' + $_.Exception.Message + $script:Gm.Reset)
+            return $CurrentModel
+        }
         $CurrentModel = $selectedModel
         $State.model = $CurrentModel
         $script:ActiveModelId = $CurrentModel
-        if ($SessionFile) {
-            Save-AgentSession -SessionFile $SessionFile -State $State -Workspace $RootPath -Model $CurrentModel
-        }
         if ($script:AgentConfigPath) {
             $null = Update-AgentConfigOptionalKey -Path $script:AgentConfigPath -Key 'SHELLOSSUS_MODEL' -Value $CurrentModel
         }

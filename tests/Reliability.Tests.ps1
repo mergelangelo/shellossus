@@ -15,6 +15,115 @@ $testBackups = @()
 $testProcesses = @()
 try {
     & {
+        $sessionFile = Join-Path $envData.TestRoot 'shared-session.jsonl'
+        $oldState = @{ messages = @(@{ role = 'system'; content = 'sys' }, @{ role = 'user'; content = 'Original' }) }
+        Save-AgentSession -SessionFile $sessionFile -State $oldState -Workspace $workspacePath -Model 'test-model'
+        $otherState = @{}
+        $null = Invoke-SessionResume -SessionFile $sessionFile -State $otherState -CurrentWorkspace $workspacePath
+        $oldState.messages += @{ role = 'assistant'; content = 'Winner' }
+        $otherState.messages += @{ role = 'assistant'; content = 'Stale writer' }
+
+        $overlap = @{ blocked = $false }
+        & {
+            function Move-Item {
+                param($LiteralPath, $Destination, [switch]$Force, $ErrorAction)
+                Assert-True ($LiteralPath -notlike '*.jsonl') 'The staged save is visible to session discovery.'
+                try { Save-AgentSession -SessionFile $sessionFile -State $otherState }
+                catch {
+                    if ($_.Exception.Message -notlike '*save is locked*') { throw }
+                    $overlap.blocked = $true
+                }
+                Microsoft.PowerShell.Management\Move-Item -LiteralPath $LiteralPath -Destination $Destination -Force:$Force -ErrorAction $ErrorAction
+            }
+            Save-AgentSession -SessionFile $sessionFile -State $oldState
+        }
+        Assert-True ($overlap.blocked -and -not (Test-Path -LiteralPath ($sessionFile + '.lock'))) 'A concurrent save entered the commit section or the lock leaked.'
+        $winningHash = (Get-FileHash -LiteralPath $sessionFile).Hash
+        $stale = $false
+        try { Save-AgentSession -SessionFile $sessionFile -State $otherState }
+        catch {
+            if ($_.Exception.Message -notlike '*save conflict*') { throw }
+            $stale = $true
+        }
+        Assert-True ($stale -and (Get-FileHash -LiteralPath $sessionFile).Hash -eq $winningHash) 'A stale save overwrote a newer session revision.'
+        Assert-True (-not (Test-Path -LiteralPath ($sessionFile + '.lock')) -and -not $otherState.messages[-1].id) 'A stale save left a lock or changed the live tree.'
+        $copyFile = Join-Path $envData.TestRoot 'recovered-session.jsonl'
+        Save-AgentSession -SessionFile $copyFile -State $otherState
+        $copy = @(Read-AgentSession -SessionFile $copyFile)
+        Assert-True ($copy[-1].content -eq 'Stale writer') 'The losing console could not save under a new name.'
+        $null = Invoke-SessionResume -SessionFile $sessionFile -State $otherState -CurrentWorkspace $workspacePath
+        Assert-True ($otherState.messages[-1].content -eq 'Winner') 'Resuming did not load the winning revision.'
+        $exportFile = Join-Path $envData.TestRoot 'exported-revision.jsonl'
+        $null = Export-AgentSessionOutput -State $otherState -ExportPath $exportFile -RootPath $workspacePath
+        $otherState.messages += @{ role = 'user'; content = 'Next revision' }
+        Save-AgentSession -SessionFile $sessionFile -State $otherState
+        Assert-True ((@(Read-AgentSession -SessionFile $sessionFile))[-1].content -eq 'Next revision') 'JSONL export lost the revision of the active session.'
+    }
+
+    & {
+        $invalid = Join-Path $envData.TestRoot 'invalid-session.jsonl'
+        $header = @{ type = 'session_meta'; version = 1; id = 'imported'; workspace = $workspacePath; model = 'new-model'; leaf_id = 'a' }
+        $root = '{"id":"a","role":"user","content":"Imported"}'
+        $live = @{
+            session_id = 'live'
+            model = 'live-model'
+            leaf_id = 'live-leaf'
+            messages = @(@{ role = 'user'; content = 'Live message' })
+            todos = @(@{ content = 'Live task'; status = 'pending' })
+        }
+        $script:ActiveSessionTodos = @($live.todos)
+        $savedActiveFile = $script:ActiveSessionFile
+        $savedActiveId = $script:ActiveSessionId
+        $savedActiveModel = $script:ActiveModelId
+        $before = $live | ConvertTo-Json -Depth 10 -Compress
+        $cases = @(
+            @{ match = '*format version*'; version = 2 },
+            @{ match = '*message role*'; lines = @('{"id":"b","role":"unknown","content":"bad"}') },
+            @{ match = '*duplicate session entry ID*'; lines = @('{"type":"branch_entry","id":"A","role":"user","content":"duplicate"}') },
+            @{ match = '*Parent cycle*'; lines = @(
+                '{"type":"branch_entry","id":"b","parent_id":"c","role":"user","content":"cycle"}',
+                '{"type":"branch_entry","id":"c","parent_id":"b","role":"assistant","content":"cycle"}'
+            ) },
+            @{ match = '*missing parent*'; lines = @('{"type":"branch_entry","id":"b","parent_id":"missing","role":"user","content":"orphan"}') },
+            @{ match = '*leaf ID does not exist*'; leaf = 'missing' },
+            @{ match = '*Incomplete tool calls*'; lines = @(
+                '{"type":"branch_entry","id":"b","parent_id":"a","role":"assistant","tool_calls":[{"id":"call","type":"function","function":{"name":"list_files","arguments":"{}"}}]}'
+            ) },
+            @{ match = '*mismatched tool result*'; lines = @('{"type":"branch_entry","id":"b","parent_id":"a","role":"tool","tool_call_id":"unmatched","content":"{}"}') },
+            @{ match = '*Invalid first kept entry*'; lines = @(
+                '{"type":"branch_entry","id":"b","parent_id":"a","role":"assistant","content":"different branch"}',
+                '{"type":"branch_entry","id":"c","parent_id":"a","role":"user","entry_type":"compaction","first_kept_entry_id":"b","content":"summary"}'
+            ) }
+        )
+        try {
+            foreach ($case in $cases) {
+                $meta = @{} + $header
+                if ($case.version) { $meta.version = $case.version }
+                if ($case.leaf) { $meta.leaf_id = $case.leaf }
+                $lines = @($meta | ConvertTo-Json -Compress) + @($root) + @($case.lines)
+                Set-Content -LiteralPath $invalid -Value $lines -Encoding UTF8
+                $rejected = $false
+                try { $null = Invoke-SessionResume -SessionFile $invalid -State $live -CurrentWorkspace $workspacePath }
+                catch {
+                    if ($_.Exception.Message -notlike $case.match) { throw }
+                    $rejected = $true
+                }
+                Assert-True ($rejected -and ($live | ConvertTo-Json -Depth 10 -Compress) -ceq $before) "Malformed session changed live state ($($case.match))."
+                Assert-True ($script:ActiveSessionTodos[0].content -eq 'Live task' -and $script:ActiveSessionFile -eq $savedActiveFile -and $script:ActiveSessionId -eq $savedActiveId -and $script:ActiveModelId -eq $savedActiveModel) 'Malformed session changed active session globals.'
+            }
+            $legacy = Join-Path $envData.TestRoot 'linear-session.jsonl'
+            Set-Content -LiteralPath $legacy -Encoding UTF8 -Value @('{"role":"user","content":"2025-01-02T03:04:05.0000000Z"}', '{"role":"assistant","content":"Legacy answer"}')
+            $loaded = @{}
+            $null = Invoke-SessionResume -SessionFile $legacy -State $loaded -CurrentWorkspace $workspacePath
+            Assert-True ($loaded.tree_entries.Count -eq 2 -and $loaded.messages[-1].content -eq 'Legacy answer') 'A headerless linear session no longer loads.'
+            Assert-True ($loaded.messages[-2].content -ceq '2025-01-02T03:04:05.0000000Z') 'A timestamp in the conversation was treated as a non-string value.'
+        }
+        finally {
+            $script:ActiveSessionTodos = @()
+        }
+    }
+
+    & {
         $mock = @{ messages = @() }
         function Invoke-WebRequest {
             param($Uri, $Method, $Headers, $ContentType, $Body, $TimeoutSec, $ErrorAction, [switch]$UseBasicParsing, $OutFile)

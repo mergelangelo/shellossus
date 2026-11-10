@@ -9,13 +9,7 @@ function Export-AgentSessionOutput {
         [string]$Indent = ''
     )
     if ($ExportPath -match '\.jsonl$') {
-        $keepSessionFile = $script:ActiveSessionFile
-        try {
-            Save-AgentSession -SessionFile $ExportPath -State $State -Workspace $RootPath -Model $Model
-        }
-        finally {
-            $script:ActiveSessionFile = $keepSessionFile
-        }
+        Save-AgentSession -SessionFile $ExportPath -State $State -Workspace $RootPath -Model $Model -AsExport
         Write-Host ($script:Gm.Green + "${Indent}Exported session JSONL: $ExportPath" + $script:Gm.Reset)
         return $ExportPath
     }
@@ -59,6 +53,8 @@ function Invoke-ReplNewSessionCommand {
     $State.messages = @($system)
     $State.tree_entries = @()
     $State.leaf_id = $null
+    $State.session_revision_path = $null
+    $State.session_revision_hash = $null
     $State.todos = @()
     $State.usage_input_tokens = 0
     $State.usage_output_tokens = 0
@@ -100,8 +96,16 @@ function Invoke-ReplNameCommand {
     param($State, [string]$SessionFile = '', [string]$RootPath, [string]$Model = '', [string]$NameArg = '')
     $trimmedName = if ($NameArg) { $NameArg.Trim() } else { '' }
     if ($trimmedName) {
+        $previousName = $State.session_name
         $State.session_name = $trimmedName
-        Save-AgentSession -SessionFile $SessionFile -State $State -Workspace $RootPath -Model $Model
+        try {
+            Save-AgentSession -SessionFile $SessionFile -State $State -Workspace $RootPath -Model $Model
+        }
+        catch {
+            $State.session_name = $previousName
+            Write-Host ($script:Gm.Red + '  ' + $_.Exception.Message + $script:Gm.Reset)
+            return
+        }
         Write-Host ($script:Gm.Green + "  Session name set to: $($State.session_name)" + $script:Gm.Reset)
     }
     else {
@@ -235,18 +239,25 @@ function Invoke-ReplReloadCommand {
 
 function Invoke-ReplSaveCommand {
     param($State, [string]$SessionDir, [string]$SessionFile = '', [string]$RootPath, [string]$Model = '', [string]$SaveArg = '')
+    $target = $SessionFile
     if ($SaveArg -and $SaveArg.Trim()) {
         $nameArg = $SaveArg.Trim()
         if ($nameArg -notmatch '\.jsonl$') { $nameArg += '.jsonl' }
-        $SessionFile = Join-Path $SessionDir (Split-Path $nameArg -Leaf)
+        $target = Join-Path $SessionDir (Split-Path $nameArg -Leaf)
     }
-    if (-not $SessionFile -or -not $SessionFile.Trim()) {
+    if (-not $target -or -not $target.Trim()) {
         Write-Host ($script:Gm.Yellow + '  Session not saved. Provide a name, or sessions are disabled (-NoSession).' + $script:Gm.Reset)
         return @{ session_file = '' }
     }
-    Save-AgentSession -SessionFile $SessionFile -State $State -Workspace $RootPath -Model $Model
-    Write-Host ($script:Gm.Green + "  Saved session: $SessionFile" + $script:Gm.Reset)
-    return @{ session_file = $SessionFile }
+    try {
+        Save-AgentSession -SessionFile $target -State $State -Workspace $RootPath -Model $Model
+        Write-Host ($script:Gm.Green + "  Saved session: $target" + $script:Gm.Reset)
+        return @{ session_file = $target }
+    }
+    catch {
+        Write-Host ($script:Gm.Red + '  ' + $_.Exception.Message + $script:Gm.Reset)
+        return @{ session_file = $SessionFile }
+    }
 }
 
 function Test-UndoDropsLaterShellMessage {
@@ -278,13 +289,13 @@ function Invoke-ReplUndoCommand {
     try {
         Invoke-AgentUndo -State $State -UndoEntry $lastUndo
         Restore-AgentTurnPermission -Frame $lastUndo -State $State
-        Save-AgentSession -SessionFile $SessionFile -State $State -Workspace $RootPath -Model $Model
         if ($UndoStack.Count -eq 1) { $UndoStack = @() }
         else { $UndoStack = @($UndoStack[0..($UndoStack.Count - 2)]) }
         if ($dropsLaterShell) {
             Write-Host ($script:Gm.Yellow + '  Warning: a later shell message is dropped from the transcript. The shell effect is not undone.' + $script:Gm.Reset)
         }
         Write-Host ($script:Gm.Green + '  Reverted last turn and restored tracked changes.' + $script:Gm.Reset)
+        Save-AgentSession -SessionFile $SessionFile -State $State -Workspace $RootPath -Model $Model
     }
     catch {
         Write-Host ($script:Gm.Red + '  ' + $_.Exception.Message + $script:Gm.Reset)
@@ -297,12 +308,16 @@ function Invoke-ReplModelCommand {
     $reqModel = if ($NewModel) { $NewModel.Trim() } else { '' }
     $selectedModel = Select-ReplModelId -CurrentModel $CurrentModel -SessionDir $SessionDir -NewModel $reqModel
     if ($selectedModel) {
+        try {
+            Save-AgentSession -SessionFile $SessionFile -State $State -Workspace $RootPath -Model $selectedModel
+        }
+        catch {
+            Write-Host ($script:Gm.Red + '  ' + $_.Exception.Message + $script:Gm.Reset)
+            return $CurrentModel
+        }
         $CurrentModel = $selectedModel
         $State.model = $CurrentModel
         $script:ActiveModelId = $CurrentModel
-        if ($SessionFile) {
-            Save-AgentSession -SessionFile $SessionFile -State $State -Workspace $RootPath -Model $CurrentModel
-        }
         if ($script:AgentConfigPath) {
             $null = Update-AgentConfigOptionalKey -Path $script:AgentConfigPath -Key 'SHELLOSSUS_MODEL' -Value $CurrentModel
         }

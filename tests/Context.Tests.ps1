@@ -108,7 +108,8 @@ try {
     $reasonState = @{
         messages = @(
             @{ role = 'system'; content = 'sys' },
-            @{ role = 'assistant'; content = 'using a tool'; reasoning_content = 'plan the call'; tool_calls = @{ id = 'tc-reason'; type = 'function'; function = @{ name = 'list_files'; arguments = '{}' } } }
+            @{ role = 'assistant'; content = 'using a tool'; reasoning_content = 'plan the call'; tool_calls = @{ id = 'tc-reason'; type = 'function'; function = @{ name = 'list_files'; arguments = '{}' } } },
+            @{ role = 'tool'; tool_call_id = 'tc-reason'; content = '{}' }
         )
     }
     $reasonSaveOut = @(Save-AgentSession -SessionFile $reasonSessionFile -State $reasonState -Workspace $workspacePath -Model 'model-a' -SessionId 'sid-reason')
@@ -119,7 +120,7 @@ try {
     if ($reasonMsgs.Count -gt 1 -and $reasonMsgs[1].tool_calls) {
         $reasonToolId = [string]@($reasonMsgs[1].tool_calls)[0].id
     }
-    Assert-True ($reasonMsgs.Count -eq 2 -and [string]$reasonMsgs[1].reasoning_content -eq 'plan the call' -and ($reasonMsgs[1].tool_calls -is [array]) -and @($reasonMsgs[1].tool_calls).Count -eq 1 -and $reasonToolId -eq 'tc-reason') 'Session roundtrip dropped reasoning_content or tool_calls.'
+    Assert-True ($reasonMsgs.Count -eq 3 -and [string]$reasonMsgs[1].reasoning_content -eq 'plan the call' -and ($reasonMsgs[1].tool_calls -is [array]) -and @($reasonMsgs[1].tool_calls).Count -eq 1 -and $reasonToolId -eq 'tc-reason') 'Session roundtrip dropped reasoning_content or tool_calls.'
 
     # Session tree branching (/tree), session forking (/fork), and HTML session export (/export).
     $treeSessionDir = Join-Path $testRoot 'tree-sessions'

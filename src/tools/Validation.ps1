@@ -14,7 +14,7 @@ function Get-AgentToolCallIdSet {
 }
 
 function Assert-AgentToolCallBatch {
-    param($Message, [string]$FinishReason)
+    param($Message, [string]$FinishReason, [switch]$Replay)
     if (-not (Test-IsJsonObject $Message) -or
         ($null -ne $Message.role -and ($Message.role -isnot [string] -or $Message.role -cne 'assistant')) -or
         ($null -ne $Message.content -and $Message.content -isnot [string]) -or
@@ -32,7 +32,7 @@ function Assert-AgentToolCallBatch {
         throw 'Invalid tool_calls batch. The call list does not match finish_reason.'
     }
     $limit = 64
-    if ($calls.Count -gt $limit) {
+    if (-not $Replay -and $calls.Count -gt $limit) {
         throw "Invalid tool_calls batch. A response may contain at most $limit calls."
     }
     if ($calls.Count -eq 0) { return }

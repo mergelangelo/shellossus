@@ -67,6 +67,64 @@ function Test-ValidConversationBoundary {
     return $true
 }
 
+function Assert-AgentSessionTree {
+    param([array]$Entries, [string]$LeafId)
+    $byId = @{}
+    $parents = @{}
+    foreach ($entry in $Entries) {
+        $byId[$entry.id] = $entry
+        if ($entry.parent_id) { $parents[$entry.parent_id] = $true }
+    }
+    $pendingById = @{}
+    $path = [object[]]::new($Entries.Count)
+    foreach ($entry in $Entries) {
+        $node = $entry
+        $depth = 0
+        while ($node -and -not $pendingById.ContainsKey($node.id)) {
+            $pendingById[$node.id] = $false # Visiting, before the parent's state is known.
+            $path[$depth] = $node
+            $depth++
+            $parentId = $node.parent_id
+            if ($parentId -and -not $byId.ContainsKey($parentId)) {
+                throw "Session entry '$($node.id)' has a missing parent."
+            }
+            $node = if ($parentId) { $byId[$parentId] }
+        }
+        $pending = if ($node) { $pendingById[$node.id] }
+        if ($pending -is [bool]) { throw "Parent cycle in session tree at entry '$($node.id)'." }
+        for ($i = $depth - 1; $i -ge 0; $i--) {
+            $node = $path[$i]
+            if ($node.role -eq 'tool') {
+                if (-not $pending -or -not $pending.ContainsKey($node.tool_call_id)) {
+                    throw "Session entry '$($node.id)' has a mismatched tool result."
+                }
+                # Siblings may answer the same pending call on separate branches.
+                $pending = $pending.Clone()
+                $pending.Remove($node.tool_call_id)
+            }
+            else {
+                if ($pending.Count -gt 0) { throw "Incomplete tool calls before session entry '$($node.id)'." }
+                $pending = if ($node.tool_calls) { Get-AgentToolCallIdSet -Calls $node.tool_calls }
+            }
+            if ($pending.Count -gt 0 -and ($node.id -eq $LeafId -or -not $parents.ContainsKey($node.id))) {
+                throw "Incomplete tool calls at session leaf '$($node.id)'."
+            }
+            $pendingById[$node.id] = $pending
+        }
+    }
+    foreach ($entry in $Entries) {
+        $firstKept = $entry.first_kept_entry_id
+        if (-not $firstKept) { continue }
+        $ancestor = $byId[$entry.parent_id]
+        while ($ancestor -and $ancestor.id -ine $firstKept) {
+            $ancestor = if ($ancestor.parent_id) { $byId[$ancestor.parent_id] }
+        }
+        if (-not $ancestor -or $ancestor.role -eq 'tool' -or $ancestor.entry_type -eq 'compaction') {
+            throw "Invalid first kept entry for session compaction '$($entry.id)'."
+        }
+    }
+}
+
 function Build-BranchContextMessages {
     param($State, [string]$LeafId)
     $sysMsg = if ($State.messages -and $State.messages.Count -gt 0 -and $State.messages[0].role -eq 'system') {
@@ -78,28 +136,29 @@ function Build-BranchContextMessages {
     if (-not $LeafId) { return @($sysMsg) }
     $byId = @{}
     foreach ($te in @($State.tree_entries)) {
-        if ($te -and $te.id) { $byId[[string]$te.id] = $te }
+        if ($te -and $te.id) {
+            if ($byId.ContainsKey([string]$te.id)) { throw "Duplicate session entry ID '$($te.id)'." }
+            $byId[[string]$te.id] = $te
+        }
     }
     if (-not $byId.ContainsKey($LeafId)) {
         throw "Entry ID '$LeafId' not found in session tree."
     }
-    $chainRev = @()
+    $path = [object[]]::new($byId.Count)
+    $start = $path.Count
+    $visited = @{}
     $curr = $byId[$LeafId]
-    $guard = 0
-    while ($null -ne $curr -and $guard -lt 5000) {
-        $guard++
-        $chainRev += $curr
-        if ($curr.parent_id -and $byId.ContainsKey([string]$curr.parent_id)) {
-            $curr = $byId[[string]$curr.parent_id]
+    while ($curr) {
+        if ($visited.ContainsKey($curr.id)) { throw "Parent cycle in session tree at entry '$($curr.id)'." }
+        $visited[$curr.id] = $true
+        $start--
+        $path[$start] = $curr
+        if ($curr.parent_id -and -not $byId.ContainsKey([string]$curr.parent_id)) {
+            throw "Session entry '$($curr.id)' has a missing parent."
         }
-        else {
-            $curr = $null
-        }
+        $curr = if ($curr.parent_id) { $byId[[string]$curr.parent_id] }
     }
-    $path = @()
-    for ($i = $chainRev.Count - 1; $i -ge 0; $i--) {
-        $path += $chainRev[$i]
-    }
+    $path = @($path[$start..($path.Count - 1)])
     $compIdx = -1
     for ($i = 0; $i -lt $path.Count; $i++) {
         if ($path[$i].entry_type -eq 'compaction') {

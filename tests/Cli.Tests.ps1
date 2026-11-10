@@ -1439,14 +1439,8 @@ try {
     Save-AgentSession -SessionFile $modelPersistFile -State $modelPersistState -Workspace $workspacePath -Model 'old-model' -SessionId 'sess-model-persist'
     $modelPersistMetaBefore = Get-AgentSessionMeta -SessionFile $modelPersistFile
     Assert-True ($modelPersistMetaBefore.model -eq 'old-model') "Fixture session meta model was not old-model, got '$($modelPersistMetaBefore.model)'."
-    $modelPersistLive = @{
-        messages = @(
-            @{ role = 'system'; content = 'sys' },
-            @{ role = 'user'; content = 'Model persist user text' }
-        )
-        model = 'old-model'
-        session_id = 'sess-model-persist'
-    }
+    $modelPersistLive = @{}
+    $null = Invoke-SessionResume -SessionFile $modelPersistFile -State $modelPersistLive -CurrentWorkspace $workspacePath
     $modelPersistResult = Invoke-ReplModelCommand -State $modelPersistLive -CurrentModel 'old-model' -SessionDir $modelPersistDir -NewModel 'new-model' -SessionFile $modelPersistFile -RootPath $workspacePath
     Assert-True ($modelPersistResult -eq 'new-model') "Expected Invoke-ReplModelCommand to return new-model, got '$modelPersistResult'."
     $modelPersistMetaAfter = Get-AgentSessionMeta -SessionFile $modelPersistFile
