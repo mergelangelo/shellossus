@@ -15,6 +15,60 @@ $testBackups = @()
 $testProcesses = @()
 try {
     & {
+        $mock = @{ messages = @() }
+        function Invoke-WebRequest {
+            param($Uri, $Method, $Headers, $ContentType, $Body, $TimeoutSec, $ErrorAction, [switch]$UseBasicParsing, $OutFile)
+            $payload = $Body | ConvertFrom-Json
+            foreach ($message in $payload.messages) {
+                $allowed = @('role', 'content')
+                if ($message.role -eq 'assistant') { $allowed += @('reasoning_content', 'tool_calls') }
+                if ($message.role -eq 'tool') { $allowed += 'tool_call_id' }
+                $actual = @(Get-ObjectPropertyNames -InputObject $message | Sort-Object) -join ','
+                Assert-True ($actual -eq (($allowed | Sort-Object) -join ',')) "Unexpected fields in API message with role '$($message.role)': $actual"
+            }
+            if ($payload.messages[0].content -like '*context compaction assistant*') {
+                $answer = "## Goal`nKeep the tool exchange."
+            }
+            else {
+                $mock.messages = $payload.messages
+                $answer = 'Request accepted.'
+            }
+            @{ choices = @(@{ finish_reason = 'stop'; message = @{ content = $answer } }) } |
+                ConvertTo-Json -Depth 5 -Compress | Set-Content -LiteralPath $OutFile -Encoding UTF8 -NoNewline
+        }
+
+        $arguments = '{"path":"wire.txt"}'
+        $state = @{ messages = @(
+            @{ role = 'system'; content = 'sys' },
+            @{ role = 'user'; content = 'Earlier task.' },
+            @{ role = 'assistant'; content = $null; reasoning_content = 'Read the file first.'; tool_calls = @(
+                @{ id = 'wire-call'; type = 'function'; function = @{ name = 'read_file'; arguments = $arguments }; extra_content = @{ opaque = 'provider-data' } }
+            ) },
+            @{ role = 'tool'; content = '{"text":"file contents"}'; tool_call_id = 'wire-call' },
+            @{ role = 'user'; content = 'Continue.' }
+        ) }
+        $turnArgs = @{ Endpoint = 'https://example.invalid/v1/chat/completions'; ModelId = 'test-model'; ApiKey = 'fake' }
+        Assert-True (Invoke-AgentCompact @turnArgs -State $state -KeepRecent 2) 'Could not prepare compacted session fixture.'
+        $sessionFile = Join-Path $envData.TestRoot 'wire-messages.jsonl'
+        Save-AgentSession -SessionFile $sessionFile -State $state -Workspace $workspacePath -Model 'test-model'
+        $resumed = @{}
+        $null = Invoke-SessionResume -SessionFile $sessionFile -State $resumed -CurrentWorkspace $workspacePath
+        $handoff = $resumed.messages[1]
+        $resumed.messages[-1].local_note = 'Session-only value.'
+        Invoke-AgentTurn @turnArgs -State $resumed -Root $workspacePath -Steps 1
+
+        $wire = $mock.messages
+        Assert-True ($wire.Count -eq 5 -and $wire[1].role -eq 'user' -and $wire[1].content -ceq $handoff.content) 'The request lost the compacted handoff or changed the message order.'
+        Assert-True ($null -eq $wire[2].content -and $wire[2].reasoning_content -ceq 'Read the file first.' -and $wire[2].tool_calls -is [array]) 'The request changed assistant content, reasoning or tool call shape.'
+        $wireCall = $wire[2].tool_calls[0]
+        Assert-True ($wireCall.id -ceq 'wire-call' -and $wireCall.function.arguments -ceq $arguments -and $wireCall.extra_content.opaque -ceq 'provider-data' -and $wire[3].tool_call_id -ceq $wireCall.id -and $wire[3].content -ceq '{"text":"file contents"}') 'The request changed the tool exchange.'
+        Assert-True ($handoff.entry_type -eq 'compaction' -and $handoff.id -and $handoff.parent_id -and $handoff.first_kept_entry_id -eq $resumed.messages[2].id) 'Preparing the request removed local tree metadata.'
+        Save-AgentSession -SessionFile $sessionFile -State $resumed -Workspace $workspacePath -Model 'test-model'
+        $saved = @(Read-AgentSession -SessionFile $sessionFile)
+        Assert-True ($saved[1].id -eq $handoff.id -and $saved[1].parent_id -eq $handoff.parent_id -and $saved[1].entry_type -eq 'compaction' -and $saved[1].first_kept_entry_id -eq $handoff.first_kept_entry_id) 'Session JSONL lost the compaction metadata.'
+    }
+
+    & {
         # A valid write at the front of an invalid batch must never run.
         $savedWrites = $script:CurrentTurnWrites
         $script:CurrentTurnWrites = @()

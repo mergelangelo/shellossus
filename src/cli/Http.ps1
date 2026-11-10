@@ -1,5 +1,21 @@
 # Pure-ASCII JSON payload escaping, JSONL event output, spinner wait loop, and async HTTP worker.
 
+function ConvertTo-AgentApiMessages {
+    param([array]$Messages)
+    foreach ($message in $Messages) {
+        $apiMessage = @{ role = $message.role; content = $message.content }
+        if ($message.role -eq 'assistant') {
+            if ($message.reasoning_content) { $apiMessage.reasoning_content = $message.reasoning_content }
+            # Tool calls are provider data. Replay the arguments, IDs, and extensions intact.
+            if ($message.tool_calls) { $apiMessage.tool_calls = @($message.tool_calls) }
+        }
+        elseif ($message.role -eq 'tool') {
+            $apiMessage.tool_call_id = $message.tool_call_id
+        }
+        $apiMessage
+    }
+}
+
 function ConvertTo-AsciiJson {
     param([string]$Json)
     if (-not $Json -or ($Json -notmatch '[^\x00-\x7F]')) { return $Json }

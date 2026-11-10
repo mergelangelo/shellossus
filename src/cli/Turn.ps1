@@ -191,7 +191,7 @@ function Invoke-AgentTurn {
         Write-AgentJsonEvent -EventType 'turn_start' -Payload @{ model = $ModelId; step = $step }
         $bodyObj = @{
             model = $ModelId
-            messages = @($State.messages)
+            messages = @(ConvertTo-AgentApiMessages -Messages $State.messages)
             tools = $activeTools
             stream = $false
         }
