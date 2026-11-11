@@ -424,7 +424,7 @@ function Invoke-ReplSessionsCommand {
 }
 
 function Invoke-ReplContinueCommand {
-    param($State, [string]$Endpoint, [string]$Model, [string]$ApiKey, [string]$RootPath, [string]$SessionFile = '', [int]$MaxSteps = 50, [AllowEmptyCollection()][array]$UndoStack = @(), [string]$LastFailedQuestion = '', [string]$ContinueArg = '')
+    param($State, [string]$Endpoint, [string]$Model, [string]$ApiKey, [string]$RootPath, [string]$SessionFile = '', [int]$MaxSteps = 50, [AllowEmptyCollection()][array]$UndoStack = @(), [string]$LastFailedQuestion = '', [string]$ContinueArg = '', $UndoBox = $null)
     $contSteps = $MaxSteps
     if ($ContinueArg -and $ContinueArg.Trim()) {
         $rawSteps = $ContinueArg.Trim()
@@ -443,28 +443,37 @@ function Invoke-ReplContinueCommand {
         Write-Host ($script:Gm.Grey1 + '  Nothing to continue.' + $script:Gm.Reset)
         return @{ state = $State; undo_stack = @($UndoStack); last_failed_question = $LastFailedQuestion }
     }
-    Ensure-SessionTree -State $State
-    $turnSnapshot = New-AgentTurnSnapshot -State $State
-    $script:CurrentTurnWrites = @()
-    Write-Host ($script:Gm.Aqua + "  [continue] Continuing agent turn (up to $contSteps steps)..." + $script:Gm.Reset)
+    $tx = Start-AgentTurnTransaction -State $State -UndoBox $UndoBox -UndoStack $UndoStack
     try {
+        Write-Host ($script:Gm.Aqua + "  [continue] Continuing agent turn (up to $contSteps steps)..." + $script:Gm.Reset)
         Invoke-AgentContinue -State $State -Endpoint $Endpoint -ModelId $Model -ApiKey $ApiKey -Root $RootPath -Steps $contSteps | Out-Null
         Save-AgentSession -SessionFile $SessionFile -State $State -Workspace $RootPath -Model $Model
+        Complete-AgentTurnTransaction -Transaction $tx
+        $UndoStack = @($tx.undo_box.undo_stack)
+        return @{ state = $State; undo_stack = @($UndoStack); last_failed_question = '' }
     }
     catch {
         $requestErr = Format-AgentError -ErrorRecord $_
-        $rollback = Invoke-AgentTurnRollback -State $State -Snapshot $turnSnapshot -Writes @($script:CurrentTurnWrites) -UndoStack $UndoStack
-        $UndoStack = @($rollback.undo_stack)
+        $rollback = Undo-AgentTurnTransaction -Transaction $tx -State $State -Reason 'turn_failed'
+        $UndoStack = @($tx.undo_box.undo_stack)
         if ($rollback.succeeded) {
             Write-Host ($script:Gm.Red + 'Continue failed; turn rolled back: ' + (Format-TuiText $requestErr) + $script:Gm.Reset)
         }
         else {
-            Write-Host ($script:Gm.Red + 'Continue failed; rollback did not succeed: ' + (Format-TuiText $rollback.error) + $script:Gm.Reset)
+            $rbMsg = 'Continue failed; rollback did not succeed: ' + (Format-TuiText $rollback.error)
+            if ($rollback.recovery_manifest) {
+                $rbMsg += ' Recovery manifest: ' + (Format-TuiText $rollback.recovery_manifest)
+            }
+            Write-Host ($script:Gm.Red + $rbMsg + $script:Gm.Reset)
         }
         return @{ state = $State; undo_stack = @($UndoStack); last_failed_question = $LastFailedQuestion }
     }
-    $UndoStack = @(Add-AgentUndoFrame -UndoStack $UndoStack -Frame (New-AgentUndoFrame -Snapshot $turnSnapshot -Writes @($script:CurrentTurnWrites)))
-    return @{ state = $State; undo_stack = @($UndoStack); last_failed_question = '' }
+    finally {
+        if ($tx.state -eq 'active') {
+            $null = Undo-AgentTurnTransaction -Transaction $tx -State $State -Reason 'pipeline_stopped'
+            $UndoStack = @($tx.undo_box.undo_stack)
+        }
+    }
 }
 
 function Invoke-ReplBangCommand {

@@ -5266,6 +5266,108 @@ function Clear-AgentUndoBackups {
     }
 }
 
+function Protect-AgentTurnBackups {
+    param([AllowEmptyCollection()][array]$Writes = @())
+    foreach ($w in @($Writes)) {
+        if ($null -ne $w) { $w.preserve_backup = $true }
+    }
+}
+
+function Write-AgentRecoveryManifest {
+    param(
+        [string]$Workspace = '',
+        [string]$SessionId = '',
+        [string]$Reason = '',
+        [string]$RollbackError = '',
+        [AllowEmptyCollection()][array]$Writes = @()
+    )
+    Protect-AgentTurnBackups -Writes $Writes
+    try {
+        $operations = @(foreach ($w in @($Writes)) {
+            if ($null -eq $w) { continue }
+            @{
+                rel_path = [string]$w.rel_path
+                full_path = [string]$w.full_path
+                action = [string]$w.action
+                backup = [string]$w.backup
+                undone = [bool]$w.undone
+                preserve_backup = [bool]$w.preserve_backup
+            }
+        })
+        $manifest = @{
+            schema = 'shellossus.recovery.v1'
+            created_at = (Get-Date -Format 'yyyy-MM-ddTHH:mm:ssK')
+            reason = [string]$Reason
+            workspace = [string]$Workspace
+            session_id = [string]$SessionId
+            rollback_error = [string]$RollbackError
+            operations = @($operations)
+        }
+        $json = $manifest | ConvertTo-Json -Depth 10
+        $primaryBase = if ($script:AgentConfigPath) {
+            Split-Path $script:AgentConfigPath -Parent
+        }
+        elseif ($script:ActiveSessionFile) {
+            Split-Path $script:ActiveSessionFile -Parent
+        }
+        else {
+            ''
+        }
+        if ($primaryBase) {
+            try {
+                $recDir = Join-Path $primaryBase 'recovery'
+                if (-not (Test-PathHasReparsePoint -Path $recDir)) {
+                    if (-not (Test-Path -LiteralPath $recDir)) {
+                        New-Item -ItemType Directory -Path $recDir -Force -ErrorAction Stop | Out-Null
+                    }
+                    $recItem = Get-Item -LiteralPath $recDir -Force -ErrorAction Stop
+                    if ($recItem.PSIsContainer -and -not (Test-PathHasReparsePoint -Path $recItem.FullName)) {
+                        $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+                        for ($attempt = 0; $attempt -lt 20; $attempt++) {
+                            $rand = Get-Random -Minimum 100000 -Maximum 999999
+                            $cand = Join-Path $recItem.FullName ("recovery-$stamp-$PID-$rand.json")
+                            if (-not (Test-Path -LiteralPath $cand)) {
+                                $allocated = New-Item -ItemType File -Path $cand -ErrorAction Stop
+                                try {
+                                    Set-AgentUtf8Content -LiteralPath $allocated.FullName -Value $json
+                                }
+                                catch {
+                                    Remove-Item -LiteralPath $allocated.FullName -Force -ErrorAction SilentlyContinue
+                                    throw
+                                }
+                                return [string]$allocated.FullName
+                            }
+                        }
+                    }
+                }
+            }
+            catch {}
+        }
+        $baseTmp = if ($env:TEMP) { $env:TEMP } elseif ($env:TMPDIR) { $env:TMPDIR } elseif ($env:TMP) { $env:TMP } else { '/tmp' }
+        if (-not (Test-Path -LiteralPath $baseTmp)) {
+            New-Item -ItemType Directory -Path $baseTmp -Force -ErrorAction Stop | Out-Null
+        }
+        for ($attempt = 0; $attempt -lt 20; $attempt++) {
+            $r1 = Get-Random -Minimum 100000 -Maximum 999999
+            $r2 = Get-Random -Minimum 100000 -Maximum 999999
+            $candTmp = Join-Path $baseTmp ("shellossus-recovery-$PID-$r1-$r2.json")
+            if (-not (Test-Path -LiteralPath $candTmp)) {
+                $allocatedTmp = New-Item -ItemType File -Path $candTmp -ErrorAction Stop
+                try {
+                    Set-AgentUtf8Content -LiteralPath $allocatedTmp.FullName -Value $json
+                }
+                catch {
+                    Remove-Item -LiteralPath $allocatedTmp.FullName -Force -ErrorAction SilentlyContinue
+                    throw
+                }
+                return [string]$allocatedTmp.FullName
+            }
+        }
+    }
+    catch {}
+    return ''
+}
+
 function Read-AgentUndoContent {
     param([string]$Path, [switch]$Hash, [long]$MaxBytes)
     try {
@@ -10417,28 +10519,84 @@ function Restore-AgentTurnSnapshot {
 }
 
 function Invoke-AgentTurnRollback {
-    param($State, $Snapshot, [AllowEmptyCollection()][array]$Writes = @(), [AllowEmptyCollection()][array]$UndoStack = @())
+    param($State, $Snapshot, [AllowEmptyCollection()][array]$Writes = @(), [AllowEmptyCollection()][array]$UndoStack = @(), [string]$Reason = 'turn_failed')
+    Protect-AgentTurnBackups -Writes $Writes
     try {
         Restore-AgentTurnSnapshot -State $State -Snapshot $Snapshot -Writes $Writes
         return @{
             succeeded = $true
             undo_stack = @($UndoStack)
             error = ''
+            recovery_manifest = ''
         }
     }
     catch {
-        foreach ($w in @($Writes)) {
-            if ($w) { $w.preserve_backup = $true }
-        }
+        Protect-AgentTurnBackups -Writes $Writes
         $kept = New-AgentUndoFrame -Snapshot $Snapshot -Writes @($Writes)
         $kept.preserve_backups = $true
         $stack = @(Add-AgentUndoFrame -UndoStack $UndoStack -Frame $kept)
+        $rbErr = Format-AgentError -ErrorRecord $_
+        $ws = if ($State -and $State.workspace) { [string]$State.workspace } elseif ($script:ActiveWorkspace) { [string]$script:ActiveWorkspace } else { '' }
+        $sid = if ($State -and $State.session_id) { [string]$State.session_id } elseif ($script:ActiveSessionId) { [string]$script:ActiveSessionId } else { '' }
+        $manifestPath = Write-AgentRecoveryManifest -Workspace $ws -SessionId $sid -Reason $Reason -RollbackError $rbErr -Writes $Writes
         return @{
             succeeded = $false
             undo_stack = @($stack)
-            error = (Format-AgentError -ErrorRecord $_)
+            error = $rbErr
+            recovery_manifest = [string]$manifestPath
         }
     }
+}
+
+function Start-AgentTurnTransaction {
+    param($State, $UndoBox = $null, [AllowEmptyCollection()][array]$UndoStack = @())
+    Ensure-SessionTree -State $State
+    $snapshot = New-AgentTurnSnapshot -State $State
+    $script:CurrentTurnWrites = @()
+    if ($null -eq $UndoBox -or $UndoBox -isnot [hashtable]) {
+        $UndoBox = @{ undo_stack = @($UndoStack) }
+    }
+    else {
+        $UndoBox.undo_stack = @($UndoStack)
+    }
+    return @{
+        state = 'active'
+        snapshot = $snapshot
+        undo_box = $UndoBox
+        rollback = $null
+    }
+}
+
+function Complete-AgentTurnTransaction {
+    param($Transaction, [switch]$DiscardUndoFrame)
+    if ($null -eq $Transaction -or $Transaction.state -ne 'active') { return }
+    if ($DiscardUndoFrame) {
+        Clear-AgentUndoBackups -Writes @($script:CurrentTurnWrites)
+    }
+    else {
+        $frame = New-AgentUndoFrame -Snapshot $Transaction.snapshot -Writes @($script:CurrentTurnWrites)
+        $Transaction.undo_box.undo_stack = @(Add-AgentUndoFrame -UndoStack $Transaction.undo_box.undo_stack -Frame $frame)
+    }
+    $script:CurrentTurnWrites = @()
+    $Transaction.state = 'committed'
+}
+
+function Undo-AgentTurnTransaction {
+    param($Transaction, $State, [string]$Reason = 'turn_failed')
+    if ($null -eq $Transaction) { return $null }
+    if ($Transaction.state -ne 'active') { return $Transaction.rollback }
+    Protect-AgentTurnBackups -Writes @($script:CurrentTurnWrites)
+    $rollback = Invoke-AgentTurnRollback -State $State -Snapshot $Transaction.snapshot -Writes @($script:CurrentTurnWrites) -UndoStack $Transaction.undo_box.undo_stack -Reason $Reason
+    $Transaction.undo_box.undo_stack = @($rollback.undo_stack)
+    $Transaction.rollback = $rollback
+    if ($rollback.succeeded) {
+        $Transaction.state = 'rolled_back'
+        $script:CurrentTurnWrites = @()
+    }
+    else {
+        $Transaction.state = 'recovery_required'
+    }
+    return $rollback
 }
 
 function Get-AgentRequestEstimatedTokens {
@@ -11867,7 +12025,7 @@ function Invoke-ReplSessionsCommand {
 }
 
 function Invoke-ReplContinueCommand {
-    param($State, [string]$Endpoint, [string]$Model, [string]$ApiKey, [string]$RootPath, [string]$SessionFile = '', [int]$MaxSteps = 50, [AllowEmptyCollection()][array]$UndoStack = @(), [string]$LastFailedQuestion = '', [string]$ContinueArg = '')
+    param($State, [string]$Endpoint, [string]$Model, [string]$ApiKey, [string]$RootPath, [string]$SessionFile = '', [int]$MaxSteps = 50, [AllowEmptyCollection()][array]$UndoStack = @(), [string]$LastFailedQuestion = '', [string]$ContinueArg = '', $UndoBox = $null)
     $contSteps = $MaxSteps
     if ($ContinueArg -and $ContinueArg.Trim()) {
         $rawSteps = $ContinueArg.Trim()
@@ -11886,28 +12044,37 @@ function Invoke-ReplContinueCommand {
         Write-Host ($script:Gm.Grey1 + '  Nothing to continue.' + $script:Gm.Reset)
         return @{ state = $State; undo_stack = @($UndoStack); last_failed_question = $LastFailedQuestion }
     }
-    Ensure-SessionTree -State $State
-    $turnSnapshot = New-AgentTurnSnapshot -State $State
-    $script:CurrentTurnWrites = @()
-    Write-Host ($script:Gm.Aqua + "  [continue] Continuing agent turn (up to $contSteps steps)..." + $script:Gm.Reset)
+    $tx = Start-AgentTurnTransaction -State $State -UndoBox $UndoBox -UndoStack $UndoStack
     try {
+        Write-Host ($script:Gm.Aqua + "  [continue] Continuing agent turn (up to $contSteps steps)..." + $script:Gm.Reset)
         Invoke-AgentContinue -State $State -Endpoint $Endpoint -ModelId $Model -ApiKey $ApiKey -Root $RootPath -Steps $contSteps | Out-Null
         Save-AgentSession -SessionFile $SessionFile -State $State -Workspace $RootPath -Model $Model
+        Complete-AgentTurnTransaction -Transaction $tx
+        $UndoStack = @($tx.undo_box.undo_stack)
+        return @{ state = $State; undo_stack = @($UndoStack); last_failed_question = '' }
     }
     catch {
         $requestErr = Format-AgentError -ErrorRecord $_
-        $rollback = Invoke-AgentTurnRollback -State $State -Snapshot $turnSnapshot -Writes @($script:CurrentTurnWrites) -UndoStack $UndoStack
-        $UndoStack = @($rollback.undo_stack)
+        $rollback = Undo-AgentTurnTransaction -Transaction $tx -State $State -Reason 'turn_failed'
+        $UndoStack = @($tx.undo_box.undo_stack)
         if ($rollback.succeeded) {
             Write-Host ($script:Gm.Red + 'Continue failed; turn rolled back: ' + (Format-TuiText $requestErr) + $script:Gm.Reset)
         }
         else {
-            Write-Host ($script:Gm.Red + 'Continue failed; rollback did not succeed: ' + (Format-TuiText $rollback.error) + $script:Gm.Reset)
+            $rbMsg = 'Continue failed; rollback did not succeed: ' + (Format-TuiText $rollback.error)
+            if ($rollback.recovery_manifest) {
+                $rbMsg += ' Recovery manifest: ' + (Format-TuiText $rollback.recovery_manifest)
+            }
+            Write-Host ($script:Gm.Red + $rbMsg + $script:Gm.Reset)
         }
         return @{ state = $State; undo_stack = @($UndoStack); last_failed_question = $LastFailedQuestion }
     }
-    $UndoStack = @(Add-AgentUndoFrame -UndoStack $UndoStack -Frame (New-AgentUndoFrame -Snapshot $turnSnapshot -Writes @($script:CurrentTurnWrites)))
-    return @{ state = $State; undo_stack = @($UndoStack); last_failed_question = '' }
+    finally {
+        if ($tx.state -eq 'active') {
+            $null = Undo-AgentTurnTransaction -Transaction $tx -State $State -Reason 'pipeline_stopped'
+            $UndoStack = @($tx.undo_box.undo_stack)
+        }
+    }
 }
 
 function Invoke-ReplBangCommand {
@@ -12153,6 +12320,7 @@ if (-not $LibraryOnly) {
     $script:ActiveModelId = $Model
     Sync-AgentCapabilities -State $state | Out-Null
     $undoStack = @()
+    $undoBox = @{ undo_stack = @() }
     $lastFailedQuestion = ''
     $lastFailedAttachmentSource = ''
     if ($Session) {
@@ -12195,32 +12363,45 @@ if (-not $LibraryOnly) {
     }
     try {
         if ($Prompt) {
-            Ensure-SessionTree -State $state
-            $turnSnapshot = New-AgentTurnSnapshot -State $state
-            $script:CurrentTurnWrites = @()
-            $expandedPrompt = $Prompt
-            if (-not $LiteralPrompt) {
-                $tplPrompt = Resolve-PromptTemplate -Root $rootPath -ConfigDir $configDir -InputText $Prompt.Trim()
-                $effectivePrompt = if ($null -ne $tplPrompt) { $tplPrompt } else { $Prompt }
-                $expandedPrompt = Expand-UserPrompt -Root $rootPath -Prompt $effectivePrompt -AttachmentSource $Prompt
-            }
-            $state.messages += @{ role = 'user'; content = $expandedPrompt }
+            $tx = Start-AgentTurnTransaction -State $state -UndoBox $undoBox -UndoStack $undoStack
             try {
+                $expandedPrompt = $Prompt
+                if (-not $LiteralPrompt) {
+                    $tplPrompt = Resolve-PromptTemplate -Root $rootPath -ConfigDir $configDir -InputText $Prompt.Trim()
+                    $effectivePrompt = if ($null -ne $tplPrompt) { $tplPrompt } else { $Prompt }
+                    $expandedPrompt = Expand-UserPrompt -Root $rootPath -Prompt $effectivePrompt -AttachmentSource $Prompt
+                }
+                $state.messages += @{ role = 'user'; content = $expandedPrompt }
                 Invoke-AgentTurn -State $state -Endpoint $endpoint -ModelId $Model -ApiKey $agentKey -Root $rootPath -Steps $MaxSteps
                 Save-AgentSession -SessionFile $sessionFile -State $state -Workspace $rootPath -Model $Model
+                Complete-AgentTurnTransaction -Transaction $tx -DiscardUndoFrame
             }
             catch {
                 $errMsg = Format-AgentError -ErrorRecord $_
-                $rollback = Invoke-AgentTurnRollback -State $state -Snapshot $turnSnapshot -Writes @($script:CurrentTurnWrites)
+                $rollback = Undo-AgentTurnTransaction -Transaction $tx -State $state -Reason 'turn_failed'
+                $undoStack = @($tx.undo_box.undo_stack)
                 $errorPayload = @{ status = 'error'; error = $errMsg }
                 if (-not $rollback.succeeded) {
                     $errorPayload.rollback_error = $rollback.error
+                    if ($rollback.recovery_manifest) {
+                        $errorPayload.recovery_manifest = [string]$rollback.recovery_manifest
+                    }
                     if ($script:OutputMode -ne 'json') {
-                        Write-Host ($script:Gm.Red + 'Rollback did not succeed: ' + (Format-TuiText $rollback.error) + $script:Gm.Reset)
+                        $rbMsg = 'Rollback did not succeed: ' + (Format-TuiText $rollback.error)
+                        if ($rollback.recovery_manifest) {
+                            $rbMsg += ' Recovery manifest: ' + (Format-TuiText $rollback.recovery_manifest)
+                        }
+                        Write-Host ($script:Gm.Red + $rbMsg + $script:Gm.Reset)
                     }
                 }
                 Write-AgentJsonEvent -EventType 'turn_end' -Payload $errorPayload
                 throw (Format-TuiText $errMsg)
+            }
+            finally {
+                if ($tx.state -eq 'active') {
+                    $null = Undo-AgentTurnTransaction -Transaction $tx -State $state -Reason 'pipeline_stopped'
+                    $undoStack = @($tx.undo_box.undo_stack)
+                }
             }
             return
         }
@@ -12243,7 +12424,7 @@ if (-not $LibraryOnly) {
             if ($trimmedQ -eq '/clear' -or $trimmedQ -eq '/new') {
                 $newRes = Invoke-ReplNewSessionCommand -State $state -RootPath $rootPath -ConfigDir $configDir -Model $Model -SessionDir $sessionDir -NoSession:$NoSession -UndoStack $undoStack
                 $fullSystemPrompt = $newRes.full_system_prompt; $system = $newRes.system
-                $sessionFile = $newRes.session_file; $undoStack = @($newRes.undo_stack); $lastFailedQuestion = ''
+                $sessionFile = $newRes.session_file; $undoStack = @($newRes.undo_stack); $undoBox.undo_stack = @($undoStack); $lastFailedQuestion = ''
                 continue
             }
             if ($trimmedQ -match '^/(?:todo|todos)(?:\s+(.+))?$') { Invoke-ReplTodoCommand -State $state -TodoArg $Matches[1]; continue }
@@ -12264,19 +12445,19 @@ if (-not $LibraryOnly) {
             if ($trimmedQ -match '^/name(?:\s+(.+))?$') { Invoke-ReplNameCommand -State $state -SessionFile $sessionFile -RootPath $rootPath -Model $Model -NameArg $Matches[1]; continue }
             if ($trimmedQ -match '^/tree(?:\s+(.+))?$') {
                 $treeRes = Invoke-ReplTreeCommand -State $state -SessionFile $sessionFile -RootPath $rootPath -Model $Model -UndoStack $undoStack -TargetEntryId $Matches[1]
-                $undoStack = @($treeRes.undo_stack)
+                $undoStack = @($treeRes.undo_stack); $undoBox.undo_stack = @($undoStack)
                 continue
             }
             if ($trimmedQ -match '^/(?:fork|clone)(?:\s+(.+))?$') {
                 $forkRes = Invoke-ReplForkCommand -State $state -SessionDir $sessionDir -SessionFile $sessionFile -NoSession:$NoSession -UndoStack $undoStack -ForkEntryId $Matches[1]
-                $state = $forkRes.state; $sessionFile = $forkRes.session_file; $undoStack = @($forkRes.undo_stack)
+                $state = $forkRes.state; $sessionFile = $forkRes.session_file; $undoStack = @($forkRes.undo_stack); $undoBox.undo_stack = @($undoStack)
                 continue
             }
             if ($trimmedQ -match '^/(?:export|share)(?:\s+(.+))?$') { Invoke-ReplExportCommand -State $state -RootPath $rootPath -Model $Model -ExportArg $Matches[1]; continue }
             if ($trimmedQ -match '^/import(?:\s+(.+))?$') {
                 $impRes = Invoke-ReplImportCommand -State $state -RootPath $rootPath -SessionFile $sessionFile -Model $Model -NoSession:$NoSession -UndoStack $undoStack -LastFailedQuestion $lastFailedQuestion -ImportArg $Matches[1]
                 $sessionFile = $impRes.session_file; $Model = $impRes.model
-                $undoStack = @($impRes.undo_stack); $lastFailedQuestion = $impRes.last_failed_question
+                $undoStack = @($impRes.undo_stack); $undoBox.undo_stack = @($undoStack); $lastFailedQuestion = $impRes.last_failed_question
                 continue
             }
             if ($trimmedQ -eq '/copy') { Invoke-ReplCopyCommand -State $state; continue }
@@ -12292,7 +12473,7 @@ if (-not $LibraryOnly) {
             }
             if ($trimmedQ -eq '/undo') {
                 $undoRes = Invoke-ReplUndoCommand -State $state -SessionFile $sessionFile -RootPath $rootPath -Model $Model -UndoStack $undoStack
-                $undoStack = @($undoRes.undo_stack)
+                $undoStack = @($undoRes.undo_stack); $undoBox.undo_stack = @($undoStack)
                 continue
             }
             if ($trimmedQ -eq '/status' -or $trimmedQ -eq '/tokens' -or $trimmedQ -eq '/session') {
@@ -12307,12 +12488,12 @@ if (-not $LibraryOnly) {
                 $resArg = if ($trimmedQ -ne '/sessions' -and $Matches[1]) { $Matches[1] } else { '' }
                 $sessRes = Invoke-ReplSessionsCommand -State $state -SessionDir $sessionDir -SessionFile $sessionFile -RootPath $rootPath -Model $Model -UndoStack $undoStack -LastFailedQuestion $lastFailedQuestion -ResumeArg $resArg -NoSession:$NoSession
                 $sessionFile = $sessRes.session_file; $Model = $sessRes.model
-                $undoStack = @($sessRes.undo_stack); $lastFailedQuestion = $sessRes.last_failed_question
+                $undoStack = @($sessRes.undo_stack); $undoBox.undo_stack = @($undoStack); $lastFailedQuestion = $sessRes.last_failed_question
                 continue
             }
             if ($trimmedQ -match '^/continue(?:\s+(.+))?$') {
-                $contRes = Invoke-ReplContinueCommand -State $state -Endpoint $endpoint -Model $Model -ApiKey $agentKey -RootPath $rootPath -SessionFile $sessionFile -MaxSteps $MaxSteps -UndoStack $undoStack -LastFailedQuestion $lastFailedQuestion -ContinueArg $Matches[1]
-                $undoStack = @($contRes.undo_stack); $lastFailedQuestion = $contRes.last_failed_question
+                $contRes = Invoke-ReplContinueCommand -State $state -Endpoint $endpoint -Model $Model -ApiKey $agentKey -RootPath $rootPath -SessionFile $sessionFile -MaxSteps $MaxSteps -UndoStack $undoStack -LastFailedQuestion $lastFailedQuestion -ContinueArg $Matches[1] -UndoBox $undoBox
+                $undoStack = @($contRes.undo_stack); $undoBox.undo_stack = @($undoStack); $lastFailedQuestion = $contRes.last_failed_question
                 continue
             }
             $attachmentSource = $question
@@ -12338,35 +12519,44 @@ if (-not $LibraryOnly) {
                 Invoke-ReplBangCommand -State $state -InputText $trimmedQ -RootPath $rootPath -SessionFile $sessionFile -Model $Model
                 continue
             }
-            Ensure-SessionTree -State $state
-            $turnSnapshot = New-AgentTurnSnapshot -State $state
-            $script:CurrentTurnWrites = @()
-            $expandedQuestion = Expand-UserPrompt -Root $rootPath -Prompt $question -AttachmentSource $attachmentSource
-            $state.messages += @{ role = 'user'; content = $expandedQuestion }
+            $tx = Start-AgentTurnTransaction -State $state -UndoBox $undoBox -UndoStack $undoStack
             try {
+                $expandedQuestion = Expand-UserPrompt -Root $rootPath -Prompt $question -AttachmentSource $attachmentSource
+                $state.messages += @{ role = 'user'; content = $expandedQuestion }
                 Invoke-AgentTurn -State $state -Endpoint $endpoint -ModelId $Model -ApiKey $agentKey -Root $rootPath -Steps $MaxSteps
                 Save-AgentSession -SessionFile $sessionFile -State $state -Workspace $rootPath -Model $Model
+                Complete-AgentTurnTransaction -Transaction $tx
+                $undoStack = @($tx.undo_box.undo_stack)
+                $lastFailedQuestion = ''
             }
             catch {
                 $lastFailedQuestion = $question
                 $lastFailedAttachmentSource = $attachmentSource
                 $requestErr = Format-AgentError -ErrorRecord $_
-                $rollback = Invoke-AgentTurnRollback -State $state -Snapshot $turnSnapshot -Writes @($script:CurrentTurnWrites) -UndoStack $undoStack
-                $undoStack = @($rollback.undo_stack)
+                $rollback = Undo-AgentTurnTransaction -Transaction $tx -State $state -Reason 'turn_failed'
+                $undoStack = @($tx.undo_box.undo_stack)
                 if ($rollback.succeeded) {
                     Write-Host ($script:Gm.Red + 'Request failed; turn rolled back (use /retry to resend): ' + (Format-TuiText $requestErr) + $script:Gm.Reset)
                 }
                 else {
-                    Write-Host ($script:Gm.Red + 'Request failed; rollback did not succeed: ' + (Format-TuiText $rollback.error) + $script:Gm.Reset)
+                    $rbMsg = 'Request failed; rollback did not succeed: ' + (Format-TuiText $rollback.error)
+                    if ($rollback.recovery_manifest) {
+                        $rbMsg += ' Recovery manifest: ' + (Format-TuiText $rollback.recovery_manifest)
+                    }
+                    Write-Host ($script:Gm.Red + $rbMsg + $script:Gm.Reset)
                 }
                 continue
             }
-            $undoStack = @(Add-AgentUndoFrame -UndoStack $undoStack -Frame (New-AgentUndoFrame -Snapshot $turnSnapshot -Writes @($script:CurrentTurnWrites)))
-            $lastFailedQuestion = ''
+            finally {
+                if ($tx.state -eq 'active') {
+                    $null = Undo-AgentTurnTransaction -Transaction $tx -State $state -Reason 'pipeline_stopped'
+                    $undoStack = @($tx.undo_box.undo_stack)
+                }
+            }
         }
     }
     finally {
-        Clear-AgentUndoBackups -UndoEntries $undoStack -Writes $script:CurrentTurnWrites
+        Clear-AgentUndoBackups -UndoEntries $undoBox.undo_stack -Writes $script:CurrentTurnWrites
         $script:CurrentTurnWrites = @()
         Remove-Variable agentKey -ErrorAction SilentlyContinue
     }

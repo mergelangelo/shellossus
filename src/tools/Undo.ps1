@@ -20,6 +20,108 @@ function Clear-AgentUndoBackups {
     }
 }
 
+function Protect-AgentTurnBackups {
+    param([AllowEmptyCollection()][array]$Writes = @())
+    foreach ($w in @($Writes)) {
+        if ($null -ne $w) { $w.preserve_backup = $true }
+    }
+}
+
+function Write-AgentRecoveryManifest {
+    param(
+        [string]$Workspace = '',
+        [string]$SessionId = '',
+        [string]$Reason = '',
+        [string]$RollbackError = '',
+        [AllowEmptyCollection()][array]$Writes = @()
+    )
+    Protect-AgentTurnBackups -Writes $Writes
+    try {
+        $operations = @(foreach ($w in @($Writes)) {
+            if ($null -eq $w) { continue }
+            @{
+                rel_path = [string]$w.rel_path
+                full_path = [string]$w.full_path
+                action = [string]$w.action
+                backup = [string]$w.backup
+                undone = [bool]$w.undone
+                preserve_backup = [bool]$w.preserve_backup
+            }
+        })
+        $manifest = @{
+            schema = 'shellossus.recovery.v1'
+            created_at = (Get-Date -Format 'yyyy-MM-ddTHH:mm:ssK')
+            reason = [string]$Reason
+            workspace = [string]$Workspace
+            session_id = [string]$SessionId
+            rollback_error = [string]$RollbackError
+            operations = @($operations)
+        }
+        $json = $manifest | ConvertTo-Json -Depth 10
+        $primaryBase = if ($script:AgentConfigPath) {
+            Split-Path $script:AgentConfigPath -Parent
+        }
+        elseif ($script:ActiveSessionFile) {
+            Split-Path $script:ActiveSessionFile -Parent
+        }
+        else {
+            ''
+        }
+        if ($primaryBase) {
+            try {
+                $recDir = Join-Path $primaryBase 'recovery'
+                if (-not (Test-PathHasReparsePoint -Path $recDir)) {
+                    if (-not (Test-Path -LiteralPath $recDir)) {
+                        New-Item -ItemType Directory -Path $recDir -Force -ErrorAction Stop | Out-Null
+                    }
+                    $recItem = Get-Item -LiteralPath $recDir -Force -ErrorAction Stop
+                    if ($recItem.PSIsContainer -and -not (Test-PathHasReparsePoint -Path $recItem.FullName)) {
+                        $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+                        for ($attempt = 0; $attempt -lt 20; $attempt++) {
+                            $rand = Get-Random -Minimum 100000 -Maximum 999999
+                            $cand = Join-Path $recItem.FullName ("recovery-$stamp-$PID-$rand.json")
+                            if (-not (Test-Path -LiteralPath $cand)) {
+                                $allocated = New-Item -ItemType File -Path $cand -ErrorAction Stop
+                                try {
+                                    Set-AgentUtf8Content -LiteralPath $allocated.FullName -Value $json
+                                }
+                                catch {
+                                    Remove-Item -LiteralPath $allocated.FullName -Force -ErrorAction SilentlyContinue
+                                    throw
+                                }
+                                return [string]$allocated.FullName
+                            }
+                        }
+                    }
+                }
+            }
+            catch {}
+        }
+        $baseTmp = if ($env:TEMP) { $env:TEMP } elseif ($env:TMPDIR) { $env:TMPDIR } elseif ($env:TMP) { $env:TMP } else { '/tmp' }
+        if (-not (Test-Path -LiteralPath $baseTmp)) {
+            New-Item -ItemType Directory -Path $baseTmp -Force -ErrorAction Stop | Out-Null
+        }
+        for ($attempt = 0; $attempt -lt 20; $attempt++) {
+            $r1 = Get-Random -Minimum 100000 -Maximum 999999
+            $r2 = Get-Random -Minimum 100000 -Maximum 999999
+            $candTmp = Join-Path $baseTmp ("shellossus-recovery-$PID-$r1-$r2.json")
+            if (-not (Test-Path -LiteralPath $candTmp)) {
+                $allocatedTmp = New-Item -ItemType File -Path $candTmp -ErrorAction Stop
+                try {
+                    Set-AgentUtf8Content -LiteralPath $allocatedTmp.FullName -Value $json
+                }
+                catch {
+                    Remove-Item -LiteralPath $allocatedTmp.FullName -Force -ErrorAction SilentlyContinue
+                    throw
+                }
+                return [string]$allocatedTmp.FullName
+            }
+        }
+    }
+    catch {}
+    return ''
+}
+
 function Read-AgentUndoContent {
     param([string]$Path, [switch]$Hash, [long]$MaxBytes)
     try {

@@ -108,28 +108,84 @@ function Restore-AgentTurnSnapshot {
 }
 
 function Invoke-AgentTurnRollback {
-    param($State, $Snapshot, [AllowEmptyCollection()][array]$Writes = @(), [AllowEmptyCollection()][array]$UndoStack = @())
+    param($State, $Snapshot, [AllowEmptyCollection()][array]$Writes = @(), [AllowEmptyCollection()][array]$UndoStack = @(), [string]$Reason = 'turn_failed')
+    Protect-AgentTurnBackups -Writes $Writes
     try {
         Restore-AgentTurnSnapshot -State $State -Snapshot $Snapshot -Writes $Writes
         return @{
             succeeded = $true
             undo_stack = @($UndoStack)
             error = ''
+            recovery_manifest = ''
         }
     }
     catch {
-        foreach ($w in @($Writes)) {
-            if ($w) { $w.preserve_backup = $true }
-        }
+        Protect-AgentTurnBackups -Writes $Writes
         $kept = New-AgentUndoFrame -Snapshot $Snapshot -Writes @($Writes)
         $kept.preserve_backups = $true
         $stack = @(Add-AgentUndoFrame -UndoStack $UndoStack -Frame $kept)
+        $rbErr = Format-AgentError -ErrorRecord $_
+        $ws = if ($State -and $State.workspace) { [string]$State.workspace } elseif ($script:ActiveWorkspace) { [string]$script:ActiveWorkspace } else { '' }
+        $sid = if ($State -and $State.session_id) { [string]$State.session_id } elseif ($script:ActiveSessionId) { [string]$script:ActiveSessionId } else { '' }
+        $manifestPath = Write-AgentRecoveryManifest -Workspace $ws -SessionId $sid -Reason $Reason -RollbackError $rbErr -Writes $Writes
         return @{
             succeeded = $false
             undo_stack = @($stack)
-            error = (Format-AgentError -ErrorRecord $_)
+            error = $rbErr
+            recovery_manifest = [string]$manifestPath
         }
     }
+}
+
+function Start-AgentTurnTransaction {
+    param($State, $UndoBox = $null, [AllowEmptyCollection()][array]$UndoStack = @())
+    Ensure-SessionTree -State $State
+    $snapshot = New-AgentTurnSnapshot -State $State
+    $script:CurrentTurnWrites = @()
+    if ($null -eq $UndoBox -or $UndoBox -isnot [hashtable]) {
+        $UndoBox = @{ undo_stack = @($UndoStack) }
+    }
+    else {
+        $UndoBox.undo_stack = @($UndoStack)
+    }
+    return @{
+        state = 'active'
+        snapshot = $snapshot
+        undo_box = $UndoBox
+        rollback = $null
+    }
+}
+
+function Complete-AgentTurnTransaction {
+    param($Transaction, [switch]$DiscardUndoFrame)
+    if ($null -eq $Transaction -or $Transaction.state -ne 'active') { return }
+    if ($DiscardUndoFrame) {
+        Clear-AgentUndoBackups -Writes @($script:CurrentTurnWrites)
+    }
+    else {
+        $frame = New-AgentUndoFrame -Snapshot $Transaction.snapshot -Writes @($script:CurrentTurnWrites)
+        $Transaction.undo_box.undo_stack = @(Add-AgentUndoFrame -UndoStack $Transaction.undo_box.undo_stack -Frame $frame)
+    }
+    $script:CurrentTurnWrites = @()
+    $Transaction.state = 'committed'
+}
+
+function Undo-AgentTurnTransaction {
+    param($Transaction, $State, [string]$Reason = 'turn_failed')
+    if ($null -eq $Transaction) { return $null }
+    if ($Transaction.state -ne 'active') { return $Transaction.rollback }
+    Protect-AgentTurnBackups -Writes @($script:CurrentTurnWrites)
+    $rollback = Invoke-AgentTurnRollback -State $State -Snapshot $Transaction.snapshot -Writes @($script:CurrentTurnWrites) -UndoStack $Transaction.undo_box.undo_stack -Reason $Reason
+    $Transaction.undo_box.undo_stack = @($rollback.undo_stack)
+    $Transaction.rollback = $rollback
+    if ($rollback.succeeded) {
+        $Transaction.state = 'rolled_back'
+        $script:CurrentTurnWrites = @()
+    }
+    else {
+        $Transaction.state = 'recovery_required'
+    }
+    return $rollback
 }
 
 function Get-AgentRequestEstimatedTokens {

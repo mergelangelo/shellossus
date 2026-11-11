@@ -841,10 +841,12 @@ try {
     $script:AgentConfigPath = Join-Path $memoryConfig '.env'
     try {
         & {
+            $script:observedMemoryWrites = @()
             function Invoke-WebRequest {
                 param($Uri, $Method, $Headers, $ContentType, $Body, $TimeoutSec, $ErrorAction, [switch]$UseBasicParsing, $OutFile)
                 $request = $Body | ConvertFrom-Json
                 if ($request.messages[-1].role -eq 'tool') {
+                    $script:observedMemoryWrites = @($script:CurrentTurnWrites)
                     $finish = if ($failTurn) { 'content_filter' } else { 'stop' }
                     $choice = @{ finish_reason = $finish; message = @{ content = 'Done.' } }
                 }
@@ -875,8 +877,10 @@ try {
                     messages = @(@{ role = 'system'; content = 'system before' }, @{ role = 'user'; content = 'update memory' })
                 }
                 $script:ActiveSessionTodos = @(@{ content = 'active task'; status = 'in_progress' })
+                $script:observedMemoryWrites = @()
                 $turn = Invoke-ReplContinueCommand -State $memoryState -Endpoint 'https://example.invalid/v1/chat/completions' -Model 'test-model' -ApiKey 'fake' -RootPath $memoryRoot -SessionFile $memorySession -MaxSteps 4
-                $writes = @($script:CurrentTurnWrites)
+                $writes = @($script:observedMemoryWrites)
+                Assert-True (@($script:CurrentTurnWrites).Count -eq 0) 'Completed or rolled-back continue left CurrentTurnWrites populated.'
                 Assert-True (($writes.action -join ',') -eq 'created,modified,deleted,modified,deleted,created') 'Memory and regular file writes did not share the journal.'
                 if ($failTurn) {
                     Assert-True (@($turn.undo_stack).Count -eq 0 -and @($memoryState.messages).Count -eq 2) 'A failed turn did not restore history and its undo stack.'
@@ -926,6 +930,7 @@ try {
         foreach ($w in @($script:CurrentTurnWrites)) {
             if ($w.backup) { Remove-Item -LiteralPath $w.backup -Force -ErrorAction SilentlyContinue }
         }
+        Remove-Variable -Name observedMemoryWrites -Scope Script -ErrorAction SilentlyContinue
         $script:AgentConfigPath = $savedMemoryConfig
         $script:ActiveSessionTodos = @()
     }
@@ -1834,6 +1839,754 @@ Start-Sleep -Seconds 30
     $script:AgentProcessParentsCachedAt = $null
     $script:AgentProcessParentsCache = $null
     $script:AgentProcessParentCollections = 0
+
+    # Task 1: Turn transaction state machine, backup protection, recovery manifest, no double rollback,
+    # Save-AgentSession rollback across entrypoints, and real PipelineStoppedException emergency rollback.
+    & {
+        $txRoot = Join-Path $workspacePath 'tx-lifecycle'
+        $txCfgDir = Join-Path $envData.TestRoot 'tx-config'
+        $txSessDir = Join-Path $envData.TestRoot 'tx-sessions'
+        $txAltTmp = Join-Path $envData.TestRoot 'tx-alt-tmp'
+        New-Item -ItemType Directory -Path $txRoot, $txCfgDir, $txSessDir, $txAltTmp -Force | Out-Null
+
+        $savedTxCfg = $script:AgentConfigPath
+        $savedTxSessFile = $script:ActiveSessionFile
+        $savedTxPerm = $script:AgentPermission
+        $savedTxMode = $script:OutputMode
+        $savedEnvTemp = $env:TEMP
+        $savedEnvTmpDir = $env:TMPDIR
+        $savedEnvTmp = $env:TMP
+        $createdManifests = @()
+        $createdBackups = @()
+        try {
+            # 1a. Protect-AgentTurnBackups marks backups preserved and prevents Clear-AgentUndoBackups deletion.
+            Protect-AgentTurnBackups -Writes @()
+            $protBak = New-AgentTempFile
+            $createdBackups += $protBak.FullName
+            $protWrite = @{ rel_path = 'a.txt'; full_path = (Join-Path $txRoot 'a.txt'); action = 'modified'; backup = $protBak.FullName; undone = $false }
+            Protect-AgentTurnBackups -Writes @($null, $protWrite)
+            Assert-True ([bool]$protWrite.preserve_backup) 'Protect-AgentTurnBackups did not set preserve_backup on write entry.'
+            Clear-AgentUndoBackups -UndoEntries @() -Writes @($protWrite)
+            Assert-True (Test-Path -LiteralPath $protBak.FullName) 'Clear-AgentUndoBackups deleted a backup protected by Protect-AgentTurnBackups.'
+            Remove-Item -LiteralPath $protBak.FullName -Force -ErrorAction SilentlyContinue
+
+            # 1b. Write-AgentRecoveryManifest writes valid shellossus.recovery.v1 JSON in primary config recovery/,
+            # secondary session recovery/, OS temp fallback, and returns '' safely on total I/O failure.
+            $script:AgentConfigPath = Join-Path $txCfgDir '.env'
+            $script:ActiveSessionFile = ''
+            $manPath1 = Write-AgentRecoveryManifest -Workspace $txRoot -SessionId 'sess-tx-1' -Reason 'turn_failed' -RollbackError 'conflict on a.txt' -Writes @($null, $protWrite)
+            $createdManifests += $manPath1
+            $expectedRecDir1 = Join-Path $txCfgDir 'recovery'
+            Assert-True ($manPath1 -and (Test-Path -LiteralPath $manPath1) -and ((Split-Path $manPath1 -Parent) -eq $expectedRecDir1)) "Primary config recovery manifest path invalid: $manPath1"
+            Assert-True ((Split-Path $manPath1 -Leaf) -match '^recovery-\d{8}-\d{6}-\d+-\d+\.json$') "Primary recovery manifest filename format invalid: $manPath1"
+            $manObj1 = (Get-Content -LiteralPath $manPath1 -Raw -Encoding UTF8) | ConvertFrom-Json
+            Assert-True ($manObj1.schema -eq 'shellossus.recovery.v1' -and [bool]$manObj1.created_at -and $manObj1.reason -eq 'turn_failed' -and $manObj1.workspace -eq $txRoot -and $manObj1.session_id -eq 'sess-tx-1' -and $manObj1.rollback_error -eq 'conflict on a.txt') 'Recovery manifest metadata fields did not match schema.'
+            Assert-True (@($manObj1.operations).Count -eq 1 -and $manObj1.operations[0].rel_path -eq 'a.txt' -and $manObj1.operations[0].action -eq 'modified' -and $manObj1.operations[0].backup -eq $protBak.FullName -and (-not [bool]$manObj1.operations[0].undone) -and [bool]$manObj1.operations[0].preserve_backup) 'Recovery manifest operations array did not match recorded write.'
+
+            $script:AgentConfigPath = ''
+            $script:ActiveSessionFile = Join-Path $txSessDir 'active.jsonl'
+            $manPath2 = Write-AgentRecoveryManifest -Workspace $txRoot -SessionId 'sess-tx-2' -Reason 'pipeline_stopped' -RollbackError 'session fallback test' -Writes @($protWrite)
+            $createdManifests += $manPath2
+            $expectedRecDir2 = Join-Path $txSessDir 'recovery'
+            Assert-True ($manPath2 -and (Test-Path -LiteralPath $manPath2) -and ((Split-Path $manPath2 -Parent) -eq $expectedRecDir2)) "Session-dir recovery manifest path invalid: $manPath2"
+
+            # Block primary recovery dir with a regular file so Write-AgentRecoveryManifest falls back to OS temp.
+            $blockedCfgDir = Join-Path $envData.TestRoot 'tx-blocked-cfg'
+            New-Item -ItemType Directory -Path $blockedCfgDir -Force | Out-Null
+            Set-Content -LiteralPath (Join-Path $blockedCfgDir 'recovery') -Value 'not-a-dir' -Encoding Ascii -NoNewline
+            $script:AgentConfigPath = Join-Path $blockedCfgDir '.env'
+            $script:ActiveSessionFile = ''
+            $env:TEMP = $txAltTmp
+            $env:TMPDIR = $txAltTmp
+            $env:TMP = $txAltTmp
+            $manPath3 = Write-AgentRecoveryManifest -Workspace $txRoot -SessionId 'sess-tx-3' -Reason 'pipeline_stopped' -RollbackError 'fallback to temp' -Writes @($protWrite)
+            $createdManifests += $manPath3
+            Assert-True ($manPath3 -and (Test-Path -LiteralPath $manPath3) -and ((Split-Path $manPath3 -Leaf) -match '^shellossus-recovery-\d+-\d+-\d+\.json$')) "Temp fallback recovery manifest path invalid: $manPath3"
+            $manObj3 = (Get-Content -LiteralPath $manPath3 -Raw -Encoding UTF8) | ConvertFrom-Json
+            Assert-True ($manObj3.schema -eq 'shellossus.recovery.v1' -and $manObj3.reason -eq 'pipeline_stopped') 'Temp fallback manifest content invalid.'
+
+            # Total I/O failure must never throw and must keep preserve_backup intact.
+            $blockedTmpFile = Join-Path $envData.TestRoot 'tx-blocked-tmp-file'
+            Set-Content -LiteralPath $blockedTmpFile -Value 'file-not-dir' -Encoding Ascii -NoNewline
+            $env:TEMP = $blockedTmpFile
+            $env:TMPDIR = $blockedTmpFile
+            $env:TMP = $blockedTmpFile
+            $manFail = & {
+                function New-Item { throw 'Injected total manifest I/O failure.' }
+                Write-AgentRecoveryManifest -Workspace $txRoot -SessionId 'sess-tx-fail' -Reason 'turn_failed' -RollbackError 'io fail' -Writes @($protWrite)
+            }
+            Assert-True ($manFail -ceq '' -and [bool]$protWrite.preserve_backup) 'Write-AgentRecoveryManifest threw or cleared preserve_backup on total I/O failure.'
+            $env:TEMP = $savedEnvTemp
+            $env:TMPDIR = $savedEnvTmpDir
+            $env:TMP = $savedEnvTmp
+
+            # 1c. Explicit state machine transitions in ConstrainedLanguage & FullLanguage:
+            # active -> committed (REPL frame & -DiscardUndoFrame), active -> rolled_back, active -> recovery_required, and idempotency.
+            $script:AgentConfigPath = Join-Path $txCfgDir '.env'
+            $script:AgentPermission = 'AutoEdit'
+            $script:OutputMode = 'json'
+
+            $smFile = Join-Path $txRoot 'sm-target.txt'
+            Set-Content -LiteralPath $smFile -Value 'sm-v0' -Encoding UTF8 -NoNewline
+            $smState = @{
+                session_id = 'sess-sm'
+                workspace = $txRoot
+                messages = @(@{ role = 'system'; content = 'sys' }, @{ role = 'user'; content = 'u0' })
+            }
+            $smBox = @{ undo_stack = @() }
+            $txCommit = Start-AgentTurnTransaction -State $smState -UndoBox $smBox -UndoStack @()
+            Assert-True ($txCommit.state -eq 'active' -and @($script:CurrentTurnWrites).Count -eq 0) 'Start-AgentTurnTransaction did not initialize active state and empty CurrentTurnWrites.'
+            $null = Invoke-AgentTool -Root $txRoot -Call @{ function = @{ name = 'edit_file'; arguments = '{"path":"sm-target.txt","old_text":"sm-v0","new_text":"sm-v1"}' } } | ConvertFrom-Json
+            $commitBak = [string]$script:CurrentTurnWrites[0].backup
+            $createdBackups += $commitBak
+            $smState.messages += @{ role = 'assistant'; content = 'a1' }
+            Complete-AgentTurnTransaction -Transaction $txCommit
+            Assert-True ($txCommit.state -eq 'committed' -and @($script:CurrentTurnWrites).Count -eq 0 -and @($smBox.undo_stack).Count -eq 1 -and (Test-Path -LiteralPath $commitBak)) 'Complete-AgentTurnTransaction did not commit undo frame and clear CurrentTurnWrites.'
+            $noopAfterCommit = Undo-AgentTurnTransaction -Transaction $txCommit -State $smState -Reason 'pipeline_stopped'
+            Assert-True ($null -eq $noopAfterCommit -and $txCommit.state -eq 'committed' -and ((Get-Content -LiteralPath $smFile -Raw -Encoding UTF8) -ceq 'sm-v1')) 'Undo-AgentTurnTransaction rolled back an already committed transaction.'
+            Clear-AgentUndoBackups -UndoEntries $smBox.undo_stack -Writes @()
+            $smBox.undo_stack = @()
+
+            # -DiscardUndoFrame (-Prompt mode) cleans up backups and keeps undo_stack empty.
+            $txDiscard = Start-AgentTurnTransaction -State $smState -UndoBox $smBox -UndoStack @()
+            $null = Invoke-AgentTool -Root $txRoot -Call @{ function = @{ name = 'edit_file'; arguments = '{"path":"sm-target.txt","old_text":"sm-v1","new_text":"sm-v2"}' } } | ConvertFrom-Json
+            $discardBak = [string]$script:CurrentTurnWrites[0].backup
+            $createdBackups += $discardBak
+            Assert-True ([bool]$discardBak -and (Test-Path -LiteralPath $discardBak)) 'Fixture edit before DiscardUndoFrame did not create backup.'
+            Complete-AgentTurnTransaction -Transaction $txDiscard -DiscardUndoFrame
+            Assert-True ($txDiscard.state -eq 'committed' -and @($script:CurrentTurnWrites).Count -eq 0 -and @($smBox.undo_stack).Count -eq 0 -and (-not (Test-Path -LiteralPath $discardBak))) 'Complete-AgentTurnTransaction -DiscardUndoFrame leaked backup or pushed an undo frame.'
+
+            # active -> rolled_back restores modified & created files, restores state, cleans backups, and is idempotent.
+            $preRbCount = @($smState.messages).Count
+            $txRb = Start-AgentTurnTransaction -State $smState -UndoBox $smBox -UndoStack @()
+            $smState.messages += @{ role = 'user'; content = 'uncommitted question' }
+            $null = Invoke-AgentTool -Root $txRoot -Call @{ function = @{ name = 'edit_file'; arguments = '{"path":"sm-target.txt","old_text":"sm-v2","new_text":"sm-v3"}' } } | ConvertFrom-Json
+            $rbBak = [string]$script:CurrentTurnWrites[0].backup
+            $createdBackups += $rbBak
+            $null = Invoke-AgentTool -Root $txRoot -Call @{ function = @{ name = 'write_file'; arguments = '{"path":"sm-created.txt","content":"temp-new"}' } } | ConvertFrom-Json
+            $rbRes1 = Undo-AgentTurnTransaction -Transaction $txRb -State $smState -Reason 'pipeline_stopped'
+            Assert-True ($rbRes1.succeeded -and $txRb.state -eq 'rolled_back' -and @($script:CurrentTurnWrites).Count -eq 0) 'Undo-AgentTurnTransaction did not transition to rolled_back and clear CurrentTurnWrites.'
+            Assert-True (((Get-Content -LiteralPath $smFile -Raw -Encoding UTF8) -ceq 'sm-v2') -and (-not (Test-Path -LiteralPath (Join-Path $txRoot 'sm-created.txt'))) -and (-not (Test-Path -LiteralPath $rbBak)) -and @($smState.messages).Count -eq $preRbCount) 'Undo-AgentTurnTransaction did not restore files, messages, and temporary backups.'
+            Set-Content -LiteralPath $smFile -Value 'post-rollback-edit' -Encoding UTF8 -NoNewline
+            $rbRes2 = Undo-AgentTurnTransaction -Transaction $txRb -State $smState -Reason 'pipeline_stopped'
+            Assert-True ($rbRes2.succeeded -and $txRb.state -eq 'rolled_back' -and ((Get-Content -LiteralPath $smFile -Raw -Encoding UTF8) -ceq 'post-rollback-edit')) 'Second Undo-AgentTurnTransaction re-ran rollback after rolled_back.'
+
+            # active -> recovery_required preserves manual change, keeps backup, writes manifest once, and is idempotent.
+            $recDirCountBefore = @(Get-ChildItem -LiteralPath $expectedRecDir1 -Filter 'recovery-*.json' -File -ErrorAction SilentlyContinue).Count
+            $txRec = Start-AgentTurnTransaction -State $smState -UndoBox $smBox -UndoStack @()
+            $null = Invoke-AgentTool -Root $txRoot -Call @{ function = @{ name = 'edit_file'; arguments = '{"path":"sm-target.txt","old_text":"post-rollback-edit","new_text":"agent-conflict-edit"}' } } | ConvertFrom-Json
+            $conflictBak = [string]$script:CurrentTurnWrites[0].backup
+            $createdBackups += $conflictBak
+            Set-Content -LiteralPath $smFile -Value 'manual-override-on-disk' -Encoding UTF8 -NoNewline
+            $recRes1 = Undo-AgentTurnTransaction -Transaction $txRec -State $smState -Reason 'pipeline_stopped'
+            $createdManifests += [string]$recRes1.recovery_manifest
+            Assert-True ((-not $recRes1.succeeded) -and $txRec.state -eq 'recovery_required' -and [bool]$recRes1.recovery_manifest -and (Test-Path -LiteralPath $recRes1.recovery_manifest)) 'Conflict rollback did not enter recovery_required with a manifest on disk.'
+            Assert-True (((Get-Content -LiteralPath $smFile -Raw -Encoding UTF8) -ceq 'manual-override-on-disk') -and (Test-Path -LiteralPath $conflictBak) -and @($smBox.undo_stack).Count -eq 1 -and [bool]$smBox.undo_stack[0].preserve_backups) 'Conflict rollback overwrote manual edit or failed to preserve backup and undo_box frame.'
+            Clear-AgentUndoBackups -UndoEntries $smBox.undo_stack -Writes $script:CurrentTurnWrites
+            Assert-True (Test-Path -LiteralPath $conflictBak) 'Outer Clear-AgentUndoBackups deleted backup in recovery_required state.'
+            $recDirCountMid = @(Get-ChildItem -LiteralPath $expectedRecDir1 -Filter 'recovery-*.json' -File -ErrorAction SilentlyContinue).Count
+            $recRes2 = Undo-AgentTurnTransaction -Transaction $txRec -State $smState -Reason 'pipeline_stopped'
+            $recDirCountAfter = @(Get-ChildItem -LiteralPath $expectedRecDir1 -Filter 'recovery-*.json' -File -ErrorAction SilentlyContinue).Count
+            Assert-True (($recDirCountMid -eq ($recDirCountBefore + 1)) -and ($recDirCountAfter -eq $recDirCountMid) -and ($recRes2.recovery_manifest -ceq $recRes1.recovery_manifest)) 'Repeated Undo-AgentTurnTransaction in recovery_required wrote a duplicate manifest.'
+            Remove-Item -LiteralPath $conflictBak -Force -ErrorAction SilentlyContinue
+            $script:CurrentTurnWrites = @()
+
+            # 1d. Entrypoint integration: single rollback execution (no double rollback in finally after catch),
+            # recovery_manifest surfaced in text & JSON modes, and Save-AgentSession failure rollback across -Prompt, REPL, and /continue.
+            $entryCfgFile = Join-Path $txCfgDir 'entrypoint.env'
+            Save-AgentConfig -Path $entryCfgFile -Config @{
+                SHELLOSSUS_BASE_URL = 'https://example.invalid/v1'
+                SHELLOSSUS_MODEL = 'test-model'
+                SHELLOSSUS_API_KEY = 'test-key'
+            }
+            $script:AgentConfigPath = $entryCfgFile
+            $entryRecDir = Join-Path $txCfgDir 'recovery'
+            $global:txEntryMode = ''
+            $global:txEntryStep = 0
+            $global:txHostLines = @()
+            $global:txRollbackCalls = 0
+            $global:txRestoreCopies = 0
+            $global:txQueue = @()
+            $global:txLastBackup = ''
+            $global:txLockPath = ''
+            $global:txModTarget = Join-Path $txRoot 'entry-mod.txt'
+            $savedOrigRollback = ${function:Invoke-AgentTurnRollback}
+            $origCopyCmdlet = Get-Command -Name 'Copy-Item' -CommandType Cmdlet
+            function script:Invoke-AgentTurnRollback {
+                param($State, $Snapshot, [AllowEmptyCollection()][array]$Writes = @(), [AllowEmptyCollection()][array]$UndoStack = @(), [string]$Reason = 'turn_failed')
+                $global:txRollbackCalls++
+                & $savedOrigRollback @PSBoundParameters
+            }
+            function Copy-Item {
+                param($Path, $LiteralPath, $Destination, [switch]$Force, $ErrorAction)
+                if ([string]$Destination -eq [string]$global:txModTarget) {
+                    $global:txRestoreCopies++
+                }
+                & $origCopyCmdlet @PSBoundParameters
+            }
+            function Invoke-WebRequest {
+                param($Uri, $Method, $Headers, $ContentType, $Body, $TimeoutSec, $ErrorAction, [switch]$UseBasicParsing, $OutFile)
+                $global:txEntryStep++
+                if ($global:txEntryStep -eq 1) {
+                    $calls = @(
+                        @{ id = 'tx-e1'; type = 'function'; function = @{ name = 'edit_file'; arguments = '{"path":"entry-mod.txt","old_text":"before-entry","new_text":"after-entry"}' } }
+                        @{ id = 'tx-w1'; type = 'function'; function = @{ name = 'write_file'; arguments = '{"path":"entry-new.txt","content":"created-entry"}' } }
+                    )
+                    $r = @{ choices = @(@{ finish_reason = 'tool_calls'; message = @{ content = ''; tool_calls = $calls } }) } | ConvertTo-Json -Depth 10 -Compress
+                    Set-Content -LiteralPath $OutFile -Value $r -Encoding UTF8 -NoNewline
+                    return
+                }
+                $parsed = $Body | ConvertFrom-Json
+                foreach ($m in @($parsed.messages)) {
+                    if ($m.role -eq 'tool' -and $m.tool_call_id -eq 'tx-e1') {
+                        $tr = $m.content | ConvertFrom-Json
+                        if ($tr.backup) { $global:txLastBackup = [string]$tr.backup }
+                    }
+                }
+                if ($global:txEntryMode -eq 'conflict_http_fail') {
+                    Set-Content -LiteralPath (Join-Path $txRoot 'entry-mod.txt') -Value 'manual-entry-conflict' -Encoding UTF8 -NoNewline
+                    throw 'HTTP 500 Entry Conflict'
+                }
+                if ($global:txEntryMode -eq 'clean_http_fail') {
+                    throw 'HTTP 500 Entry Clean'
+                }
+                if ($global:txEntryMode -eq 'save_fail') {
+                    if ($global:txLockPath) {
+                        New-Item -ItemType File -Path $global:txLockPath -Force | Out-Null
+                    }
+                    $r = @{ choices = @(@{ finish_reason = 'stop'; message = @{ content = 'Turn finished before save.' } }) } | ConvertTo-Json -Depth 5 -Compress
+                    Set-Content -LiteralPath $OutFile -Value $r -Encoding UTF8 -NoNewline
+                    return
+                }
+                $r = @{ choices = @(@{ finish_reason = 'stop'; message = @{ content = 'ok' } }) } | ConvertTo-Json -Depth 5 -Compress
+                Set-Content -LiteralPath $OutFile -Value $r -Encoding UTF8 -NoNewline
+            }
+            function Write-Host {
+                param([Parameter(Position = 0, ValueFromRemainingArguments = $true)]$Object, [switch]$NoNewline, $Separator, $ForegroundColor, $BackgroundColor)
+                $t = ($Object | ForEach-Object { [string]$_ }) -join ' '
+                if ($t) { $global:txHostLines += $t }
+            }
+            function Start-Sleep { param($Seconds, $Milliseconds) }
+            function global:Read-Host {
+                param($Prompt)
+                if (-not $global:txQueue -or @($global:txQueue).Count -eq 0) { return '/exit' }
+                $n = [string]@($global:txQueue)[0]
+                if (@($global:txQueue).Count -le 1) { $global:txQueue = @() }
+                else { $global:txQueue = @(@($global:txQueue)[1..(@($global:txQueue).Count - 1)]) }
+                return $n
+            }
+            try {
+                $entryModFile = Join-Path $txRoot 'entry-mod.txt'
+                $entryNewFile = Join-Path $txRoot 'entry-new.txt'
+
+                # (i) /continue clean catch rollback runs Invoke-AgentTurnRollback exactly once.
+                Set-Content -LiteralPath $entryModFile -Value 'before-entry' -Encoding UTF8 -NoNewline
+                Remove-Item -LiteralPath $entryNewFile -Force -ErrorAction SilentlyContinue
+                $global:txEntryMode = 'clean_http_fail'
+                $global:txEntryStep = 0
+                $global:txRollbackCalls = 0
+                $global:txHostLines = @()
+                $script:OutputMode = 'text'
+                $script:AgentPermission = 'AutoEdit'
+                $contCleanState = @{ workspace = $txRoot; messages = @(@{ role = 'system'; content = 'sys' }, @{ role = 'user'; content = 'go' }) }
+                $null = Invoke-ReplContinueCommand -State $contCleanState -Endpoint 'https://example.invalid/v1/chat/completions' -Model 'test-model' -ApiKey 'fake' -RootPath $txRoot -SessionFile '' -MaxSteps 4 -UndoStack @()
+                Assert-True ($global:txRollbackCalls -eq 1) "Expected /continue catch rollback to run once, ran $($global:txRollbackCalls) times."
+                Assert-True (((Get-Content -LiteralPath $entryModFile -Raw -Encoding UTF8) -ceq 'before-entry') -and (-not (Test-Path -LiteralPath $entryNewFile))) '/continue clean rollback did not restore files.'
+
+                # (ii) /continue conflict catch rollback runs once and surfaces Recovery manifest path.
+                Set-Content -LiteralPath $entryModFile -Value 'before-entry' -Encoding UTF8 -NoNewline
+                $global:txEntryMode = 'conflict_http_fail'
+                $global:txEntryStep = 0
+                $global:txRollbackCalls = 0
+                $global:txHostLines = @()
+                $global:txLastBackup = ''
+                $contConfState = @{ session_id = 'sess-cont-conf'; workspace = $txRoot; messages = @(@{ role = 'system'; content = 'sys' }, @{ role = 'user'; content = 'go' }) }
+                $null = Invoke-ReplContinueCommand -State $contConfState -Endpoint 'https://example.invalid/v1/chat/completions' -Model 'test-model' -ApiKey 'fake' -RootPath $txRoot -SessionFile '' -MaxSteps 4 -UndoStack @()
+                $createdBackups += $global:txLastBackup
+                $contConfText = Strip-AnsiCodes -Text ($global:txHostLines -join "`n")
+                Assert-True ($global:txRollbackCalls -eq 1) "Expected /continue conflict rollback to run once, ran $($global:txRollbackCalls) times."
+                Assert-True ($contConfText -match 'Recovery manifest:\s*(\S+)') "Failed /continue rollback did not surface Recovery manifest path: $contConfText"
+                $contManPath = $Matches[1]
+                $createdManifests += $contManPath
+                Assert-True ((Test-Path -LiteralPath $contManPath) -and (Test-Path -LiteralPath $global:txLastBackup)) '/continue conflict manifest or backup missing.'
+                Remove-Item -LiteralPath $global:txLastBackup -Force -ErrorAction SilentlyContinue
+                Remove-Item -LiteralPath $entryNewFile -Force -ErrorAction SilentlyContinue
+
+                # (iii) -Prompt -Mode json conflict rollback runs once and emits recovery_manifest in turn_end JSON.
+                Set-Content -LiteralPath $entryModFile -Value 'before-entry' -Encoding UTF8 -NoNewline
+                $global:txEntryMode = 'conflict_http_fail'
+                $global:txEntryStep = 0
+                $global:txHostLines = @()
+                $global:txLastBackup = ''
+                $recBeforePrompt = @(Get-ChildItem -LiteralPath $entryRecDir -Filter 'recovery-*.json' -File -ErrorAction SilentlyContinue).Count
+                $promptJsonThrew = $false
+                try {
+                    & "$PSScriptRoot\..\shellossus.ps1" -Workspace $txRoot -BaseUrl 'https://example.invalid/v1' -Model 'test-model' -Prompt 'run' -Permission AutoEdit -Mode json -NoSession -ConfigPath $entryCfgFile
+                }
+                catch { $promptJsonThrew = $true }
+                $recAfterPrompt = @(Get-ChildItem -LiteralPath $entryRecDir -Filter 'recovery-*.json' -File -ErrorAction SilentlyContinue).Count
+                $createdBackups += $global:txLastBackup
+                Assert-True ($promptJsonThrew -and (($recAfterPrompt - $recBeforePrompt) -eq 1)) "JSON -Prompt conflict rollback manifest delta was $($recAfterPrompt - $recBeforePrompt) (expected 1; threw=$promptJsonThrew)."
+                $turnEndEv = $null
+                foreach ($ln in @($global:txHostLines)) {
+                    if (-not ([string]$ln).Trim()) { continue }
+                    $ev = ([string]$ln) | ConvertFrom-Json
+                    if ($ev.type -eq 'turn_end') { $turnEndEv = $ev }
+                }
+                Assert-True ($null -ne $turnEndEv -and $turnEndEv.status -eq 'error' -and [bool]$turnEndEv.recovery_manifest -and (Test-Path -LiteralPath $turnEndEv.recovery_manifest)) 'JSON -Prompt turn_end did not include a valid recovery_manifest path.'
+                $createdManifests += [string]$turnEndEv.recovery_manifest
+                Assert-True (Test-Path -LiteralPath $global:txLastBackup) 'JSON -Prompt deleted preserved backup after conflict.'
+                Remove-Item -LiteralPath $global:txLastBackup -Force -ErrorAction SilentlyContinue
+                Remove-Item -LiteralPath $entryNewFile -Force -ErrorAction SilentlyContinue
+
+                # (iv) REPL conflict rollback runs once (1 manifest, undo:1) and surfaces Recovery manifest path.
+                Set-Content -LiteralPath $entryModFile -Value 'before-entry' -Encoding UTF8 -NoNewline
+                $global:txEntryMode = 'conflict_http_fail'
+                $global:txEntryStep = 0
+                $global:txHostLines = @()
+                $global:txLastBackup = ''
+                $global:txQueue = @('do repl conflict', '/exit')
+                $recBeforeRepl = @(Get-ChildItem -LiteralPath $entryRecDir -Filter 'recovery-*.json' -File -ErrorAction SilentlyContinue).Count
+                & "$PSScriptRoot\..\shellossus.ps1" -Workspace $txRoot -BaseUrl 'https://example.invalid/v1' -Model 'test-model' -Permission AutoEdit -Mode text -NoSession -ConfigPath $entryCfgFile
+                $recAfterRepl = @(Get-ChildItem -LiteralPath $entryRecDir -Filter 'recovery-*.json' -File -ErrorAction SilentlyContinue).Count
+                $createdBackups += $global:txLastBackup
+                $replConfText = Strip-AnsiCodes -Text ($global:txHostLines -join "`n")
+                Assert-True ((($recAfterRepl - $recBeforeRepl) -eq 1) -and ($replConfText -like '*undo:1*') -and ($replConfText -notlike '*undo:2*')) "REPL conflict rollback manifest delta=$($recAfterRepl - $recBeforeRepl) or unexpected undo count: $replConfText"
+                Assert-True ($replConfText -match 'Recovery manifest:\s*(\S+)') "REPL conflict rollback did not surface Recovery manifest path: $replConfText"
+                $createdManifests += $Matches[1]
+                Assert-True ((Test-Path -LiteralPath $Matches[1]) -and (Test-Path -LiteralPath $global:txLastBackup)) 'REPL conflict manifest or backup missing after REPL exit.'
+                Remove-Item -LiteralPath $global:txLastBackup -Force -ErrorAction SilentlyContinue
+                Remove-Item -LiteralPath $entryNewFile -Force -ErrorAction SilentlyContinue
+
+                # (v) Save-AgentSession failure (before committed) rolls back modified & created files, messages, and backups across -Prompt, REPL, and /continue.
+                # (v-a) -Prompt
+                $promptSaveSess = Join-Path $txSessDir 'prompt-save-fail.jsonl'
+                Save-AgentSession -SessionFile $promptSaveSess -State @{ messages = @(@{ role = 'system'; content = 'sys' }, @{ role = 'user'; content = 'seed-q' }, @{ role = 'assistant'; content = 'seed-a' }) } -Workspace $txRoot -Model 'test-model' -SessionId 'sess-prompt-save'
+                Set-Content -LiteralPath $entryModFile -Value 'before-entry' -Encoding UTF8 -NoNewline
+                Remove-Item -LiteralPath $entryNewFile -Force -ErrorAction SilentlyContinue
+                $global:txEntryMode = 'save_fail'
+                $global:txEntryStep = 0
+                $global:txRestoreCopies = 0
+                $global:txLastBackup = ''
+                $global:txLockPath = $promptSaveSess + '.lock'
+                $promptSaveThrew = $false
+                try {
+                    & "$PSScriptRoot\..\shellossus.ps1" -Workspace $txRoot -Session $promptSaveSess -BaseUrl 'https://example.invalid/v1' -Model 'test-model' -Prompt 'save fail prompt' -Permission AutoEdit -Mode text -ConfigPath $entryCfgFile
+                }
+                catch {
+                    if ($_.Exception.Message -like '*save is locked*') { $promptSaveThrew = $true }
+                }
+                finally {
+                    if (Test-Path -LiteralPath $global:txLockPath) { Remove-Item -LiteralPath $global:txLockPath -Force }
+                }
+                Assert-True ($promptSaveThrew -and $global:txRestoreCopies -eq 1) "Single-shot -Prompt Save-AgentSession failure did not roll back once (threw=$promptSaveThrew, restores=$($global:txRestoreCopies))."
+                Assert-True (((Get-Content -LiteralPath $entryModFile -Raw -Encoding UTF8) -ceq 'before-entry') -and (-not (Test-Path -LiteralPath $entryNewFile)) -and (-not (Test-Path -LiteralPath $global:txLastBackup))) 'Single-shot -Prompt Save-AgentSession failure left file edits, created files, or temporary backups.'
+                $promptSavedMsgs = @(Read-AgentSession -SessionFile $promptSaveSess)
+                Assert-True ($promptSavedMsgs.Count -eq 3 -and $promptSavedMsgs[-1].content -ceq 'seed-a') 'Single-shot -Prompt Save-AgentSession failure corrupted saved session.'
+
+                # (v-b) REPL
+                $replSaveSess = Join-Path $txSessDir 'repl-save-fail-both.jsonl'
+                Save-AgentSession -SessionFile $replSaveSess -State @{ messages = @(@{ role = 'system'; content = 'sys' }, @{ role = 'user'; content = 'seed-rq' }, @{ role = 'assistant'; content = 'seed-ra' }) } -Workspace $txRoot -Model 'test-model' -SessionId 'sess-repl-save'
+                Set-Content -LiteralPath $entryModFile -Value 'before-entry' -Encoding UTF8 -NoNewline
+                Remove-Item -LiteralPath $entryNewFile -Force -ErrorAction SilentlyContinue
+                $global:txEntryMode = 'save_fail'
+                $global:txEntryStep = 0
+                $global:txRestoreCopies = 0
+                $global:txHostLines = @()
+                $global:txLastBackup = ''
+                $global:txLockPath = $replSaveSess + '.lock'
+                $global:txQueue = @('save fail repl turn', '/status', '/exit')
+                try {
+                    & "$PSScriptRoot\..\shellossus.ps1" -Workspace $txRoot -Session $replSaveSess -BaseUrl 'https://example.invalid/v1' -Model 'test-model' -Permission AutoEdit -Mode text -ConfigPath $entryCfgFile
+                }
+                finally {
+                    if (Test-Path -LiteralPath $global:txLockPath) { Remove-Item -LiteralPath $global:txLockPath -Force }
+                }
+                $replSaveOut = Strip-AnsiCodes -Text ($global:txHostLines -join "`n")
+                Assert-True ($global:txRestoreCopies -eq 1 -and ($replSaveOut -like '*Request failed; turn rolled back*save is locked*')) "REPL Save-AgentSession failure did not roll back once: restores=$($global:txRestoreCopies) out=$replSaveOut"
+                Assert-True (((Get-Content -LiteralPath $entryModFile -Raw -Encoding UTF8) -ceq 'before-entry') -and (-not (Test-Path -LiteralPath $entryNewFile)) -and (-not (Test-Path -LiteralPath $global:txLastBackup))) 'REPL Save-AgentSession failure left file edits, created files, or temporary backups.'
+                $replSavedMsgs = @(Read-AgentSession -SessionFile $replSaveSess)
+                Assert-True ($replSavedMsgs.Count -eq 3 -and $replSavedMsgs[-1].content -ceq 'seed-ra') 'REPL Save-AgentSession failure modified saved session.'
+
+                # (v-c) /continue
+                $contSaveSess = Join-Path $txSessDir 'cont-save-fail-both.jsonl'
+                Set-Content -LiteralPath $entryModFile -Value 'before-entry' -Encoding UTF8 -NoNewline
+                Remove-Item -LiteralPath $entryNewFile -Force -ErrorAction SilentlyContinue
+                $global:txEntryMode = 'save_fail'
+                $global:txEntryStep = 0
+                $global:txRollbackCalls = 0
+                $global:txRestoreCopies = 0
+                $global:txHostLines = @()
+                $global:txLastBackup = ''
+                $global:txLockPath = $contSaveSess + '.lock'
+                $contSaveState = @{ workspace = $txRoot; messages = @(@{ role = 'system'; content = 'sys' }, @{ role = 'user'; content = 'cont-seed' }) }
+                try {
+                    $contSaveRes = Invoke-ReplContinueCommand -State $contSaveState -Endpoint 'https://example.invalid/v1/chat/completions' -Model 'test-model' -ApiKey 'fake' -RootPath $txRoot -SessionFile $contSaveSess -MaxSteps 4 -UndoStack @()
+                }
+                finally {
+                    if (Test-Path -LiteralPath $global:txLockPath) { Remove-Item -LiteralPath $global:txLockPath -Force }
+                }
+                Assert-True ($global:txRollbackCalls -eq 1 -and $global:txRestoreCopies -eq 1 -and @($contSaveRes.undo_stack).Count -eq 0) "/continue Save-AgentSession failure rollback calls=$($global:txRollbackCalls) restores=$($global:txRestoreCopies)."
+                Assert-True (((Get-Content -LiteralPath $entryModFile -Raw -Encoding UTF8) -ceq 'before-entry') -and (-not (Test-Path -LiteralPath $entryNewFile)) -and (-not (Test-Path -LiteralPath $global:txLastBackup)) -and @($contSaveState.messages).Count -eq 2) '/continue Save-AgentSession failure did not restore files, messages, and backups.'
+            }
+            finally {
+                Set-Item Function:\script:Invoke-AgentTurnRollback -Value $savedOrigRollback
+                Remove-Item Function:\Copy-Item -ErrorAction SilentlyContinue
+                Remove-Item Function:\Invoke-WebRequest -ErrorAction SilentlyContinue
+                Remove-Item Function:\Write-Host -ErrorAction SilentlyContinue
+                Remove-Item Function:\Start-Sleep -ErrorAction SilentlyContinue
+                Remove-Item Function:\global:Read-Host -ErrorAction SilentlyContinue
+                Remove-Variable -Name txEntryMode, txEntryStep, txHostLines, txRollbackCalls, txRestoreCopies, txQueue, txLastBackup, txLockPath, txModTarget -Scope Global -ErrorAction SilentlyContinue
+            }
+        }
+        finally {
+            $script:AgentConfigPath = $savedTxCfg
+            $script:ActiveSessionFile = $savedTxSessFile
+            $script:AgentPermission = $savedTxPerm
+            $script:OutputMode = $savedTxMode
+            $env:TEMP = $savedEnvTemp
+            $env:TMPDIR = $savedEnvTmpDir
+            $env:TMP = $savedEnvTmp
+            foreach ($mp in $createdManifests) {
+                if ($mp -and (Test-Path -LiteralPath $mp)) { Remove-Item -LiteralPath $mp -Force -ErrorAction SilentlyContinue }
+            }
+            foreach ($bp in $createdBackups) {
+                if ($bp -and (Test-Path -LiteralPath $bp)) { Remove-Item -LiteralPath $bp -Force -ErrorAction SilentlyContinue }
+            }
+        }
+    }
+
+    if (-not $ConstrainedLanguage) {
+        & {
+            $stopRoot = Join-Path $workspacePath 'pipeline-stop'
+            $stopCfgDir = Join-Path $envData.TestRoot 'pipeline-stop-cfg'
+            $stopSessDir = Join-Path $envData.TestRoot 'pipeline-stop-sess'
+            $stopSignalDir = Join-Path $envData.TestRoot 'pipeline-stop-signals'
+            New-Item -ItemType Directory -Path $stopRoot, $stopCfgDir, $stopSessDir, $stopSignalDir -Force | Out-Null
+            $stopCfgFile = Join-Path $stopCfgDir '.env'
+            Save-AgentConfig -Path $stopCfgFile -Config @{
+                SHELLOSSUS_BASE_URL = 'https://example.invalid/v1'
+                SHELLOSSUS_MODEL = 'test-model'
+                SHELLOSSUS_API_KEY = 'test-key'
+            }
+            $bundledScriptPath = Join-Path (Split-Path $PSScriptRoot -Parent) 'shellossus.ps1'
+
+            function Invoke-StoppedRunspaceTurn {
+                param([scriptblock]$WorkerScript, [hashtable]$Bag, [string]$ReadyFile)
+                if (Test-Path -LiteralPath $ReadyFile) { Remove-Item -LiteralPath $ReadyFile -Force }
+                $ps = [powershell]::Create()
+                try {
+                    $null = $ps.AddScript($WorkerScript).AddArgument($Bag)
+                    $null = $ps.BeginInvoke()
+                    $waitStart = Get-Date
+                    while (-not (Test-Path -LiteralPath $ReadyFile)) {
+                        if ($ps.InvocationStateInfo.State -in @('Completed', 'Failed', 'Stopped')) {
+                            $reasonText = if ($ps.InvocationStateInfo.Reason) { $ps.InvocationStateInfo.Reason.Message } else { 'no reason' }
+                            throw "Worker exited early ($($ps.InvocationStateInfo.State)) before ready signal: $reasonText"
+                        }
+                        if (((Get-Date) - $waitStart).TotalSeconds -gt 15) {
+                            throw 'Timed out waiting for worker turn to reach mid-turn ready point.'
+                        }
+                        Start-Sleep -Milliseconds 25
+                    }
+                    $ps.Stop()
+                }
+                finally {
+                    $ps.Dispose()
+                }
+            }
+
+            $stopCleanupPaths = @()
+            try {
+                # B1. Pipeline stop during single-shot -Prompt after modifying & creating files:
+                # catch is bypassed, finally rolls back modified & created files, cleans backups, and leaves session clean.
+                $b1Mod = Join-Path $stopRoot 'b1-mod.txt'
+                $b1New = Join-Path $stopRoot 'b1-new.txt'
+                $b1Ready = Join-Path $stopSignalDir 'b1.ready'
+                $b1Sess = Join-Path $stopSessDir 'b1.jsonl'
+                Set-Content -LiteralPath $b1Mod -Value 'b1-original' -Encoding UTF8 -NoNewline
+                Remove-Item -LiteralPath $b1New -Force -ErrorAction SilentlyContinue
+                Save-AgentSession -SessionFile $b1Sess -State @{ messages = @(@{ role = 'system'; content = 'sys' }, @{ role = 'user'; content = 'seed' }, @{ role = 'assistant'; content = 'seed-reply' }) } -Workspace $stopRoot -Model 'test-model' -SessionId 'sess-b1'
+                $b1Bag = @{
+                    script_path = $bundledScriptPath
+                    workspace = $stopRoot
+                    config_path = $stopCfgFile
+                    session_file = $b1Sess
+                    ready_file = $b1Ready
+                    mod_file = $b1Mod
+                    new_file = $b1New
+                    saw_partial = $false
+                    entered_catch = $false
+                    backup = ''
+                }
+                Invoke-StoppedRunspaceTurn -ReadyFile $b1Ready -Bag $b1Bag -WorkerScript {
+                    param($b)
+                    $global:b1Step = 0
+                    function global:Invoke-WebRequest {
+                        param($Uri, $Method, $Headers, $ContentType, $Body, $TimeoutSec, $ErrorAction, [switch]$UseBasicParsing, $OutFile)
+                        $global:b1Step++
+                        if ($global:b1Step -eq 1) {
+                            $calls = @(
+                                @{ id = 'b1-e'; type = 'function'; function = @{ name = 'edit_file'; arguments = '{"path":"b1-mod.txt","old_text":"b1-original","new_text":"b1-mid-turn"}' } }
+                                @{ id = 'b1-w'; type = 'function'; function = @{ name = 'write_file'; arguments = '{"path":"b1-new.txt","content":"b1-created"}' } }
+                            )
+                            $r = @{ choices = @(@{ finish_reason = 'tool_calls'; message = @{ content = ''; tool_calls = $calls } }) } | ConvertTo-Json -Depth 10 -Compress
+                            Set-Content -LiteralPath $OutFile -Value $r -Encoding UTF8 -NoNewline
+                            return
+                        }
+                        $req = $Body | ConvertFrom-Json
+                        foreach ($m in @($req.messages)) {
+                            if ($m.role -eq 'tool' -and $m.tool_call_id -eq 'b1-e') {
+                                $b.backup = [string](($m.content | ConvertFrom-Json).backup)
+                            }
+                        }
+                        if (((Get-Content -LiteralPath $b.mod_file -Raw -Encoding UTF8) -ceq 'b1-mid-turn') -and (Test-Path -LiteralPath $b.new_file)) {
+                            $b.saw_partial = $true
+                        }
+                        Set-Content -LiteralPath $b.ready_file -Value 'ready' -Encoding Ascii -NoNewline
+                        Microsoft.PowerShell.Utility\Start-Sleep -Seconds 30
+                    }
+                    function global:Write-Host { param([Parameter(ValueFromRemainingArguments = $true)]$Object, [switch]$NoNewline, $Separator, $ForegroundColor, $BackgroundColor) }
+                    try {
+                        & $b.script_path -Workspace $b.workspace -Session $b.session_file -BaseUrl 'https://example.invalid/v1' -Model 'test-model' -Prompt 'interrupt me' -Permission AutoEdit -Mode text -ConfigPath $b.config_path
+                    }
+                    catch {
+                        $b.entered_catch = $true
+                    }
+                }
+                $stopCleanupPaths += $b1Bag.backup
+                Assert-True ([bool]$b1Bag.saw_partial -and (-not [bool]$b1Bag.entered_catch)) "B1 pipeline stop did not hit mid-turn state or unexpectedly entered catch (saw=$($b1Bag.saw_partial), catch=$($b1Bag.entered_catch))."
+                Assert-True (((Get-Content -LiteralPath $b1Mod -Raw -Encoding UTF8) -ceq 'b1-original') -and (-not (Test-Path -LiteralPath $b1New))) 'B1 pipeline stop did not roll back modified and created files in -Prompt.'
+                Assert-True ([bool]$b1Bag.backup -and (-not (Test-Path -LiteralPath $b1Bag.backup))) 'B1 pipeline stop leaked temporary undo backup after clean rollback.'
+                $b1Msgs = @(Read-AgentSession -SessionFile $b1Sess)
+                Assert-True ($b1Msgs.Count -eq 3 -and $b1Msgs[-1].content -ceq 'seed-reply') 'B1 pipeline stop modified saved session.'
+
+                # B2. Pipeline stop during interactive REPL turn restores files, $state.messages, and cleans up backups.
+                $b2Mod = Join-Path $stopRoot 'b2-mod.txt'
+                $b2New = Join-Path $stopRoot 'b2-new.txt'
+                $b2Ready = Join-Path $stopSignalDir 'b2.ready'
+                Set-Content -LiteralPath $b2Mod -Value 'b2-original' -Encoding UTF8 -NoNewline
+                Remove-Item -LiteralPath $b2New -Force -ErrorAction SilentlyContinue
+                $b2Bag = @{
+                    script_path = $bundledScriptPath
+                    workspace = $stopRoot
+                    config_path = $stopCfgFile
+                    ready_file = $b2Ready
+                    mod_file = $b2Mod
+                    new_file = $b2New
+                    saw_partial = $false
+                    entered_catch = $false
+                    backup = ''
+                    live_state = $null
+                }
+                Invoke-StoppedRunspaceTurn -ReadyFile $b2Ready -Bag $b2Bag -WorkerScript {
+                    param($b)
+                    $global:b2Step = 0
+                    $global:b2ReadCount = 0
+                    function global:Read-Host {
+                        param($Prompt)
+                        $global:b2ReadCount++
+                        if ($global:b2ReadCount -eq 1) { return 'edit in repl then stop' }
+                        return '/exit'
+                    }
+                    function global:Invoke-WebRequest {
+                        param($Uri, $Method, $Headers, $ContentType, $Body, $TimeoutSec, $ErrorAction, [switch]$UseBasicParsing, $OutFile)
+                        $global:b2Step++
+                        if ($global:b2Step -eq 1) {
+                            $calls = @(
+                                @{ id = 'b2-e'; type = 'function'; function = @{ name = 'edit_file'; arguments = '{"path":"b2-mod.txt","old_text":"b2-original","new_text":"b2-mid-turn"}' } }
+                                @{ id = 'b2-w'; type = 'function'; function = @{ name = 'write_file'; arguments = '{"path":"b2-new.txt","content":"b2-created"}' } }
+                            )
+                            $r = @{ choices = @(@{ finish_reason = 'tool_calls'; message = @{ content = ''; tool_calls = $calls } }) } | ConvertTo-Json -Depth 10 -Compress
+                            Set-Content -LiteralPath $OutFile -Value $r -Encoding UTF8 -NoNewline
+                            return
+                        }
+                        $b.live_state = $state
+                        $req = $Body | ConvertFrom-Json
+                        foreach ($m in @($req.messages)) {
+                            if ($m.role -eq 'tool' -and $m.tool_call_id -eq 'b2-e') {
+                                $b.backup = [string](($m.content | ConvertFrom-Json).backup)
+                            }
+                        }
+                        if (((Get-Content -LiteralPath $b.mod_file -Raw -Encoding UTF8) -ceq 'b2-mid-turn') -and (Test-Path -LiteralPath $b.new_file) -and @($state.messages).Count -ge 4) {
+                            $b.saw_partial = $true
+                        }
+                        Set-Content -LiteralPath $b.ready_file -Value 'ready' -Encoding Ascii -NoNewline
+                        Microsoft.PowerShell.Utility\Start-Sleep -Seconds 30
+                    }
+                    function global:Write-Host { param([Parameter(ValueFromRemainingArguments = $true)]$Object, [switch]$NoNewline, $Separator, $ForegroundColor, $BackgroundColor) }
+                    try {
+                        & $b.script_path -Workspace $b.workspace -BaseUrl 'https://example.invalid/v1' -Model 'test-model' -Permission AutoEdit -Mode text -NoSession -ConfigPath $b.config_path
+                    }
+                    catch {
+                        $b.entered_catch = $true
+                    }
+                }
+                $stopCleanupPaths += $b2Bag.backup
+                Assert-True ([bool]$b2Bag.saw_partial -and (-not [bool]$b2Bag.entered_catch)) 'B2 REPL pipeline stop did not reach mid-turn partial state or entered catch.'
+                Assert-True (((Get-Content -LiteralPath $b2Mod -Raw -Encoding UTF8) -ceq 'b2-original') -and (-not (Test-Path -LiteralPath $b2New))) 'B2 REPL pipeline stop did not restore modified and created files.'
+                Assert-True ($null -ne $b2Bag.live_state -and @($b2Bag.live_state.messages).Count -eq 1 -and $b2Bag.live_state.messages[0].role -eq 'system') 'B2 REPL pipeline stop did not restore $state.messages to pre-turn snapshot.'
+                Assert-True ([bool]$b2Bag.backup -and (-not (Test-Path -LiteralPath $b2Bag.backup))) 'B2 REPL pipeline stop leaked temporary undo backup.'
+
+                # B3. Pipeline stop when rollback hits a manual-edit conflict:
+                # manual edit on disk is NOT overwritten, backup survives outer Clear-AgentUndoBackups, and recovery-*.json manifest is written to disk.
+                $b3ConflictDir = Join-Path $envData.TestRoot 'pipeline-stop-conflict-cfg'
+                New-Item -ItemType Directory -Path $b3ConflictDir -Force | Out-Null
+                $b3CfgFile = Join-Path $b3ConflictDir '.env'
+                Save-AgentConfig -Path $b3CfgFile -Config @{
+                    SHELLOSSUS_BASE_URL = 'https://example.invalid/v1'
+                    SHELLOSSUS_MODEL = 'test-model'
+                    SHELLOSSUS_API_KEY = 'test-key'
+                }
+                $b3File = Join-Path $stopRoot 'b3-conflict.txt'
+                $b3Ready = Join-Path $stopSignalDir 'b3.ready'
+                Set-Content -LiteralPath $b3File -Value 'b3-before' -Encoding UTF8 -NoNewline
+                $b3Bag = @{
+                    script_path = $bundledScriptPath
+                    workspace = $stopRoot
+                    config_path = $b3CfgFile
+                    ready_file = $b3Ready
+                    target_file = $b3File
+                    backup = ''
+                }
+                Invoke-StoppedRunspaceTurn -ReadyFile $b3Ready -Bag $b3Bag -WorkerScript {
+                    param($b)
+                    $global:b3Step = 0
+                    function global:Invoke-WebRequest {
+                        param($Uri, $Method, $Headers, $ContentType, $Body, $TimeoutSec, $ErrorAction, [switch]$UseBasicParsing, $OutFile)
+                        $global:b3Step++
+                        if ($global:b3Step -eq 1) {
+                            $calls = @(
+                                @{ id = 'b3-e'; type = 'function'; function = @{ name = 'edit_file'; arguments = '{"path":"b3-conflict.txt","old_text":"b3-before","new_text":"b3-agent"}' } }
+                            )
+                            $r = @{ choices = @(@{ finish_reason = 'tool_calls'; message = @{ content = ''; tool_calls = $calls } }) } | ConvertTo-Json -Depth 10 -Compress
+                            Set-Content -LiteralPath $OutFile -Value $r -Encoding UTF8 -NoNewline
+                            return
+                        }
+                        $req = $Body | ConvertFrom-Json
+                        $b.backup = [string](($req.messages[-1].content | ConvertFrom-Json).backup)
+                        Set-Content -LiteralPath $b.target_file -Value 'b3-manual-external-edit' -Encoding UTF8 -NoNewline
+                        Set-Content -LiteralPath $b.ready_file -Value 'ready' -Encoding Ascii -NoNewline
+                        Microsoft.PowerShell.Utility\Start-Sleep -Seconds 30
+                    }
+                    function global:Write-Host { param([Parameter(ValueFromRemainingArguments = $true)]$Object, [switch]$NoNewline, $Separator, $ForegroundColor, $BackgroundColor) }
+                    & $b.script_path -Workspace $b.workspace -BaseUrl 'https://example.invalid/v1' -Model 'test-model' -Prompt 'conflict on stop' -Permission AutoEdit -Mode text -NoSession -ConfigPath $b.config_path
+                }
+                $stopCleanupPaths += $b3Bag.backup
+                Assert-True ((Get-Content -LiteralPath $b3File -Raw -Encoding UTF8) -ceq 'b3-manual-external-edit') 'B3 pipeline-stop conflict overwrote manual change on disk.'
+                Assert-True ([bool]$b3Bag.backup -and (Test-Path -LiteralPath $b3Bag.backup) -and ((Get-Content -LiteralPath $b3Bag.backup -Raw -Encoding UTF8) -ceq 'b3-before')) 'B3 pipeline-stop conflict did not preserve backup file across outer Clear-AgentUndoBackups.'
+                $b3RecDir = Join-Path $b3ConflictDir 'recovery'
+                $b3Manifests = @(Get-ChildItem -LiteralPath $b3RecDir -Filter 'recovery-*.json' -File -ErrorAction SilentlyContinue)
+                Assert-True ($b3Manifests.Count -eq 1) "Expected exactly 1 recovery manifest in $b3RecDir after B3 pipeline-stop conflict, found $($b3Manifests.Count)."
+                $stopCleanupPaths += $b3Manifests[0].FullName
+                $b3Man = (Get-Content -LiteralPath $b3Manifests[0].FullName -Raw -Encoding UTF8) | ConvertFrom-Json
+                Assert-True ($b3Man.schema -eq 'shellossus.recovery.v1' -and $b3Man.reason -eq 'pipeline_stopped' -and $b3Man.rollback_error -like '*manual changes*') 'B3 recovery manifest metadata invalid.'
+                Assert-True (@($b3Man.operations).Count -eq 1 -and $b3Man.operations[0].rel_path -eq 'b3-conflict.txt' -and $b3Man.operations[0].backup -eq $b3Bag.backup -and [bool]$b3Man.operations[0].preserve_backup -and (-not [bool]$b3Man.operations[0].undone)) 'B3 recovery manifest operation record invalid.'
+
+                # B4. /continue interrupted by pipeline stop rolls back partial /continue writes & messages
+                # while preserving prior $undoStack recovery backups across outer Clear-AgentUndoBackups.
+                $b4PriorFile = Join-Path $stopRoot 'b4-prior.txt'
+                $b4ContMod = Join-Path $stopRoot 'b4-cont-mod.txt'
+                $b4ContNew = Join-Path $stopRoot 'b4-cont-new.txt'
+                $b4Ready = Join-Path $stopSignalDir 'b4.ready'
+                Set-Content -LiteralPath $b4PriorFile -Value 'b4-prior-before' -Encoding UTF8 -NoNewline
+                Set-Content -LiteralPath $b4ContMod -Value 'b4-cont-before' -Encoding UTF8 -NoNewline
+                Remove-Item -LiteralPath $b4ContNew -Force -ErrorAction SilentlyContinue
+                $b4Bag = @{
+                    script_path = $bundledScriptPath
+                    workspace = $stopRoot
+                    config_path = $stopCfgFile
+                    ready_file = $b4Ready
+                    prior_file = $b4PriorFile
+                    cont_mod = $b4ContMod
+                    cont_new = $b4ContNew
+                    prior_backup = ''
+                    cont_backup = ''
+                    pre_cont_msg_count = 0
+                    live_state = $null
+                    saw_cont_partial = $false
+                }
+                Invoke-StoppedRunspaceTurn -ReadyFile $b4Ready -Bag $b4Bag -WorkerScript {
+                    param($b)
+                    $global:b4Turn = 0
+                    $global:b4Step = 0
+                    $global:b4Queue = @('turn1 conflict', '/continue', '/exit')
+                    function global:Read-Host {
+                        param($Prompt)
+                        if (-not $global:b4Queue -or @($global:b4Queue).Count -eq 0) { return '/exit' }
+                        $n = [string]@($global:b4Queue)[0]
+                        if (@($global:b4Queue).Count -le 1) { $global:b4Queue = @() }
+                        else { $global:b4Queue = @(@($global:b4Queue)[1..(@($global:b4Queue).Count - 1)]) }
+                        if ($n -eq '/continue') {
+                            $global:b4Turn = 2
+                            $global:b4Step = 0
+                            $b.pre_cont_msg_count = @($state.messages).Count
+                        }
+                        elseif ($n -eq 'turn1 conflict') {
+                            $global:b4Turn = 1
+                            $global:b4Step = 0
+                        }
+                        return $n
+                    }
+                    function global:Start-Sleep { param($Seconds, $Milliseconds) }
+                    function global:Write-Host { param([Parameter(ValueFromRemainingArguments = $true)]$Object, [switch]$NoNewline, $Separator, $ForegroundColor, $BackgroundColor) }
+                    function global:Invoke-WebRequest {
+                        param($Uri, $Method, $Headers, $ContentType, $Body, $TimeoutSec, $ErrorAction, [switch]$UseBasicParsing, $OutFile)
+                        $global:b4Step++
+                        if ($global:b4Turn -eq 1) {
+                            if ($global:b4Step -eq 1) {
+                                $calls = @(@{ id = 'b4-p1'; type = 'function'; function = @{ name = 'edit_file'; arguments = '{"path":"b4-prior.txt","old_text":"b4-prior-before","new_text":"b4-prior-agent"}' } })
+                                $r = @{ choices = @(@{ finish_reason = 'tool_calls'; message = @{ content = ''; tool_calls = $calls } }) } | ConvertTo-Json -Depth 10 -Compress
+                                Set-Content -LiteralPath $OutFile -Value $r -Encoding UTF8 -NoNewline
+                                return
+                            }
+                            $req1 = $Body | ConvertFrom-Json
+                            $b.prior_backup = [string](($req1.messages[-1].content | ConvertFrom-Json).backup)
+                            Set-Content -LiteralPath $b.prior_file -Value 'b4-prior-manual' -Encoding UTF8 -NoNewline
+                            throw 'HTTP 500 Turn 1 Fail'
+                        }
+                        if ($global:b4Step -eq 1) {
+                            $calls2 = @(
+                                @{ id = 'b4-c1'; type = 'function'; function = @{ name = 'edit_file'; arguments = '{"path":"b4-cont-mod.txt","old_text":"b4-cont-before","new_text":"b4-cont-mid"}' } }
+                                @{ id = 'b4-c2'; type = 'function'; function = @{ name = 'write_file'; arguments = '{"path":"b4-cont-new.txt","content":"b4-cont-created"}' } }
+                            )
+                            $r2 = @{ choices = @(@{ finish_reason = 'tool_calls'; message = @{ content = ''; tool_calls = $calls2 } }) } | ConvertTo-Json -Depth 10 -Compress
+                            Set-Content -LiteralPath $OutFile -Value $r2 -Encoding UTF8 -NoNewline
+                            return
+                        }
+                        $b.live_state = $state
+                        $req2 = $Body | ConvertFrom-Json
+                        foreach ($m in @($req2.messages)) {
+                            if ($m.role -eq 'tool' -and $m.tool_call_id -eq 'b4-c1') {
+                                $b.cont_backup = [string](($m.content | ConvertFrom-Json).backup)
+                            }
+                        }
+                        if (((Get-Content -LiteralPath $b.cont_mod -Raw -Encoding UTF8) -ceq 'b4-cont-mid') -and (Test-Path -LiteralPath $b.cont_new)) {
+                            $b.saw_cont_partial = $true
+                        }
+                        Set-Content -LiteralPath $b.ready_file -Value 'ready' -Encoding Ascii -NoNewline
+                        Microsoft.PowerShell.Utility\Start-Sleep -Seconds 30
+                    }
+                    & $b.script_path -Workspace $b.workspace -BaseUrl 'https://example.invalid/v1' -Model 'test-model' -Permission AutoEdit -Mode text -NoSession -ConfigPath $b.config_path
+                }
+                $stopCleanupPaths += @($b4Bag.prior_backup, $b4Bag.cont_backup)
+                Assert-True ([bool]$b4Bag.saw_cont_partial) 'B4 /continue did not reach mid-turn partial state before Stop().'
+                Assert-True (((Get-Content -LiteralPath $b4ContMod -Raw -Encoding UTF8) -ceq 'b4-cont-before') -and (-not (Test-Path -LiteralPath $b4ContNew))) 'B4 /continue pipeline stop did not roll back partial /continue writes.'
+                Assert-True ([bool]$b4Bag.cont_backup -and (-not (Test-Path -LiteralPath $b4Bag.cont_backup))) 'B4 /continue pipeline stop leaked /continue temporary backup.'
+                Assert-True ($null -ne $b4Bag.live_state -and @($b4Bag.live_state.messages).Count -eq $b4Bag.pre_cont_msg_count) 'B4 /continue pipeline stop did not restore pre-continue messages.'
+                Assert-True ([bool]$b4Bag.prior_backup -and (Test-Path -LiteralPath $b4Bag.prior_backup) -and ((Get-Content -LiteralPath $b4Bag.prior_backup -Raw -Encoding UTF8) -ceq 'b4-prior-before')) 'B4 /continue pipeline stop lost prior undoStack recovery backup during outer Clear-AgentUndoBackups.'
+            }
+            finally {
+                foreach ($cp in $stopCleanupPaths) {
+                    if ($cp -and (Test-Path -LiteralPath $cp)) { Remove-Item -LiteralPath $cp -Force -ErrorAction SilentlyContinue }
+                }
+                $stopRecDir = Join-Path $stopCfgDir 'recovery'
+                if (Test-Path -LiteralPath $stopRecDir) {
+                    Remove-Item -LiteralPath $stopRecDir -Recurse -Force -ErrorAction SilentlyContinue
+                }
+            }
+        }
+    }
 }
 finally {
     Remove-Item Function:\Invoke-WebRequest -ErrorAction SilentlyContinue

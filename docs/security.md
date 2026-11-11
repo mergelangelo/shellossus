@@ -36,7 +36,7 @@ Plan review sets `approved` only when the user selects an explicit approval opti
    - The read-only exception for these file tools is `read_file` access to global `SKILL.md` files explicitly registered by `Get-SkillsCatalog` from the global configuration directory (normally `%USERPROFILE%\.shellossus\skills`).
    - The workspace is the starting directory for `run_command`, `!`, and `!!`. These commands can access other paths, invoke native executables, and use the network wherever the user's OS permissions and application-control policies allow. On Windows, controls such as AppLocker or WDAC enforce executable restrictions.
    - `memory` is a separate fixed-path tool: workspace scope uses an existing root `MEMORY.md`, otherwise `.shellossus/MEMORY.md`; global scope uses `MEMORY.md` beside the active configuration file. It does not use `Resolve-AgentPath`, but it checks its target path and ancestor directories up to the scope root for reparse points (`Test-PathHasReparsePoint`).
-   - Configuration and global context/skills/agent profiles are intentionally loaded from outside the workspace. Sessions normally live beside the configuration in `sessions/` (`-SessionDir` overrides this); imports/exports and explicit session paths are not constrained by the file-tool boundary. Staging files, backups, and HTTP response files use OS temporary storage. Doctor can create the configured session directory and temporarily probe it.
+   - Configuration and global context/skills/agent profiles are intentionally loaded from outside the workspace. Sessions normally live beside the configuration in `sessions/` (`-SessionDir` overrides this); imports/exports and explicit session paths are not constrained by the file-tool boundary. Staging files, backups, and HTTP response files use OS temporary storage, and failed turn rollbacks write recovery manifests under `recovery/` beside the active configuration or session directory (falling back to OS temporary storage). Doctor can create the configured session directory and temporarily probe it.
 2. **Reparse Point Rejection:**
    - `Resolve-AgentPath`, `find_files`, `grep_files`, and `Get-SkillsCatalog` inspect file and ancestor directory attributes and reject any NTFS junction, symlink, or reparse point (`Attributes -band 1024`).
    - *Note:* Application-level path validation is not an OS kernel sandbox and does not protect against concurrent TOCTOU race conditions by external processes.
@@ -60,9 +60,9 @@ Plan review sets `approved` only when the user selects an explicit approval opti
 
 ### Turn and Recovery Scope
 
-`/undo` and automatic rollback after a failed turn reverse recorded `write_file`, `edit_file`, and `memory` tool changes in both memory scopes. They restore conversation and task-board state after file restoration succeeds. Shell commands, manual `/memory` commands, configuration, session exports, and network requests are outside the turn journal.
+`/undo` and automatic rollback after a failed or interrupted turn reverse recorded `write_file`, `edit_file`, and `memory` tool changes in both memory scopes. They restore conversation and task-board state after file restoration succeeds. Shell commands, manual `/memory` commands, configuration, session exports, and network requests are outside the turn journal.
 
-Undo history is process-local and retains the 20 newest frames. Eviction, session resets, session switches, and process exit clean up ordinary backups. An I/O failure during restoration can leave some files restored and others pending. In that case Shellossus reports the pending paths and keeps the backups for recovery.
+Undo history is process-local and retains the 20 newest frames. Eviction, session resets, session switches, and process exit clean up ordinary backups. An I/O failure or conflict during restoration can leave some files restored and others pending. In that case Shellossus reports the pending paths, keeps the backups for recovery, and (for failed turn rollbacks) writes a JSON recovery manifest under `recovery/` beside the configuration or session directory, falling back to OS temporary storage if unavailable.
 
 ---
 
