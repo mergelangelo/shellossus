@@ -1520,6 +1520,9 @@ if ($resolved -cne (Get-Item -LiteralPath $AgentPath -Force).FullName) {
 }
 $env:OPENAI_API_KEY = 'keep-openai-parent'
 Invoke-AgentHttpRequest -Uri "http://127.0.0.1:$Port/v1/chat/completions" -ApiKey 'secret-key-xyz' -Body '{"ping":1}' -OutFile $HttpOut -TimeoutSec 10 -ForceBackgroundWorker
+# Failed requests can overwrite OutFile in Windows PowerShell 5.1.
+# Capture the successful response before exercising the error paths.
+$httpOkBody = Get-Content -LiteralPath $HttpOut -Raw -Encoding UTF8
 if ($env:OPENAI_API_KEY -cne 'keep-openai-parent') {
     throw 'OPENAI_API_KEY was not restored after background HTTP worker.'
 }
@@ -1549,7 +1552,7 @@ $script:ActiveModelId = 'loopback-model'
 $script:AgentConfigPath = Join-Path $WorkspacePath '.nonexistent-env'
 $subRes = @(Invoke-ParallelSubagentProcesses -Root $WorkspacePath -Tasks @(@{ role = 'recon'; prompt = 'check renamed worker' }) -MaxSteps 3 -TimeoutSec 20 -ApiKey 'secret-key-xyz')
 @{
-    http_body = (Get-Content -LiteralPath $HttpOut -Raw -Encoding UTF8)
+    http_body = $httpOkBody
     err_401 = $err401
     err_scheme = $errScheme
     web_err = $webErr
@@ -1560,6 +1563,7 @@ $subRes = @(Invoke-ParallelSubagentProcesses -Root $WorkspacePath -Tasks @(@{ ro
         Set-Content -LiteralPath $driverScript -Value $driverCode -Encoding Ascii
         try {
             $driverRaw = & $childShell -NoProfile -NonInteractive -File $driverScript -AgentPath $renamedScript -Port $port -WorkspacePath $workspacePath -HttpOut $driverOutFile -WebOut $driverWebOut
+            Assert-True ($LASTEXITCODE -eq 0) "Renamed worker driver failed (exit=$LASTEXITCODE): $($driverRaw -join "`n")"
             $driverJsonLine = @($driverRaw | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_.StartsWith('{') })[-1]
             Assert-True ([bool]$driverJsonLine) "Renamed worker driver did not return JSON output: $($driverRaw -join "`n")"
             $driverRes = $driverJsonLine | ConvertFrom-Json
