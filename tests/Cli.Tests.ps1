@@ -1567,7 +1567,8 @@ $subRes = @(Invoke-ParallelSubagentProcesses -Root $WorkspacePath -Tasks @(@{ ro
             $driverJsonLine = @($driverRaw | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_.StartsWith('{') })[-1]
             Assert-True ([bool]$driverJsonLine) "Renamed worker driver did not return JSON output: $($driverRaw -join "`n")"
             $driverRes = $driverJsonLine | ConvertFrom-Json
-            $parsedOk = $driverRes.http_body | ConvertFrom-Json
+            try { $parsedOk = $driverRes.http_body | ConvertFrom-Json -ErrorAction Stop }
+            catch { throw "Background HTTP worker returned invalid JSON: $($driverRes | ConvertTo-Json -Depth 6 -Compress)" }
             Assert-True ($parsedOk.ok -eq $true -and $parsedOk.worker -ceq 'file-http') "Background HTTP worker via -File did not return expected 200 payload: $($driverRes.http_body)"
             Assert-True ($driverRes.err_401 -like '*401*' -and $driverRes.err_401 -notlike '*secret-key-xyz*') "Background HTTP 401 error failed or leaked ApiKey: $($driverRes.err_401)"
             Assert-True ([bool]$driverRes.err_scheme -and $driverRes.err_scheme.Contains('[redacted]') -and (-not $driverRes.err_scheme.Contains('badkeyscheme'))) "Background HTTP error did not redact ApiKey: $($driverRes.err_scheme)"
