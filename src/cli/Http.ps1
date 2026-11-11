@@ -100,6 +100,40 @@ function Wait-AgentProcessWithSpinner {
     }
 }
 
+function Invoke-InternalHttpWorker {
+    $script:InternalWorkerFailed = $false
+    try {
+        if (-not $env:SHELLOSSUS_HTTP_URI) { throw 'HTTP worker URI is required.' }
+        if (-not $env:SHELLOSSUS_HTTP_IN) { throw 'HTTP worker input file is required.' }
+        if (-not $env:SHELLOSSUS_HTTP_OUT) { throw 'HTTP worker output file is required.' }
+        $timeoutVal = if ($env:SHELLOSSUS_HTTP_TIMEOUT) { [int]$env:SHELLOSSUS_HTTP_TIMEOUT } else { 180 }
+        $null = Microsoft.PowerShell.Utility\Invoke-WebRequest -Uri $env:SHELLOSSUS_HTTP_URI -Method 'Post' -Headers @{ Authorization = ('Bearer ' + $env:SHELLOSSUS_API_KEY) } -ContentType 'application/json; charset=utf-8' -InFile $env:SHELLOSSUS_HTTP_IN -OutFile $env:SHELLOSSUS_HTTP_OUT -MaximumRedirection 0 -TimeoutSec $timeoutVal -UseBasicParsing -ErrorAction Stop
+    }
+    catch {
+        $msg = [string]$_.Exception.Message
+        $details = $null
+        if ($_.ErrorDetails -and $_.ErrorDetails.Message) {
+            $details = ([string]$_.ErrorDetails.Message).Trim()
+        }
+        if ($details) {
+            # Four bytes per code unit is a safe UTF-8 upper bound.
+            if ($details.Length -le 4096) {
+                try {
+                    $parsed = $details | ConvertFrom-Json -ErrorAction Stop
+                    if ($parsed.error -and $parsed.error.message) { $details = [string]$parsed.error.message }
+                }
+                catch {}
+            }
+            if ($details.Length -gt 300) { $details = $details.Substring(0, 300) + '...' }
+            $msg = $msg + ' (' + $details + ')'
+        }
+        if ($env:SHELLOSSUS_HTTP_ERR) {
+            Set-AgentUtf8Content -LiteralPath $env:SHELLOSSUS_HTTP_ERR -Value $msg
+        }
+        $script:InternalWorkerFailed = $true
+    }
+}
+
 function Invoke-AgentHttpRequest {
     param(
         [string]$Uri,
@@ -135,40 +169,14 @@ function Invoke-AgentHttpRequest {
         return
     }
     $shellExe = Get-AgentPowerShellExecutable
+    $workerScript = Resolve-StandaloneScriptPath -Required
     $reqTemp = New-AgentTempFile
     $errTemp = New-AgentTempFile
     $stdoutTemp = New-AgentTempFile
     $stderrTemp = New-AgentTempFile
     try {
         Set-Content -LiteralPath $reqTemp.FullName -Value $asciiBody -Encoding Ascii -NoNewline -ErrorAction Stop
-        $workerCmd = @'
-$ErrorActionPreference = 'Stop'
-try {
-    Microsoft.PowerShell.Utility\Invoke-WebRequest -Uri $env:SHELLOSSUS_HTTP_URI -Method 'Post' -Headers @{ Authorization = ('Bearer ' + $env:SHELLOSSUS_API_KEY) } -ContentType 'application/json; charset=utf-8' -InFile $env:SHELLOSSUS_HTTP_IN -OutFile $env:SHELLOSSUS_HTTP_OUT -MaximumRedirection 0 -TimeoutSec ([int]$env:SHELLOSSUS_HTTP_TIMEOUT) -UseBasicParsing -ErrorAction Stop
-}
-catch {
-    $msg = $_.Exception.Message
-    $details = $null
-    if ($_.ErrorDetails -and $_.ErrorDetails.Message) {
-        $details = $_.ErrorDetails.Message.Trim()
-    }
-    if ($details) {
-        # The worker runs standalone. Four bytes per code unit is a safe UTF-8 upper bound.
-        if ($details.Length -le 4096) {
-            try {
-                $parsed = $details | ConvertFrom-Json -ErrorAction Stop
-                if ($parsed.error -and $parsed.error.message) { $details = [string]$parsed.error.message }
-            }
-            catch {}
-        }
-        if ($details.Length -gt 300) { $details = $details.Substring(0, 300) + '...' }
-        $msg = $msg + ' (' + $details + ')'
-    }
-    Set-Content -LiteralPath $env:SHELLOSSUS_HTTP_ERR -Value $msg -Encoding UTF8 -NoNewline
-    exit 1
-}
-'@
-        $argList = Get-AgentWorkerArguments -CommandText $workerCmd
+        $argList = Get-AgentWorkerArguments -ScriptPath $workerScript -WorkerMode 'http'
         $proc = Invoke-WithProcessEnvironment -Values @{
             SHELLOSSUS_HTTP_URI = $Uri
             SHELLOSSUS_API_KEY = $ApiKey

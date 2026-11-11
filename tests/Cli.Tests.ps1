@@ -1417,6 +1417,170 @@ try {
         }
     }
 
+    # Task 3: Renamed copy of shellossus.ps1 in a directory with spaces resolves itself via $script:BundledScriptPath
+    # and executes -InternalWorker http (200 + 401 with ApiKey redaction), web (SSRF block), and subagent end-to-end.
+    & {
+        $spacedFolder = Join-Path $testRoot 'dir with spaces'
+        New-Item -ItemType Directory -Path $spacedFolder -Force | Out-Null
+        $renamedScript = Join-Path $spacedFolder 'renamed-agent.ps1'
+        Copy-Item -LiteralPath "$PSScriptRoot\..\shellossus.ps1" -Destination $renamedScript -Force
+
+        $badWorkerThrew = $false
+        $badWorkerMsg = ''
+        try {
+            & $renamedScript -InternalWorker 'unsupported'
+        }
+        catch {
+            $badWorkerThrew = $true
+            $badWorkerMsg = [string]$_.Exception.Message
+        }
+        Assert-True ($badWorkerThrew -and $badWorkerMsg -like '*Unsupported internal worker mode*') "Expected unsupported -InternalWorker mode to fail, got threw=$badWorkerThrew msg='$badWorkerMsg'."
+
+        $listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, 0)
+        $listener.Start()
+        $port = ([System.Net.IPEndPoint]$listener.LocalEndpoint).Port
+        $serverRs = [powershell]::Create().AddScript({
+            param($l)
+            $seen = @()
+            for ($reqIdx = 0; $reqIdx -lt 3; $reqIdx++) {
+                $client = $l.AcceptTcpClient()
+                try {
+                    $stream = $client.GetStream()
+                    $buf = [byte[]]::new(4096)
+                    $ms = [System.IO.MemoryStream]::new()
+                    $hdrEnd = -1
+                    while ($hdrEnd -lt 0) {
+                        $n = $stream.Read($buf, 0, $buf.Length)
+                        if ($n -le 0) { break }
+                        $ms.Write($buf, 0, $n)
+                        $txt = [System.Text.Encoding]::ASCII.GetString($ms.ToArray())
+                        $idx = $txt.IndexOf("`r`n`r`n")
+                        if ($idx -ge 0) { $hdrEnd = $idx + 4 }
+                    }
+                    $allBytes = $ms.ToArray()
+                    $hdrText = [System.Text.Encoding]::ASCII.GetString($allBytes, 0, $hdrEnd)
+                    if ($hdrText -match '(?im)^Expect:\s*100-continue') {
+                        $cont = [System.Text.Encoding]::ASCII.GetBytes("HTTP/1.1 100 Continue`r`n`r`n")
+                        $stream.Write($cont, 0, $cont.Length)
+                        $stream.Flush()
+                    }
+                    $contentLen = 0
+                    if ($hdrText -match '(?im)^Content-Length:\s*(\d+)') { $contentLen = [int]$Matches[1] }
+                    $haveBody = $allBytes.Length - $hdrEnd
+                    while ($haveBody -lt $contentLen) {
+                        $n = $stream.Read($buf, 0, $buf.Length)
+                        if ($n -le 0) { break }
+                        $ms.Write($buf, 0, $n)
+                        $haveBody += $n
+                    }
+                    $finalBytes = $ms.ToArray()
+                    $reqBody = if ($contentLen -gt 0) { [System.Text.Encoding]::UTF8.GetString($finalBytes, $hdrEnd, $contentLen) } else { '' }
+                    $seen += @{ headers = $hdrText; body = $reqBody }
+                    if ($reqIdx -eq 0) {
+                        $statusLine = 'HTTP/1.1 200 OK'
+                        $respJson = @{ ok = $true; worker = 'file-http' } | ConvertTo-Json -Compress
+                    }
+                    elseif ($reqIdx -eq 1) {
+                        $statusLine = 'HTTP/1.1 401 Unauthorized'
+                        $respJson = @{ error = @{ message = 'Denied token secret-key-xyz' } } | ConvertTo-Json -Compress
+                    }
+                    else {
+                        $statusLine = 'HTTP/1.1 200 OK'
+                        $respJson = @{
+                            choices = @(@{ finish_reason = 'stop'; message = @{ role = 'assistant'; content = 'renamed subagent ok' } })
+                            usage = @{ prompt_tokens = 12; completion_tokens = 4 }
+                        } | ConvertTo-Json -Depth 8 -Compress
+                    }
+                    $respBytes = [System.Text.Encoding]::UTF8.GetBytes($respJson)
+                    $respHdr = [System.Text.Encoding]::ASCII.GetBytes("$statusLine`r`nContent-Type: application/json`r`nContent-Length: $($respBytes.Length)`r`nConnection: close`r`n`r`n")
+                    $stream.Write($respHdr, 0, $respHdr.Length)
+                    $stream.Write($respBytes, 0, $respBytes.Length)
+                    $stream.Flush()
+                }
+                finally {
+                    $client.Close()
+                }
+            }
+            return $seen
+        }).AddArgument($listener)
+        $serverHandle = $serverRs.BeginInvoke()
+
+        $childShell = Get-AgentPowerShellExecutable
+        $driverScript = Join-Path $spacedFolder 'driver.ps1'
+        $driverOutFile = Join-Path $spacedFolder 'http-ok.json'
+        $driverWebOut = Join-Path $spacedFolder 'web-blocked.tmp'
+        $driverCode = @'
+param([string]$AgentPath, [int]$Port, [string]$WorkspacePath, [string]$HttpOut, [string]$WebOut)
+$ErrorActionPreference = 'Stop'
+. $AgentPath -LibraryOnly
+$script:HideSpinner = $true
+$resolved = Resolve-StandaloneScriptPath -Required
+if ($resolved -cne (Get-Item -LiteralPath $AgentPath -Force).FullName) {
+    throw "Unexpected resolved path: $resolved"
+}
+$env:OPENAI_API_KEY = 'keep-openai-parent'
+Invoke-AgentHttpRequest -Uri "http://127.0.0.1:$Port/v1/chat/completions" -ApiKey 'secret-key-xyz' -Body '{"ping":1}' -OutFile $HttpOut -TimeoutSec 10 -ForceBackgroundWorker
+if ($env:OPENAI_API_KEY -cne 'keep-openai-parent') {
+    throw 'OPENAI_API_KEY was not restored after background HTTP worker.'
+}
+$err401 = ''
+try {
+    Invoke-AgentHttpRequest -Uri "http://127.0.0.1:$Port/v1/chat/completions" -ApiKey 'secret-key-xyz' -Body '{"ping":2}' -OutFile $HttpOut -TimeoutSec 10 -ForceBackgroundWorker
+}
+catch {
+    $err401 = [string]$_.Exception.Message
+}
+$errScheme = ''
+try {
+    Invoke-AgentHttpRequest -Uri 'badkeyscheme://example.invalid/v1' -ApiKey 'badkeyscheme' -Body '{}' -OutFile $HttpOut -TimeoutSec 5 -ForceBackgroundWorker
+}
+catch {
+    $errScheme = [string]$_.Exception.Message
+}
+$webErr = ''
+try {
+    Invoke-AgentWebDownload -Uri "http://127.0.0.1:$Port/private" -OutFile $WebOut
+}
+catch {
+    $webErr = [string]$_.Exception.Message
+}
+$script:ActiveEndpoint = "http://127.0.0.1:$Port/v1/chat/completions"
+$script:ActiveModelId = 'loopback-model'
+$script:AgentConfigPath = Join-Path $WorkspacePath '.nonexistent-env'
+$subRes = @(Invoke-ParallelSubagentProcesses -Root $WorkspacePath -Tasks @(@{ role = 'recon'; prompt = 'check renamed worker' }) -MaxSteps 3 -TimeoutSec 20 -ApiKey 'secret-key-xyz')
+@{
+    http_body = (Get-Content -LiteralPath $HttpOut -Raw -Encoding UTF8)
+    err_401 = $err401
+    err_scheme = $errScheme
+    web_err = $webErr
+    sub_status = [string]$subRes[0].status
+    sub_output = [string]$subRes[0].output
+} | ConvertTo-Json -Depth 6 -Compress
+'@
+        Set-Content -LiteralPath $driverScript -Value $driverCode -Encoding Ascii
+        try {
+            $driverRaw = & $childShell -NoProfile -NonInteractive -File $driverScript -AgentPath $renamedScript -Port $port -WorkspacePath $workspacePath -HttpOut $driverOutFile -WebOut $driverWebOut
+            $driverJsonLine = @($driverRaw | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_.StartsWith('{') })[-1]
+            Assert-True ([bool]$driverJsonLine) "Renamed worker driver did not return JSON output: $($driverRaw -join "`n")"
+            $driverRes = $driverJsonLine | ConvertFrom-Json
+            $parsedOk = $driverRes.http_body | ConvertFrom-Json
+            Assert-True ($parsedOk.ok -eq $true -and $parsedOk.worker -ceq 'file-http') "Background HTTP worker via -File did not return expected 200 payload: $($driverRes.http_body)"
+            Assert-True ($driverRes.err_401 -like '*401*' -and $driverRes.err_401 -notlike '*secret-key-xyz*') "Background HTTP 401 error failed or leaked ApiKey: $($driverRes.err_401)"
+            Assert-True ([bool]$driverRes.err_scheme -and $driverRes.err_scheme.Contains('[redacted]') -and (-not $driverRes.err_scheme.Contains('badkeyscheme'))) "Background HTTP error did not redact ApiKey: $($driverRes.err_scheme)"
+            Assert-True ($driverRes.web_err -like '*Blocked request*') "Renamed script -InternalWorker web did not block loopback SSRF: $($driverRes.web_err)"
+            Assert-True ($driverRes.sub_status -ceq 'completed' -and $driverRes.sub_output -ceq 'renamed subagent ok') "Renamed script -InternalWorker subagent failed: status=$($driverRes.sub_status) output=$($driverRes.sub_output)"
+
+            $seenReqs = @($serverRs.EndInvoke($serverHandle))
+            Assert-True ($seenReqs.Count -eq 3) "Expected 3 loopback HTTP requests (200, 401, subagent), got $($seenReqs.Count)."
+            Assert-True ($seenReqs[0].headers -match '(?im)^Authorization:\s*Bearer secret-key-xyz\r?$' -and $seenReqs[0].body -ceq '{"ping":1}') 'First background HTTP request did not send expected Bearer header or body.'
+        }
+        finally {
+            $listener.Stop()
+            $serverRs.Dispose()
+            Remove-Item -LiteralPath $spacedFolder -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+
     & {
         function Invoke-WebRequest { throw 'HTTP 400 included credential fixture-header-key' }
         $message = ''

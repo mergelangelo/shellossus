@@ -113,9 +113,11 @@ param(
     [string]$Shortcut = '',
     [switch]$NoShortcut,
     [switch]$LibraryOnly,
-    [switch]$LiteralPrompt
+    [switch]$LiteralPrompt,
+    [string]$InternalWorker = ''
 )
 
+$script:BundledScriptPath = $PSCommandPath
 $script:StartupRequestTimeoutSpec = $RequestTimeoutSec
 $script:StartupRequestTimeoutBound = ($PSBoundParameters.Keys -contains 'RequestTimeoutSec')
 Remove-Variable -Name RequestTimeoutSec -Scope Script -ErrorAction SilentlyContinue

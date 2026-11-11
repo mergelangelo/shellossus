@@ -24,6 +24,10 @@ $script:AutoApproveCommands = $false
 $script:PermissionRevision = 0
 $script:StartupAgentPermission = 'Ask'
 $script:StartupPermissionSpecified = $false
+if (-not (Get-Variable -Name StandaloneScriptPath -Scope Script -ErrorAction SilentlyContinue)) {
+    $script:StandaloneScriptPath = ''
+}
+$script:InternalWorkerFailed = $false
 
 $script:AgentMaxApiResponseBytes = 8MB
 $script:AgentMaxToolArgumentBytes = 1MB
@@ -373,28 +377,88 @@ function Get-AgentPowerShellExecutable {
     return $path
 }
 
-function Get-AgentWorkerArguments {
-    param([string]$CommandText)
-    # -EncodedCommand takes Base64 of UTF-16LE. Use operators for CLM compatibility.
-    $bytes = [byte[]]::new($CommandText.Length * 2)
-    for ($i = 0; $i -lt $CommandText.Length; $i++) {
-        $code = [int][char]$CommandText[$i]
-        $bytes[2 * $i] = $code -band 255
-        $bytes[2 * $i + 1] = $code -shr 8
+function Resolve-ValidatedWorkerScriptPath {
+    param([string]$Path)
+    if (-not $Path -or -not $Path.Trim()) {
+        throw 'Worker script path is required.'
     }
-    $alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
-    $encoded = -join @(for ($i = 0; $i -lt $bytes.Length; $i += 3) {
-        $first = $bytes[$i]
-        $hasSecond = ($i + 1 -lt $bytes.Length)
-        $hasThird = ($i + 2 -lt $bytes.Length)
-        $second = if ($hasSecond) { $bytes[$i + 1] } else { 0 }
-        $third = if ($hasThird) { $bytes[$i + 2] } else { 0 }
-        $alphabet[$first -shr 2]
-        $alphabet[(($first -band 3) -shl 4) -bor ($second -shr 4)]
-        if ($hasSecond) { $alphabet[(($second -band 15) -shl 2) -bor ($third -shr 6)] } else { '=' }
-        if ($hasThird) { $alphabet[$third -band 63] } else { '=' }
-    })
-    return @('-NoProfile', '-NonInteractive', '-OutputFormat', 'Text', '-EncodedCommand', $encoded)
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        throw "Worker script was not found: $Path"
+    }
+    if (Test-PathHasReparsePoint -Path $Path) {
+        throw 'Reparse points are not allowed for worker script paths.'
+    }
+    $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+    if ($item.PSIsContainer) {
+        throw "Worker script must be a file: $Path"
+    }
+    if (Test-PathHasReparsePoint -Path $item.FullName) {
+        throw 'Reparse points are not allowed for worker script paths.'
+    }
+    return [string]$item.FullName
+}
+
+function Resolve-StandaloneScriptPath {
+    param([switch]$Required)
+    if ($script:StandaloneScriptPath) {
+        if ((Test-Path -LiteralPath $script:StandaloneScriptPath -PathType Leaf) -and (-not (Test-PathHasReparsePoint -Path $script:StandaloneScriptPath))) {
+            $expItem = Get-Item -LiteralPath $script:StandaloneScriptPath -Force -ErrorAction SilentlyContinue
+            if ($expItem -and (-not $expItem.PSIsContainer) -and (-not (Test-PathHasReparsePoint -Path $expItem.FullName))) {
+                return [string]$expItem.FullName
+            }
+        }
+        if ($Required) {
+            throw 'Standalone script path could not be resolved for background worker.'
+        }
+        return ''
+    }
+    $cands = @()
+    if ($script:BundledScriptPath) {
+        $cands += $script:BundledScriptPath
+    }
+    if ($PSScriptRoot) {
+        $cands += (Join-Path $PSScriptRoot 'shellossus.ps1')
+        $parentDir = Split-Path $PSScriptRoot -Parent
+        if ($parentDir) {
+            $cands += (Join-Path $parentDir 'shellossus.ps1')
+            $grandParentDir = Split-Path $parentDir -Parent
+            if ($grandParentDir) {
+                $cands += (Join-Path $grandParentDir 'shellossus.ps1')
+            }
+        }
+    }
+    foreach ($c in $cands) {
+        if ($c -and (Test-Path -LiteralPath $c -PathType Leaf) -and (-not (Test-PathHasReparsePoint -Path $c))) {
+            $item = Get-Item -LiteralPath $c -Force -ErrorAction SilentlyContinue
+            if ($item -and (-not $item.PSIsContainer) -and (-not (Test-PathHasReparsePoint -Path $item.FullName))) {
+                return [string]$item.FullName
+            }
+        }
+    }
+    if ($Required) {
+        throw 'Standalone script path could not be resolved for background worker.'
+    }
+    return ''
+}
+
+function Get-AgentWorkerArguments {
+    param(
+        [string]$ScriptPath,
+        [string]$WorkerMode
+    )
+    if (-not $ScriptPath -or -not $ScriptPath.Trim()) {
+        throw 'Worker script path is required.'
+    }
+    if ($WorkerMode -notin @('http', 'web', 'subagent')) {
+        throw 'Unsupported internal worker mode.'
+    }
+    $escapedPath = ($ScriptPath -replace '(\\*)"', '$1$1\"') -replace '(\\*)$', '$1$1'
+    if ($env:OS -eq 'Windows_NT') {
+        return "-NoProfile -NonInteractive -OutputFormat Text -File `"$escapedPath`" -InternalWorker $WorkerMode"
+    }
+    # Start-Process joins ArgumentList into ProcessStartInfo.Arguments without quoting spaces.
+    $posixFileArg = if ($ScriptPath -match '[\s"]') { "`"$escapedPath`"" } else { $ScriptPath }
+    return @('-NoProfile', '-NonInteractive', '-OutputFormat', 'Text', '-File', $posixFileArg, '-InternalWorker', $WorkerMode)
 }
 
 function Get-AgentCommandArguments {

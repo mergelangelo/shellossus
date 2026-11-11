@@ -1,6 +1,19 @@
 # CLI entrypoint: interactive setup, configuration resolution, single-shot execution, and interactive REPL loop.
 
 if (-not $LibraryOnly) {
+    if ($InternalWorker) {
+        if ($InternalWorker -notin @('http', 'web', 'subagent')) {
+            throw 'Unsupported internal worker mode.'
+        }
+        $script:InternalWorkerFailed = $false
+        switch ($InternalWorker) {
+            'http' { Invoke-InternalHttpWorker }
+            'web' { Invoke-InternalWebWorker }
+            'subagent' { Invoke-InternalSubagentWorker }
+        }
+        if ($script:InternalWorkerFailed) { exit 1 }
+        return
+    }
     $script:OutputMode = if ($Mode) { $Mode.ToLower() } else { 'text' }
     if ($script:OutputMode -notin @('text', 'json')) { throw 'Mode must be text or json.' }
     if ($Install) {

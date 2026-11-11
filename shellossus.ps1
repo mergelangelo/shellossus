@@ -36,9 +36,11 @@ param(
     [string]$Shortcut = '',
     [switch]$NoShortcut,
     [switch]$LibraryOnly,
-    [switch]$LiteralPrompt
+    [switch]$LiteralPrompt,
+    [string]$InternalWorker = ''
 )
 
+$script:BundledScriptPath = $PSCommandPath
 $script:StartupRequestTimeoutSpec = $RequestTimeoutSec
 $script:StartupRequestTimeoutBound = ($PSBoundParameters.Keys -contains 'RequestTimeoutSec')
 Remove-Variable -Name RequestTimeoutSec -Scope Script -ErrorAction SilentlyContinue
@@ -2325,6 +2327,10 @@ $script:AutoApproveCommands = $false
 $script:PermissionRevision = 0
 $script:StartupAgentPermission = 'Ask'
 $script:StartupPermissionSpecified = $false
+if (-not (Get-Variable -Name StandaloneScriptPath -Scope Script -ErrorAction SilentlyContinue)) {
+    $script:StandaloneScriptPath = ''
+}
+$script:InternalWorkerFailed = $false
 
 $script:AgentMaxApiResponseBytes = 8MB
 $script:AgentMaxToolArgumentBytes = 1MB
@@ -2674,28 +2680,88 @@ function Get-AgentPowerShellExecutable {
     return $path
 }
 
-function Get-AgentWorkerArguments {
-    param([string]$CommandText)
-    # -EncodedCommand takes Base64 of UTF-16LE. Use operators for CLM compatibility.
-    $bytes = [byte[]]::new($CommandText.Length * 2)
-    for ($i = 0; $i -lt $CommandText.Length; $i++) {
-        $code = [int][char]$CommandText[$i]
-        $bytes[2 * $i] = $code -band 255
-        $bytes[2 * $i + 1] = $code -shr 8
+function Resolve-ValidatedWorkerScriptPath {
+    param([string]$Path)
+    if (-not $Path -or -not $Path.Trim()) {
+        throw 'Worker script path is required.'
     }
-    $alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
-    $encoded = -join @(for ($i = 0; $i -lt $bytes.Length; $i += 3) {
-        $first = $bytes[$i]
-        $hasSecond = ($i + 1 -lt $bytes.Length)
-        $hasThird = ($i + 2 -lt $bytes.Length)
-        $second = if ($hasSecond) { $bytes[$i + 1] } else { 0 }
-        $third = if ($hasThird) { $bytes[$i + 2] } else { 0 }
-        $alphabet[$first -shr 2]
-        $alphabet[(($first -band 3) -shl 4) -bor ($second -shr 4)]
-        if ($hasSecond) { $alphabet[(($second -band 15) -shl 2) -bor ($third -shr 6)] } else { '=' }
-        if ($hasThird) { $alphabet[$third -band 63] } else { '=' }
-    })
-    return @('-NoProfile', '-NonInteractive', '-OutputFormat', 'Text', '-EncodedCommand', $encoded)
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        throw "Worker script was not found: $Path"
+    }
+    if (Test-PathHasReparsePoint -Path $Path) {
+        throw 'Reparse points are not allowed for worker script paths.'
+    }
+    $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+    if ($item.PSIsContainer) {
+        throw "Worker script must be a file: $Path"
+    }
+    if (Test-PathHasReparsePoint -Path $item.FullName) {
+        throw 'Reparse points are not allowed for worker script paths.'
+    }
+    return [string]$item.FullName
+}
+
+function Resolve-StandaloneScriptPath {
+    param([switch]$Required)
+    if ($script:StandaloneScriptPath) {
+        if ((Test-Path -LiteralPath $script:StandaloneScriptPath -PathType Leaf) -and (-not (Test-PathHasReparsePoint -Path $script:StandaloneScriptPath))) {
+            $expItem = Get-Item -LiteralPath $script:StandaloneScriptPath -Force -ErrorAction SilentlyContinue
+            if ($expItem -and (-not $expItem.PSIsContainer) -and (-not (Test-PathHasReparsePoint -Path $expItem.FullName))) {
+                return [string]$expItem.FullName
+            }
+        }
+        if ($Required) {
+            throw 'Standalone script path could not be resolved for background worker.'
+        }
+        return ''
+    }
+    $cands = @()
+    if ($script:BundledScriptPath) {
+        $cands += $script:BundledScriptPath
+    }
+    if ($PSScriptRoot) {
+        $cands += (Join-Path $PSScriptRoot 'shellossus.ps1')
+        $parentDir = Split-Path $PSScriptRoot -Parent
+        if ($parentDir) {
+            $cands += (Join-Path $parentDir 'shellossus.ps1')
+            $grandParentDir = Split-Path $parentDir -Parent
+            if ($grandParentDir) {
+                $cands += (Join-Path $grandParentDir 'shellossus.ps1')
+            }
+        }
+    }
+    foreach ($c in $cands) {
+        if ($c -and (Test-Path -LiteralPath $c -PathType Leaf) -and (-not (Test-PathHasReparsePoint -Path $c))) {
+            $item = Get-Item -LiteralPath $c -Force -ErrorAction SilentlyContinue
+            if ($item -and (-not $item.PSIsContainer) -and (-not (Test-PathHasReparsePoint -Path $item.FullName))) {
+                return [string]$item.FullName
+            }
+        }
+    }
+    if ($Required) {
+        throw 'Standalone script path could not be resolved for background worker.'
+    }
+    return ''
+}
+
+function Get-AgentWorkerArguments {
+    param(
+        [string]$ScriptPath,
+        [string]$WorkerMode
+    )
+    if (-not $ScriptPath -or -not $ScriptPath.Trim()) {
+        throw 'Worker script path is required.'
+    }
+    if ($WorkerMode -notin @('http', 'web', 'subagent')) {
+        throw 'Unsupported internal worker mode.'
+    }
+    $escapedPath = ($ScriptPath -replace '(\\*)"', '$1$1\"') -replace '(\\*)$', '$1$1'
+    if ($env:OS -eq 'Windows_NT') {
+        return "-NoProfile -NonInteractive -OutputFormat Text -File `"$escapedPath`" -InternalWorker $WorkerMode"
+    }
+    # Start-Process joins ArgumentList into ProcessStartInfo.Arguments without quoting spaces.
+    $posixFileArg = if ($ScriptPath -match '[\s"]') { "`"$escapedPath`"" } else { $ScriptPath }
+    return @('-NoProfile', '-NonInteractive', '-OutputFormat', 'Text', '-File', $posixFileArg, '-InternalWorker', $WorkerMode)
 }
 
 function Get-AgentCommandArguments {
@@ -5960,6 +6026,32 @@ function ConvertFrom-HtmlToText {
     return $joined.Trim()
 }
 
+function Invoke-InternalWebWorker {
+    $script:InternalWorkerFailed = $false
+    try {
+        if (-not $env:SHELLOSSUS_WEB_DOWNLOAD_URI) {
+            throw 'Web download URI is required.'
+        }
+        if (-not $env:SHELLOSSUS_WEB_DOWNLOAD_FILE) {
+            throw 'Web download output file is required.'
+        }
+        Assert-SafeWebResolution -Target ([uri]$env:SHELLOSSUS_WEB_DOWNLOAD_URI)
+    }
+    catch {
+        Write-Output $_.Exception.Message
+        $script:InternalWorkerFailed = $true
+        return
+    }
+    try {
+        $null = Microsoft.PowerShell.Utility\Invoke-WebRequest -Uri $env:SHELLOSSUS_WEB_DOWNLOAD_URI -Method Get -Headers @{ 'User-Agent' = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Shellossus/1.0' } -MaximumRedirection 0 -TimeoutSec 30 -UseBasicParsing -OutFile $env:SHELLOSSUS_WEB_DOWNLOAD_FILE -ErrorAction Stop
+    }
+    catch {
+        Write-Output (Format-WebRequestError -ErrorRecord $_)
+        $script:InternalWorkerFailed = $true
+        return
+    }
+}
+
 function Invoke-AgentWebDownload {
     param([string]$Uri, [string]$OutFile, [int]$MaxBytes = 2097152)
     $request = @{
@@ -5990,32 +6082,13 @@ function Invoke-AgentWebDownload {
     }
     else {
         $shellExe = Get-AgentPowerShellExecutable
+        $workerScript = Resolve-StandaloneScriptPath -Required
         $stdout = New-AgentTempFile
         $stderr = New-AgentTempFile
         $proc = $null
         $procId = 0
         try {
-            $workerFunctions = foreach ($name in @('Test-BlockedWebAddress', 'Assert-SafeWebResolution', 'Format-WebRequestError')) {
-                $body = (Get-Command -Name $name -CommandType Function).Definition
-                "function $name {`n$body`n}"
-            }
-            $workerMain = @'
-$ErrorActionPreference = 'Stop'
-try {
-    Assert-SafeWebResolution -Target $env:SHELLOSSUS_WEB_DOWNLOAD_URI
-} catch {
-    Write-Output $_.Exception.Message
-    exit 1
-}
-try {
-    Microsoft.PowerShell.Utility\Invoke-WebRequest -Uri $env:SHELLOSSUS_WEB_DOWNLOAD_URI -Method Get -Headers @{ 'User-Agent' = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Shellossus/1.0' } -MaximumRedirection 0 -TimeoutSec 30 -UseBasicParsing -OutFile $env:SHELLOSSUS_WEB_DOWNLOAD_FILE -ErrorAction Stop
-} catch {
-    Write-Output (Format-WebRequestError -ErrorRecord $_)
-    exit 1
-}
-'@
-            $worker = ($workerFunctions -join "`n") + "`n" + $workerMain
-            $workerArguments = Get-AgentWorkerArguments -CommandText $worker
+            $workerArguments = Get-AgentWorkerArguments -ScriptPath $workerScript -WorkerMode 'web'
             $proc = Invoke-WithProcessEnvironment -Values @{
                 SHELLOSSUS_API_KEY = $null
                 OPENAI_API_KEY = $null
@@ -6731,24 +6804,48 @@ function Invoke-AgentMemory {
 }
 
 # --- src/tools/AgentWorkers.ps1 ---
-# Standalone script resolution, subagent aggregate status, shared subagent error results, and parallel ReadOnly worker process pool.
+# Subagent aggregate status, shared subagent error results, internal subagent worker, and parallel ReadOnly worker process pool.
 
-function Resolve-StandaloneScriptPath {
-    if ($script:StandaloneScriptPath -and (Test-Path -LiteralPath $script:StandaloneScriptPath)) {
-        return (Get-Item -LiteralPath $script:StandaloneScriptPath -Force).FullName
+function Invoke-InternalSubagentWorker {
+    $script:InternalWorkerFailed = $false
+    $subScript = Resolve-ValidatedWorkerScriptPath -Path $env:SHELLOSSUS_SUB_SCRIPT
+    if (-not $env:SHELLOSSUS_SUB_PROMPT -or -not (Test-Path -LiteralPath $env:SHELLOSSUS_SUB_PROMPT -PathType Leaf)) {
+        throw 'Subagent prompt file is missing.'
     }
-    $cands = @()
-    if ($PSScriptRoot) {
-        $cands += (Join-Path $PSScriptRoot 'shellossus.ps1')
-        $parentDir = Split-Path $PSScriptRoot -Parent
-        if ($parentDir) { $cands += (Join-Path $parentDir 'shellossus.ps1') }
+    $promptItem = Get-Item -LiteralPath $env:SHELLOSSUS_SUB_PROMPT -Force -ErrorAction Stop
+    if (($promptItem.Attributes -band 1024) -ne 0) {
+        throw 'Reparse points are not allowed for subagent prompt files.'
     }
-    foreach ($c in $cands) {
-        if ($c -and (Test-Path -LiteralPath $c)) {
-            return (Get-Item -LiteralPath $c -Force).FullName
-        }
+    $pText = Get-Content -LiteralPath $env:SHELLOSSUS_SUB_PROMPT -Raw -Encoding UTF8 -ErrorAction Stop
+    if ($null -eq $pText) { $pText = '' }
+    $stepsVal = if ($env:SHELLOSSUS_SUB_STEPS) { [int]$env:SHELLOSSUS_SUB_STEPS } else { 15 }
+    $workerArgs = @{
+        Workspace = [string]$env:SHELLOSSUS_SUB_ROOT
+        BaseUrl = [string]$env:SHELLOSSUS_SUB_BASEURL
+        Model = [string]$env:SHELLOSSUS_SUB_MODEL
+        Permission = 'ReadOnly'
+        Mode = 'json'
+        NoSession = $true
+        MaxSteps = $stepsVal
+        ContextWindow = [string]$env:SHELLOSSUS_SUB_CONTEXT_WINDOW
+        CompactThreshold = [string]$env:SHELLOSSUS_SUB_COMPACT_THRESHOLD
+        Tools = [string]$env:SHELLOSSUS_SUB_TOOLS
+        NoTools = ($env:SHELLOSSUS_SUB_NO_TOOLS -eq '1')
+        ExcludeTools = 'run_agent'
+        Prompt = [string]$pText
+        LiteralPrompt = $true
     }
-    return ''
+    if ($env:SHELLOSSUS_SUB_REQUEST_TIMEOUT) { $workerArgs.RequestTimeoutSec = $env:SHELLOSSUS_SUB_REQUEST_TIMEOUT }
+    if ($env:SHELLOSSUS_SUB_CONFIG) { $workerArgs.ConfigPath = $env:SHELLOSSUS_SUB_CONFIG }
+    if ($env:SHELLOSSUS_SUB_NO_SKILLS -eq '1') { $workerArgs.NoSkills = $true }
+    if ($env:SHELLOSSUS_SUB_NO_TEMPLATES -eq '1') { $workerArgs.NoPromptTemplates = $true }
+    if ($env:SHELLOSSUS_SUB_NO_CONTEXT -eq '1') { $workerArgs.NoContextFiles = $true }
+    if ($env:SHELLOSSUS_SUB_REASONING_EFFORT) { $workerArgs.ReasoningEffort = $env:SHELLOSSUS_SUB_REASONING_EFFORT }
+    $global:LASTEXITCODE = 0
+    & $subScript @workerArgs
+    if ($null -ne $LASTEXITCODE -and [int]$LASTEXITCODE -ne 0) {
+        $script:InternalWorkerFailed = $true
+    }
 }
 
 function Resolve-SubagentAggregateStatus {
@@ -6825,37 +6922,17 @@ function Invoke-ParallelSubagentProcesses {
     }
     $configDir = if ($script:AgentConfigPath) { Split-Path $script:AgentConfigPath -Parent } else { '' }
     $shellExe = Get-AgentPowerShellExecutable
+    $launcherScript = Resolve-StandaloneScriptPath -Required
+    $targetScript = if ($ScriptPath) {
+        Resolve-ValidatedWorkerScriptPath -Path $ScriptPath
+    }
+    else {
+        $launcherScript
+    }
     $effEndpoint = if ($script:ActiveEndpoint) { $script:ActiveEndpoint } else { 'https://example.invalid/v1/chat/completions' }
     $baseUrl = $effEndpoint -replace '/chat/completions/?$', ''
     $effKey = if ($ApiKey) { $ApiKey } else { 'subagent-key' }
-    $workerCmd = @'
-$ErrorActionPreference = 'Stop'
-$pText = Get-Content -LiteralPath $env:SHELLOSSUS_SUB_PROMPT -Raw -Encoding UTF8
-$workerArgs = @{
-    Workspace = $env:SHELLOSSUS_SUB_ROOT
-    BaseUrl = $env:SHELLOSSUS_SUB_BASEURL
-    Model = $env:SHELLOSSUS_SUB_MODEL
-    Permission = 'ReadOnly'
-    Mode = 'json'
-    NoSession = $true
-    MaxSteps = [int]$env:SHELLOSSUS_SUB_STEPS
-    ContextWindow = $env:SHELLOSSUS_SUB_CONTEXT_WINDOW
-    CompactThreshold = $env:SHELLOSSUS_SUB_COMPACT_THRESHOLD
-    Tools = $env:SHELLOSSUS_SUB_TOOLS
-    NoTools = ($env:SHELLOSSUS_SUB_NO_TOOLS -eq '1')
-    ExcludeTools = 'run_agent'
-    Prompt = $pText
-    LiteralPrompt = $true
-}
-if ($env:SHELLOSSUS_SUB_REQUEST_TIMEOUT) { $workerArgs.RequestTimeoutSec = $env:SHELLOSSUS_SUB_REQUEST_TIMEOUT }
-if ($env:SHELLOSSUS_SUB_CONFIG) { $workerArgs.ConfigPath = $env:SHELLOSSUS_SUB_CONFIG }
-if ($env:SHELLOSSUS_SUB_NO_SKILLS -eq '1') { $workerArgs.NoSkills = $true }
-if ($env:SHELLOSSUS_SUB_NO_TEMPLATES -eq '1') { $workerArgs.NoPromptTemplates = $true }
-if ($env:SHELLOSSUS_SUB_NO_CONTEXT -eq '1') { $workerArgs.NoContextFiles = $true }
-if ($env:SHELLOSSUS_SUB_REASONING_EFFORT) { $workerArgs.ReasoningEffort = $env:SHELLOSSUS_SUB_REASONING_EFFORT }
-& $env:SHELLOSSUS_SUB_SCRIPT @workerArgs
-'@
-    $argList = Get-AgentWorkerArguments -CommandText $workerCmd
+    $argList = Get-AgentWorkerArguments -ScriptPath $launcherScript -WorkerMode 'subagent'
     $allResults = @()
     $batchSize = 4
     for ($offset = 0; $offset -lt $Tasks.Count; $offset += $batchSize) {
@@ -6880,7 +6957,7 @@ if ($env:SHELLOSSUS_SUB_REASONING_EFFORT) { $workerArgs.ReasoningEffort = $env:S
                 $proc = Invoke-WithProcessEnvironment -Values @{
                     SHELLOSSUS_API_KEY = $effKey
                     OPENAI_API_KEY = $null
-                    SHELLOSSUS_SUB_SCRIPT = $ScriptPath
+                    SHELLOSSUS_SUB_SCRIPT = $targetScript
                     SHELLOSSUS_SUB_ROOT = $Root
                     SHELLOSSUS_SUB_BASEURL = $baseUrl
                     SHELLOSSUS_SUB_MODEL = $effModel
@@ -10360,6 +10437,40 @@ function Wait-AgentProcessWithSpinner {
     }
 }
 
+function Invoke-InternalHttpWorker {
+    $script:InternalWorkerFailed = $false
+    try {
+        if (-not $env:SHELLOSSUS_HTTP_URI) { throw 'HTTP worker URI is required.' }
+        if (-not $env:SHELLOSSUS_HTTP_IN) { throw 'HTTP worker input file is required.' }
+        if (-not $env:SHELLOSSUS_HTTP_OUT) { throw 'HTTP worker output file is required.' }
+        $timeoutVal = if ($env:SHELLOSSUS_HTTP_TIMEOUT) { [int]$env:SHELLOSSUS_HTTP_TIMEOUT } else { 180 }
+        $null = Microsoft.PowerShell.Utility\Invoke-WebRequest -Uri $env:SHELLOSSUS_HTTP_URI -Method 'Post' -Headers @{ Authorization = ('Bearer ' + $env:SHELLOSSUS_API_KEY) } -ContentType 'application/json; charset=utf-8' -InFile $env:SHELLOSSUS_HTTP_IN -OutFile $env:SHELLOSSUS_HTTP_OUT -MaximumRedirection 0 -TimeoutSec $timeoutVal -UseBasicParsing -ErrorAction Stop
+    }
+    catch {
+        $msg = [string]$_.Exception.Message
+        $details = $null
+        if ($_.ErrorDetails -and $_.ErrorDetails.Message) {
+            $details = ([string]$_.ErrorDetails.Message).Trim()
+        }
+        if ($details) {
+            # Four bytes per code unit is a safe UTF-8 upper bound.
+            if ($details.Length -le 4096) {
+                try {
+                    $parsed = $details | ConvertFrom-Json -ErrorAction Stop
+                    if ($parsed.error -and $parsed.error.message) { $details = [string]$parsed.error.message }
+                }
+                catch {}
+            }
+            if ($details.Length -gt 300) { $details = $details.Substring(0, 300) + '...' }
+            $msg = $msg + ' (' + $details + ')'
+        }
+        if ($env:SHELLOSSUS_HTTP_ERR) {
+            Set-AgentUtf8Content -LiteralPath $env:SHELLOSSUS_HTTP_ERR -Value $msg
+        }
+        $script:InternalWorkerFailed = $true
+    }
+}
+
 function Invoke-AgentHttpRequest {
     param(
         [string]$Uri,
@@ -10395,40 +10506,14 @@ function Invoke-AgentHttpRequest {
         return
     }
     $shellExe = Get-AgentPowerShellExecutable
+    $workerScript = Resolve-StandaloneScriptPath -Required
     $reqTemp = New-AgentTempFile
     $errTemp = New-AgentTempFile
     $stdoutTemp = New-AgentTempFile
     $stderrTemp = New-AgentTempFile
     try {
         Set-Content -LiteralPath $reqTemp.FullName -Value $asciiBody -Encoding Ascii -NoNewline -ErrorAction Stop
-        $workerCmd = @'
-$ErrorActionPreference = 'Stop'
-try {
-    Microsoft.PowerShell.Utility\Invoke-WebRequest -Uri $env:SHELLOSSUS_HTTP_URI -Method 'Post' -Headers @{ Authorization = ('Bearer ' + $env:SHELLOSSUS_API_KEY) } -ContentType 'application/json; charset=utf-8' -InFile $env:SHELLOSSUS_HTTP_IN -OutFile $env:SHELLOSSUS_HTTP_OUT -MaximumRedirection 0 -TimeoutSec ([int]$env:SHELLOSSUS_HTTP_TIMEOUT) -UseBasicParsing -ErrorAction Stop
-}
-catch {
-    $msg = $_.Exception.Message
-    $details = $null
-    if ($_.ErrorDetails -and $_.ErrorDetails.Message) {
-        $details = $_.ErrorDetails.Message.Trim()
-    }
-    if ($details) {
-        # The worker runs standalone. Four bytes per code unit is a safe UTF-8 upper bound.
-        if ($details.Length -le 4096) {
-            try {
-                $parsed = $details | ConvertFrom-Json -ErrorAction Stop
-                if ($parsed.error -and $parsed.error.message) { $details = [string]$parsed.error.message }
-            }
-            catch {}
-        }
-        if ($details.Length -gt 300) { $details = $details.Substring(0, 300) + '...' }
-        $msg = $msg + ' (' + $details + ')'
-    }
-    Set-Content -LiteralPath $env:SHELLOSSUS_HTTP_ERR -Value $msg -Encoding UTF8 -NoNewline
-    exit 1
-}
-'@
-        $argList = Get-AgentWorkerArguments -CommandText $workerCmd
+        $argList = Get-AgentWorkerArguments -ScriptPath $workerScript -WorkerMode 'http'
         $proc = Invoke-WithProcessEnvironment -Values @{
             SHELLOSSUS_HTTP_URI = $Uri
             SHELLOSSUS_API_KEY = $ApiKey
@@ -12174,6 +12259,19 @@ function Invoke-ReplBangCommand {
 # CLI entrypoint: interactive setup, configuration resolution, single-shot execution, and interactive REPL loop.
 
 if (-not $LibraryOnly) {
+    if ($InternalWorker) {
+        if ($InternalWorker -notin @('http', 'web', 'subagent')) {
+            throw 'Unsupported internal worker mode.'
+        }
+        $script:InternalWorkerFailed = $false
+        switch ($InternalWorker) {
+            'http' { Invoke-InternalHttpWorker }
+            'web' { Invoke-InternalWebWorker }
+            'subagent' { Invoke-InternalSubagentWorker }
+        }
+        if ($script:InternalWorkerFailed) { exit 1 }
+        return
+    }
     $script:OutputMode = if ($Mode) { $Mode.ToLower() } else { 'text' }
     if ($script:OutputMode -notin @('text', 'json')) { throw 'Mode must be text or json.' }
     if ($Install) {

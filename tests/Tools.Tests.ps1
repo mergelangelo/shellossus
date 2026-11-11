@@ -363,6 +363,37 @@ try {
         Assert-True ($unixArgs.Count -eq 4 -and $unixArgs[0] -eq '-NoProfile' -and $unixArgs[1] -eq '-NonInteractive' -and $unixArgs[2] -eq '-Command' -and $unixArgs[3] -eq $quoteCmd) "Non-Windows arguments were not the four-element raw command."
         $unixJoined = $unixArgs -join ' '
         Assert-True (($unixJoined -notmatch 'ExecutionPolicy') -and ($unixJoined -notmatch 'Bypass')) 'Non-Windows arguments added ExecutionPolicy or Bypass.'
+
+        # Task 3: Get-AgentWorkerArguments uses fixed -File -InternalWorker modes (never -EncodedCommand) and quotes Windows paths with spaces.
+        $winWorkerPath = 'C:\Program Files\My "Agent"\my-agent.ps1'
+        $env:OS = 'Windows_NT'
+        foreach ($wMode in @('http', 'web', 'subagent')) {
+            $winWorkerArgs = Get-AgentWorkerArguments -ScriptPath $winWorkerPath -WorkerMode $wMode
+            $expectedWinWorker = "-NoProfile -NonInteractive -OutputFormat Text -File `"C:\Program Files\My \`"Agent\`"\my-agent.ps1`" -InternalWorker $wMode"
+            Assert-True ($winWorkerArgs -is [string]) "Windows worker arguments for $wMode were not a single string."
+            Assert-True ($winWorkerArgs -ceq $expectedWinWorker) "Windows worker arguments mismatch for ${wMode}: $winWorkerArgs"
+            Assert-True (($winWorkerArgs -notmatch 'EncodedCommand') -and ($winWorkerArgs -notmatch 'ExecutionPolicy') -and ($winWorkerArgs -notmatch 'Bypass')) "Windows worker arguments included forbidden flags: $winWorkerArgs"
+        }
+        $env:OS = 'Other'
+        $posixPlainPath = '/Users/me/shellossus/my-agent.ps1'
+        $posixPlainArgs = @(Get-AgentWorkerArguments -ScriptPath $posixPlainPath -WorkerMode 'http')
+        Assert-True ($posixPlainArgs.Count -eq 8 -and $posixPlainArgs[4] -ceq '-File' -and $posixPlainArgs[5] -ceq $posixPlainPath -and $posixPlainArgs[7] -ceq 'http') "POSIX plain worker arguments mismatch: $($posixPlainArgs -join '|')"
+        $posixWorkerPath = '/Users/me/dir with spaces/my-agent.ps1'
+        foreach ($wMode in @('http', 'web', 'subagent')) {
+            $posixWorkerArgs = @(Get-AgentWorkerArguments -ScriptPath $posixWorkerPath -WorkerMode $wMode)
+            Assert-True ($posixWorkerArgs.Count -eq 8 -and $posixWorkerArgs[0] -ceq '-NoProfile' -and $posixWorkerArgs[1] -ceq '-NonInteractive' -and $posixWorkerArgs[2] -ceq '-OutputFormat' -and $posixWorkerArgs[3] -ceq 'Text' -and $posixWorkerArgs[4] -ceq '-File' -and $posixWorkerArgs[5] -ceq "`"$posixWorkerPath`"" -and $posixWorkerArgs[6] -ceq '-InternalWorker' -and $posixWorkerArgs[7] -ceq $wMode) "POSIX spaced worker arguments mismatch for ${wMode}: $($posixWorkerArgs -join '|')"
+            Assert-True ((($posixWorkerArgs -join ' ') -notmatch 'EncodedCommand') -and (($posixWorkerArgs -join ' ') -notmatch 'ExecutionPolicy') -and (($posixWorkerArgs -join ' ') -notmatch 'Bypass')) "POSIX worker arguments included forbidden flags."
+        }
+        foreach ($badMode in @('', 'eval', 'powershell', 'custom')) {
+            $badModeThrew = $false
+            try { $null = Get-AgentWorkerArguments -ScriptPath $posixWorkerPath -WorkerMode $badMode }
+            catch { $badModeThrew = $true }
+            Assert-True $badModeThrew "Get-AgentWorkerArguments accepted unsupported mode '$badMode'."
+        }
+        $emptyScriptThrew = $false
+        try { $null = Get-AgentWorkerArguments -ScriptPath '   ' -WorkerMode 'http' }
+        catch { $emptyScriptThrew = $true }
+        Assert-True $emptyScriptThrew 'Get-AgentWorkerArguments accepted blank -ScriptPath.'
     }
     finally {
         if ($null -eq $savedQuoteOs) {
@@ -371,6 +402,32 @@ try {
         else {
             Set-Item -LiteralPath 'Env:OS' -Value ([string]$savedQuoteOs.Value)
         }
+    }
+
+    # Task 3: Resolve-StandaloneScriptPath resolves $script:BundledScriptPath (including renamed script in directory with spaces) and rejects missing/reparse candidates.
+    $savedStandaloneOverride = $script:StandaloneScriptPath
+    $savedBundledPath = $script:BundledScriptPath
+    $spacedDir = Join-Path $testRoot 'folder with spaces'
+    New-Item -ItemType Directory -Path $spacedDir -Force | Out-Null
+    $renamedStandalone = Join-Path $spacedDir 'custom-agent.ps1'
+    Copy-Item -LiteralPath "$PSScriptRoot\..\shellossus.ps1" -Destination $renamedStandalone -Force
+    try {
+        $script:StandaloneScriptPath = ''
+        $script:BundledScriptPath = $renamedStandalone
+        $resolvedBundled = Resolve-StandaloneScriptPath -Required
+        Assert-True ($resolvedBundled -ceq (Get-Item -LiteralPath $renamedStandalone -Force).FullName) "Resolve-StandaloneScriptPath did not resolve renamed BundledScriptPath in spaced dir: '$resolvedBundled'"
+
+        $script:StandaloneScriptPath = Join-Path $spacedDir 'does-not-exist.ps1'
+        Assert-True ((Resolve-StandaloneScriptPath) -ceq '') 'Resolve-StandaloneScriptPath without -Required should return empty string when override path is missing.'
+        $reqMissingThrew = $false
+        try { $null = Resolve-StandaloneScriptPath -Required }
+        catch { $reqMissingThrew = $true }
+        Assert-True $reqMissingThrew 'Resolve-StandaloneScriptPath -Required did not throw when override path is missing.'
+    }
+    finally {
+        $script:StandaloneScriptPath = $savedStandaloneOverride
+        $script:BundledScriptPath = $savedBundledPath
+        Remove-Item -LiteralPath $spacedDir -Recurse -Force -ErrorAction SilentlyContinue
     }
 
     # Child shell publishes the current session values, including empty, and does not keep a stale parent value.

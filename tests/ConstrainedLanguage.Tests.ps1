@@ -536,6 +536,75 @@ try {
     Invoke-ReplPermissionCommand -State $clPermissionState -ReqPerm 'Ask'
     Restore-AgentTurnPermission -State $clPermissionState -Frame $clPermissionFrame
     Assert-True ($script:AgentPermission -eq 'Ask' -and -not $script:AutoApproveCommands -and -not $script:AutoApproveWeb) 'ConstrainedLanguage undo restored revoked approvals.'
+
+    # Task 3: Direct execution of Resolve-StandaloneScriptPath, Get-AgentWorkerArguments, Invoke-InternalWebWorker,
+    # Invoke-InternalHttpWorker, and Invoke-InternalSubagentWorker validation in ConstrainedLanguage mode.
+    $clStandalone = Resolve-StandaloneScriptPath -Required
+    Assert-True ([bool]$clStandalone -and (Test-Path -LiteralPath $clStandalone -PathType Leaf)) 'ConstrainedLanguage Resolve-StandaloneScriptPath -Required failed.'
+    $savedClOs = Get-Item -LiteralPath 'Env:OS' -ErrorAction SilentlyContinue
+    try {
+        $env:OS = 'Windows_NT'
+        $clWinArgs = Get-AgentWorkerArguments -ScriptPath 'C:\Dir With Spaces\shellossus.ps1' -WorkerMode 'http'
+        Assert-True ($clWinArgs -ceq '-NoProfile -NonInteractive -OutputFormat Text -File "C:\Dir With Spaces\shellossus.ps1" -InternalWorker http') "ConstrainedLanguage Windows Get-AgentWorkerArguments failed: $clWinArgs"
+        $env:OS = 'Other'
+        $clPosixPlain = @(Get-AgentWorkerArguments -ScriptPath '/opt/shellossus/shellossus.ps1' -WorkerMode 'subagent')
+        Assert-True ($clPosixPlain.Count -eq 8 -and $clPosixPlain[4] -ceq '-File' -and $clPosixPlain[5] -ceq '/opt/shellossus/shellossus.ps1' -and $clPosixPlain[7] -ceq 'subagent') 'ConstrainedLanguage POSIX plain Get-AgentWorkerArguments failed.'
+        $clPosixArgs = @(Get-AgentWorkerArguments -ScriptPath '/opt/dir with spaces/shellossus.ps1' -WorkerMode 'web')
+        Assert-True ($clPosixArgs.Count -eq 8 -and $clPosixArgs[4] -ceq '-File' -and $clPosixArgs[5] -ceq '"/opt/dir with spaces/shellossus.ps1"' -and $clPosixArgs[7] -ceq 'web') 'ConstrainedLanguage POSIX spaced Get-AgentWorkerArguments failed.'
+    }
+    finally {
+        if ($null -eq $savedClOs) { Remove-Item -LiteralPath 'Env:OS' -ErrorAction SilentlyContinue }
+        else { Set-Item -LiteralPath 'Env:OS' -Value ([string]$savedClOs.Value) }
+    }
+    $clBadModeThrew = $false
+    try { $null = Get-AgentWorkerArguments -ScriptPath $clStandalone -WorkerMode 'eval' }
+    catch { $clBadModeThrew = $true }
+    Assert-True $clBadModeThrew 'ConstrainedLanguage Get-AgentWorkerArguments accepted invalid worker mode.'
+
+    $clWebOut = Join-Path $testRoot 'cl-web-blocked.tmp'
+    $clWebMessages = @(Invoke-WithProcessEnvironment -Values @{
+        SHELLOSSUS_WEB_DOWNLOAD_URI = 'http://127.0.0.1/secret'
+        SHELLOSSUS_WEB_DOWNLOAD_FILE = $clWebOut
+    } -Action {
+        Invoke-InternalWebWorker
+    })
+    Assert-True ($script:InternalWorkerFailed -and ($clWebMessages -join ' ') -like '*Blocked request*' -and (-not (Test-Path -LiteralPath $clWebOut))) "ConstrainedLanguage Invoke-InternalWebWorker did not block 127.0.0.1: $($clWebMessages -join ' ')"
+
+    $clHttpIn = New-AgentTempFile
+    $clHttpOut = Join-Path $testRoot 'cl-http-out.tmp'
+    $clHttpErr = New-AgentTempFile
+    try {
+        Set-AgentUtf8Content -LiteralPath $clHttpIn.FullName -Value '{}'
+        Invoke-WithProcessEnvironment -Values @{
+            SHELLOSSUS_HTTP_URI = 'badclscheme://example.invalid/v1'
+            SHELLOSSUS_API_KEY = 'cl-key'
+            SHELLOSSUS_HTTP_IN = $clHttpIn.FullName
+            SHELLOSSUS_HTTP_OUT = $clHttpOut
+            SHELLOSSUS_HTTP_ERR = $clHttpErr.FullName
+            SHELLOSSUS_HTTP_TIMEOUT = '2'
+        } -Action {
+            Invoke-InternalHttpWorker
+        }
+        $clErrWritten = Get-Content -LiteralPath $clHttpErr.FullName -Raw -Encoding UTF8
+        Assert-True ($script:InternalWorkerFailed -and [bool]$clErrWritten -and $clErrWritten.Trim().Length -gt 0) 'ConstrainedLanguage Invoke-InternalHttpWorker did not record error output.'
+    }
+    finally {
+        Remove-Item -LiteralPath $clHttpIn.FullName, $clHttpErr.FullName, $clHttpOut -Force -ErrorAction SilentlyContinue
+    }
+
+    $clSubMissingThrew = $false
+    try {
+        Invoke-WithProcessEnvironment -Values @{
+            SHELLOSSUS_SUB_SCRIPT = (Join-Path $testRoot 'missing-sub-worker.ps1')
+            SHELLOSSUS_SUB_PROMPT = (Join-Path $testRoot 'missing-prompt.tmp')
+        } -Action {
+            Invoke-InternalSubagentWorker
+        }
+    }
+    catch {
+        $clSubMissingThrew = $true
+    }
+    Assert-True $clSubMissingThrew 'ConstrainedLanguage Invoke-InternalSubagentWorker accepted missing SHELLOSSUS_SUB_SCRIPT.'
 }
 finally {
     Remove-TestEnvironment -Env $envData

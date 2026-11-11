@@ -68,7 +68,7 @@ Undo history is process-local and retains the 20 newest frames. Eviction, sessio
 
 ## Process Execution & Command Timeouts
 
-Child PowerShell processes launch the executable by absolute path from the current installation's `$PSHOME` with profiles disabled. The model API POST and web download workers receive application-owned code through `-EncodedCommand`. Request URLs, credentials, and payloads travel separately as environment values or data files.
+Child PowerShell processes launch the executable by absolute path from the current installation's `$PSHOME` with profiles disabled. The model API POST, web download, and parallel subagent workers invoke the standalone `shellossus.ps1` script via `-File` in fixed internal worker modes (`http`, `web`, `subagent`). Request URLs, credentials, and payloads travel separately as environment values or data files.
 
 For `fetch_url` and `web_search`, downloads run in a separate PowerShell process. The parent checks the temporary output file while the download is running, stops it when it exceeds 2 MiB, and checks the completed file again before reading it. The check is periodic, so a fast response can temporarily exceed the limit between polls; this is not a strict disk or worker-memory quota.
 

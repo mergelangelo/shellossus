@@ -318,6 +318,32 @@ function ConvertFrom-HtmlToText {
     return $joined.Trim()
 }
 
+function Invoke-InternalWebWorker {
+    $script:InternalWorkerFailed = $false
+    try {
+        if (-not $env:SHELLOSSUS_WEB_DOWNLOAD_URI) {
+            throw 'Web download URI is required.'
+        }
+        if (-not $env:SHELLOSSUS_WEB_DOWNLOAD_FILE) {
+            throw 'Web download output file is required.'
+        }
+        Assert-SafeWebResolution -Target ([uri]$env:SHELLOSSUS_WEB_DOWNLOAD_URI)
+    }
+    catch {
+        Write-Output $_.Exception.Message
+        $script:InternalWorkerFailed = $true
+        return
+    }
+    try {
+        $null = Microsoft.PowerShell.Utility\Invoke-WebRequest -Uri $env:SHELLOSSUS_WEB_DOWNLOAD_URI -Method Get -Headers @{ 'User-Agent' = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Shellossus/1.0' } -MaximumRedirection 0 -TimeoutSec 30 -UseBasicParsing -OutFile $env:SHELLOSSUS_WEB_DOWNLOAD_FILE -ErrorAction Stop
+    }
+    catch {
+        Write-Output (Format-WebRequestError -ErrorRecord $_)
+        $script:InternalWorkerFailed = $true
+        return
+    }
+}
+
 function Invoke-AgentWebDownload {
     param([string]$Uri, [string]$OutFile, [int]$MaxBytes = 2097152)
     $request = @{
@@ -348,32 +374,13 @@ function Invoke-AgentWebDownload {
     }
     else {
         $shellExe = Get-AgentPowerShellExecutable
+        $workerScript = Resolve-StandaloneScriptPath -Required
         $stdout = New-AgentTempFile
         $stderr = New-AgentTempFile
         $proc = $null
         $procId = 0
         try {
-            $workerFunctions = foreach ($name in @('Test-BlockedWebAddress', 'Assert-SafeWebResolution', 'Format-WebRequestError')) {
-                $body = (Get-Command -Name $name -CommandType Function).Definition
-                "function $name {`n$body`n}"
-            }
-            $workerMain = @'
-$ErrorActionPreference = 'Stop'
-try {
-    Assert-SafeWebResolution -Target $env:SHELLOSSUS_WEB_DOWNLOAD_URI
-} catch {
-    Write-Output $_.Exception.Message
-    exit 1
-}
-try {
-    Microsoft.PowerShell.Utility\Invoke-WebRequest -Uri $env:SHELLOSSUS_WEB_DOWNLOAD_URI -Method Get -Headers @{ 'User-Agent' = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Shellossus/1.0' } -MaximumRedirection 0 -TimeoutSec 30 -UseBasicParsing -OutFile $env:SHELLOSSUS_WEB_DOWNLOAD_FILE -ErrorAction Stop
-} catch {
-    Write-Output (Format-WebRequestError -ErrorRecord $_)
-    exit 1
-}
-'@
-            $worker = ($workerFunctions -join "`n") + "`n" + $workerMain
-            $workerArguments = Get-AgentWorkerArguments -CommandText $worker
+            $workerArguments = Get-AgentWorkerArguments -ScriptPath $workerScript -WorkerMode 'web'
             $proc = Invoke-WithProcessEnvironment -Values @{
                 SHELLOSSUS_API_KEY = $null
                 OPENAI_API_KEY = $null

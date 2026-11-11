@@ -318,17 +318,23 @@ try {
         }
     }
 
-    # Fixed worker code survives multiline launch in CLM and request data stays separate.
+    # Fixed worker modes launch via -File without -EncodedCommand and request data stays separate.
     $shellName = if ($PSVersionTable.PSEdition -eq 'Desktop') { 'powershell.exe' } elseif ($IsWindows) { 'pwsh.exe' } else { 'pwsh' }
     $installedShell = Join-Path $PSHOME $shellName
-    $workerArgs = @(Get-AgentWorkerArguments -CommandText "Write-Output 'first line'`nWrite-Output 'second line'")
-    $workerOutput = @(& $installedShell @workerArgs)
-    Assert-True (($workerOutput -join '|') -ceq 'first line|second line') 'Encoded worker launch lost multiline code.'
+    $expectedWorkerScript = Resolve-StandaloneScriptPath -Required
+    $bundledSourceText = Get-Content -LiteralPath $expectedWorkerScript -Raw -Encoding UTF8
+    $forbiddenEncodedFlag = '-Encoded' + 'Command'
+    Assert-True (-not $bundledSourceText.Contains($forbiddenEncodedFlag)) 'Bundled shellossus.ps1 still contains -EncodedCommand.'
+    foreach ($modeCheck in @('http', 'web', 'subagent')) {
+        $modeArgs = Get-AgentWorkerArguments -ScriptPath $expectedWorkerScript -WorkerMode $modeCheck
+        $modeArgsJoined = if ($modeArgs -is [string]) { $modeArgs } else { $modeArgs -join ' ' }
+        Assert-True ($modeArgsJoined.Contains('-File') -and $modeArgsJoined.Contains("-InternalWorker $modeCheck") -and (-not $modeArgsJoined.Contains($forbiddenEncodedFlag))) "Worker arguments for $modeCheck did not use fixed -File dispatch: $modeArgsJoined"
+    }
     & {
         $launches = @{ items = @(); kind = '' }
         function Start-Process {
             [CmdletBinding()]
-            param($FilePath, [string[]]$ArgumentList, $RedirectStandardOutput, $RedirectStandardError, [switch]$NoNewWindow, [switch]$PassThru)
+            param($FilePath, $ArgumentList, $RedirectStandardOutput, $RedirectStandardError, [switch]$NoNewWindow, [switch]$PassThru)
             if ($launches.kind -eq 'post') {
                 $uri = $env:SHELLOSSUS_HTTP_URI
                 $body = Get-Content -LiteralPath $env:SHELLOSSUS_HTTP_IN -Raw -Encoding Ascii
@@ -346,6 +352,8 @@ try {
 
         $outPath = Join-Path $envData.TestRoot 'fixed-worker-response.txt'
         foreach ($kind in @('post', 'get')) {
+            $expectedMode = if ($kind -eq 'post') { 'http' } else { 'web' }
+            $expectedArgs = Get-AgentWorkerArguments -ScriptPath $expectedWorkerScript -WorkerMode $expectedMode
             $launches.kind = $kind
             $launches.items = @()
             foreach ($uri in @('https://example.invalid/first', 'https://example.invalid/second')) {
@@ -359,13 +367,11 @@ try {
                 Assert-True ($launches.items[0].body -ceq $launches.items[0].uri -and $launches.items[1].body -ceq $launches.items[1].uri) 'The API worker lost its file-backed request body.'
             }
             foreach ($launch in $launches.items) {
-                Assert-True ($launch.executable -ceq $installedShell -and $launch.arguments -contains '-NoProfile' -and $launch.arguments -contains '-EncodedCommand') "The $kind worker did not launch fixed code using the installed PowerShell."
+                $argStr = if ($launch.arguments -is [string]) { $launch.arguments } else { $launch.arguments -join ' ' }
+                $expectedStr = if ($expectedArgs -is [string]) { $expectedArgs } else { $expectedArgs -join ' ' }
+                Assert-True ($launch.executable -ceq $installedShell -and $argStr -ceq $expectedStr -and (-not $argStr.Contains($forbiddenEncodedFlag))) "The $kind worker did not launch fixed -File -InternalWorker $expectedMode using the installed PowerShell: $argStr"
             }
             Assert-True (($launches.items[0].arguments -join ' ') -ceq ($launches.items[1].arguments -join ' ')) "Request data changed the $kind worker program."
-            if (-not $ConstrainedLanguage) {
-                $workerCode = [System.Text.Encoding]::Unicode.GetString([Convert]::FromBase64String($launches.items[0].arguments[-1]))
-                Assert-True ($workerCode -like '*Invoke-WebRequest*' -and $workerCode -notlike '*Invoke-Expression*') "The $kind worker evaluates external code."
-            }
         }
     }
 

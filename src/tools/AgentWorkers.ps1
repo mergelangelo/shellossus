@@ -1,21 +1,45 @@
-# Standalone script resolution, subagent aggregate status, shared subagent error results, and parallel ReadOnly worker process pool.
+# Subagent aggregate status, shared subagent error results, internal subagent worker, and parallel ReadOnly worker process pool.
 
-function Resolve-StandaloneScriptPath {
-    if ($script:StandaloneScriptPath -and (Test-Path -LiteralPath $script:StandaloneScriptPath)) {
-        return (Get-Item -LiteralPath $script:StandaloneScriptPath -Force).FullName
+function Invoke-InternalSubagentWorker {
+    $script:InternalWorkerFailed = $false
+    $subScript = Resolve-ValidatedWorkerScriptPath -Path $env:SHELLOSSUS_SUB_SCRIPT
+    if (-not $env:SHELLOSSUS_SUB_PROMPT -or -not (Test-Path -LiteralPath $env:SHELLOSSUS_SUB_PROMPT -PathType Leaf)) {
+        throw 'Subagent prompt file is missing.'
     }
-    $cands = @()
-    if ($PSScriptRoot) {
-        $cands += (Join-Path $PSScriptRoot 'shellossus.ps1')
-        $parentDir = Split-Path $PSScriptRoot -Parent
-        if ($parentDir) { $cands += (Join-Path $parentDir 'shellossus.ps1') }
+    $promptItem = Get-Item -LiteralPath $env:SHELLOSSUS_SUB_PROMPT -Force -ErrorAction Stop
+    if (($promptItem.Attributes -band 1024) -ne 0) {
+        throw 'Reparse points are not allowed for subagent prompt files.'
     }
-    foreach ($c in $cands) {
-        if ($c -and (Test-Path -LiteralPath $c)) {
-            return (Get-Item -LiteralPath $c -Force).FullName
-        }
+    $pText = Get-Content -LiteralPath $env:SHELLOSSUS_SUB_PROMPT -Raw -Encoding UTF8 -ErrorAction Stop
+    if ($null -eq $pText) { $pText = '' }
+    $stepsVal = if ($env:SHELLOSSUS_SUB_STEPS) { [int]$env:SHELLOSSUS_SUB_STEPS } else { 15 }
+    $workerArgs = @{
+        Workspace = [string]$env:SHELLOSSUS_SUB_ROOT
+        BaseUrl = [string]$env:SHELLOSSUS_SUB_BASEURL
+        Model = [string]$env:SHELLOSSUS_SUB_MODEL
+        Permission = 'ReadOnly'
+        Mode = 'json'
+        NoSession = $true
+        MaxSteps = $stepsVal
+        ContextWindow = [string]$env:SHELLOSSUS_SUB_CONTEXT_WINDOW
+        CompactThreshold = [string]$env:SHELLOSSUS_SUB_COMPACT_THRESHOLD
+        Tools = [string]$env:SHELLOSSUS_SUB_TOOLS
+        NoTools = ($env:SHELLOSSUS_SUB_NO_TOOLS -eq '1')
+        ExcludeTools = 'run_agent'
+        Prompt = [string]$pText
+        LiteralPrompt = $true
     }
-    return ''
+    if ($env:SHELLOSSUS_SUB_REQUEST_TIMEOUT) { $workerArgs.RequestTimeoutSec = $env:SHELLOSSUS_SUB_REQUEST_TIMEOUT }
+    if ($env:SHELLOSSUS_SUB_CONFIG) { $workerArgs.ConfigPath = $env:SHELLOSSUS_SUB_CONFIG }
+    if ($env:SHELLOSSUS_SUB_NO_SKILLS -eq '1') { $workerArgs.NoSkills = $true }
+    if ($env:SHELLOSSUS_SUB_NO_TEMPLATES -eq '1') { $workerArgs.NoPromptTemplates = $true }
+    if ($env:SHELLOSSUS_SUB_NO_CONTEXT -eq '1') { $workerArgs.NoContextFiles = $true }
+    if ($env:SHELLOSSUS_SUB_REASONING_EFFORT) { $workerArgs.ReasoningEffort = $env:SHELLOSSUS_SUB_REASONING_EFFORT }
+    $global:LASTEXITCODE = 0
+    & $subScript @workerArgs
+    if ($null -ne $LASTEXITCODE -and [int]$LASTEXITCODE -ne 0) {
+        $script:InternalWorkerFailed = $true
+    }
 }
 
 function Resolve-SubagentAggregateStatus {
@@ -92,37 +116,17 @@ function Invoke-ParallelSubagentProcesses {
     }
     $configDir = if ($script:AgentConfigPath) { Split-Path $script:AgentConfigPath -Parent } else { '' }
     $shellExe = Get-AgentPowerShellExecutable
+    $launcherScript = Resolve-StandaloneScriptPath -Required
+    $targetScript = if ($ScriptPath) {
+        Resolve-ValidatedWorkerScriptPath -Path $ScriptPath
+    }
+    else {
+        $launcherScript
+    }
     $effEndpoint = if ($script:ActiveEndpoint) { $script:ActiveEndpoint } else { 'https://example.invalid/v1/chat/completions' }
     $baseUrl = $effEndpoint -replace '/chat/completions/?$', ''
     $effKey = if ($ApiKey) { $ApiKey } else { 'subagent-key' }
-    $workerCmd = @'
-$ErrorActionPreference = 'Stop'
-$pText = Get-Content -LiteralPath $env:SHELLOSSUS_SUB_PROMPT -Raw -Encoding UTF8
-$workerArgs = @{
-    Workspace = $env:SHELLOSSUS_SUB_ROOT
-    BaseUrl = $env:SHELLOSSUS_SUB_BASEURL
-    Model = $env:SHELLOSSUS_SUB_MODEL
-    Permission = 'ReadOnly'
-    Mode = 'json'
-    NoSession = $true
-    MaxSteps = [int]$env:SHELLOSSUS_SUB_STEPS
-    ContextWindow = $env:SHELLOSSUS_SUB_CONTEXT_WINDOW
-    CompactThreshold = $env:SHELLOSSUS_SUB_COMPACT_THRESHOLD
-    Tools = $env:SHELLOSSUS_SUB_TOOLS
-    NoTools = ($env:SHELLOSSUS_SUB_NO_TOOLS -eq '1')
-    ExcludeTools = 'run_agent'
-    Prompt = $pText
-    LiteralPrompt = $true
-}
-if ($env:SHELLOSSUS_SUB_REQUEST_TIMEOUT) { $workerArgs.RequestTimeoutSec = $env:SHELLOSSUS_SUB_REQUEST_TIMEOUT }
-if ($env:SHELLOSSUS_SUB_CONFIG) { $workerArgs.ConfigPath = $env:SHELLOSSUS_SUB_CONFIG }
-if ($env:SHELLOSSUS_SUB_NO_SKILLS -eq '1') { $workerArgs.NoSkills = $true }
-if ($env:SHELLOSSUS_SUB_NO_TEMPLATES -eq '1') { $workerArgs.NoPromptTemplates = $true }
-if ($env:SHELLOSSUS_SUB_NO_CONTEXT -eq '1') { $workerArgs.NoContextFiles = $true }
-if ($env:SHELLOSSUS_SUB_REASONING_EFFORT) { $workerArgs.ReasoningEffort = $env:SHELLOSSUS_SUB_REASONING_EFFORT }
-& $env:SHELLOSSUS_SUB_SCRIPT @workerArgs
-'@
-    $argList = Get-AgentWorkerArguments -CommandText $workerCmd
+    $argList = Get-AgentWorkerArguments -ScriptPath $launcherScript -WorkerMode 'subagent'
     $allResults = @()
     $batchSize = 4
     for ($offset = 0; $offset -lt $Tasks.Count; $offset += $batchSize) {
@@ -147,7 +151,7 @@ if ($env:SHELLOSSUS_SUB_REASONING_EFFORT) { $workerArgs.ReasoningEffort = $env:S
                 $proc = Invoke-WithProcessEnvironment -Values @{
                     SHELLOSSUS_API_KEY = $effKey
                     OPENAI_API_KEY = $null
-                    SHELLOSSUS_SUB_SCRIPT = $ScriptPath
+                    SHELLOSSUS_SUB_SCRIPT = $targetScript
                     SHELLOSSUS_SUB_ROOT = $Root
                     SHELLOSSUS_SUB_BASEURL = $baseUrl
                     SHELLOSSUS_SUB_MODEL = $effModel
