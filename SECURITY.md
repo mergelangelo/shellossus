@@ -1,55 +1,45 @@
 # Security Policy
 
-`shellossus` is a local coding assistant designed for enterprise environments and locked-down Windows desktops (Citrix, VDI, restricted bastion hosts). Because `shellossus` executes shell commands and modifies workspace files, security, isolation boundaries, and privilege control are core design invariants.
+`shellossus` is built for developer workstations, enterprise desktops, Citrix/VDI sessions, and locked-down Windows servers where installing third-party runtimes or binaries is prohibited. Because coding agents inspect files and can execute shell commands, explicit boundaries and fail-closed defaults are core architectural invariants.
 
 ---
 
 ## Reporting a Vulnerability
 
-If you discover a security vulnerability or unintended privilege escalation in `shellossus`, please report it privately:
+If you discover a security vulnerability, boundary bypass, or unintended privilege escalation in `shellossus`, please report it privately rather than opening a public issue:
 
-1. **GitHub Security Advisory (Recommended):** Submit a confidential vulnerability report via [GitHub Security Advisories](https://github.com/mergelangelo/shellossus/security/advisories/new).
-2. **Direct Contact:** If GitHub Security Advisories is inaccessible, contact the project maintainers via the email listed in repository metadata.
+1. **GitHub Security Advisories (Preferred):** Submit a private report via [GitHub Security Advisories](https://github.com/mergelangelo/shellossus/security/advisories/new).
+2. **Direct Maintainer Contact:** If GitHub Security Advisories is unavailable, contact the maintainers via the address listed in the repository metadata.
 
 Please include:
-- A detailed description of the potential vulnerability.
-- Reproduction steps, proof-of-concept scripts, or configuration examples.
-- The operating environment (Windows version, PowerShell edition, LanguageMode).
+- A clear description of the issue and affected component (`src/...`).
+- Minimal reproduction steps, proof-of-concept input, or configuration settings.
+- Runtime details (OS version, Windows PowerShell 5.1 vs `pwsh` 7+, and `LanguageMode`).
 
-### Vulnerability Response SLA
+### Response Targets
 - **Acknowledgment:** Within 48 hours.
 - **Triage & Assessment:** Within 5 business days.
-- **Remediation & Patching:** High-priority patches are released promptly upon validation. We follow coordinated disclosure and provide credit to reporters.
+- **Remediation:** Validated security fixes are prioritized for immediate patching under coordinated disclosure, with reporter credit upon request.
 
 ---
 
-## Threat Model & Security Architecture
+## Security Architecture Summary
 
-`shellossus` implements defense-in-depth principles across all components:
+`shellossus` enforces defense-in-depth at the application layer while remaining completely transparent about OS boundaries:
 
-### 1. Permission Modes & Confirmation Prompts
-By default, `shellossus` operates in **`Ask`** mode:
-- **`write_file` / `edit_file` / `memory`:** In `Ask` mode, modifying file or memory calls require confirmation via single-key `[y]es` / `[a]ll` (or typing `WRITE`); pressing `Enter` defaults to `[n]o` (cancels).
-- **Command Execution:** In `Ask` / `AutoEdit` mode, requires confirmation via single-key `[y]es` / `[a]ll` (or typing `RUN`); pressing `Enter` defaults to `[n]o` (cancels).
-- **`ReadOnly` Mode:** Strips file write tools and shell execution tools entirely from the model's capabilities and rejects unauthorized invocations (including modifying `memory` actions).
-- User-entered `!cmd` / `!!cmd` shortcuts execute directly even in `ReadOnly`; this mode restricts model tools, not the user's explicit commands or session persistence.
+1. **Explicit Permission Gating (`Ask` by Default):**
+   - Modifying file/memory operations (`write_file`, `edit_file`, `memory`), shell commands (`run_command`), and outbound web requests (`fetch_url`, `web_search`) require explicit user confirmation by default (`Enter` cancels; `-Mode json` cancels unapproved actions immediately).
+   - `ReadOnly` mode hides and blocks model file writes, shell execution, and modifying `memory` actions. Operator-entered `!cmd` / `!!cmd` shortcuts remain direct user actions.
+2. **Workspace File Boundary vs. OS Shell Scope:**
+   - Workspace file tools and user `@file` attachments resolve strictly within the workspace root (with a read-only exception for registered global `SKILL.md` files) and reject symbolic links, NTFS junctions, and reparse points (`Attributes -band 1024`).
+   - **Shell execution is not an OS sandbox:** `run_command`, `!cmd`, and `!!cmd` start in the workspace directory but execute with the user's OS permissions and host policies (such as AppLocker or WDAC).
+3. **Credential & Configuration Isolation:**
+   - `.env`, `.env.*` (except `.env.example`), and the active user configuration file (`-ConfigPath`) are blocked across all listing, search, read, attachment, and write tools.
+   - Config files are parsed as inert `SHELLOSSUS_*` key-value pairs (never evaluated as PowerShell), key storage verifies private ACLs/file modes, and `SHELLOSSUS_API_KEY` / `OPENAI_API_KEY` are scrubbed from `run_command` child environments.
+4. **Transactional Writes & Conflict-Aware `/undo`:**
+   - File and `memory` tool writes stage content first, preserve encodings/BOMs, verify byte hashes, and create verified backups before atomic replacement.
+   - `/undo` and automatic turn-failure rollback reverse recorded `write_file`, `edit_file`, and `memory` tool changes (including in-process subagent edits) and restore conversation and `todo` state, refusing to clobber manual user edits made after the agent's write. Shell commands, manual `/memory` commands, settings, exports, and network effects are outside undo coverage.
+5. **Isolated Workers & Resource Caps:**
+   - HTTP, web download, and parallel subagent workers launch `$PSHOME` PowerShell with `-NoProfile` in fixed `-InternalWorker` modes, enforcing SSRF DNS/IP preflight on web fetches, process-tree command timeouts, and strict payload/step/size budgets.
 
-### 2. Workspace Boundary & Junction Rejection
-- Workspace file tools and `@file` attachments enforce the workspace boundary and reject ancestor reparse points. `read_file` also permits registered global `SKILL.md` files.
-- Shell commands retain the user's OS permissions and are not confined to the workspace. Global `memory`, configuration/context loading, sessions, imports/exports, and temporary files have separate paths. `memory` checks its target and ancestor directories up to the scope root for reparse points (`Test-PathHasReparsePoint`). See the [complete scope](docs/security.md#workspace-isolation--path-safety).
-
-### 3. Credential & Environment Protection
-- `.env`, `.env.*` (excluding `.env.example`), and user profile configuration files are strictly forbidden from agent tools (`read_file`, `find_files`, `grep_files`, `@file`, `write_file`).
-- Before executing commands, `SHELLOSSUS_API_KEY` and `OPENAI_API_KEY` are stripped from the child environment. This does not prevent commands from reading credentials on disk or in other environment variables allowed by the OS.
-
-### 4. Transactional Edits & Conflict-Aware `/undo`
-- `write_file` / `edit_file` modifications are staged to temporary files and verified prior to replacing target files on disk.
-- Pre-edit backups are verified before touching disk.
-- If a file is modified externally or manually after an agent edit, `/undo` detects the conflict and preserves both disk content and the backup file.
-- Shell effects, memory notes, task-board state, settings, exports, and network effects are outside undo coverage. Saved sessions do not restore undo history; an I/O error during restoration can leave a partial rollback.
-
-### 5. Process Lifecycle & Execution Timeout
-- Shell commands run under configurable execution timeouts (default 60 seconds).
-- Descendant process trees are tracked via parent PID maps to terminate runaway child processes upon timeout.
-
-For in-depth security mechanics, refer to [`docs/security.md`](docs/security.md).
+For the complete boundary table, permission rules, undo recovery mechanics, and enterprise / `ConstrainedLanguage` deployment details, see [`docs/security.md`](docs/security.md).

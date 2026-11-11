@@ -1,8 +1,8 @@
 # Media Assets
 
-This directory contains media assets (screencasts, demo GIFs, and terminal screenshots) referenced in `README.md` and documentation.
+Directory reserved for terminal screenshots and screencasts used in release notes or documentation.
 
-## Suggested Assets:
-- `demo.gif` — Animated walkthrough of the Gruvbox Material inline TUI REPL, tool execution, and diff approval.
-- `tui-status.png` — Screenshot of the session status dashboard and context token gauge.
-- `diff-preview.png` — Screenshot of color-coded unified diff previews and conflict-aware `/undo`.
+## Recommended Captures
+- **Interactive TUI (`tui-status.png`):** Prompt frame, active permission badge, context gauge, and `/status` card.
+- **Diff & Undo (`diff-preview.png`):** Color-coded unified diff confirmation in `Ask` mode and `/undo` rollback.
+- **End-to-End Demo (`demo.gif`):** Walkthrough of `shellossus` inspecting a project, editing files, and navigating `/tree`.

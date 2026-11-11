@@ -1,102 +1,113 @@
-# Security, Permissions & Enterprise Guide
+# Security, Boundaries & Enterprise Guide
 
-`shellossus` is designed for environments where installing third-party runtimes, binaries, or unverified PowerShell Gallery modules is prohibited or impractical.
+`shellossus` is engineered for environments where installing third-party runtimes, external CLI binaries, or unverified PowerShell Gallery modules is prohibited. Its security design relies on **explicit, fail-closed application boundaries** and **complete transparency about OS permissions**.
 
 ---
 
 ## Permission Modes
 
-You can set the permission mode at launch (`-Permission <Mode>`) or switch it at any time during a session (`/permission <Mode>`):
+Set the permission mode at launch (`-Permission <Mode>`) or switch at any time during a session (`/permission <Mode>`):
 
-| Mode | Read & Search Tools | File Write & Edit Tools | Shell Execution (`run_command`) | Typical Use Case |
-| --- | --- | --- | --- | --- |
-| `ReadOnly` | Allowed | Hidden & blocked | Hidden & blocked | Code review, SQL/log analysis, architecture Q&A |
-| `Ask` *(default)* | Allowed | Requires confirmation (`y` / `a` / `WRITE`; `Enter` cancels) | Requires confirmation (`y` / `a` / `RUN`; `Enter` cancels) | Safe everyday pair programming |
-| `AutoEdit` | Allowed | Auto-approved (saves backup) | Requires confirmation (`y` / `a` / `RUN`; `Enter` cancels) | Fast iterative coding while keeping shell commands gated |
-| `Auto` | Allowed | Auto-approved (saves backup) | Auto-approved | Trusted automation or sandboxed environments |
+| Mode | Read & Search Tools | File & Memory Writes (`write_file`, `edit_file`, `memory`) | Shell Execution (`run_command`) | Outbound Web (`fetch_url`, `web_search`) | Typical Use Case |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **`ReadOnly`** | Allowed | Hidden & blocked (`memory view` allowed) | Hidden & blocked | Confirm per call (or `[a]ll`) | Code review, SQL/log analysis, architecture Q&A |
+| **`Ask`** *(default)* | Allowed | Confirm (`y` / `a` / `WRITE`; `Enter` cancels) | Confirm (`y` / `a` / `RUN`; `Enter` cancels) | Confirm (`y` / `a` / `WEB`; `Enter` cancels) | Safe everyday pair programming |
+| **`AutoEdit`** | Allowed | Auto-approved (with verified backup) | Confirm (`y` / `a` / `RUN`; `Enter` cancels) | Confirm (`y` / `a` / `WEB`; `Enter` cancels) | Fast iterative coding while gating shell commands |
+| **`Auto`** | Allowed | Auto-approved (with verified backup) | Auto-approved | Auto-approved | Trusted automation or isolated sandboxes |
 
-When resuming a saved session via `/resume`, `shellossus` resets the active permission mode to `Ask` unless `-Permission` was explicitly passed at launch.
-
-The table describes the model's `write_file`, `edit_file`, and `run_command` tools. It does not make the entire process read-only. `todo`, `ask_user`, and `memory` remain available subject to tool filters. Memory modifications (`append`, `set`, `clear`) are rejected in `ReadOnly` and require confirmation in `Ask` mode. Sessions can still be saved in `ReadOnly`. `ask_user` plan approval does not change these permission rules.
-
-User-entered `!cmd` and `!!cmd` are direct operator commands in every permission mode, including `ReadOnly`. They run immediately with the user's OS permissions. `!cmd` records the command and its output in the conversation. `!!cmd` displays the result locally.
-
-Outbound web tools (`fetch_url` and `web_search`) require separate confirmation in `ReadOnly`, `Ask`, and `AutoEdit`. Choose `[a]ll` at a web prompt to approve further web requests for the session. `Auto` approves web requests automatically. In JSON mode, a request that requires confirmation returns `cancelled` immediately.
-
-Switching to a stricter mode with `/permission`, or reselecting `ReadOnly`, `Ask`, or `AutoEdit`, clears the temporary `[a]ll` approvals for commands and web requests. Undoing an earlier turn preserves the explicit permission selection.
-
-Plan review sets `approved` only when the user selects an explicit approval option by number, full label, or exact value. Both the label and value must be `Approve`, `Yes`, `Ok`, `Okay`, or `Accept`, optionally followed by ` (Recommended)`. Free-text responses are returned as feedback.
+### Confirmation & State Transition Rules
+- **Session Resume Reset:** Resuming or importing a session (`/resume`, `/import`) resets the active mode to `Ask` unless `-Permission` was explicitly passed at startup, and clears temporary `[a]ll` approvals.
+- **Approval Revocation:** Switching to a stricter mode via `/permission` — or reselecting `ReadOnly`, `Ask`, or `AutoEdit` — clears session-scoped command and web `[a]ll` approvals. `/undo` preserves explicit `/permission` choices made after the reverted turn.
+- **Non-Interactive JSON Mode:** In `-Mode json`, any action requiring interactive confirmation returns `status = "cancelled"` immediately without blocking on `Read-Host`.
+- **Plan Review (`ask_user`):** Plan review sets `approved = true` only when the user selects an explicit approval option (`Approve`, `Yes`, `Ok`, `Okay`, or `Accept`, optionally suffixed with ` (Recommended)`). Free-text responses are returned as feedback, and plan approval never escalates `-Permission`.
+- **Operator Shortcuts (`!cmd` / `!!cmd`):** User-typed `!` and `!!` commands are direct operator actions, not model tool calls; they execute immediately in all permission modes (including `ReadOnly`).
 
 ---
 
 ## Workspace Isolation & Path Safety
 
-1. **Workspace Boundary Enforcement:**
-   - `list_files`, `read_file`, `find_files`, `grep_files`, `write_file`, `edit_file`, and `@file` attachments use workspace path validation. Paths resolving outside the workspace directory are rejected (`Path is outside the workspace.`). Boundary checks (`Test-AgentPathWithinRoot` and `Get-WorkspaceRelativePath`) match Windows drive paths (`C:\...`) case-insensitively on Windows (`OrdinalIgnoreCase`) while keeping POSIX paths case-sensitive (`Ordinal`).
-   - The read-only exception for these file tools is `read_file` access to global `SKILL.md` files explicitly registered by `Get-SkillsCatalog` from the global configuration directory (normally `%USERPROFILE%\.shellossus\skills`).
-   - The workspace is the starting directory for `run_command`, `!`, and `!!`. These commands can access other paths, invoke native executables, and use the network wherever the user's OS permissions and application-control policies allow. On Windows, controls such as AppLocker or WDAC enforce executable restrictions.
-   - `memory` is a separate fixed-path tool: workspace scope uses an existing root `MEMORY.md`, otherwise `.shellossus/MEMORY.md`; global scope uses `MEMORY.md` beside the active configuration file. It does not use `Resolve-AgentPath`, but it checks its target path and ancestor directories up to the scope root for reparse points (`Test-PathHasReparsePoint`).
-   - Configuration and global context/skills/agent profiles are intentionally loaded from outside the workspace. Sessions normally live beside the configuration in `sessions/` (`-SessionDir` overrides this); imports/exports and explicit session paths are not constrained by the file-tool boundary. Staging files, backups, and HTTP response files use OS temporary storage, and failed turn rollbacks write recovery manifests under `recovery/` beside the active configuration or session directory (falling back to OS temporary storage). Doctor can create the configured session directory and temporarily probe it.
-2. **Reparse Point Rejection:**
-   - `Resolve-AgentPath`, `find_files`, `grep_files`, and `Get-SkillsCatalog` inspect file and ancestor directory attributes and reject any NTFS junction, symlink, or reparse point (`Attributes -band 1024`).
-   - *Note:* Application-level path validation is not an OS kernel sandbox and does not protect against concurrent TOCTOU race conditions by external processes.
-3. **Credential File Protection:**
-   - `.env`, `.env.*` (except `.env.example`), and the user configuration file (`-ConfigPath`) are excluded from directory listings (`list_files`, `find_files`), search (`grep_files`), `@file` attachments, `read_file`, `write_file`, and `edit_file`.
-   - Configuration files are parsed strictly as key-value data (`Read-AgentConfig`), never executed as PowerShell code.
+`shellossus` enforces an **application-level file-tool boundary**, not an OS kernel sandbox:
+
+| Subsystem | Filesystem Boundary | Reparse-Point Check | Secret (`.env` / Config) Block |
+| :--- | :--- | :--- | :--- |
+| `list_files`, `find_files`, `grep_files`, `write_file`, `edit_file`, `@file` | Active workspace root only | Target + all ancestors (`Attributes -band 1024`) | Enforced |
+| `read_file` | Workspace root + registered global `SKILL.md` files | Target + all ancestors | Enforced |
+| `memory` (`MEMORY.md`) | Fixed paths: workspace (`MEMORY.md` or `.shellossus/MEMORY.md`) or global (`<ConfigDir>/MEMORY.md`) | Target + ancestors up to scope root | Blocks `$ConfigPath` |
+| `run_command`, `!cmd`, `!!cmd` | Starts in workspace; **retains full user OS permissions** | Governed by OS / AppLocker / WDAC | Scrubs `SHELLOSSUS_API_KEY` & `OPENAI_API_KEY` env vars |
+| Sessions, imports/exports, config, recovery, temp files | `<ConfigDir>/sessions`, explicit paths, `<ConfigDir>/recovery`, OS temp | Config & subagent prompt paths reject reparse points | Config parsed as plain data |
+
+### Key Isolation Details
+1. **Case-Accurate Path Matching:** `Test-AgentPathWithinRoot` and `Get-WorkspaceRelativePath` compare Windows drive paths (`C:\...`) case-insensitively (`OrdinalIgnoreCase`) and POSIX paths case-sensitively (`Ordinal`).
+2. **NTFS Junction & Symlink Rejection:** `Resolve-AgentPath`, `Invoke-WorkspaceWalk`, `Get-SkillsCatalog`, and `Invoke-AgentMemory` reject symlinks, junctions, and reparse points (`Attributes -band 1024`). *(Note: application-level checks cannot prevent concurrent filesystem TOCTOU races by external processes.)*
+3. **Explicit User `@file` Scope:** Only `@file` references present in the user's original prompt (or explicit slash-command arguments) attach workspace files. Model outputs, template bodies, and subagent task prompts are never auto-expanded into file attachments.
+4. **Credential & Config Protection:**
+   - `.env`, `.env.*` (except `.env.example`), and the active `-ConfigPath` are excluded from listings, searches, attachments, reads, and writes.
+   - `Read-AgentConfig` parses only supported `SHELLOSSUS_*` key-value lines as inert text (never executing PowerShell expressions).
+   - Before saving an API key, `Save-AgentConfig` rejects UNC/reparse paths and verifies private permissions on both the parent directory and staged file (SDDL/process-SID ACL verification on Windows; owner, mode `0600`, hardlink count, and non-writable ancestor checks on Unix).
 
 ---
 
 ## Safe File Writes & `/undo` Protection
 
-- **Staged Writes:** `Invoke-AgentWrite` writes new content to a temporary file first, verifies the written content, verifies that the target file did not change during user confirmation, creates and verifies a backup copy, and then replaces the target file via `Move-Item -Force`.
-- `write_file` and `edit_file` accept UTF-8 with or without a BOM and BOM-marked UTF-16 LE or BE. They verify that the original bytes round-trip through the detected encoding before an edit or overwrite, preserve the existing encoding and BOM, and verify backups and undo by byte hash. New files use UTF-8 without a BOM, except for new `.ps1` files with non-ASCII characters, which use a UTF-8 BOM for Windows PowerShell 5.1.
-- Memory changes stop on a read error. Replacing or clearing an existing memory file requires a verified backup, including when the user runs `/memory` directly.
-- **Conflict-Aware `/undo`:**
-  - `write_file` and `edit_file` record created/modified paths and their content. Modified files also have verified pre-edit backups. In-process subagent file edits join the parent's recorded turn.
-  - Before changing any file, undo verifies every pending backup against its recorded `before_content`, including intermediate backups from repeated edits to the same file. Missing, unreadable, or corrupted backups stop the entire preflight; files, backups, and conversation state are preserved for a retry.
-  - Undo checks each recorded target against the workspace boundary or its fixed memory path. It checks for reparse points during preflight and again before each restoration or deletion. These application-level checks are subject to filesystem races.
-  - When `/undo` is invoked, `Invoke-AgentUndo` checks whether the file on disk was modified manually after the agent's write. If manual edits are detected, `/undo` refuses to overwrite the file and preserves the backup path.
-  - Undo removes the backups after restoration and verification succeed. A failed undo reports pending operations and preserves the backups, including across session switches and process exit.
+### Transactional Staged Writes & Encoding Integrity
+- **Staging & Verification:** `Invoke-AgentWrite` and `Invoke-AgentMemory` write updated content to a temporary file first, verify the staged content, confirm the target file did not change on disk during user confirmation, create a verified backup, and replace the target atomically via `Move-Item -Force`.
+- **Encoding & BOM Preservation:** `write_file` and `edit_file` support UTF-8 (with or without BOM) and BOM-marked UTF-16 LE / UTF-16 BE. Existing files must round-trip byte-identically through their detected encoding before modification, preserving encoding, BOM, and `CRLF`/`LF` line endings. New files default to UTF-8 without BOM — except new `.ps1` files containing non-ASCII characters, which receive a UTF-8 BOM so Windows PowerShell 5.1 parses them cleanly.
+- **Fail-Closed Memory Reads:** Unreadable existing `MEMORY.md` files abort modification rather than being treated as empty.
 
-### Turn and Recovery Scope
-
-`/undo` and automatic rollback after a failed or interrupted turn reverse recorded `write_file`, `edit_file`, and `memory` tool changes in both memory scopes. They restore conversation and task-board state after file restoration succeeds. Shell commands, manual `/memory` commands, configuration, session exports, and network requests are outside the turn journal.
-
-Undo history is process-local and retains the 20 newest frames. Eviction, session resets, session switches, and process exit clean up ordinary backups. An I/O failure or conflict during restoration can leave some files restored and others pending. In that case Shellossus reports the pending paths, keeps the backups for recovery, and (for failed turn rollbacks) writes a JSON recovery manifest under `recovery/` beside the configuration or session directory, falling back to OS temporary storage if unavailable.
+### Conflict-Aware `/undo` & Automatic Rollback
+- **Turn Journal Scope:** Every turn records `write_file`, `edit_file`, and `memory` tool operations (including in-process subagent writes) alongside conversation and `todo` task-board snapshots. Shell commands, manual `/memory` commands, settings changes, session exports, and network calls are outside the journal.
+- **Reverse-Chain Preflight:** Before `/undo` or turn-failure rollback modifies any file, `shellossus` validates the entire reverse sequence of operations and byte-hash backups (including repeated edits to the same file within one turn) and re-verifies workspace/reparse boundaries.
+- **Manual-Edit Conflict Detection:** If a file on disk was modified externally after the agent's write, `/undo` aborts before overwriting user changes and preserves all backup files so conflicts can be inspected and retried.
+- **Retention & Recovery Manifests:** Undo history is process-local (retaining the 20 newest frames). If an I/O error or conflict interrupts restoration mid-flight, `shellossus` keeps the backups, reports pending operations, and (on failed turn rollbacks) writes a JSON recovery manifest under `recovery/` beside the config/session directory (falling back to OS temporary storage).
 
 ---
 
 ## Process Execution & Command Timeouts
 
-Child PowerShell processes launch the executable by absolute path from the current installation's `$PSHOME` with profiles disabled. The model API POST, web download, and parallel subagent workers invoke the standalone `shellossus.ps1` script via `-File` in fixed internal worker modes (`http`, `web`, `subagent`). Request URLs, credentials, and payloads travel separately as environment values or data files.
+### Isolated Internal Workers (`http`, `web`, `subagent`)
+Child PowerShell workers launch the host binary by absolute path from `$PSHOME` with `-NoProfile` and invoke `shellossus.ps1` via `-File -InternalWorker <mode>`. URLs, headers, API keys, and request bodies are passed via scoped environment variables and temporary UTF-8 data files rather than interpolated command code.
 
-For `fetch_url` and `web_search`, downloads run in a separate PowerShell process. The parent checks the temporary output file while the download is running, stops it when it exceeds 2 MiB, and checks the completed file again before reading it. The check is periodic, so a fast response can temporarily exceed the limit between polls; this is not a strict disk or worker-memory quota.
+### Outbound Web Preflight (`fetch_url` & `web_search`)
+- **SSRF & Redirect Blocking:** Before connecting, the `web` worker validates literal IPs and all resolved IPv4/IPv6 DNS records against loopback, link-local, RFC1918/ULA private, CGNAT, and metadata ranges, and disables HTTP redirects (`-MaximumRedirection 0`).
+- **DNS Resolution in `ConstrainedLanguage`:** Uses Windows inbox `Resolve-DnsName` when available; falls back to the system `.NET` resolver only in `FullLanguage` mode, and fails closed for hostnames in `ConstrainedLanguage` when `Resolve-DnsName` is absent. *(Because the HTTP client resolves DNS independently after preflight, strict destination enforcement in hostile networks should additionally use an outbound proxy or firewall.)*
+- **Download Cap:** The parent process polls the download file and terminates the worker if output exceeds **2 MiB**, re-verifying size after completion.
 
-The worker checks literal IPs and all IPv4 and IPv6 DNS answers before making the HTTP request, and disables redirects. It uses the Windows inbox `Resolve-DnsName` cmdlet when available. If the cmdlet is missing, the worker can use the system resolver in `FullLanguage` mode, and hostname requests fail closed in `ConstrainedLanguage`. The HTTP client resolves the hostname separately, so DNS preflight does not pin the connection to a checked IP. Deployments that require a guaranteed destination restriction need an outbound network policy or gateway.
+### Shell Execution (`run_command`)
+- **API Key Scrubbing:** `SHELLOSSUS_API_KEY` and `OPENAI_API_KEY` are removed from the child process environment before spawning `run_command` (commands still retain OS-allowed access to disk and other environment variables).
+- **Disk-Backed Output:** `stdout` and `stderr` stream directly to temporary files on disk. Up to 300 tail lines / 20,000 UTF-8 bytes are returned to the model; truncated runs preserve the complete log under `.shellossus/output/cmd-*.log`.
+- **Timeout & Descendant Cleanup:** Commands default to a 60-second timeout (`1`..`600`s). Periodic PID/start-time snapshots (`Win32_Process` on Windows PowerShell 5.1, `Get-Process` on Unix) track child trees so timed-out or interrupted commands terminate tracked descendants without hitting recycled PIDs.
 
-- **API Key Scrubbing:** `Invoke-ShellCommand` clears `SHELLOSSUS_API_KEY` and `OPENAI_API_KEY` before spawning a child PowerShell process and restores them afterward. Other environment variables remain available, and commands can still read files allowed by the OS, including a saved `.env` key.
-- **Disk-Backed Output Streaming:** Standard output and standard error are redirected directly to temporary files on disk (`Start-Process -RedirectStandardOutput -RedirectStandardError`). The model receives a tail of up to 300 lines and 20,000 UTF-8 bytes. If output is truncated, the full log is preserved under `.shellossus/output/cmd-*.log`.
-- **Timeout & Termination:** Commands default to a 60-second timeout (`timeout_sec`, configurable from 1 to 600 seconds). While waiting, `shellossus` tracks child and descendant processes. On timeout or interrupted execution it stops the command and tracked descendants using built-in cmdlets. Windows PowerShell 5.1 uses `Get-CimInstance Win32_Process` for parent relationships; PowerShell on Linux/macOS uses `Get-Process`. Start times are checked before termination to avoid stopping an unrelated process that reused a PID. Timeout results include `termination_errors` if cleanup could not be completed.
-- **Process Tracking Limits:** Tracking is based on periodic snapshots, not an OS process sandbox. A detached descendant whose parent exits between snapshots can escape discovery; command execution retains the user's OS permissions. Normal successful commands may intentionally leave background processes running.
-
-## Resource Limits
-
-Each agent turn can accept up to 128 tool calls across model responses, regardless of the step limit. A batch that would exceed the budget is rejected before any call in it runs. Tool arguments are limited to 1 MiB of UTF-8 before parsing, and `edit_file` accepts up to 64 edits per batch. Each model response is limited to 8 MiB before JSON or SSE parsing. The HTTP worker is monitored periodically, so the temporary download can briefly exceed the limit. Accepted model responses and tool results share a 32 MiB payload budget per turn. Model HTTP requests default to a 180-second timeout (`-RequestTimeoutSec` / `SHELLOSSUS_REQUEST_TIMEOUT_SEC`, configurable from 10 to 1800 seconds), and transient retries within a single model step share a 3,600-second wall-clock budget. When optional network-level SSE streaming is enabled (`-Stream` / `SHELLOSSUS_STREAM`), responses are buffered and strictly verified (`ConvertFrom-AgentSseResponse`) rather than rendered token-by-token: any stream missing terminal `data: [DONE]` or a non-empty `finish_reason`, or containing malformed JSON or stream error frames, is rejected before conversation state is updated or any tool executes.
-
-Each memory file is limited to 256 KiB. A session has a 32 MiB JSONL budget, a 10,000-record limit, and a 5,000-entry tree limit. Start a new session with `/new` when the history fills up. Diagnostics retain the 100 newest steps.
-
-Workspace searches visit up to 10,000 directory entries, including ignored entries. Search results indicate when the traversal is incomplete. `grep_files` additionally allows 100 ms per regular-expression match and 10 seconds for the content scan. Narrow the search path after a traversal limit, or simplify the pattern after a match timeout.
+---
 
 ## Subagent Tool Restrictions
 
-In-process and separate-process subagents receive the intersection of the parent's effective tool permissions and the role's tool filter. Parent exclusions, aliases, and wildcard filters are respected. An empty intersection disables all tools; it never means unrestricted access. `ReadOnly` subagents exclude `write_file`, `edit_file`, `run_command`, `memory`, `todo`, and `ask_user` (plus `fetch_url` and `web_search` in non-interactive JSON mode when web tools are not auto-approved), and in-process subagents preserve the parent session's active `todo` state. Parallel workers remain `ReadOnly`, and recursive `run_agent` calls are disabled.
+In-process and worker-process subagents receive the **strict intersection** of the parent session's active tool permissions and the subagent role's `tools` filter (an empty intersection disables all tools).
+- `ReadOnly` subagents (`recon`, `audit`, `parallel[]` workers, or any subagent in a `ReadOnly` session) exclude `write_file`, `edit_file`, `run_command`, `memory`, `todo`, and `ask_user` (plus `fetch_url` and `web_search` in non-interactive JSON mode when web access is not auto-approved).
+- Recursive delegation is blocked (`run_agent` depth is capped at `1`).
+
+---
+
+## Resource Limits
+
+| Guardrail | Limit | Behavior When Reached |
+| :--- | :--- | :--- |
+| Tool calls per turn | `128` calls | Entire response batch is rejected before any call in it runs |
+| Tool call arguments | `1 MiB` UTF-8 | Rejected prior to JSON parsing |
+| Batch edits (`edit_file`) | `64` edits / call | Rejected during argument validation |
+| Model HTTP response size | `8 MiB` | Worker terminated & response rejected before JSON/SSE parsing |
+| Turn payload budget | `32 MiB` UTF-8 | Turn aborts cleanly across accepted responses + tool outputs |
+| Model request timeout | `180`s default (`10`..`1800`s) | Retries transient failures within a `3600`s per-step wall-clock cap |
+| SSE stream verification (`-Stream`) | `[DONE]` + `finish_reason` | Incomplete or error streams are rejected before state/tool changes |
+| Web fetch size | `2 MiB` | Download worker stopped and rejected |
+| Memory file (`MEMORY.md`) | `256 KiB` | Write rejected before staging |
+| Session storage (`.jsonl`) | `32 MiB`, `10,000` records, `5,000` tree nodes | Rejects oversized writes/imports; start a fresh session via `/new` |
+| Workspace traversal (`find_files`, `grep_files`) | `10,000` directory entries | Returns results with `truncated = true` metadata |
+| Regex content scan (`grep_files`) | `100` ms / match, `10`s total scan | Stops cleanly with explicit timeout truncation metadata |
 
 ---
 
 ## Enterprise / Citrix / VDI Notes
 
-- `shellossus` does **not** modify `ExecutionPolicy`, language mode, or system security settings.
-- Windows PowerShell 5.1, PowerShell 7+, and `ConstrainedLanguage` are supported targets. CI runs the smoke suite on Windows PowerShell 5.1 (`windows-latest`) and PowerShell 7 (`pwsh`) across Windows, Linux, and macOS, including dedicated constrained-language runs for `Doctor.Tests.ps1`, `Reliability.Tests.ps1`, and cold-start child-process verification in `ConstrainedLanguage.Tests.ps1` (see [verification coverage](architecture.md#build--verification-pipeline)).
-- Use `shellossus -Doctor` before starting a chat, or `/doctor` in a session, for runtime, settings, storage, and endpoint checks. The authenticated `/models` probe does not generate a completion or verify model tool support. Reports hide the key but include local paths, validated API base URLs, and model IDs; review those before sharing.
-- Setup and interactive startup mask API key input. A saved key is plaintext, so choose a private config location such as `%USERPROFILE%\.shellossus\.env`. Before writing a key, Shellossus checks the directory and stages the config in a file with verified permissions. Windows checks local ACLs. Unix checks owner and mode bits. Existing plaintext configs remain readable and produce a warning when privacy cannot be verified. Set `SHELLOSSUS_API_KEY` to run without saving a key.
-- Chat and subagent workers receive the effective key through `SHELLOSSUS_API_KEY` in the child environment. Shellossus restores the launching process's environment after the child starts.
+- **Zero System Mutation:** `shellossus` never alters `ExecutionPolicy`, `LanguageMode`, registry keys, or system security policies.
+- **Verified `ConstrainedLanguage` Support:** Tested in CI on Windows PowerShell 5.1 and cross-platform PowerShell 7 (`pwsh`), including dedicated child processes that lock `$ExecutionContext.SessionState.LanguageMode = 'ConstrainedLanguage'` on line 1 prior to loading `shellossus.ps1`.
+- **Pre-Flight Health Checks:** Run `shellossus -Doctor` (or `/doctor`) to validate runtime compatibility, endpoint connectivity, model visibility, and session directory ACLs without generating completions. Review local paths, base URLs, and model IDs in the output before sharing diagnostic logs externally.

@@ -1,181 +1,157 @@
 # Zero Dependencies. One File. Full Agent Power.
-### Pure PowerShell 5.1+ Agent for Desktops & Servers
+### Pure PowerShell 5.1+ Coding Agent for Desktops & Servers
 
-**No Python. No Node.js. No third-party modules.** `shellossus` needs nothing but PowerShell itself — built into Windows by default, and available on Linux and macOS via `pwsh`.
+**No Python. No Node.js. No third-party modules.** `shellossus` runs on PowerShell itself — built into every Windows machine by default, and available on Linux and macOS via `pwsh`.
 
-Drop [`shellossus.ps1`](shellossus.ps1) onto any machine and connect to any OpenAI-compatible API (cloud, local Ollama/vLLM, or internal corporate gateway).
+Drop [`shellossus.ps1`](shellossus.ps1) onto any workstation, jump host, or Citrix/VDI session and connect to any OpenAI-compatible API (cloud providers, internal corporate gateways, or local `Ollama` / `vLLM` servers).
 
-## Key Features
+---
 
-| Capability | What It Does |
-| --- | --- |
-| **13 Built-in Tools** | `list_files`, `read_file` (line & character pagination), `find_files` (path globs + `.gitignore`), `grep_files` (regex/literal, filters, context, `file_offset` + `start_line` continuation), `write_file`, `edit_file` (fuzzy matching + batch `edits[]`), `run_command`, `run_agent` (single, parallel, pipeline), `fetch_url`, `web_search`, `todo`, `ask_user`, and `memory` (workspace/global persistent notes). See the [tool reference](docs/architecture.md#built-in-tool-reference). |
-| **Subagent Delegation** | Built-in roles (`recon`, `audit`, `craft`) + custom `.shellossus/agents/*.md` profiles, `/agents` catalog, `/agent:<role> <task>` shortcut, and unified parent `/undo` across subagent file edits |
-| **4 Permission Modes** | `ReadOnly` (blocks model file edits, memory writes, and commands), `Ask` *(default: prompts `WRITE` / `RUN`)*, `AutoEdit` (auto-approves file writes with backup; asks `RUN`), `Auto` (auto-approves writes and commands) |
-| **Verified File Edits & `/undo`** | Staged writes, backups, and manual-edit conflict detection for file and memory tools. Undo also restores the turn's task board. |
-| **First-Run Diagnostics** | `-Doctor` / `/doctor` explains runtime, configuration, endpoint, model catalog, and session storage problems without generating a model response |
-| **Session Tree, Fork & Export** | Workspace-scoped `.jsonl` sessions (`-Continue`, `/sessions`, `/resume`), branch navigation (`/tree`), session forking (`/fork`), and standalone HTML export (`/export`) |
-| **Smart Context Compaction** | Iterative structured handoffs (`/compact [focus]`) with cumulative `<read-files>` / `<modified-files>` tracking and automatic context-overflow recovery |
-| **Context & Extensibility** | Auto-loads `AGENTS.md`, `SOUL.md` (ethos/persona), `MEMORY.md` (cross-session memory), `SYSTEM.md`, `APPEND_SYSTEM.md`, `skills/*/SKILL.md` (`/skill:name`), `/<template>` prompts (`$1`, `$@`, `${1:-default}`), `@file` attachments, and `!cmd` / `!!cmd` |
-| **TrueColor Terminal UI & 9 Themes** | Built-in palettes (`gruvbox-material`, `catppuccin-mocha`, `tokyo-night`, `dracula`, `nord`, `one-dark`, `rose-pine`, `kanagawa`, `catppuccin-latte`) with `/theme` picker, Markdown headings, lists, code blocks, auto-aligned tables, collapsible `reasoning` blocks, and `-Mode json` event streaming |
-| **Enterprise & Lockdown Ready** | Pure ASCII single-script distribution (`shellossus.ps1`), NTFS junction/symlink boundary protection, `.env` secret blocking, and full `ConstrainedLanguage` mode compatibility |
+## Why `shellossus`?
+
+- **Runs Where Nothing Else Can:** Engineered natively for **Windows PowerShell 5.1**, PowerShell 7+, **`ConstrainedLanguage` mode**, AppLocker, and WDAC — with zero external binaries (`rg`, `fd`, `git`, `curl`) or PowerShell Gallery dependencies.
+- **Modular Engineering, Single-File Artifact:** Maintained across 36 focused modules in [`src/`](src/) and bundled by [`build.ps1`](build.ps1) into one pure 7-bit ASCII script ([`shellossus.ps1`](shellossus.ps1)) that parses identically regardless of BOM or system codepage and is trivial to audit or copy.
+- **Transactional & Fail-Closed by Design:** Starts in `Ask` mode by default, stages every edit, preserves file encodings/BOMs, verifies backups by byte hash, supports conflict-aware multi-step `/undo`, and rejects truncated responses or incomplete SSE streams before modifying state.
+- **Full Agent Depth, Zero Vendor Lock-In:** Combines 13 built-in tools, subagents (`single`, `parallel[]`, `pipeline[]`), DAG session branching (`/tree`, `/fork`), structured `/compact`, layered Markdown customization (`SOUL.md`, `AGENTS.md`, `MEMORY.md`, `SKILL.md`), a 24-bit TrueColor TUI, and headless JSONL streaming over standard `/v1/chat/completions`.
+
+---
 
 ## Quick Start
 
-### 1. Install Launcher (One-Time)
+### 1. Install Launcher & Configure
 
-Clone the repository or copy [`shellossus.ps1`](shellossus.ps1) into a permanent folder (e.g. `C:\Users\YOU\Tools\shellossus`), then run:
+Copy [`shellossus.ps1`](shellossus.ps1) (or clone the repository) into a permanent folder and register the launcher in your PowerShell `$PROFILE`:
 
 ```powershell
 .\shellossus.ps1 -Install
-```
-
-During installation, `-Install` always registers the full `shellossus` command and lets you pick an optional shortcut (`s`, `sss`, `shos`, a custom name, or no shortcut), verifying with `Get-Command -All` that the chosen shortcut does not conflict with existing commands. Non-interactive installation is also supported:
-
-```powershell
+# Optional non-interactive shortcut registration:
 .\shellossus.ps1 -Install -Shortcut s
-.\shellossus.ps1 -Install -NoShortcut
 ```
 
-Open a new PowerShell window and configure your API endpoint, model ID, and key (stored in `%USERPROFILE%\.shellossus\.env`, outside your project):
+Open a new PowerShell window and configure your API base URL (HTTPS, or `http://localhost` for local servers), model ID, and masked API key (stored outside your repository in `%USERPROFILE%\.shellossus\.env`, or supplied at runtime via `$env:SHELLOSSUS_API_KEY`):
 
 ```powershell
 shellossus -Setup
 ```
 
-Check the setup before entering a chat (also works when configuration is missing or invalid):
+### 2. Verify Setup
+
+Run the non-mutating health check to validate runtime compatibility, configuration privacy, workspace/session storage, and `GET /models` reachability:
 
 ```powershell
 shellossus -Doctor
-# Without the launcher: .\shellossus.ps1 -Doctor
-shellossus -Doctor -Mode json             # One JSON report; exit 1 for failed checks
 ```
 
-Doctor checks the PowerShell version and language mode, effective endpoint/model/key settings, workspace access, and session-directory create/write/rename/read/delete access. It creates the session directory if needed, removes its temporary probe, and skips storage checks with `-NoSession`.
-
-With a configured key, it sends one direct authenticated `GET <BaseUrl>/models` with a 10-second request timeout (DNS resolution can take longer). Redirects are disabled. Missing `/models` support, an unlisted model, or rate limiting produces a warning.
-
-The report lists untested capabilities separately (`not_tested` in JSON). These include the chat HTTP worker and its Unicode, error, and cancellation handling, model completion and tool-call compatibility, and web tools in ConstrainedLanguage. Reports show local paths, the validated API base URL, and the configured model ID. They hide the API key and omit server response bodies.
-
-Settings use the same precedence as normal startup: launch arguments for endpoint/model/workspace, then `SHELLOSSUS_*` environment variables, then the saved configuration. The API key comes from `SHELLOSSUS_API_KEY` first, then the configuration file. Interactive input is masked. Saving a key requires a verified private config location. Leave the key blank in a fresh setup to use an environment key or enter it at launch. Remote endpoints require an **HTTPS API base URL** (normally ending in `/v1`), while local loopback servers (`http://localhost`, `http://127.0.0.1`, `http://[::1]`) are also supported over `http://`.
-
-### 2. Run in Any Project
+### 3. Run in Any Project
 
 ```powershell
 cd C:\path\to\project
 shellossus
 ```
 
-Common launch flags:
+Common launch modes (see the [full CLI & `.env` reference](docs/cli.md)):
 
 ```powershell
-shellossus -Continue                        # Resume latest session for current workspace
-shellossus -Permission AutoEdit             # Edit files without prompting; ask before shell commands
-shellossus -Prompt "Explain @src/tools/Files.ps1" # Single-shot non-interactive mode
-shellossus -Mascot                          # Display the 20x16 half-block mascot without starting a chat
+shellossus -Continue                                # Resume latest session for this workspace
+shellossus -Permission AutoEdit                     # Auto-approve file edits; confirm shell commands
+shellossus -Stream                                  # Assemble responses over SSE for strict gateways
+shellossus -Prompt "Explain @src/tools/Files.ps1"   # Single-shot non-interactive execution
+shellossus -Mode json -NoSession -Prompt "Audit @." # Machine-readable JSONL event stream
 ```
 
-`-MaxRepeatCalls N` accepts 1 through 50 and defaults to 3. For identical tool calls without a state change, the first call runs. The warning replaces attempt `N` for values of 2 or more, or the first repeat when set to 1. Another identical attempt stops the turn.
+---
 
-`-RequestTimeoutSec N` (or `SHELLOSSUS_REQUEST_TIMEOUT_SEC` in the environment / `.env`) sets the per-request model HTTP timeout from `10` to `1800` seconds (default `180`s), applying across chat steps, context compaction, and delegated subagents, with a `3600`s total wall-clock cap per step across transient retries.
+## Capabilities at a Glance
 
-`-Stream` (or `SHELLOSSUS_STREAM=true` / `1` in the environment / `.env`; `-Stream:$false` overrides) enables optional network-level Server-Sent Events (`stream = true`) response assembly across chat steps, context compaction, and delegated subagents so gateways with strict inter-packet read timeouts keep bytes moving on the wire. Responses are assembled in full before terminal rendering or tool dispatch (not rendered token-by-token), and any stream missing terminal `[DONE]` or `finish_reason` is rejected before any tool executes.
+| Area | What Is Built In |
+| :--- | :--- |
+| **13 Native Tools** | `list_files`, `read_file` (line & char pagination), `find_files` (`.gitignore`-aware globs), `grep_files` (regex/literal + continuation), `write_file`, `edit_file` (fuzzy + batch `edits[]`), `run_command`, `run_agent`, `fetch_url`, `web_search`, `todo`, `ask_user`, and `memory` ([tool reference](docs/architecture.md#built-in-tool-reference)) |
+| **Subagent Delegation** | Built-in roles (`recon`, `audit`, `craft`) + custom `agents/*.md` profiles, single/parallel/pipeline orchestration, `/agent:<role> <task>`, and unified parent `/undo` |
+| **4 Permission Modes** | `ReadOnly` (inspection only), `Ask` *(default: diff & command prompts)*, `AutoEdit` (auto-approves writes; gates shell), and `Auto` ([permission guide](docs/security.md#permission-modes)) |
+| **Safe Edits & `/undo`** | Atomic staged writes, UTF-8 / UTF-16 BOM & line-ending preservation, manual-edit conflict detection, automatic turn rollback, and task-board/memory restoration |
+| **Session Tree & Compaction** | Workspace-scoped `.jsonl` DAG sessions, branch switching (`/tree`), forking (`/fork`), standalone themed HTML export (`/export`), and constraint-preserving `/compact` |
+| **Layered Customization** | Local & global `AGENTS.md` (including path-scoped nested rules), `SOUL.md` persona/ethos, `MEMORY.md` long-term notes, `SYSTEM.md` / `APPEND_SYSTEM.md`, `SKILL.md` skills, and `/<template>` prompts ([customization guide](docs/customization.md)) |
+| **24-bit Terminal UI** | 9 built-in TrueColor themes (`gruvbox-material` default), visible-width-aligned Markdown tables, collapsible `reasoning` blocks, interactive pickers, and pixel `/mascot` |
 
-`-NoContextFiles` skips automatic loading of `SYSTEM.md`, `APPEND_SYSTEM.md`, `AGENTS.md`, `SOUL.md` (including its aliases), and `MEMORY.md` from the workspace and user configuration. Built-in capability and permission rules still apply. Skills, prompt templates, and explicit attachments are controlled separately.
+---
 
-## Interactive Commands
+## Interactive Workflow
 
-| Command | Description |
-| --- | --- |
-| `/help` | List available interactive commands |
-| `/status` | Show active model, permission mode, token estimate, and session path |
-| `/doctor` | Check the current runtime, settings, endpoint/model catalog, and session storage |
-| `/mascot` | Display the 20x16 half-block mascot |
-| `/permission <mode>` | Switch mode: `ReadOnly`, `Ask`, `AutoEdit`, `Auto` |
-| `/context [win] [comp]` (`/ctx`) | Show or configure context window size and auto-compaction threshold |
-| `/diagnostics [on\|off]` | Show or toggle pre-request capability and tool diagnostics |
-| `/reasoning <opt>` | Display: `compact`, `full`, `hide`; Effort: `low`, `medium`, `high`, `default` |
-| `/continue [steps]` | Continue execution after hitting the step limit (or continue the last response) |
-| `/undo` | Revert the last tracked turn, including file and memory tool changes and the task board |
-| `/todo [clear]` (`/td`) | Display or clear active task plan checklist |
-| `/retry` | Resend the last failed user prompt |
-| `/compact [focus]` | Summarize older turns into a structured context handoff |
-| `/name [name]` | Set or display the session name |
-| `/tree [entry-id]` | Show the conversation tree or switch active branch to `<entry-id>` |
-| `/fork [entry-id]` (`/clone`) | Fork the active branch (or from `<entry-id>`) into a new session file |
-| `/export [path.html\|.jsonl]` | Export the session to a standalone themed HTML page or JSONL |
-| `/import <path.jsonl>` | Import and resume a JSONL session file |
-| `/copy` | Copy the last assistant message to the clipboard |
-| `/memory [clear\|add ..]` (`/mem`) | View, clear, or record persistent cross-session memories in `MEMORY.md` |
-| `/reload` | Reload context files (`AGENTS.md`, `SOUL.md`, `MEMORY.md`, `SYSTEM.md`), skills, and templates |
-| `/hotkeys` | Show input shortcuts and syntax reference |
-| `/model <id>` | Switch model ID for the current session |
-| `/theme [name]` (`/th`) | Pick or switch color theme (`gruvbox-material`, `catppuccin-mocha`, `tokyo-night`, `dracula`, `nord`, `one-dark`, `rose-pine`, `kanagawa`, `catppuccin-latte`) |
-| `/sessions` | List recent saved sessions |
-| `/resume <num\|name>` | Load a saved session |
-| `/save [name]` | Save current session (optionally under a custom filename) |
-| `/new` (`/clear`) | Start a fresh session |
-| `/agents` | List built-in (`recon`, `audit`, `craft`) and custom subagent roles |
-| `/agent:<role> <task>` | Delegate `<task>` to a specific subagent role |
-| `/skills` | List discovered local and global `SKILL.md` skills |
-| `/skill:<name> [args]` | Invoke a skill directly with arguments |
-| `/<template> [args]` | Expand a prompt template from `.shellossus/prompts/<name>.md` (`$1`, `$@`, `${1:-default}`, `${@:2}`) |
-| `@path/to/file` | Attach a workspace file inline into your prompt |
-| `!cmd` / `!!cmd` | Execute a shell command (`!` appends output to context; `!!` is local-only) |
-| `/exit` (`/quit`) | Quit `shellossus` |
+Call picker-enabled commands (`/permission`, `/model`, `/theme`, `/context`, `/reasoning`, `/sessions`, `/resume`) without arguments to open an interactive TUI selector. Full syntax and aliases are documented in [`docs/cli.md`](docs/cli.md).
 
-## Workspace and Undo Boundaries
+| Command / Syntax | Purpose |
+| :--- | :--- |
+| `/help` (`?`, `/h`) · `/status` (`/s`) · `/doctor` | View commands, inspect context/token dashboard, or run health diagnostics |
+| `/permission` (`/p`) · `/model` (`/m`) · `/theme` (`/th`) | Switch permission mode, active model ID, or 24-bit color theme |
+| `/context` (`/ctx`) · `/reasoning` · `/compact` (`/c`) | Tune token budgets, control reasoning view/effort, or compact history |
+| `/undo` (`/u`) · `/retry` · `/continue [steps]` | Revert the last turn, resend a failed prompt, or continue past `-MaxSteps` |
+| `/todo` (`/td`) · `/memory` (`/mem`) · `/reload` | Manage task checklist, view/update `MEMORY.md` (`ws`/`global`), or reload rules |
+| `/sessions` · `/resume` (`/r`) · `/tree` (`/t`) · `/fork` | Browse/resume workspace sessions, switch DAG branches, or fork a session |
+| `/save [name]` · `/export [path]` · `/import <path>` · `/new` | Save, export standalone `.html`/`.jsonl`, import `.jsonl`, or start fresh |
+| `/agents` · `/agent:<role> <task>` · `/skills` · `/skill:<name>` | Inspect or invoke subagent roles and `SKILL.md` domain skills |
+| `/<template> [args]` · `@path/to/file` · `!cmd` / `!!cmd` | Expand prompt templates, attach workspace files, or run operator commands |
 
-`list_files`, `read_file`, `find_files`, `grep_files`, `write_file`, `edit_file`, and `@file` attachments enforce workspace paths and reject reparse-point traversal. `read_file` can also read explicitly registered global `SKILL.md` files. **Shell commands are not sandboxed**: `run_command`, `!cmd`, and `!!cmd` start in the workspace but retain your OS permissions and can access other paths, programs, and the network. User-entered `!` / `!!` shortcuts run directly, without the model tool's permission prompt, including in `ReadOnly` mode.
+---
 
-`memory` has workspace and global scopes. Global notes live beside the active configuration file. Memory writes check target and ancestor paths for reparse points, are blocked in `ReadOnly`, and require confirmation in `Ask` mode. Sessions, exports, temporary files, and global customization files also have paths outside the workspace. See the [full boundary and permission reference](docs/security.md).
+## Security & Undo Boundaries
 
-`/undo` and automatic rollback cover recorded `write_file`, `edit_file`, and `memory` tool changes, including in-process subagent edits. They check backups and manual-edit conflicts before restoring files, then restore the conversation and task board. Shell effects, manual `/memory` commands, settings, exports, and network effects are outside the turn journal. Undo history is process-local. A restore-time I/O failure can leave a partially restored turn. Shellossus reports the pending changes and keeps the backups for recovery.
+- **Workspace File Boundary:** `list_files`, `read_file`, `find_files`, `grep_files`, `write_file`, `edit_file`, and `@file` attachments enforce the active workspace root (with a read-only exception for registered global `SKILL.md` files), reject symlinks/NTFS junctions, and block `.env` secrets and the active config file.
+- **OS-Scoped Shell Execution:** `run_command`, `!cmd`, and `!!cmd` are **not** sandboxed — they start in the workspace directory and execute under your OS account and host policies (AppLocker/WDAC). Operator `!` / `!!` shortcuts run directly in every mode, including `ReadOnly`.
+- **Conflict-Aware `/undo`:** Reverts recorded `write_file`, `edit_file`, and `memory` tool changes (including in-process subagent edits) along with conversation and `todo` state, and refuses to overwrite files edited manually after the agent's write. Shell commands, manual `/memory` edits, configuration changes, exports, and network requests are outside undo coverage.
+
+See [`docs/security.md`](docs/security.md) for the complete boundary matrix, worker architecture, and resource caps.
+
+---
 
 ## Repository Structure
 
 ```text
 .
-├── CONSTITUTION.md     # Project constitution: core principles, safety guarantees, and invariants
-├── SECURITY.md         # Vulnerability reporting policy and threat model
-├── shellossus.ps1      # Standalone single-file distribution (built from src/*.ps1)
-├── build.ps1           # Bundler and sync verifier (.\build.ps1 / .\build.ps1 -Check)
+├── CONSTITUTION.md       # Non-negotiable architectural principles & invariants
+├── AGENTS.md             # Repository rules for coding agents
+├── SECURITY.md           # Vulnerability reporting policy & security summary
+├── shellossus.ps1        # Standalone pure-ASCII artifact (built from src/*.ps1)
+├── build.ps1             # Bundler & ASCII/LF sync verifier (.\build.ps1 [-Check])
 ├── src/
-│   ├── Config.ps1      # .env parser, workspace path boundary & reparse-point checks
-│   ├── Theme.ps1       # Gruvbox Material RGB palette, status bar, and prompt frame
-│   ├── ui/             # TUI cards/diffs (Cards), multiline/picker input (Input), Markdown/tables (Markdown)
-│   ├── tools/          # Modular tools & schemas (Common, Schemas, Normalizers, Validation, Ignore, Files, Search, Shell, Undo, Web, Todo, AskUser, Memory, Agents, Dispatch)
-│   ├── context/        # Prompt builder, skills/roles catalog, templates, session tree, persistence, compaction
-│   ├── Doctor.ps1      # Runtime, endpoint, model catalog, and session storage diagnostics
-│   ├── cli/            # Profile installer (Install), HTTP transport (Http), agent turn loop (Turn), REPL cards & pickers (Repl)
-│   └── Cli.ps1         # CLI entrypoint, setup, single-shot execution, and interactive REPL loop
+│   ├── Config.ps1        # SHELLOSSUS_* config I/O, ACL privacy, path & secret guards
+│   ├── Theme.ps1         # 9 TrueColor palettes and box-drawing glyphs
+│   ├── ui/               # Ansi framing/gauges, TUI Cards/diffs, Input/pickers, Markdown/tables
+│   ├── tools/            # Schemas, validation, ignore walk, files, search, shell, undo, web, memory, agents
+│   ├── context/          # Layered prompt builder, skills/roles catalog, templates, session DAG, compaction
+│   ├── Doctor.ps1        # Non-mutating runtime, endpoint, catalog & storage diagnostics
+│   ├── cli/              # Profile installer, HTTP/SSE worker, Turn loop, REPL cards & slash Commands
+│   └── Cli.ps1           # Top-level CLI entrypoint, setup wizard, single-shot & REPL loop
 ├── tests/
-│   ├── smoke.ps1       # Test runner (.\build.ps1 -Check + all *.Tests.ps1 suites)
-│   └── *.Tests.ps1     # Modular suites (Config, Theme, Tools, Context, Cli, Doctor, Reliability, ConstrainedLanguage)
-├── docs/
-│   ├── architecture.md # Internal design, module boundaries, and build pipeline
-│   ├── security.md     # Permission model, workspace isolation, and enterprise notes
-│   ├── customization.md# Guide to AGENTS.md, skills, prompt templates, and sessions
-│   └── assets/         # Screenshots, screencasts, and terminal demos
-└── examples/           # Sample agents, SOUL.md, prompt templates, and domain skills
+│   ├── smoke.ps1         # Build check + modular suites + ConstrainedLanguage child runs
+│   ├── TestHelpers.ps1   # Shared assertions and temporary workspace harness
+│   └── *.Tests.ps1       # Config, Theme, Tools, Context, Cli, Doctor, Reliability, ConstrainedLanguage
+├── docs/                 # Canonical documentation (cli, customization, security, architecture)
+└── examples/             # Sample SOUL.md, MEMORY.md, subagent role, prompt template & skill
 ```
 
-## Development & Testing
+---
 
-Edit modular files under [`src/`](src/), rebuild [`shellossus.ps1`](shellossus.ps1), and run the smoke test suite:
+## Development & Verification
+
+Edit modular files under [`src/`](src/), regenerate [`shellossus.ps1`](shellossus.ps1), and run the full verification suite:
 
 ```powershell
 .\build.ps1
 .\tests\smoke.ps1
 ```
 
+---
+
 ## Documentation
 
-- [Project Constitution](CONSTITUTION.md)
-- [Security Policy](SECURITY.md)
-- [Architecture & Build Pipeline](docs/architecture.md)
-- [Security, Permissions & Enterprise Guide](docs/security.md)
-- [Customization: AGENTS.md, Skills & Prompt Templates](docs/customization.md)
+| Document | Contents |
+| :--- | :--- |
+| **[CLI, Configuration & Automation](docs/cli.md)** | All launch flags, `SHELLOSSUS_*` `.env` settings, REPL commands & aliases, `-Doctor`, `-Stream`, and `-Mode json` events |
+| **[Customization & Extensibility](docs/customization.md)** | System prompt stack, `AGENTS.md`, `SOUL.md`, `MEMORY.md`, `SKILL.md`, subagent roles, prompt templates, `@file`, and `!cmd` |
+| **[Security, Boundaries & Enterprise](docs/security.md)** | Permission modes, workspace vs. OS scope, staged writes & `/undo`, internal workers, resource limits, and Citrix/VDI/CLM notes |
+| **[Architecture & Build Pipeline](docs/architecture.md)** | Dual-distribution design, 36-module map, turn lifecycle, 13-tool reference, and `smoke.ps1` verification |
+| **[Project Constitution](CONSTITUTION.md)** | Core engineering invariants and non-negotiable design guarantees |
+| **[Security Policy](SECURITY.md)** | Vulnerability disclosure process and response targets |
 
 ## License
 

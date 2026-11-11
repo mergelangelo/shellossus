@@ -1,101 +1,111 @@
 # Architecture & Build Pipeline
 
-`shellossus` uses a dual-distribution architecture: developers maintain clean, modular source files in [`src/`](../src/), while [`build.ps1`](../build.ps1) bundles them into the standalone [`shellossus.ps1`](../shellossus.ps1) in the repository root. This gives contributors small, focused modules while allowing enterprise / Citrix / VDI users to copy a single zero-dependency `.ps1` file.
+`shellossus` uses a **dual-distribution architecture**: contributors work in 36 small, focused PowerShell modules under [`src/`](../src/), while [`build.ps1`](../build.ps1) compiles them into the standalone, pure 7-bit ASCII [`shellossus.ps1`](../shellossus.ps1) artifact in the repository root.
+
+This design gives maintainers clean separation of concerns and fast unit testing without sacrificing single-file deployment on locked-down Windows desktops, Citrix/VDI sessions, and jump hosts.
 
 ---
 
-## Module Breakdown
+## Module Map (`src/` -> `shellossus.ps1`)
 
-### 1. [`src/Config.ps1`](../src/Config.ps1)
-- **Configuration I/O (`Read-AgentConfig`, `Save-AgentConfig`):** Parses and writes `SHELLOSSUS_*` key-value pairs as pure data without ever evaluating PowerShell expressions.
-- **ConstrainedLanguage-Safe File Helpers (`New-AgentTempFile`, `Set-AgentUtf8Content`):** Allocates temporary files and writes UTF-8 content (including empty strings) using native PowerShell cmdlets without `.NET` static method invocations blocked in Windows PowerShell 5.1 `ConstrainedLanguage` mode.
-- **Boundary & Secret Enforcement (`Resolve-AgentPath`, `Test-PathHasReparsePoint`, `Test-IsSecretFile`):**
-  - Resolves workspace-relative paths against the workspace root.
-  - Rejects any path outside the workspace root (with a narrow read-only exception for registered global `SKILL.md` files when `-AllowRegisteredSkill` is passed by `read_file`).
-  - Walks all ancestor directories of every resolved item and rejects NTFS junctions, symlinks, or reparse points (`Attributes -band 1024`).
-  - Blocks access to `.env`, `.env.*` (except `.env.example`), and the active user configuration file (`$script:AgentConfigPath`).
+`build.ps1` concatenates the 36 modules below in exact dependency order and fails if any `.ps1` file under `src/` is unlisted or contains non-ASCII characters:
 
-### 2. [`src/Theme.ps1`](../src/Theme.ps1) & [`src/ui/`](../src/ui/)
-- **Palettes & Prompt Frame (`Theme.ps1`):** 9 built-in 24-bit TrueColor RGB themes (`gruvbox-material` default, `catppuccin-mocha`, `tokyo-night`, `dracula`, `nord`, `one-dark`, `rose-pine`, `kanagawa`, `catppuccin-latte`), dynamic palette builder (`Set-AgentTheme`), context gauge, permission badges, and status bar (`Write-TuiPromptFrame`).
-- **TUI Cards & Diffs (`ui/Cards.ps1`):** Tool execution cards, task board cards, plan review, memory cards, and unified diff rendering (`Format-UnifiedDiff`).
-- **Interactive Input (`ui/Input.ps1`):** Multi-line prompt input (`Read-TuiMultilineInput`), interactive TUI selector (`Invoke-TuiSelector`), and confirmation prompts (`Read-TuiConfirmation`).
-- **Markdown, Table & Mascot Renderer (`ui/Markdown.ps1`):**
-  - Renders headings (`H1`–`H4`), bulleted/numbered lists, blockquotes, fenced code blocks, inline code, bold, italic, and links (`Write-AgentReply`, `Format-MarkdownInline`).
-  - Buffers contiguous Markdown table lines, computes visible column widths (`Get-VisibleLength`), and pads cells so ANSI escape codes do not distort table alignment (`Format-MarkdownTable`).
-  - Renders model `reasoning_content` in `compact` (last 3 lines), `full`, or `hide` mode (`Write-AgentReasoning`) and the ASCII/Unicode mascot (`Write-TuiMascotCard`).
+### 1. Core Foundation & Theme
+- **[`src/Config.ps1`](../src/Config.ps1):** Plain-data `SHELLOSSUS_*` config parser/writer (`Read-AgentConfig`, `Save-AgentConfig`), private ACL/mode checks (`Test-AgentConfigPrivacy`), `ConstrainedLanguage`-safe temp/UTF-8 helpers (`New-AgentTempFile`, `Set-AgentUtf8Content`), workspace path & reparse-point enforcement (`Resolve-AgentPath`, `Test-PathHasReparsePoint`), and `.env` secret blocking (`Test-IsSecretFile`).
+- **[`src/Theme.ps1`](../src/Theme.ps1):** 9 built-in 24-bit TrueColor palettes (`gruvbox-material` default, `catppuccin-mocha`, `tokyo-night`, `dracula`, `nord`, `one-dark`, `rose-pine`, `kanagawa`, `catppuccin-latte`), palette switching (`Set-AgentTheme`), and terminal box-drawing glyphs.
 
-### 3. [`src/tools/`](../src/tools/)
-- **Common State & Truncation (`Common.ps1`):** Runtime state variables, scoped execution context snapshot/restore (`Get-AgentExecutionContext`, `Restore-AgentExecutionContext`), canonical name mapping (`Resolve-ToolCanonicalName`), tool enablement check (`Test-IsToolEnabled`), `ConstrainedLanguage`-safe file content digests (`Get-AgentFileContentDigest`), line/head/tail truncation, and environment inspection (`Get-AgentEnvironment`).
-- **Schemas & Capabilities (`Schemas.ps1`):** Capability probing (`Get-AgentCapabilities`) and OpenAI tool schema definitions (`Get-AgentTools`).
-- **Argument Normalizers (`Normalizers.ps1`):** Tolerant alias and schema normalizers (`Format-EditArguments`, `Format-RunAgentArguments`, `Format-TodoArguments`, `Format-AskUserArguments`, `Format-MemoryArguments`).
-- **Schema Validation (`Validation.ps1`):** Strict tool argument validation before execution (`Test-AgentToolArguments`).
-- **Ignore Rules & Directory Walk (`Ignore.ps1`):** `.gitignore` / `.ignore` parsing, ancestor rule resolution, and workspace walking (`Invoke-WorkspaceWalk`).
-- **File Writing & Editing (`Files.ps1`):** Fuzzy line matching (`Find-EditMatch`), diff previews (`Format-DiffSnippet`), line-ending preservation, and transactional single/batch file writes (`Invoke-AgentWrite`).
-- **File Discovery & Reading (`Search.ps1`):** Directory listing (`Invoke-AgentListFiles`), glob file search (`Invoke-AgentFindFiles`), regex/literal content search (`Invoke-AgentGrepFiles`), and paginated file reading (`Invoke-AgentReadFile`).
-- **Undo Engine (`Undo.ps1`)** checks and reverses recorded file operations, then restores conversation and task-board snapshots (`Invoke-AgentUndo`).
-- **Process & Shell (`Shell.ps1`):** Process tracking (`Stop-AgentProcessTree`) and sanitized command execution (`Invoke-AgentCommand`).
-- **Web & Search (`Web.ps1`):** URL encoding, HTML text extraction, web search (`Invoke-AgentWebSearch`), and page fetch (`Invoke-AgentFetchUrl`).
-- **Task Tracking (`Todo.ps1`):** Lightweight task state tracking tool (`Invoke-AgentTodo`).
-- **Interactive Questioning (`AskUser.ps1`):** Plan review and user clarification questions tool (`Invoke-AgentAskUser`).
-- **Persistent Memory (`Memory.ps1`):** Long-term cross-session knowledge storage in `MEMORY.md` (`Invoke-AgentMemory`).
-- **Subagents (`Agents.ps1`):** Delegated task execution and scoped child execution (`Enter-SubagentExecutionScope`, `Exit-SubagentExecutionScope`, `Invoke-SubagentInProcess`, `Invoke-AgentSubagent`).
-- **Dispatcher (`Dispatch.ps1`):** Master tool router (`Invoke-AgentTool`).
+### 2. Terminal UI (`src/ui/`)
+- **[`src/ui/Ansi.ps1`](../src/ui/Ansi.ps1):** ANSI escape stripping/wrapping, terminal width detection (`Get-TerminalWidth`), framed card boxes (`Format-TuiCardBox`), context token gauge, permission badges, and REPL prompt frame (`Write-TuiPromptFrame`).
+- **[`src/ui/Cards.ps1`](../src/ui/Cards.ps1):** Tool execution cards, `todo` task boards, `ask_user` plan review cards, memory cards, and unified diff formatting (`Format-UnifiedDiff`).
+- **[`src/ui/Input.ps1`](../src/ui/Input.ps1):** Multi-line fenced/paste input (`Read-TuiMultilineInput`), interactive numbered/fuzzy selector (`Invoke-TuiSelector`), and confirmation prompts (`Read-TuiConfirmation`).
+- **[`src/ui/Markdown.ps1`](../src/ui/Markdown.ps1):** Markdown headings, lists, code blocks, inline styles, visible-width-aligned tables (`Get-VisibleLength`, `Format-MarkdownTable`), `reasoning_content` blocks (`Write-AgentReasoning`), and the half-block pixel mascot (`Write-TuiMascotCard`).
 
-### 4. [`src/context/`](../src/context/)
-- **Prompt Assembly (`Prompt.ps1`):** System prompt builder (`Build-SystemPrompt`), loading `AGENTS.md`, `SOUL.md`, `MEMORY.md`, and capability blocks (`Sync-AgentCapabilities`).
-- **Skills & Subagent Catalog (`Catalog.ps1`):** Discovery and resolution of `SKILL.md` skills (`Get-SkillsCatalog`, `Resolve-SkillCommand`) and built-in/custom subagent roles (`Get-AgentRolesCatalog`, `Resolve-AgentRoleCommand`).
-- **Templates & Expansion (`Templates.ps1`):** Reusable slash prompt templates (`.shellossus/prompts/`) and inline `@file` / `!cmd` prompt attachments.
-- **Session Branch Tree (`SessionTree.ps1`):** Multi-branch conversation DAG construction, boundary validation, and branch switching (`Ensure-SessionTree`, `Get-SessionTree`, `Switch-SessionBranch`).
-- **Session Persistence & Export (`Session.ps1`):** Atomic JSONL session storage (`Save-AgentSession`, `Invoke-SessionResume`), session forking (`Invoke-SessionFork`), and standalone HTML export (`Export-AgentSessionHtml`).
-- **Context Compaction (`Compaction.ps1`):** Token budgeting, token estimation, semantic compaction boundaries, and structured handoffs (`Invoke-AgentCompact`).
+### 3. Tool Runtime & Built-in Tools (`src/tools/`)
+- **[`src/tools/Common.ps1`](../src/tools/Common.ps1):** Scoped execution state snapshot/restore (`Get-AgentExecutionContext`, `Restore-AgentExecutionContext`), canonical tool aliases (`Resolve-ToolCanonicalName`), tool filter checks (`Test-IsToolEnabled`), `ConstrainedLanguage`-safe file digests, output truncation, and runtime inspection (`Get-AgentEnvironment`).
+- **[`src/tools/Schemas.ps1`](../src/tools/Schemas.ps1):** Single source of truth for OpenAI function schemas and parameter rules (`Get-AgentToolSpecifications`, `Get-AgentTools`, `Get-AgentCapabilities`).
+- **[`src/tools/Normalizers.ps1`](../src/tools/Normalizers.ps1):** Tolerant parameter alias/camelCase normalizers prior to validation (`Format-AgentToolArguments`).
+- **[`src/tools/Validation.ps1`](../src/tools/Validation.ps1):** Strict pre-execution schema, required-field, type, and custom constraint validation (`Test-AgentToolArguments`).
+- **[`src/tools/Ignore.ps1`](../src/tools/Ignore.ps1):** Hierarchical `.gitignore` / `.ignore` / `.fdignore` compiler, turn-scoped directory walk cache, and workspace traversal (`Invoke-WorkspaceWalk`).
+- **[`src/tools/Files.ps1`](../src/tools/Files.ps1):** Encoding/BOM round-trip detection, exact/CRLF/fuzzy line matching (`Find-EditMatch`), bottom-to-top batch edits, and staged transactional writes (`Invoke-AgentWrite`, `Invoke-AgentEdit`).
+- **[`src/tools/Search.ps1`](../src/tools/Search.ps1):** Read-only inspection tools: `Invoke-AgentListFiles`, `Invoke-AgentFindFiles`, `Invoke-AgentGrepFiles` (with literal prefiltering and regex timeouts), and line/character-paginated `Invoke-AgentReadFile`.
+- **[`src/tools/Shell.ps1`](../src/tools/Shell.ps1):** Sanitized child PowerShell execution, disk-backed stdout/stderr logs, and PID/start-time descendant tree termination (`Invoke-ShellCommand`, `Invoke-AgentCommand`).
+- **[`src/tools/Undo.ps1`](../src/tools/Undo.ps1):** Verified backup creation, reverse-chain preflight validation, manual-edit conflict detection, turn transaction rollback, and recovery manifests (`Invoke-AgentUndo`, `Undo-AgentTurnTransaction`).
+- **[`src/tools/Web.ps1`](../src/tools/Web.ps1):** SSRF IP/DNS preflight (`Assert-SafeWebResolution`), web confirmation prompts, isolated `web` download worker, HTML-to-text extraction, and `Invoke-AgentFetchUrl`.
+- **[`src/tools/WebSearch.ps1`](../src/tools/WebSearch.ps1):** Pure-PowerShell UTF-8 percent-encoding/decoding and HTML search result extraction (`Invoke-AgentWebSearch`).
+- **[`src/tools/Todo.ps1`](../src/tools/Todo.ps1):** Session task board tool (`Invoke-AgentTodo`).
+- **[`src/tools/AskUser.ps1`](../src/tools/AskUser.ps1):** Interactive user question and strict plan-approval tool (`Invoke-AgentAskUser`).
+- **[`src/tools/Memory.ps1`](../src/tools/Memory.ps1):** Workspace and global `MEMORY.md` tool with staged writes, backups, and live system-prompt sync (`Invoke-AgentMemory`).
+- **[`src/tools/AgentWorkers.ps1`](../src/tools/AgentWorkers.ps1):** Internal `subagent` worker entrypoint (`Invoke-InternalSubagentWorker`), aggregate status resolution, and parallel `ReadOnly` worker process pool.
+- **[`src/tools/Agents.ps1`](../src/tools/Agents.ps1):** Scoped in-process subagent execution, forked history boundary slicing, and `run_agent` orchestration (`single`, `parallel[]`, `pipeline[]`).
+- **[`src/tools/Dispatch.ps1`](../src/tools/Dispatch.ps1):** Master tool call router (`Invoke-AgentTool`).
 
-### 5. [`src/cli/`](../src/cli/) & [`src/Cli.ps1`](../src/Cli.ps1)
-- **Profile Installer (`cli/Install.ps1`):** Built-in `-Install` launcher installer (`Invoke-AgentProfileInstall`) registering `global:shellossus` and optional conflict-checked shortcuts in `$PROFILE`.
-- **HTTP Transport, SSE Assembly & JSON Events (`cli/Http.ps1`):** UTF-8 file-backed HTTP transport (`Invoke-AgentHttpRequest`) with transient retry/backoff, spinner (`Wait-AgentProcessWithSpinner`), `ConstrainedLanguage`-compatible network-level SSE response assembler (`ConvertFrom-AgentSseResponse`, enabled via `-Stream` / `SHELLOSSUS_STREAM` with plain-JSON fallback and strict `[DONE]` + `finish_reason` verification before returning), and JSON mode event emitter (`Write-AgentJsonEvent`).
-- **Turn Loop (`cli/Turn.ps1`):**
-  - Loop detection via canonical tool call signatures (`Get-ToolCallSignature`).
-  - Automatically triggers `Invoke-AgentCompact` and retries once if the API reports a context-length overflow.
-  - Verifies `finish_reason` before accepting the assistant message or executing any `tool_calls` (`Invoke-AgentTurn`, `Invoke-AgentContinue`).
-- **REPL Helpers & Pickers (`cli/Repl.ps1`):** Slash command aliases (`Resolve-ReplCommandAlias`), status/tree/help/startup cards, and interactive pickers for `/permission`, `/diagnostics`, `/reasoning`, `/context`, and `/model`.
-- **Entrypoint & REPL Loop (`Cli.ps1`):** Handles `-Install`, `-Setup`, `-Doctor`, `-Mascot`, `-Export`, `-Prompt` single-shot execution, and the interactive REPL loop.
+### 4. Context, Session Tree & Compaction (`src/context/`)
+- **[`src/context/Prompt.ps1`](../src/context/Prompt.ps1):** Layered system prompt builder (`Build-SystemPrompt`), path-scoped nested `AGENTS.md` loader (`Get-ScopedAgentInstructions`), and live capability/memory synchronization (`Sync-AgentCapabilities`, `Sync-AgentMemoryContext`).
+- **[`src/context/Catalog.ps1`](../src/context/Catalog.ps1):** Discovery and slash-command expansion for `SKILL.md` skills and built-in/custom subagent roles (`Get-SkillsCatalog`, `Get-AgentRolesCatalog`).
+- **[`src/context/Templates.ps1`](../src/context/Templates.ps1):** Single-pass argument expansion for `.shellossus/prompts/*.md` (`Expand-TemplateArgs`) and explicit user `@file` attachment injection (`Expand-UserPrompt`).
+- **[`src/context/SessionTree.ps1`](../src/context/SessionTree.ps1):** Parent-linked conversation DAG (`id`, `parent_id`), valid tool-boundary checks (`Test-ValidConversationBoundary`), and branch context reconstruction (`Switch-SessionBranch`, `Build-BranchContextMessages`).
+- **[`src/context/Session.ps1`](../src/context/Session.ps1):** Atomic workspace-scoped JSONL persistence (`Save-AgentSession`), import/resume validation (`Invoke-SessionResume`), `/fork` (`Invoke-SessionFork`), and standalone themed HTML export (`Export-AgentSessionHtml`).
+- **[`src/context/Compaction.ps1`](../src/context/Compaction.ps1):** Token estimation, preflight context budgeting, constraint-preserving history summarization, and cumulative `<read-files>` / `<modified-files>` handoff entries (`Invoke-AgentCompact`).
 
-### 6. [`src/Doctor.ps1`](../src/Doctor.ps1)
-- **Diagnostics (`Get-AgentDoctorReport`):** Reports PowerShell/version support, language mode, configuration parsing, effective model/key settings, workspace access, session storage, and endpoint/model-catalog results. `-Doctor` runs before startup prompts or session creation, even with incomplete settings; `/doctor` checks the current model and session directory without changing conversation or undo state.
-- **Storage probe (`Test-DoctorSessionDirectory`):** Creates a missing session directory, tests create/write/rename/read/delete inside a uniquely named probe directory, and cleans up the probe. `-NoSession` skips it. Passing this check does not guarantee that an existing session file has writable ACLs or will remain writable later.
-- **Network probe (`Invoke-DoctorModelsRequest`):** One authenticated `GET /models`, no redirects, a 10-second request timeout (DNS can exceed it), and UTF-8 file-backed response decoding. Missing catalog support, rate limiting, an invalid catalog, or an absent model ID is a warning. Authentication errors and connectivity failures are failures. No completion or tool call is sent, and server bodies, headers, and raw errors are omitted from reports.
-- **Output:** Human-readable checks or one `type: "doctor"` JSON object with `checks`, `failures`, `warnings`, and `exit_code`. Standalone `-Doctor` exits 1 for any failed check and 0 otherwise; warnings require reading the report. Keys are redacted, but model IDs, validated API base URLs, and local paths are visible.
+### 5. Diagnostics & CLI Runtime (`src/Doctor.ps1`, `src/cli/`, `src/Cli.ps1`)
+- **[`src/Doctor.ps1`](../src/Doctor.ps1):** Non-mutating runtime, configuration, workspace, session-storage, and `GET /models` health diagnostics (`Get-AgentDoctorReport`, `Write-AgentDoctorReport`).
+- **[`src/cli/Install.ps1`](../src/cli/Install.ps1):** `$PROFILE` launcher installer (`Invoke-AgentProfileInstall`) with `Get-Command -All` shortcut conflict checks.
+- **[`src/cli/Http.ps1`](../src/cli/Http.ps1):** API message sanitization, pure-ASCII JSON escaping, JSONL event writer (`Write-AgentJsonEvent`), isolated `http` worker, transient retry/backoff loop, and strict SSE response assembler (`ConvertFrom-AgentSseResponse`).
+- **[`src/cli/Turn.ps1`](../src/cli/Turn.ps1):** Core agent turn loop (`Invoke-AgentTurn`, `Invoke-AgentContinue`): preflight budget check, auto-compaction on context overflow, `finish_reason` and tool-batch validation, repetition loop-guard, scoped `AGENTS.md` gating, and tool dispatch.
+- **[`src/cli/Repl.ps1`](../src/cli/Repl.ps1):** Slash-command alias resolver (`Resolve-ReplCommandAlias`), status/tree/help/skills/agents cards, `/memory` parser, and interactive pickers (`/permission`, `/reasoning`, `/context`, `/model`, `/theme`).
+- **[`src/cli/Commands.ps1`](../src/cli/Commands.ps1):** Interactive REPL handlers for `/new`, `/todo`, `/name`, `/tree`, `/fork`, `/export`, `/import`, `/copy`, `/reload`, `/save`, `/undo`, `/compact`, `/sessions` / `/resume`, `/continue`, and `!` / `!!`.
+- **[`src/Cli.ps1`](../src/Cli.ps1):** Top-level entrypoint dispatching `-InternalWorker`, `-Install`, `-Setup`, `-Mascot`, `-Doctor`, `-Export`, single-shot `-Prompt`, and the interactive REPL loop wrapped in turn transactions.
+
+---
+
+## Agent Turn Lifecycle
+
+```mermaid
+flowchart TD
+    A["User Input / -Prompt"] --> B["Expand /template, /skill, /agent & explicit @file"]
+    B --> C["Start Turn Transaction (snapshot messages, todos, permissions)"]
+    C --> D["Preflight Context Budget & Auto-Compact if over threshold"]
+    D --> E["Isolated HTTP Worker POST /chat/completions (JSON or verified SSE)"]
+    E --> F{"Valid finish_reason & tool batch?"}
+    F -- "No (truncated / malformed / error)" --> R["Rollback Turn Transaction & Restore Backups"]
+    F -- "No tool_calls" --> S["Save Atomic Session JSONL & Commit Undo Frame"]
+    F -- "Has tool_calls" --> G["Loop-Guard + Scoped Nested AGENTS.md Check"]
+    G --> H["Normalize -> Validate Schema -> Dispatch Tool (Record File/Memory Backups)"]
+    H --> D
+```
+
+---
 
 ## Built-in Tool Reference
 
-These are the 13 canonical tools from `Get-AgentTools` in `src/tools/Schemas.ps1`. Availability also depends on permission mode and `-Tools` / `-ExcludeTools` / `-NoTools`.
+All 13 canonical tools defined in [`src/tools/Schemas.ps1`](../src/tools/Schemas.ps1) (subject to active `-Permission` and `-Tools` / `-ExcludeTools` / `-NoTools`):
 
-| Tool | Purpose | Filesystem / undo scope |
-| --- | --- | --- |
-| `list_files` | List a directory | Workspace; read only |
-| `read_file` | Read text with line/character pagination | Workspace plus registered global `SKILL.md`; read only |
-| `find_files` | Find paths using globs and ignore rules | Workspace; read only |
-| `grep_files` | Search text; continue with `file_offset` and `start_line` | Workspace; read only |
-| `write_file` | Create or overwrite a text file | Workspace; records file undo |
-| `edit_file` | Exact/fuzzy replacement or batch edits | Workspace; records file undo |
-| `run_command` | Run PowerShell with a timeout and output capture | User's OS permissions; no file undo |
-| `run_agent` | Single, parallel, or pipeline delegation | Inherits tool restrictions; in-process file edits join parent undo |
-| `fetch_url` | Fetch HTTP(S) text | Network access; no undo |
-| `web_search` | Search the web | Network access; no undo |
-| `todo` | Maintain the session task board | Persisted with sessions and restored by turn undo |
-| `ask_user` | Ask a question or request plan review | Interactive response, not a general permission grant; no file undo |
-| `memory` | View/append/set/clear persistent notes | Workspace or configuration directory. Tool changes join turn undo. |
-
-`run_command` runs with the user's OS permissions. User-entered `!` / `!!` shortcuts invoke it directly. The `memory` tool checks its fixed target file and ancestor directories up to the scope root for reparse points (`Test-PathHasReparsePoint`). It requires confirmation in `Ask` mode and journals file creations, modifications, and deletions. See [security boundaries and undo coverage](security.md).
+| Tool | Purpose | Filesystem & Undo Scope |
+| :--- | :--- | :--- |
+| `list_files` | List directory entries | Workspace; read-only |
+| `read_file` | Read text with 300-line / 20k-char & `start_char` pagination | Workspace + registered global `SKILL.md`; read-only |
+| `find_files` | Glob file search honoring `.gitignore` / `.ignore` / `.fdignore` | Workspace; read-only |
+| `grep_files` | Regex/literal search with context & `file_offset` + `start_line` continuation | Workspace; read-only |
+| `write_file` | Create or overwrite a text file (staged, encoding-preserving) | Workspace; tracked by `/undo` |
+| `edit_file` | Exact, CRLF, or fuzzy replacement + bottom-to-top batch `edits[]` | Workspace; tracked by `/undo` |
+| `run_command` | Execute PowerShell with timeout, tree cleanup, and `.shellossus/output/` logs | User OS permissions; outside `/undo` |
+| `run_agent` | Single, `parallel[]` (`ReadOnly`), or `pipeline[]` subagent delegation | Clamped to parent permissions; in-process edits join `/undo` |
+| `fetch_url` | Fetch HTTP(S) page text with SSRF preflight and 2 MiB cap | Outbound network; outside `/undo` |
+| `web_search` | Query web search results with SSRF preflight | Outbound network; outside `/undo` |
+| `todo` | Update the structured session task checklist | Saved in session JSONL; restored by `/undo` |
+| `ask_user` | Ask multiple-choice questions or request explicit plan review | Interactive UI; outside `/undo` |
+| `memory` | `view`, `append`, `set`, or `clear` workspace/global `MEMORY.md` | Fixed memory paths; tool writes tracked by `/undo` |
 
 ---
 
 ## Build & Verification Pipeline
 
-1. Edit source modules in `src/*.ps1`.
-2. Run `.\build.ps1` to generate `shellossus.ps1` (pure ASCII, LF-normalized, verifying all `.ps1` files under `src/` are included in `$modules`).
-3. Run `.\tests\smoke.ps1`, which:
-   - Calls `.\build.ps1 -Check` to ensure `shellossus.ps1` matches `src/*.ps1`.
-   - Executes modular test suites (`Config.Tests.ps1`, `Theme.Tests.ps1`, `Tools.Tests.ps1`, `Context.Tests.ps1`, `Cli.Tests.ps1`, `Doctor.Tests.ps1`, `Reliability.Tests.ps1`) with isolated temporary workspaces, and runs both `Doctor.Tests.ps1 -ConstrainedLanguage` and `Reliability.Tests.ps1 -ConstrainedLanguage` in fresh `ConstrainedLanguage` child processes. Endpoint results are mocked, so tests send no real API requests.
-   - Runs `ConstrainedLanguage.Tests.ps1` to verify core operations under PowerShell `ConstrainedLanguage` mode, including a cold-start child process that switches to `ConstrainedLanguage` on line 1 before loading `shellossus.ps1`.
+1. **Edit modular sources** in [`src/`](../src/).
+2. **Bundle the artifact** via `.\build.ps1`, which validates 7-bit ASCII across `build.ps1`, `src/*.ps1`, and `tests/*.ps1`, ensures every `src/**/*.ps1` file is listed in `$modules`, normalizes line endings to LF, and writes [`shellossus.ps1`](../shellossus.ps1).
+3. **Run the verification suite** via `.\tests\smoke.ps1`:
+   - Runs `.\build.ps1 -Check` to confirm `shellossus.ps1` is byte-for-byte in sync with `src/*.ps1`.
+   - Executes all modular suites (`Config.Tests.ps1`, `Theme.Tests.ps1`, `Tools.Tests.ps1`, `Context.Tests.ps1`, `Cli.Tests.ps1`, `Doctor.Tests.ps1`, `Reliability.Tests.ps1`) using shared helpers in [`tests/TestHelpers.ps1`](../tests/TestHelpers.ps1) and isolated temporary directories (all HTTP calls mocked).
+   - Re-runs `Doctor.Tests.ps1 -ConstrainedLanguage` and `Reliability.Tests.ps1 -ConstrainedLanguage` inside fresh `ConstrainedLanguage` child processes.
+   - Executes `ConstrainedLanguage.Tests.ps1`, including a cold-start child process that switches to `ConstrainedLanguage` on line 1 before dot-sourcing `shellossus.ps1`.
 
-The CI workflow (`.github/workflows/check.yml`) runs `tests/smoke.ps1` on Windows PowerShell 5.1 (`windows-latest`) and on PowerShell 7 (`pwsh`) across Windows, Linux, and macOS.
+CI ([`.github/workflows/check.yml`](../.github/workflows/check.yml)) runs `tests/smoke.ps1` on Windows PowerShell 5.1 (`windows-latest`) and PowerShell 7 (`pwsh`) across Windows, Linux, and macOS.
