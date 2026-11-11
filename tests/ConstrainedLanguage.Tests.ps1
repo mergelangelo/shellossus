@@ -650,6 +650,15 @@ try {
     Assert-True $dirDigestThrew 'Get-AgentFileContentDigest did not throw on directory path.'
 
     & {
+        # Windows PowerShell 5.1 Get-FileHash silently skips directories.
+        function Get-FileHash { return $null }
+        $skippedDirDigestThrew = $false
+        try { $null = Get-AgentFileContentDigest -LiteralPath $digestDir }
+        catch { $skippedDirDigestThrew = $true }
+        Assert-True $skippedDirDigestThrew 'Get-AgentFileContentDigest accepted a directory when Get-FileHash silently skipped it.'
+    }
+
+    & {
         function Get-FileHash {
             throw 'Simulated non-CLM I/O failure.'
         }
