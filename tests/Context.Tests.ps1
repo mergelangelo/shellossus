@@ -1124,6 +1124,46 @@ tools: list_files
         $task12UnknownErr = [string]$_.Exception.Message
     }
     Assert-True ($task12UnknownThrew -and ($task12UnknownErr -like "Unknown agent role 'missing-role'*")) "Unknown role error changed: $task12UnknownErr"
+
+    # Invoke-CompactionBatch forwards configured $script:RequestTimeoutSec to Invoke-AgentHttpRequest and Invoke-WebRequest.
+    $savedCompactTimeout = $script:RequestTimeoutSec
+    $savedCompactMode = $script:OutputMode
+    $script:capturedCompactTimeouts = @()
+    function Invoke-WebRequest {
+        param($Uri, $Method, $Headers, $ContentType, $Body, $TimeoutSec, $ErrorAction, [switch]$UseBasicParsing, $OutFile)
+        $script:capturedCompactTimeouts += [int]$TimeoutSec
+        $resp = @{ choices = @(@{ finish_reason = 'stop'; message = @{ content = "## Goal`nTest compaction timeout`n## Progress`nDone`n## Key Decisions`nNone`n## Next Steps`nNone`n## Critical Context`nNone" } }) } | ConvertTo-Json -Depth 8 -Compress
+        Set-Content -LiteralPath $OutFile -Value $resp -Encoding UTF8 -NoNewline
+    }
+    try {
+        $script:OutputMode = 'json'
+        $null = Set-AgentRequestTimeout -TimeoutSpec '420'
+        $compTimeoutState = @{
+            session_id = 'compact-timeout'
+            workspace = $workspacePath
+            model = 'test-model'
+            usage_input_tokens = 0
+            usage_output_tokens = 0
+            messages = @(
+                @{ role = 'system'; content = 'sys' },
+                @{ role = 'user'; content = 'Old question 1' },
+                @{ role = 'assistant'; content = 'Old answer 1' },
+                @{ role = 'user'; content = 'Recent question 2' },
+                @{ role = 'assistant'; content = 'Recent answer 2' }
+            )
+        }
+        $batchSummary = Invoke-CompactionBatch -State $compTimeoutState -Endpoint 'https://example.invalid/v1/chat/completions' -ModelId 'test-model' -ApiKey 'test-key' -SystemPrompt 'Summarize.' -UserBody 'Turn 1' -SummaryLimit 4000
+        Assert-True ($batchSummary.Contains('Test compaction timeout')) 'Invoke-CompactionBatch did not return summary response.'
+        $didCompact = Invoke-AgentCompact -State $compTimeoutState -Endpoint 'https://example.invalid/v1/chat/completions' -ModelId 'test-model' -ApiKey 'test-key' -KeepRecent 2
+        Assert-True ([bool]$didCompact) 'Invoke-AgentCompact did not succeed.'
+        Assert-True ($script:capturedCompactTimeouts.Count -eq 2 -and $script:capturedCompactTimeouts[0] -eq 420 -and $script:capturedCompactTimeouts[1] -eq 420) "Invoke-CompactionBatch/Invoke-AgentCompact did not pass RequestTimeoutSec=420 to Invoke-WebRequest (got: $($script:capturedCompactTimeouts -join ','))."
+    }
+    finally {
+        Remove-Item Function:\Invoke-WebRequest -ErrorAction SilentlyContinue
+        Remove-Variable -Name capturedCompactTimeouts -Scope Script -ErrorAction SilentlyContinue
+        $script:RequestTimeoutSec = $savedCompactTimeout
+        $script:OutputMode = $savedCompactMode
+    }
 }
 finally {
     Remove-TestEnvironment -Env $envData

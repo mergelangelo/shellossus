@@ -84,7 +84,8 @@ function Get-AgentDoctorReport {
         [string]$SessionDir,
         [switch]$NoSession,
         [string]$ConfigState = 'loaded',
-        [string]$KeyStorageWarning
+        [string]$KeyStorageWarning,
+        [string]$RequestTimeoutSpec = ''
     )
     $checks = @()
     $version = $PSVersionTable.PSVersion
@@ -99,6 +100,25 @@ function Get-AgentDoctorReport {
         $checks += @{ name = 'configuration'; status = 'info'; message = 'No saved configuration found. Using launch arguments and environment variables; run shellossus -Setup to save settings.' }
     }
     else { $checks += @{ name = 'configuration'; status = 'pass'; message = 'Configuration parsed; effective launch settings are checked below.' } }
+    $resolvedTimeout = $script:RequestTimeoutSec
+    $timeoutValid = $true
+    if ($RequestTimeoutSpec) {
+        try {
+            $resolvedTimeout = ConvertTo-AgentRequestTimeout -TimeoutSpec $RequestTimeoutSpec
+        }
+        catch {
+            $timeoutValid = $false
+        }
+    }
+    elseif ($resolvedTimeout -lt $script:MinRequestTimeoutSec -or $resolvedTimeout -gt $script:MaxRequestTimeoutSec) {
+        $resolvedTimeout = 180
+    }
+    if ($timeoutValid) {
+        $checks += @{ name = 'request_timeout'; status = 'pass'; message = "Model request timeout: ${resolvedTimeout}s." }
+    }
+    else {
+        $checks += @{ name = 'request_timeout'; status = 'fail'; message = 'RequestTimeoutSec must be an integer between 10 and 1800.' }
+    }
     try {
         $root = Get-Item -LiteralPath $Workspace -Force -ErrorAction Stop
         if (-not $root.PSIsContainer) { throw 'Expected a directory.' }

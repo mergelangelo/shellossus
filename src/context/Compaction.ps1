@@ -382,7 +382,7 @@ function Invoke-CompactionBatch {
     } | ConvertTo-Json -Depth 20 -Compress
     $tempFile = New-AgentTempFile
     try {
-        Invoke-AgentHttpRequest -Uri $Endpoint -ApiKey $ApiKey -Body $summaryReq -OutFile $tempFile.FullName -TimeoutSec 180 -StatusLabel "Compacting context ($ModelId)"
+        Invoke-AgentHttpRequest -Uri $Endpoint -ApiKey $ApiKey -Body $summaryReq -OutFile $tempFile.FullName -TimeoutSec $script:RequestTimeoutSec -StatusLabel "Compacting context ($ModelId)"
         $reply = Read-AgentApiResponse -Path $tempFile.FullName
     }
     finally {

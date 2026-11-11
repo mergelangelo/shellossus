@@ -81,7 +81,7 @@ The worker checks literal IPs and all IPv4 and IPv6 DNS answers before making th
 
 ## Resource Limits
 
-Each agent turn can accept up to 128 tool calls across model responses, regardless of the step limit. A batch that would exceed the budget is rejected before any call in it runs. Tool arguments are limited to 1 MiB of UTF-8 before parsing, and `edit_file` accepts up to 64 edits per batch. Each model response is limited to 8 MiB before JSON parsing. The HTTP worker is monitored periodically, so the temporary download can briefly exceed the limit. Accepted model responses and tool results share a 32 MiB payload budget per turn.
+Each agent turn can accept up to 128 tool calls across model responses, regardless of the step limit. A batch that would exceed the budget is rejected before any call in it runs. Tool arguments are limited to 1 MiB of UTF-8 before parsing, and `edit_file` accepts up to 64 edits per batch. Each model response is limited to 8 MiB before JSON parsing. The HTTP worker is monitored periodically, so the temporary download can briefly exceed the limit. Accepted model responses and tool results share a 32 MiB payload budget per turn. Model HTTP requests default to a 180-second timeout (`-RequestTimeoutSec` / `SHELLOSSUS_REQUEST_TIMEOUT_SEC`, configurable from 10 to 1800 seconds), and transient retries within a single model step share a 3,600-second wall-clock budget.
 
 Each memory file is limited to 256 KiB. A session has a 32 MiB JSONL budget, a 10,000-record limit, and a 5,000-entry tree limit. Start a new session with `/new` when the history fills up. Diagnostics retain the 100 newest steps.
 

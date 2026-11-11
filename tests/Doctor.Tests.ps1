@@ -193,7 +193,7 @@ try {
 
     # Exercise real startup and REPL routing with isolated config and mocked I/O.
     $savedEnvironment = @{}
-    $envNames = @('SHELLOSSUS_BASE_URL', 'SHELLOSSUS_MODEL', 'SHELLOSSUS_API_KEY', 'SHELLOSSUS_WORKSPACE', 'SHELLOSSUS_CONTEXT_WINDOW', 'SHELLOSSUS_COMPACT_THRESHOLD')
+    $envNames = @('SHELLOSSUS_BASE_URL', 'SHELLOSSUS_MODEL', 'SHELLOSSUS_API_KEY', 'SHELLOSSUS_WORKSPACE', 'SHELLOSSUS_CONTEXT_WINDOW', 'SHELLOSSUS_COMPACT_THRESHOLD', 'SHELLOSSUS_REQUEST_TIMEOUT_SEC')
     foreach ($envName in $envNames) {
         $savedEnvironment[$envName] = (Get-Item -LiteralPath ('Env:' + $envName) -ErrorAction SilentlyContinue).Value
         Remove-Item -LiteralPath ('Env:' + $envName) -ErrorAction SilentlyContinue
@@ -243,6 +243,32 @@ try {
         $task10CliReport = $task10CliRaw | ConvertFrom-Json
         $task10CliKey = Get-DoctorCheck $task10CliReport 'api_key'
         Assert-True (($task10CliKey.status -eq 'pass' -or $task10CliKey.status -eq 'info') -and ([string]$task10CliKey.message -like '*local placeholder*') -and ($task10CliRaw -notlike '*doctor-secret-key*')) ("Standalone -Doctor treated a missing loopback key as a failure: $($task10CliKey.status) $($task10CliKey.message)")
+
+        # Configurable request timeout in Get-AgentDoctorReport and standalone -Doctor (valid 10..1800 passes; invalid fails cleanly without crashing or leaking secret values).
+        $validTimeoutCfg = Join-Path $envData.TestRoot 'doctor-timeout-valid.env'
+        Save-AgentConfig -Path $validTimeoutCfg -Config @{
+            SHELLOSSUS_BASE_URL = 'https://example.invalid/v1'
+            SHELLOSSUS_MODEL = 'test-model'
+            SHELLOSSUS_API_KEY = 'doctor-secret-key'
+        }
+        $validTimeoutRaw = & $entryPoint -Doctor -RequestTimeoutSec 300 -ConfigPath $validTimeoutCfg -Workspace $workspacePath -NoSession -Mode json
+        $validTimeoutReport = $validTimeoutRaw | ConvertFrom-Json
+        $validTimeoutCheck = Get-DoctorCheck $validTimeoutReport 'request_timeout'
+        Assert-True ($LASTEXITCODE -eq 0 -and $validTimeoutReport.failures -eq 0 -and $validTimeoutCheck.status -eq 'pass' -and ([string]$validTimeoutCheck.message -like '*300s*')) ("Standalone -Doctor rejected valid -RequestTimeoutSec 300: " + $validTimeoutRaw)
+
+        foreach ($badCliTimeout in @('0', '9', '1801', 'abc')) {
+            $badTimeoutRaw = & $entryPoint -Doctor -RequestTimeoutSec $badCliTimeout -ConfigPath $validTimeoutCfg -Workspace $workspacePath -NoSession -Mode json
+            $badTimeoutReport = $badTimeoutRaw | ConvertFrom-Json
+            $badTimeoutCheck = Get-DoctorCheck $badTimeoutReport 'request_timeout'
+            Assert-True ($LASTEXITCODE -eq 1 -and $badTimeoutReport.failures -ge 1 -and $badTimeoutCheck.status -eq 'fail' -and $badTimeoutCheck.message -eq 'RequestTimeoutSec must be an integer between 10 and 1800.') ("Standalone -Doctor did not report request_timeout failure for '$badCliTimeout': " + $badTimeoutRaw)
+        }
+
+        $badCfgTimeoutFile = Join-Path $envData.TestRoot 'doctor-timeout-secret.env'
+        Set-Content -LiteralPath $badCfgTimeoutFile -Value "SHELLOSSUS_BASE_URL=`"https://example.invalid/v1`"`nSHELLOSSUS_MODEL=`"test-model`"`nSHELLOSSUS_REQUEST_TIMEOUT_SEC=`"doctor-secret-key`"" -Encoding Ascii
+        $badCfgTimeoutRaw = & $entryPoint -Doctor -ConfigPath $badCfgTimeoutFile -Workspace $workspacePath -NoSession -Mode json
+        $badCfgTimeoutReport = $badCfgTimeoutRaw | ConvertFrom-Json
+        $badCfgTimeoutCheck = Get-DoctorCheck $badCfgTimeoutReport 'request_timeout'
+        Assert-True ($LASTEXITCODE -eq 1 -and $badCfgTimeoutCheck.status -eq 'fail' -and ($badCfgTimeoutRaw -notlike '*doctor-secret-key*')) 'Doctor did not fail invalid config SHELLOSSUS_REQUEST_TIMEOUT_SEC cleanly or leaked its raw value.'
     }
     finally {
         Remove-Item Function:\Read-Host -ErrorAction SilentlyContinue

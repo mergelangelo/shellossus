@@ -84,6 +84,7 @@ param(
     [int]$MaxRepeatCalls = 3,
     [string]$ContextWindow = $env:SHELLOSSUS_CONTEXT_WINDOW,
     [string]$CompactThreshold = $env:SHELLOSSUS_COMPACT_THRESHOLD,
+    [string]$RequestTimeoutSec = $env:SHELLOSSUS_REQUEST_TIMEOUT_SEC,
     [string]$Permission = 'Ask',
     [string]$Theme = $env:SHELLOSSUS_THEME,
     [string]$ReasoningEffort = '',
@@ -114,6 +115,10 @@ param(
     [switch]$LibraryOnly,
     [switch]$LiteralPrompt
 )
+
+$script:StartupRequestTimeoutSpec = $RequestTimeoutSec
+$script:StartupRequestTimeoutBound = ($PSBoundParameters.Keys -contains 'RequestTimeoutSec')
+Remove-Variable -Name RequestTimeoutSec -Scope Script -ErrorAction SilentlyContinue
 
 # Windows PowerShell 5.1 compatible. No downloaded executables or modules.
 # Auto-generated from src/*.ps1 by build.ps1. Edit files in src/ and run .\build.ps1.

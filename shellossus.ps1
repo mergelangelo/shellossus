@@ -7,6 +7,7 @@ param(
     [int]$MaxRepeatCalls = 3,
     [string]$ContextWindow = $env:SHELLOSSUS_CONTEXT_WINDOW,
     [string]$CompactThreshold = $env:SHELLOSSUS_COMPACT_THRESHOLD,
+    [string]$RequestTimeoutSec = $env:SHELLOSSUS_REQUEST_TIMEOUT_SEC,
     [string]$Permission = 'Ask',
     [string]$Theme = $env:SHELLOSSUS_THEME,
     [string]$ReasoningEffort = '',
@@ -38,6 +39,10 @@ param(
     [switch]$LiteralPrompt
 )
 
+$script:StartupRequestTimeoutSpec = $RequestTimeoutSec
+$script:StartupRequestTimeoutBound = ($PSBoundParameters.Keys -contains 'RequestTimeoutSec')
+Remove-Variable -Name RequestTimeoutSec -Scope Script -ErrorAction SilentlyContinue
+
 # Windows PowerShell 5.1 compatible. No downloaded executables or modules.
 # Auto-generated from src/*.ps1 by build.ps1. Edit files in src/ and run .\build.ps1.
 
@@ -56,7 +61,7 @@ function Read-AgentConfig {
         $lineNumber++
         $trimmed = $line.Trim()
         if (-not $trimmed -or $trimmed.StartsWith('#')) { continue }
-        if ($trimmed -notmatch '^(SHELLOSSUS_(?:BASE_URL|MODEL|API_KEY|WORKSPACE|CONTEXT_WINDOW|COMPACT_THRESHOLD|THEME))\s*=(.*)$') {
+        if ($trimmed -notmatch '^(SHELLOSSUS_(?:BASE_URL|MODEL|API_KEY|WORKSPACE|CONTEXT_WINDOW|COMPACT_THRESHOLD|REQUEST_TIMEOUT_SEC|THEME))\s*=(.*)$') {
             throw "Invalid config entry at line $lineNumber. Expected a supported SHELLOSSUS_* key=value."
         }
         $normalizedKey = $Matches[1].ToUpper()
@@ -168,7 +173,7 @@ function Save-AgentConfig {
         if ($value.Contains('"')) { throw 'Config values cannot contain double quotes.' }
         $lines += $key + '="' + $value + '"'
     }
-    foreach ($optKey in @('SHELLOSSUS_CONTEXT_WINDOW', 'SHELLOSSUS_COMPACT_THRESHOLD', 'SHELLOSSUS_THEME')) {
+    foreach ($optKey in @('SHELLOSSUS_CONTEXT_WINDOW', 'SHELLOSSUS_COMPACT_THRESHOLD', 'SHELLOSSUS_REQUEST_TIMEOUT_SEC', 'SHELLOSSUS_THEME')) {
         if ($Config.ContainsKey($optKey) -and $Config[$optKey]) {
             $optVal = [string]$Config[$optKey]
             if ($optVal -match "[`r`n]" -or $optVal.Contains('"')) { throw 'Invalid optional config value.' }
@@ -2333,6 +2338,30 @@ $script:AgentMaxTreeEntries = 5000
 $script:AgentMaxUndoFrames = 20
 $script:AgentMaxDiagnosticsEntries = 100
 $script:AgentMaxWalkEntries = 10000
+$script:RequestTimeoutSec = 180
+$script:MinRequestTimeoutSec = 10
+$script:MaxRequestTimeoutSec = 1800
+$script:MaxStepRetryBudgetSec = 3600
+
+function ConvertTo-AgentRequestTimeout {
+    param([AllowEmptyString()][string]$TimeoutSpec)
+    $err = 'RequestTimeoutSec must be an integer between 10 and 1800.'
+    if ($null -eq $TimeoutSpec) { throw $err }
+    $trimmed = $TimeoutSpec.Trim()
+    if ($trimmed -notmatch '^\d{1,4}$') { throw $err }
+    $val = [int]$trimmed
+    if ($val -lt $script:MinRequestTimeoutSec -or $val -gt $script:MaxRequestTimeoutSec) {
+        throw $err
+    }
+    return $val
+}
+
+function Set-AgentRequestTimeout {
+    param([AllowEmptyString()][string]$TimeoutSpec)
+    $val = ConvertTo-AgentRequestTimeout -TimeoutSpec $TimeoutSpec
+    $script:RequestTimeoutSec = $val
+    return $script:RequestTimeoutSec
+}
 
 function Get-CurrentTurnWritePathsSince {
     param([int]$StartCount)
@@ -6785,7 +6814,15 @@ function Get-AgentWorkerErrorText {
 }
 
 function Invoke-ParallelSubagentProcesses {
-    param([string]$Root, [array]$Tasks, [int]$MaxSteps = 15, [string]$ScriptPath, [int]$TimeoutSec = 180, [string]$ApiKey)
+    param([string]$Root, [array]$Tasks, [int]$MaxSteps = 15, [string]$ScriptPath, [int]$TimeoutSec = 0, [string]$ApiKey)
+    if ($TimeoutSec -le 0) {
+        $TimeoutSec = if (($script:RequestTimeoutSec + 30) -gt 180) {
+            if (($script:RequestTimeoutSec + 30) -gt 3600) { 3600 } else { $script:RequestTimeoutSec + 30 }
+        }
+        else {
+            180
+        }
+    }
     $configDir = if ($script:AgentConfigPath) { Split-Path $script:AgentConfigPath -Parent } else { '' }
     $shellExe = Get-AgentPowerShellExecutable
     $effEndpoint = if ($script:ActiveEndpoint) { $script:ActiveEndpoint } else { 'https://example.invalid/v1/chat/completions' }
@@ -6810,6 +6847,7 @@ $workerArgs = @{
     Prompt = $pText
     LiteralPrompt = $true
 }
+if ($env:SHELLOSSUS_SUB_REQUEST_TIMEOUT) { $workerArgs.RequestTimeoutSec = $env:SHELLOSSUS_SUB_REQUEST_TIMEOUT }
 if ($env:SHELLOSSUS_SUB_CONFIG) { $workerArgs.ConfigPath = $env:SHELLOSSUS_SUB_CONFIG }
 if ($env:SHELLOSSUS_SUB_NO_SKILLS -eq '1') { $workerArgs.NoSkills = $true }
 if ($env:SHELLOSSUS_SUB_NO_TEMPLATES -eq '1') { $workerArgs.NoPromptTemplates = $true }
@@ -6849,6 +6887,7 @@ if ($env:SHELLOSSUS_SUB_REASONING_EFFORT) { $workerArgs.ReasoningEffort = $env:S
                     SHELLOSSUS_SUB_STEPS = [string]$MaxSteps
                     SHELLOSSUS_SUB_CONTEXT_WINDOW = [string]$script:ContextWindowTokens
                     SHELLOSSUS_SUB_COMPACT_THRESHOLD = [string]$script:CompactThresholdTokens
+                    SHELLOSSUS_SUB_REQUEST_TIMEOUT = [string]$script:RequestTimeoutSec
                     SHELLOSSUS_SUB_PROMPT = $promptTemp.FullName
                     SHELLOSSUS_SUB_TOOLS = ($childTools -join ',')
                     SHELLOSSUS_SUB_NO_TOOLS = $(if ($childTools.Count -eq 0) { '1' } else { '0' })
@@ -9607,7 +9646,7 @@ function Invoke-CompactionBatch {
     } | ConvertTo-Json -Depth 20 -Compress
     $tempFile = New-AgentTempFile
     try {
-        Invoke-AgentHttpRequest -Uri $Endpoint -ApiKey $ApiKey -Body $summaryReq -OutFile $tempFile.FullName -TimeoutSec 180 -StatusLabel "Compacting context ($ModelId)"
+        Invoke-AgentHttpRequest -Uri $Endpoint -ApiKey $ApiKey -Body $summaryReq -OutFile $tempFile.FullName -TimeoutSec $script:RequestTimeoutSec -StatusLabel "Compacting context ($ModelId)"
         $reply = Read-AgentApiResponse -Path $tempFile.FullName
     }
     finally {
@@ -9794,7 +9833,8 @@ function Get-AgentDoctorReport {
         [string]$SessionDir,
         [switch]$NoSession,
         [string]$ConfigState = 'loaded',
-        [string]$KeyStorageWarning
+        [string]$KeyStorageWarning,
+        [string]$RequestTimeoutSpec = ''
     )
     $checks = @()
     $version = $PSVersionTable.PSVersion
@@ -9809,6 +9849,25 @@ function Get-AgentDoctorReport {
         $checks += @{ name = 'configuration'; status = 'info'; message = 'No saved configuration found. Using launch arguments and environment variables; run shellossus -Setup to save settings.' }
     }
     else { $checks += @{ name = 'configuration'; status = 'pass'; message = 'Configuration parsed; effective launch settings are checked below.' } }
+    $resolvedTimeout = $script:RequestTimeoutSec
+    $timeoutValid = $true
+    if ($RequestTimeoutSpec) {
+        try {
+            $resolvedTimeout = ConvertTo-AgentRequestTimeout -TimeoutSpec $RequestTimeoutSpec
+        }
+        catch {
+            $timeoutValid = $false
+        }
+    }
+    elseif ($resolvedTimeout -lt $script:MinRequestTimeoutSec -or $resolvedTimeout -gt $script:MaxRequestTimeoutSec) {
+        $resolvedTimeout = 180
+    }
+    if ($timeoutValid) {
+        $checks += @{ name = 'request_timeout'; status = 'pass'; message = "Model request timeout: ${resolvedTimeout}s." }
+    }
+    else {
+        $checks += @{ name = 'request_timeout'; status = 'fail'; message = 'RequestTimeoutSec must be an integer between 10 and 1800.' }
+    }
     try {
         $root = Get-Item -LiteralPath $Workspace -Force -ErrorAction Stop
         if (-not $root.PSIsContainer) { throw 'Expected a directory.' }
@@ -10256,7 +10315,7 @@ function Read-AgentApiResponse {
 }
 
 function Wait-AgentProcessWithSpinner {
-    param($Process, [string]$StatusLabel = 'Waiting for model', [int]$TimeoutSec = 180, [int]$PollMs = 200, [string]$ResponsePath)
+    param($Process, [string]$StatusLabel = 'Waiting for model', [int]$TimeoutSec = $script:RequestTimeoutSec, [int]$PollMs = 200, [string]$ResponsePath)
     $frames = @('|', '/', '-', '\')
     $frameIdx = 0
     $startWait = Get-Date
@@ -10307,7 +10366,7 @@ function Invoke-AgentHttpRequest {
         [string]$ApiKey,
         [string]$Body,
         [string]$OutFile,
-        [int]$TimeoutSec = 180,
+        [int]$TimeoutSec = $script:RequestTimeoutSec,
         [string]$StatusLabel = 'Waiting for model',
         [switch]$ForceBackgroundWorker
     )
@@ -10749,10 +10808,12 @@ function Invoke-AgentTurn {
         $reply = $null
         try {
             $maxRetries = 2
+            $stepStart = Get-Date
+            $attemptTimeoutSec = [int]$script:RequestTimeoutSec
             for ($attempt = 0; $attempt -le $maxRetries; $attempt++) {
                 try {
                     # Transient retries reuse the checked body. Context recovery rebuilds it.
-                    Invoke-AgentHttpRequest -Uri $Endpoint -ApiKey $ApiKey -Body $request.body -OutFile $tempResponse.FullName -TimeoutSec 180 -StatusLabel $statusLabel
+                    Invoke-AgentHttpRequest -Uri $Endpoint -ApiKey $ApiKey -Body $request.body -OutFile $tempResponse.FullName -TimeoutSec $attemptTimeoutSec -StatusLabel $statusLabel
                     $responseBytes = (Get-Item -LiteralPath $tempResponse.FullName -ErrorAction Stop).Length
                     if ($turnPayloadBytes + $responseBytes -gt $script:AgentMaxTurnPayloadBytes) {
                         throw "Turn exceeds the $($script:AgentMaxTurnPayloadBytes)-byte payload limit."
@@ -10766,11 +10827,16 @@ function Invoke-AgentTurn {
                     $contextError = $errFormatted -match '(?i)(context_length|maximum context|context window)'
                     if (-not $contextError -and ($attempt -lt $maxRetries) -and ($errFormatted -match '(?i)\b(408|429|500|502|503|504|timeout|timed out)\b')) {
                         $delay = ($attempt + 1) * 2
-                        if ($script:OutputMode -ne 'json') {
-                            Write-Host ($script:Gm.Yellow + ("  [retry {0}/{1}] Transient error ({2}); waiting {3}s..." -f ($attempt + 1), $maxRetries, (Format-TuiText $errFormatted), $delay) + $script:Gm.Reset)
+                        $remainingStepBudget = $script:MaxStepRetryBudgetSec - [int](((Get-Date) - $stepStart).TotalSeconds)
+                        if ($remainingStepBudget -gt ($delay + $script:MinRequestTimeoutSec)) {
+                            $maxRetryTimeout = $remainingStepBudget - $delay
+                            $attemptTimeoutSec = if ($script:RequestTimeoutSec -lt $maxRetryTimeout) { [int]$script:RequestTimeoutSec } else { [int]$maxRetryTimeout }
+                            if ($script:OutputMode -ne 'json') {
+                                Write-Host ($script:Gm.Yellow + ("  [retry {0}/{1}] Transient error ({2}); waiting {3}s..." -f ($attempt + 1), $maxRetries, (Format-TuiText $errFormatted), $delay) + $script:Gm.Reset)
+                            }
+                            Start-Sleep -Seconds $delay
+                            continue
                         }
-                        Start-Sleep -Seconds $delay
-                        continue
                     }
                     if (-not $overflowRetried -and ($contextError -or $errFormatted -match '(?i)(too many tokens|token limit)')) {
                         $overflowRetried = $true
@@ -11134,7 +11200,7 @@ function Format-TuiStatusCard {
     $compLabel = (Format-TokenCount -Tokens $st.compact_threshold_tokens) + " ($($st.compact_pct)%)"
     $hdr = ' ' + $script:Gm.BoldOrange + 'Session Status' + $script:Gm.Reset + ' '
     $body = @(
-        ($script:Gm.Grey1 + 'Model:       ' + $script:Gm.Fg1 + (Format-TuiText $Model) + $script:Gm.Grey1 + " (reasoning: view=$($script:ShowReasoning), effort=$effLabel)" + $script:Gm.Reset),
+        ($script:Gm.Grey1 + 'Model:       ' + $script:Gm.Fg1 + (Format-TuiText $Model) + $script:Gm.Grey1 + " (reasoning: view=$($script:ShowReasoning), effort=$effLabel) | Timeout: $($script:RequestTimeoutSec)s" + $script:Gm.Reset),
         ($script:Gm.Grey1 + 'Permission:  ' + (Format-PermissionBadge -Permission $script:AgentPermission) + $script:Gm.Grey1 + " | Theme: $($script:ActiveTheme) | MaxSteps: $MaxSteps | Undo stack: $UndoCount" + $script:Gm.Reset),
         ($script:Gm.Grey1 + 'Context:     ' + (Format-ContextGauge -Tokens $st.est_tokens -MaxTokens $st.context_window_tokens -CompactTokens $st.compact_threshold_tokens -Width 12) + $script:Gm.Grey1 + " | Auto-compact: $compLabel | Msgs: $($st.messages)" + $script:Gm.Reset),
         ($script:Gm.Grey1 + 'API Tokens:  ' + $script:Gm.Aqua + "in=$inTok out=$outTok" + $script:Gm.Grey1 + " (total=$(Format-TokenCount -Tokens ($inTok + $outTok)))" + $script:Gm.Reset),
@@ -12186,11 +12252,15 @@ if (-not $LibraryOnly) {
             SHELLOSSUS_API_KEY = $inputKey
             SHELLOSSUS_WORKSPACE = $inputWorkspace
         }
-        foreach ($optK in @('SHELLOSSUS_CONTEXT_WINDOW', 'SHELLOSSUS_COMPACT_THRESHOLD', 'SHELLOSSUS_THEME')) {
+        foreach ($optK in @('SHELLOSSUS_CONTEXT_WINDOW', 'SHELLOSSUS_COMPACT_THRESHOLD', 'SHELLOSSUS_REQUEST_TIMEOUT_SEC', 'SHELLOSSUS_THEME')) {
             if ($config.ContainsKey($optK) -and $config[$optK]) { $newCfg[$optK] = $config[$optK] }
         }
         if (($PSBoundParameters.Keys -contains 'ContextWindow') -and $ContextWindow) { $newCfg['SHELLOSSUS_CONTEXT_WINDOW'] = $ContextWindow }
         if (($PSBoundParameters.Keys -contains 'CompactThreshold') -and $CompactThreshold) { $newCfg['SHELLOSSUS_COMPACT_THRESHOLD'] = $CompactThreshold }
+        if ($script:StartupRequestTimeoutBound -and $script:StartupRequestTimeoutSpec) {
+            $null = Set-AgentRequestTimeout -TimeoutSpec $script:StartupRequestTimeoutSpec
+            $newCfg['SHELLOSSUS_REQUEST_TIMEOUT_SEC'] = [string]$script:RequestTimeoutSec
+        }
         if (($PSBoundParameters.Keys -contains 'Theme') -and $Theme -and $script:ActiveTheme) { $newCfg['SHELLOSSUS_THEME'] = $script:ActiveTheme }
         try { Save-AgentConfig -Path $ConfigPath -Config $newCfg }
         finally {
@@ -12221,14 +12291,27 @@ if (-not $LibraryOnly) {
         $doctorConfigState = 'invalid'
         $sessionDir = $SessionDir
     }
+    $effectiveTimeoutSpec = if ($script:StartupRequestTimeoutSpec) { $script:StartupRequestTimeoutSpec } elseif ($config.SHELLOSSUS_REQUEST_TIMEOUT_SEC) { $config.SHELLOSSUS_REQUEST_TIMEOUT_SEC } else { '' }
     if ($Doctor) {
         $doctorKey = Get-AgentConfiguredApiKey -Config $config
         try {
-            $report = Get-AgentDoctorReport -BaseUrl $BaseUrl -ModelId $Model -ApiKey $doctorKey -Workspace $Workspace -SessionDir $sessionDir -NoSession:$NoSession -ConfigState $doctorConfigState -KeyStorageWarning $keyStorageWarning
+            $report = Get-AgentDoctorReport -BaseUrl $BaseUrl -ModelId $Model -ApiKey $doctorKey -Workspace $Workspace -SessionDir $sessionDir -NoSession:$NoSession -ConfigState $doctorConfigState -KeyStorageWarning $keyStorageWarning -RequestTimeoutSpec $effectiveTimeoutSpec
             Write-AgentDoctorReport -Report $report -Mode $Mode
         }
         finally { Remove-Variable doctorKey -ErrorAction SilentlyContinue; $config.Clear() }
         exit $report.exit_code
+    }
+    if ($effectiveTimeoutSpec) {
+        try {
+            $null = Set-AgentRequestTimeout -TimeoutSpec $effectiveTimeoutSpec
+        }
+        catch {
+            Write-AgentJsonEvent -EventType 'turn_end' -Payload @{ status = 'error'; error = $_.Exception.Message }
+            throw
+        }
+    }
+    else {
+        $script:RequestTimeoutSec = 180
     }
     $rootItem = Get-Item -LiteralPath $Workspace -Force -ErrorAction Stop
     if (-not $rootItem.PSIsContainer) { throw 'Workspace must be a directory.' }
@@ -12432,7 +12515,7 @@ if (-not $LibraryOnly) {
             if ($trimmedQ -eq '/help' -or $trimmedQ -eq '/hotkeys') { Write-TuiHelpCard; continue }
             if ($trimmedQ -eq '/doctor') {
                 $doctorSessionDir = if ($sessionFile) { Split-Path $sessionFile -Parent } else { $sessionDir }
-                $report = Get-AgentDoctorReport -BaseUrl $BaseUrl -ModelId $Model -ApiKey $agentKey -Workspace $rootPath -SessionDir $doctorSessionDir -NoSession:(-not $sessionFile) -ConfigState $doctorConfigState -KeyStorageWarning $keyStorageWarning
+                $report = Get-AgentDoctorReport -BaseUrl $BaseUrl -ModelId $Model -ApiKey $agentKey -Workspace $rootPath -SessionDir $doctorSessionDir -NoSession:(-not $sessionFile) -ConfigState $doctorConfigState -KeyStorageWarning $keyStorageWarning -RequestTimeoutSpec ([string]$script:RequestTimeoutSec)
                 Write-AgentDoctorReport -Report $report -Mode $script:OutputMode
                 continue
             }

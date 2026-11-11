@@ -2312,6 +2312,241 @@ try {
         Remove-Item Function:\Write-Host -ErrorAction SilentlyContinue
         Remove-Variable -Name task13SaveHost -Scope Script -ErrorAction SilentlyContinue
     }
+
+    # Configurable RequestTimeoutSec: precedence (CLI > env > config > default 180), -Setup preservation/override,
+    # JSON turn_end error on invalid launch value, HTTP/spinner defaults, step retry budget clamping/cutoff, and TUI status card.
+    $savedCliTimeout = $script:RequestTimeoutSec
+    $savedCliRetryBudget = $script:MaxStepRetryBudgetSec
+    $savedEnvTimeout = $env:SHELLOSSUS_REQUEST_TIMEOUT_SEC
+    $savedEnvKeyForTimeout = $env:SHELLOSSUS_API_KEY
+    try {
+        Remove-Item Env:SHELLOSSUS_REQUEST_TIMEOUT_SEC -ErrorAction SilentlyContinue
+        $env:SHELLOSSUS_API_KEY = 'timeout-test-key'
+
+        $precEmptyCfg = Join-Path $testRoot 'timeout-prec-empty.env'
+        Save-AgentConfig -Path $precEmptyCfg -Config @{
+            SHELLOSSUS_BASE_URL = 'https://example.invalid/v1'
+            SHELLOSSUS_MODEL = 'test-model'
+        }
+        $precWithCfg = Join-Path $testRoot 'timeout-prec-set.env'
+        Save-AgentConfig -Path $precWithCfg -Config @{
+            SHELLOSSUS_BASE_URL = 'https://example.invalid/v1'
+            SHELLOSSUS_MODEL = 'test-model'
+            SHELLOSSUS_REQUEST_TIMEOUT_SEC = '240'
+        }
+
+        $global:capturedCliTimeouts = @()
+        function Invoke-WebRequest {
+            param($Uri, $Method, $Headers, $ContentType, $Body, $TimeoutSec, $ErrorAction, [switch]$UseBasicParsing, $OutFile)
+            $global:capturedCliTimeouts += [int]$TimeoutSec
+            $resp = @{ choices = @(@{ finish_reason = 'stop'; message = @{ content = 'ok' } }) } | ConvertTo-Json -Depth 8 -Compress
+            Set-Content -LiteralPath $OutFile -Value $resp -Encoding UTF8 -NoNewline
+        }
+        try {
+            $null = & "$PSScriptRoot\..\shellossus.ps1" -Workspace $workspacePath -ConfigPath $precEmptyCfg -Prompt 'ping' -Mode json -NoSession
+            $null = & "$PSScriptRoot\..\shellossus.ps1" -Workspace $workspacePath -ConfigPath $precWithCfg -Prompt 'ping' -Mode json -NoSession
+            $env:SHELLOSSUS_REQUEST_TIMEOUT_SEC = '360'
+            $null = & "$PSScriptRoot\..\shellossus.ps1" -Workspace $workspacePath -ConfigPath $precWithCfg -Prompt 'ping' -Mode json -NoSession
+            $null = & "$PSScriptRoot\..\shellossus.ps1" -Workspace $workspacePath -ConfigPath $precWithCfg -RequestTimeoutSec 480 -Prompt 'ping' -Mode json -NoSession
+            Remove-Item Env:SHELLOSSUS_REQUEST_TIMEOUT_SEC -ErrorAction SilentlyContinue
+            Assert-True (($global:capturedCliTimeouts -join ',') -eq '180,240,360,480') "Unexpected RequestTimeoutSec precedence order: $($global:capturedCliTimeouts -join ',')"
+        }
+        finally {
+            Remove-Item Function:\Invoke-WebRequest -ErrorAction SilentlyContinue
+            Remove-Variable -Name capturedCliTimeouts -Scope Global -ErrorAction SilentlyContinue
+            Remove-Item Env:SHELLOSSUS_REQUEST_TIMEOUT_SEC -ErrorAction SilentlyContinue
+        }
+
+        # -Setup preserves existing SHELLOSSUS_REQUEST_TIMEOUT_SEC and overrides when -RequestTimeoutSec is passed.
+        $setupTimeoutCfg = Join-Path $testRoot 'setup-timeout.env'
+        Save-AgentConfig -Path $setupTimeoutCfg -Config @{
+            SHELLOSSUS_BASE_URL = 'https://old.invalid/v1'
+            SHELLOSSUS_MODEL = 'old-model'
+            SHELLOSSUS_API_KEY = 'old-key'
+            SHELLOSSUS_REQUEST_TIMEOUT_SEC = '300'
+        }
+        function global:Read-Host {
+            param($Prompt, [switch]$AsSecureString)
+            if ($AsSecureString) { return }
+            return ''
+        }
+        function Write-Host {
+            param([Parameter(Position = 0, ValueFromRemainingArguments = $true)]$Object, [switch]$NoNewline, $ForegroundColor, $BackgroundColor)
+        }
+        try {
+            & "$PSScriptRoot\..\shellossus.ps1" -Setup -ConfigPath $setupTimeoutCfg -BaseUrl 'https://new.invalid/v1' -Model 'new-model'
+            $afterPreserve = Read-AgentConfig -Path $setupTimeoutCfg
+            Assert-True ($afterPreserve.SHELLOSSUS_REQUEST_TIMEOUT_SEC -eq '300' -and $afterPreserve.SHELLOSSUS_MODEL -eq 'new-model') '-Setup without -RequestTimeoutSec did not preserve SHELLOSSUS_REQUEST_TIMEOUT_SEC.'
+
+            & "$PSScriptRoot\..\shellossus.ps1" -Setup -ConfigPath $setupTimeoutCfg -BaseUrl 'https://new.invalid/v1' -Model 'new-model' -RequestTimeoutSec 540
+            $afterOverride = Read-AgentConfig -Path $setupTimeoutCfg
+            Assert-True ($afterOverride.SHELLOSSUS_REQUEST_TIMEOUT_SEC -eq '540') '-Setup with -RequestTimeoutSec 540 did not persist 540.'
+
+            $badSetupThrew = $false
+            try {
+                & "$PSScriptRoot\..\shellossus.ps1" -Setup -ConfigPath $setupTimeoutCfg -BaseUrl 'https://new.invalid/v1' -Model 'bad-model' -RequestTimeoutSec 9
+            }
+            catch {
+                if ($_.Exception.Message -eq 'RequestTimeoutSec must be an integer between 10 and 1800.') { $badSetupThrew = $true }
+            }
+            Assert-True ($badSetupThrew -and (Read-AgentConfig -Path $setupTimeoutCfg).SHELLOSSUS_REQUEST_TIMEOUT_SEC -eq '540') '-Setup accepted invalid -RequestTimeoutSec 9 or overwrote existing config.'
+        }
+        finally {
+            Remove-Item Function:\global:Read-Host -ErrorAction SilentlyContinue
+            Remove-Item Function:\Write-Host -ErrorAction SilentlyContinue
+        }
+
+        # Invalid -RequestTimeoutSec in -Mode json emits turn_end error and throws.
+        foreach ($badLaunchVal in @('0', '9', '1801', 'abc')) {
+            $script:badJsonLines = @()
+            $badLaunchThrew = $false
+            try {
+                & "$PSScriptRoot\..\shellossus.ps1" -Workspace $workspacePath -ConfigPath $precEmptyCfg -RequestTimeoutSec $badLaunchVal -Prompt 'ping' -Mode json -NoSession 6>&1 | ForEach-Object { $script:badJsonLines += [string]$_ }
+            }
+            catch {
+                if ($_.Exception.Message -eq 'RequestTimeoutSec must be an integer between 10 and 1800.') { $badLaunchThrew = $true }
+            }
+            $sawTurnEndErr = $false
+            foreach ($jl in $script:badJsonLines) {
+                if (-not ([string]$jl).Trim()) { continue }
+                $jev = ([string]$jl) | ConvertFrom-Json -ErrorAction Stop
+                if ($jev.type -eq 'turn_end' -and $jev.status -eq 'error' -and $jev.error -eq 'RequestTimeoutSec must be an integer between 10 and 1800.') {
+                    $sawTurnEndErr = $true
+                }
+            }
+            Remove-Variable -Name badJsonLines -Scope Script -ErrorAction SilentlyContinue
+            Assert-True ($badLaunchThrew -and $sawTurnEndErr) "Expected JSON turn_end error and exception for -RequestTimeoutSec '$badLaunchVal'."
+        }
+
+        # Invoke-AgentHttpRequest and Wait-AgentProcessWithSpinner default to $script:RequestTimeoutSec.
+        $null = Set-AgentRequestTimeout -TimeoutSpec '315'
+        $script:defaultHttpCaptured = 0
+        function Invoke-WebRequest {
+            param($Uri, $Method, $Headers, $ContentType, $Body, $TimeoutSec, $ErrorAction, [switch]$UseBasicParsing, $OutFile)
+            $script:defaultHttpCaptured = [int]$TimeoutSec
+            Set-Content -LiteralPath $OutFile -Value '{"ok":true}' -Encoding UTF8 -NoNewline
+        }
+        $httpTmp = New-AgentTempFile
+        try {
+            Invoke-AgentHttpRequest -Uri 'https://example.invalid/v1/chat/completions' -ApiKey 'k' -Body '{}' -OutFile $httpTmp.FullName
+            Assert-True ($script:defaultHttpCaptured -eq 315) "Invoke-AgentHttpRequest default TimeoutSec did not use RequestTimeoutSec=315 (got $($script:defaultHttpCaptured))."
+        }
+        finally {
+            Remove-Item Function:\Invoke-WebRequest -ErrorAction SilentlyContinue
+            Remove-Variable -Name defaultHttpCaptured -Scope Script -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $httpTmp.FullName -Force -ErrorAction SilentlyContinue
+        }
+
+        $script:spinClockCalls = 0
+        $fakeSpinProc = [pscustomobject]@{ HasExited = $false; Id = 999998 }
+        $savedHideSpinner = $script:HideSpinner
+        $script:HideSpinner = $true
+        function Get-Date {
+            $script:spinClockCalls++
+            if ($script:spinClockCalls -eq 1) { return [datetime]'2026-01-01T00:00:00Z' }
+            if ($script:spinClockCalls -eq 2) { return [datetime]'2026-01-01T00:03:20Z' }
+            return [datetime]'2026-01-01T00:05:20Z'
+        }
+        function Start-Sleep { param($Milliseconds, $Seconds) }
+        function Stop-Process { param($InputObject, $Id, [switch]$Force, $ErrorAction) }
+        function Wait-Process { param($InputObject, $Timeout, $ErrorAction) }
+        try {
+            $spinErr = ''
+            try {
+                Wait-AgentProcessWithSpinner -Process $fakeSpinProc
+            }
+            catch {
+                $spinErr = [string]$_.Exception.Message
+            }
+            Assert-True ($script:spinClockCalls -eq 3 -and $spinErr -eq 'Request timed out after 315s.') "Wait-AgentProcessWithSpinner did not wait until 315+5s (calls=$($script:spinClockCalls), err='$spinErr')."
+        }
+        finally {
+            $script:HideSpinner = $savedHideSpinner
+            Remove-Item Function:\Get-Date -ErrorAction SilentlyContinue
+            Remove-Item Function:\Start-Sleep -ErrorAction SilentlyContinue
+            Remove-Item Function:\Stop-Process -ErrorAction SilentlyContinue
+            Remove-Item Function:\Wait-Process -ErrorAction SilentlyContinue
+            Remove-Variable -Name spinClockCalls -Scope Script -ErrorAction SilentlyContinue
+        }
+
+        # Invoke-AgentTurn clamps retry TimeoutSec to remaining MaxStepRetryBudgetSec and stops retrying when remaining <= delay + MinRequestTimeoutSec.
+        $savedTurnMode = $script:OutputMode
+        $script:OutputMode = 'json'
+        $script:retryClampTimeouts = @()
+        try {
+            & {
+                function Invoke-AgentHttpRequest {
+                    param([string]$Uri, [string]$ApiKey, [string]$Body, [string]$OutFile, [int]$TimeoutSec, [string]$StatusLabel, [switch]$ForceBackgroundWorker)
+                    $script:retryClampTimeouts += $TimeoutSec
+                    if ($script:retryClampTimeouts.Count -eq 1) {
+                        throw 'HTTP 503 Service Unavailable'
+                    }
+                    $r = @{ choices = @(@{ finish_reason = 'stop'; message = @{ content = 'recovered' } }) } | ConvertTo-Json -Depth 8 -Compress
+                    Set-Content -LiteralPath $OutFile -Value $r -Encoding UTF8 -NoNewline
+                }
+                function Start-Sleep { param($Seconds, $Milliseconds) }
+
+                $script:RequestTimeoutSec = 40
+                $script:MaxStepRetryBudgetSec = 30
+                $clampState = @{
+                    session_id = 'clamp-test'
+                    workspace = $workspacePath
+                    model = 'test-model'
+                    messages = @(
+                        @{ role = 'system'; content = 'sys' },
+                        @{ role = 'user'; content = 'hello' }
+                    )
+                }
+                Invoke-AgentTurn -State $clampState -Endpoint 'https://example.invalid/v1/chat/completions' -ModelId 'test-model' -ApiKey 'k' -Root $workspacePath -Steps 3
+                Assert-True ($clampState.messages[-1].content -eq 'recovered' -and $script:retryClampTimeouts.Count -eq 2) 'Expected 1 transient retry within budget.'
+                Assert-True ($script:retryClampTimeouts[0] -eq 40 -and $script:retryClampTimeouts[1] -le 28 -and $script:retryClampTimeouts[1] -ge 10) "Expected retry TimeoutSec clamped to <=28, got: $($script:retryClampTimeouts -join ',')"
+
+                $script:retryClampTimeouts = @()
+                $script:RequestTimeoutSec = 20
+                $script:MaxStepRetryBudgetSec = 12
+                $cutoffState = @{
+                    session_id = 'cutoff-test'
+                    workspace = $workspacePath
+                    model = 'test-model'
+                    messages = @(
+                        @{ role = 'system'; content = 'sys' },
+                        @{ role = 'user'; content = 'hello' }
+                    )
+                }
+                $cutoffThrew = $false
+                try {
+                    Invoke-AgentTurn -State $cutoffState -Endpoint 'https://example.invalid/v1/chat/completions' -ModelId 'test-model' -ApiKey 'k' -Root $workspacePath -Steps 3
+                }
+                catch {
+                    if ($_.Exception.Message -like '*503*') { $cutoffThrew = $true }
+                }
+                Assert-True ($cutoffThrew -and $script:retryClampTimeouts.Count -eq 1) "Expected retry cutoff when remaining budget <= delay + MinRequestTimeoutSec, got attempts=$($script:retryClampTimeouts.Count)."
+            }
+        }
+        finally {
+            $script:OutputMode = $savedTurnMode
+            Remove-Variable -Name retryClampTimeouts -Scope Script -ErrorAction SilentlyContinue
+        }
+
+        # Format-TuiStatusCard includes active RequestTimeoutSec.
+        $null = Set-AgentRequestTimeout -TimeoutSpec '540'
+        $statusTimeoutState = @{
+            session_id = 'status-timeout'
+            workspace = $workspacePath
+            model = 'test-model'
+            messages = @(@{ role = 'system'; content = 'sys' })
+        }
+        $statusTimeoutPlain = ((Format-TuiStatusCard -State $statusTimeoutState -Model 'test-model' -MaxSteps 50 -SessionFile 'test.jsonl' -UndoCount 0) | ForEach-Object { Strip-AnsiCodes -Text $_ }) -join "`n"
+        Assert-True ($statusTimeoutPlain.Contains('540s')) "Format-TuiStatusCard did not include 540s timeout: $statusTimeoutPlain"
+    }
+    finally {
+        $script:RequestTimeoutSec = $savedCliTimeout
+        $script:MaxStepRetryBudgetSec = $savedCliRetryBudget
+        if ($null -eq $savedEnvTimeout) { Remove-Item Env:SHELLOSSUS_REQUEST_TIMEOUT_SEC -ErrorAction SilentlyContinue }
+        else { $env:SHELLOSSUS_REQUEST_TIMEOUT_SEC = $savedEnvTimeout }
+        if ($null -eq $savedEnvKeyForTimeout) { Remove-Item Env:SHELLOSSUS_API_KEY -ErrorAction SilentlyContinue }
+        else { $env:SHELLOSSUS_API_KEY = $savedEnvKeyForTimeout }
+    }
 }
 finally {
     Remove-TestEnvironment -Env $envData

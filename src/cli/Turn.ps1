@@ -338,10 +338,12 @@ function Invoke-AgentTurn {
         $reply = $null
         try {
             $maxRetries = 2
+            $stepStart = Get-Date
+            $attemptTimeoutSec = [int]$script:RequestTimeoutSec
             for ($attempt = 0; $attempt -le $maxRetries; $attempt++) {
                 try {
                     # Transient retries reuse the checked body. Context recovery rebuilds it.
-                    Invoke-AgentHttpRequest -Uri $Endpoint -ApiKey $ApiKey -Body $request.body -OutFile $tempResponse.FullName -TimeoutSec 180 -StatusLabel $statusLabel
+                    Invoke-AgentHttpRequest -Uri $Endpoint -ApiKey $ApiKey -Body $request.body -OutFile $tempResponse.FullName -TimeoutSec $attemptTimeoutSec -StatusLabel $statusLabel
                     $responseBytes = (Get-Item -LiteralPath $tempResponse.FullName -ErrorAction Stop).Length
                     if ($turnPayloadBytes + $responseBytes -gt $script:AgentMaxTurnPayloadBytes) {
                         throw "Turn exceeds the $($script:AgentMaxTurnPayloadBytes)-byte payload limit."
@@ -355,11 +357,16 @@ function Invoke-AgentTurn {
                     $contextError = $errFormatted -match '(?i)(context_length|maximum context|context window)'
                     if (-not $contextError -and ($attempt -lt $maxRetries) -and ($errFormatted -match '(?i)\b(408|429|500|502|503|504|timeout|timed out)\b')) {
                         $delay = ($attempt + 1) * 2
-                        if ($script:OutputMode -ne 'json') {
-                            Write-Host ($script:Gm.Yellow + ("  [retry {0}/{1}] Transient error ({2}); waiting {3}s..." -f ($attempt + 1), $maxRetries, (Format-TuiText $errFormatted), $delay) + $script:Gm.Reset)
+                        $remainingStepBudget = $script:MaxStepRetryBudgetSec - [int](((Get-Date) - $stepStart).TotalSeconds)
+                        if ($remainingStepBudget -gt ($delay + $script:MinRequestTimeoutSec)) {
+                            $maxRetryTimeout = $remainingStepBudget - $delay
+                            $attemptTimeoutSec = if ($script:RequestTimeoutSec -lt $maxRetryTimeout) { [int]$script:RequestTimeoutSec } else { [int]$maxRetryTimeout }
+                            if ($script:OutputMode -ne 'json') {
+                                Write-Host ($script:Gm.Yellow + ("  [retry {0}/{1}] Transient error ({2}); waiting {3}s..." -f ($attempt + 1), $maxRetries, (Format-TuiText $errFormatted), $delay) + $script:Gm.Reset)
+                            }
+                            Start-Sleep -Seconds $delay
+                            continue
                         }
-                        Start-Sleep -Seconds $delay
-                        continue
                     }
                     if (-not $overflowRetried -and ($contextError -or $errFormatted -match '(?i)(too many tokens|token limit)')) {
                         $overflowRetried = $true

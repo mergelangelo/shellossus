@@ -53,7 +53,7 @@ function Format-TuiStatusCard {
     $compLabel = (Format-TokenCount -Tokens $st.compact_threshold_tokens) + " ($($st.compact_pct)%)"
     $hdr = ' ' + $script:Gm.BoldOrange + 'Session Status' + $script:Gm.Reset + ' '
     $body = @(
-        ($script:Gm.Grey1 + 'Model:       ' + $script:Gm.Fg1 + (Format-TuiText $Model) + $script:Gm.Grey1 + " (reasoning: view=$($script:ShowReasoning), effort=$effLabel)" + $script:Gm.Reset),
+        ($script:Gm.Grey1 + 'Model:       ' + $script:Gm.Fg1 + (Format-TuiText $Model) + $script:Gm.Grey1 + " (reasoning: view=$($script:ShowReasoning), effort=$effLabel) | Timeout: $($script:RequestTimeoutSec)s" + $script:Gm.Reset),
         ($script:Gm.Grey1 + 'Permission:  ' + (Format-PermissionBadge -Permission $script:AgentPermission) + $script:Gm.Grey1 + " | Theme: $($script:ActiveTheme) | MaxSteps: $MaxSteps | Undo stack: $UndoCount" + $script:Gm.Reset),
         ($script:Gm.Grey1 + 'Context:     ' + (Format-ContextGauge -Tokens $st.est_tokens -MaxTokens $st.context_window_tokens -CompactTokens $st.compact_threshold_tokens -Width 12) + $script:Gm.Grey1 + " | Auto-compact: $compLabel | Msgs: $($st.messages)" + $script:Gm.Reset),
         ($script:Gm.Grey1 + 'API Tokens:  ' + $script:Gm.Aqua + "in=$inTok out=$outTok" + $script:Gm.Grey1 + " (total=$(Format-TokenCount -Tokens ($inTok + $outTok)))" + $script:Gm.Reset),

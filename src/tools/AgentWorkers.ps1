@@ -81,7 +81,15 @@ function Get-AgentWorkerErrorText {
 }
 
 function Invoke-ParallelSubagentProcesses {
-    param([string]$Root, [array]$Tasks, [int]$MaxSteps = 15, [string]$ScriptPath, [int]$TimeoutSec = 180, [string]$ApiKey)
+    param([string]$Root, [array]$Tasks, [int]$MaxSteps = 15, [string]$ScriptPath, [int]$TimeoutSec = 0, [string]$ApiKey)
+    if ($TimeoutSec -le 0) {
+        $TimeoutSec = if (($script:RequestTimeoutSec + 30) -gt 180) {
+            if (($script:RequestTimeoutSec + 30) -gt 3600) { 3600 } else { $script:RequestTimeoutSec + 30 }
+        }
+        else {
+            180
+        }
+    }
     $configDir = if ($script:AgentConfigPath) { Split-Path $script:AgentConfigPath -Parent } else { '' }
     $shellExe = Get-AgentPowerShellExecutable
     $effEndpoint = if ($script:ActiveEndpoint) { $script:ActiveEndpoint } else { 'https://example.invalid/v1/chat/completions' }
@@ -106,6 +114,7 @@ $workerArgs = @{
     Prompt = $pText
     LiteralPrompt = $true
 }
+if ($env:SHELLOSSUS_SUB_REQUEST_TIMEOUT) { $workerArgs.RequestTimeoutSec = $env:SHELLOSSUS_SUB_REQUEST_TIMEOUT }
 if ($env:SHELLOSSUS_SUB_CONFIG) { $workerArgs.ConfigPath = $env:SHELLOSSUS_SUB_CONFIG }
 if ($env:SHELLOSSUS_SUB_NO_SKILLS -eq '1') { $workerArgs.NoSkills = $true }
 if ($env:SHELLOSSUS_SUB_NO_TEMPLATES -eq '1') { $workerArgs.NoPromptTemplates = $true }
@@ -145,6 +154,7 @@ if ($env:SHELLOSSUS_SUB_REASONING_EFFORT) { $workerArgs.ReasoningEffort = $env:S
                     SHELLOSSUS_SUB_STEPS = [string]$MaxSteps
                     SHELLOSSUS_SUB_CONTEXT_WINDOW = [string]$script:ContextWindowTokens
                     SHELLOSSUS_SUB_COMPACT_THRESHOLD = [string]$script:CompactThresholdTokens
+                    SHELLOSSUS_SUB_REQUEST_TIMEOUT = [string]$script:RequestTimeoutSec
                     SHELLOSSUS_SUB_PROMPT = $promptTemp.FullName
                     SHELLOSSUS_SUB_TOOLS = ($childTools -join ',')
                     SHELLOSSUS_SUB_NO_TOOLS = $(if ($childTools.Count -eq 0) { '1' } else { '0' })

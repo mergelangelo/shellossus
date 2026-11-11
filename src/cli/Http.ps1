@@ -55,7 +55,7 @@ function Read-AgentApiResponse {
 }
 
 function Wait-AgentProcessWithSpinner {
-    param($Process, [string]$StatusLabel = 'Waiting for model', [int]$TimeoutSec = 180, [int]$PollMs = 200, [string]$ResponsePath)
+    param($Process, [string]$StatusLabel = 'Waiting for model', [int]$TimeoutSec = $script:RequestTimeoutSec, [int]$PollMs = 200, [string]$ResponsePath)
     $frames = @('|', '/', '-', '\')
     $frameIdx = 0
     $startWait = Get-Date
@@ -106,7 +106,7 @@ function Invoke-AgentHttpRequest {
         [string]$ApiKey,
         [string]$Body,
         [string]$OutFile,
-        [int]$TimeoutSec = 180,
+        [int]$TimeoutSec = $script:RequestTimeoutSec,
         [string]$StatusLabel = 'Waiting for model',
         [switch]$ForceBackgroundWorker
     )

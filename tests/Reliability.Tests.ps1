@@ -1609,6 +1609,7 @@ param(
     $MaxSteps,
     $ContextWindow,
     $CompactThreshold,
+    $RequestTimeoutSec,
     $Tools,
     [switch]$NoTools,
     $ExcludeTools,
@@ -1629,6 +1630,7 @@ $passedNoContext = [bool]$NoContextFiles
 $passedReasoning = [string]$ReasoningEffort
 $passedWindow = [string]$ContextWindow
 $passedThreshold = [string]$CompactThreshold
+$passedTimeout = [string]$RequestTimeoutSec
 $passedPrompt = [string]$Prompt
 $passedLiteralPrompt = [bool]$LiteralPrompt
 . '__LIBRARY__' -LibraryOnly
@@ -1651,6 +1653,7 @@ $payload = @{
     reasoning_effort = $passedReasoning
     context_window = $passedWindow
     compact_threshold = $passedThreshold
+    request_timeout = $passedTimeout
     user_prompt = $passedPrompt
     literal_prompt = $passedLiteralPrompt
     sys_has_role = $sysPrompt.Contains("[Subagent Role: $($env:SHELLOSSUS_SUB_ROLE)]")
@@ -1669,7 +1672,9 @@ $payload = @{
     $script:AutoApproveWeb = $true
     $savedWorkerWindow = $script:ContextWindowTokens
     $savedWorkerThreshold = $script:CompactThresholdTokens
+    $savedWorkerReqTimeout = $script:RequestTimeoutSec
     $null = Set-AgentContextLimits -WindowSpec '8k' -CompactSpec '4k'
+    $script:RequestTimeoutSec = 480
     $parentStateForParallel = @{ usage_input_tokens = 10; usage_output_tokens = 5 }
     $script:ActiveState = $parentStateForParallel
     try {
@@ -1682,8 +1687,48 @@ $payload = @{
         Assert-True ($writer.no_tools -and $writer.tools.Count -eq 0) 'Empty worker allowlist enabled tools.'
         Assert-True ($reader.no_skills -and $reader.no_templates -and $reader.no_context -and $reader.reasoning_effort -eq 'high') 'Worker did not receive -NoSkills, -NoPromptTemplates, -NoContextFiles, or -ReasoningEffort.'
         Assert-True ($reader.context_window -eq '8000' -and $reader.compact_threshold -eq '4000') 'Worker did not inherit the active context limits.'
+        Assert-True ($reader.request_timeout -eq '480' -and $writer.request_timeout -eq '480') "Worker did not inherit RequestTimeoutSec=480 (got reader='$($reader.request_timeout)', writer='$($writer.request_timeout)')."
         Assert-True ($reader.user_prompt -ceq '/check-files @model-only.txt' -and $reader.literal_prompt -and $reader.sys_has_role) ("Parallel worker did not receive a literal user prompt and separate role: " + ($reader | ConvertTo-Json -Compress))
         Assert-True ($parentStateForParallel.usage_input_tokens -eq 260 -and $parentStateForParallel.usage_output_tokens -eq 75) "Parallel worker token usage was not aggregated into parent state (got in=$($parentStateForParallel.usage_input_tokens), out=$($parentStateForParallel.usage_output_tokens))."
+
+        # Parallel supervisor default TimeoutSec scales dynamically to max(180, min(3600, RequestTimeoutSec + 30)) when omitted.
+        foreach ($supCase in @(
+            @{ ReqTimeout = 60; MidIso = '2026-01-01T00:02:00Z'; EndIso = '2026-01-01T00:03:00Z'; ExpectedTimeout = 180 },
+            @{ ReqTimeout = 600; MidIso = '2026-01-01T00:04:00Z'; EndIso = '2026-01-01T00:10:30Z'; ExpectedTimeout = 630 },
+            @{ ReqTimeout = 1800; MidIso = '2026-01-01T00:30:10Z'; EndIso = '2026-01-01T00:30:30Z'; ExpectedTimeout = 1830 },
+            @{ ReqTimeout = 3580; MidIso = '2026-01-01T00:59:50Z'; EndIso = '2026-01-01T01:00:00Z'; ExpectedTimeout = 3600 }
+        )) {
+            $script:RequestTimeoutSec = $supCase.ReqTimeout
+            $script:supClockStep = 0
+            $script:supMidIso = $supCase.MidIso
+            $script:supEndIso = $supCase.EndIso
+            $savedSupMode = $script:OutputMode
+            $script:OutputMode = 'json'
+            try {
+                $supRes = @(& {
+                    function Start-Process {
+                        param($FilePath, $ArgumentList, $WorkingDirectory, $RedirectStandardOutput, $RedirectStandardError, [switch]$NoNewWindow, [switch]$PassThru, $ErrorAction)
+                        return @{ HasExited = $false; Id = 999997; ExitCode = 1 }
+                    }
+                    function Get-Date {
+                        $script:supClockStep++
+                        if ($script:supClockStep -eq 1) { return [datetime]'2026-01-01T00:00:00Z' }
+                        if ($script:supClockStep -eq 2) { return [datetime]$script:supMidIso }
+                        return [datetime]$script:supEndIso
+                    }
+                    function Start-Sleep { param($Milliseconds, $Seconds) }
+                    function Stop-AgentProcessTree { param($Process) return $true }
+                    function Wait-Process { param($InputObject, $Timeout, $ErrorAction) }
+                    Invoke-ParallelSubagentProcesses -Root $workspacePath -Tasks @(@{ role = 'recon'; prompt = 'scale check' }) -ScriptPath $workerScript -ApiKey 'worker-fixture-key'
+                })
+                Assert-True ($script:supClockStep -eq 3 -and $supRes[0].status -eq 'timed_out' -and $supRes[0].output -eq "Subagent timed out after $($supCase.ExpectedTimeout)s.") "Supervisor timeout scaling failed for RequestTimeoutSec=$($supCase.ReqTimeout): steps=$($script:supClockStep), status=$($supRes[0].status), output='$($supRes[0].output)'"
+            }
+            finally {
+                $script:OutputMode = $savedSupMode
+                Remove-Variable -Name supClockStep, supMidIso, supEndIso -Scope Script -ErrorAction SilentlyContinue
+            }
+        }
+        $script:RequestTimeoutSec = 480
 
         # Regression (Task 11): Aborted/crashed parallel worker that emitted message_end with read_file tool_call
         # but never emitted tool_execution_end or completed turn_end must not report pending read_file as completed.
@@ -1728,6 +1773,7 @@ exit 1
         $script:AutoApproveWeb = $false
         $script:ContextWindowTokens = $savedWorkerWindow
         $script:CompactThresholdTokens = $savedWorkerThreshold
+        $script:RequestTimeoutSec = $savedWorkerReqTimeout
         $script:ActiveState = $null
     }
 

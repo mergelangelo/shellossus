@@ -362,6 +362,9 @@ try {
     $clLim = Set-AgentContextLimits -WindowSpec '128k' -CompactSpec '80k'
     Assert-True ($clLim.context_window_tokens -eq 128000 -and $clLim.compact_threshold_tokens -eq 80000) 'ConstrainedLanguage Set-AgentContextLimits failed.'
     $null = Set-AgentContextLimits -WindowSpec '128k' -CompactSpec '75%'
+    $clTimeout = Set-AgentRequestTimeout -TimeoutSpec '300'
+    Assert-True ($clTimeout -eq 300 -and $script:RequestTimeoutSec -eq 300) 'ConstrainedLanguage Set-AgentRequestTimeout failed.'
+    $null = Set-AgentRequestTimeout -TimeoutSpec '180'
     Assert-True ((ConvertTo-UrlEncodedString -Text $clCyr) -eq '%D1%87%D1%82%D0%BE%3F') 'ConstrainedLanguage ConvertTo-UrlEncodedString failed.'
     $clEmoji = ([string][char]0xD83D) + ([string][char]0xDE00)
     Assert-True ((ConvertTo-UrlEncodedString -Text $clEmoji) -eq '%F0%9F%98%80') 'ConstrainedLanguage supplementary Unicode encoding failed.'

@@ -492,6 +492,51 @@ try {
             }
         }
     }
+
+    # Configurable model request timeout: defaults, Set-AgentRequestTimeout validation (10..1800), and config round-trip.
+    Assert-True ($script:RequestTimeoutSec -eq 180) "Expected default RequestTimeoutSec 180, got $($script:RequestTimeoutSec)."
+    Assert-True ($script:MinRequestTimeoutSec -eq 10 -and $script:MaxRequestTimeoutSec -eq 1800 -and $script:MaxStepRetryBudgetSec -eq 3600) 'Expected timeout bounds 10..1800 and step retry budget 3600.'
+    $savedReqTimeout = $script:RequestTimeoutSec
+    try {
+        foreach ($validSpec in @(
+            @{ Spec = '10'; Expected = 10 },
+            @{ Spec = '180'; Expected = 180 },
+            @{ Spec = ' 600 '; Expected = 600 },
+            @{ Spec = '1800'; Expected = 1800 }
+        )) {
+            $parsedTimeout = Set-AgentRequestTimeout -TimeoutSpec $validSpec.Spec
+            Assert-True ($parsedTimeout -eq $validSpec.Expected -and $script:RequestTimeoutSec -eq $validSpec.Expected) "Set-AgentRequestTimeout failed for valid spec '$($validSpec.Spec)'."
+        }
+        $null = Set-AgentRequestTimeout -TimeoutSpec '333'
+        foreach ($badSpec in @('0', '9', '1801', 'abc', '', '   ', '-30', '12.5', '999999999999')) {
+            $badThrew = $false
+            $badErr = ''
+            try {
+                $null = Set-AgentRequestTimeout -TimeoutSpec $badSpec
+            }
+            catch {
+                $badThrew = $true
+                $badErr = [string]$_.Exception.Message
+            }
+            Assert-True ($badThrew -and $badErr -eq 'RequestTimeoutSec must be an integer between 10 and 1800.') "Set-AgentRequestTimeout accepted or returned wrong error for '$badSpec': $badErr"
+            Assert-True ($script:RequestTimeoutSec -eq 333) "Failed Set-AgentRequestTimeout mutated RequestTimeoutSec on '$badSpec'."
+        }
+
+        $timeoutCfgPath = Join-Path $testRoot 'timeout-roundtrip.env'
+        Save-AgentConfig -Path $timeoutCfgPath -Config @{
+            SHELLOSSUS_BASE_URL = 'https://example.invalid/v1'
+            SHELLOSSUS_MODEL = 'test-model'
+            SHELLOSSUS_REQUEST_TIMEOUT_SEC = '360'
+        }
+        $loadedTimeoutCfg = Read-AgentConfig -Path $timeoutCfgPath
+        Assert-True ($loadedTimeoutCfg.SHELLOSSUS_REQUEST_TIMEOUT_SEC -eq '360') "Save/Read-AgentConfig did not round-trip SHELLOSSUS_REQUEST_TIMEOUT_SEC: $($loadedTimeoutCfg.SHELLOSSUS_REQUEST_TIMEOUT_SEC)"
+        Assert-True (Update-AgentConfigOptionalKey -Path $timeoutCfgPath -Key 'SHELLOSSUS_REQUEST_TIMEOUT_SEC' -Value '420') 'Update-AgentConfigOptionalKey failed for SHELLOSSUS_REQUEST_TIMEOUT_SEC.'
+        $updatedTimeoutCfg = Read-AgentConfig -Path $timeoutCfgPath
+        Assert-True ($updatedTimeoutCfg.SHELLOSSUS_REQUEST_TIMEOUT_SEC -eq '420') 'Update-AgentConfigOptionalKey did not persist SHELLOSSUS_REQUEST_TIMEOUT_SEC.'
+    }
+    finally {
+        $script:RequestTimeoutSec = $savedReqTimeout
+    }
 }
 finally {
     Remove-TestEnvironment -Env $envData

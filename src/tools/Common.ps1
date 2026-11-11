@@ -37,6 +37,30 @@ $script:AgentMaxTreeEntries = 5000
 $script:AgentMaxUndoFrames = 20
 $script:AgentMaxDiagnosticsEntries = 100
 $script:AgentMaxWalkEntries = 10000
+$script:RequestTimeoutSec = 180
+$script:MinRequestTimeoutSec = 10
+$script:MaxRequestTimeoutSec = 1800
+$script:MaxStepRetryBudgetSec = 3600
+
+function ConvertTo-AgentRequestTimeout {
+    param([AllowEmptyString()][string]$TimeoutSpec)
+    $err = 'RequestTimeoutSec must be an integer between 10 and 1800.'
+    if ($null -eq $TimeoutSpec) { throw $err }
+    $trimmed = $TimeoutSpec.Trim()
+    if ($trimmed -notmatch '^\d{1,4}$') { throw $err }
+    $val = [int]$trimmed
+    if ($val -lt $script:MinRequestTimeoutSec -or $val -gt $script:MaxRequestTimeoutSec) {
+        throw $err
+    }
+    return $val
+}
+
+function Set-AgentRequestTimeout {
+    param([AllowEmptyString()][string]$TimeoutSpec)
+    $val = ConvertTo-AgentRequestTimeout -TimeoutSpec $TimeoutSpec
+    $script:RequestTimeoutSec = $val
+    return $script:RequestTimeoutSec
+}
 
 function Get-CurrentTurnWritePathsSince {
     param([int]$StartCount)
