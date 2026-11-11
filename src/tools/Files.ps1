@@ -285,6 +285,7 @@ function Invoke-AgentStagedWrite {
         }
     }
     finally {
+        Clear-WorkspaceWalkCache
         if (Test-Path -LiteralPath $stageFile.FullName) {
             Remove-Item -LiteralPath $stageFile.FullName -Force -ErrorAction SilentlyContinue
         }

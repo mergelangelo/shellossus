@@ -142,6 +142,7 @@ function Invoke-SubagentInProcess {
         }
     }
     finally {
+        Clear-WorkspaceWalkCache
         $permRank = @{ 'ReadOnly' = 0; 'Ask' = 1; 'AutoEdit' = 2; 'Auto' = 3 }
         if (-not $ForceReadOnly -and $roleObj.permission -ne 'ReadOnly' -and $permRank[$script:AgentPermission] -gt $permRank[$savedPerm]) {
             # Keep session-wide [a]ll permission upgrade approved by the user during craft subagent
@@ -223,6 +224,7 @@ function Invoke-AgentSubagent {
             if ($rItem.usage_output_tokens) { $totalUsageOut += [int]$rItem.usage_output_tokens }
         }
         $aggStatus = Resolve-SubagentAggregateStatus -Results $results
+        Clear-WorkspaceWalkCache
         return (@{
             status = $aggStatus
             mode = 'parallel'

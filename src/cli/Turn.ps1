@@ -139,6 +139,7 @@ function Invoke-AgentTurnRollback {
 
 function Start-AgentTurnTransaction {
     param($State, $UndoBox = $null, [AllowEmptyCollection()][array]$UndoStack = @())
+    Clear-WorkspaceWalkCache
     Ensure-SessionTree -State $State
     $snapshot = New-AgentTurnSnapshot -State $State
     $script:CurrentTurnWrites = @()
@@ -168,10 +169,12 @@ function Complete-AgentTurnTransaction {
     }
     $script:CurrentTurnWrites = @()
     $Transaction.state = 'committed'
+    Clear-WorkspaceWalkCache
 }
 
 function Undo-AgentTurnTransaction {
     param($Transaction, $State, [string]$Reason = 'turn_failed')
+    Clear-WorkspaceWalkCache
     if ($null -eq $Transaction) { return $null }
     if ($Transaction.state -ne 'active') { return $Transaction.rollback }
     Protect-AgentTurnBackups -Writes @($script:CurrentTurnWrites)
@@ -185,6 +188,7 @@ function Undo-AgentTurnTransaction {
     else {
         $Transaction.state = 'recovery_required'
     }
+    Clear-WorkspaceWalkCache
     return $rollback
 }
 
@@ -278,8 +282,10 @@ function New-AgentTurnRequest {
 function Invoke-AgentTurn {
     param($State, [string]$Endpoint, [string]$ModelId, [string]$ApiKey, [string]$Root, [int]$Steps = 50, [int]$MaxRepeatCalls = 0)
     if (-not (Test-ValidConversationBoundary -Messages $State.messages)) {
+        Clear-WorkspaceWalkCache
         throw 'Cannot send conversation with inconsistent tool calls or results.'
     }
+    Clear-WorkspaceWalkCache
     $overflowRetried = $false
     $recoverOverflow = $false
     $script:ActiveModelId = $ModelId
@@ -300,6 +306,7 @@ function Invoke-AgentTurn {
         $State.scoped_instr_cache = @{}
     }
     $scopedInstrCache = $State.scoped_instr_cache
+    try {
     for ($step = 0; $step -lt $Steps; $step++) {
         $capSync = Sync-AgentCapabilities -State $State -Root $Root
         $activeTools = @(Get-AgentTools)
@@ -657,6 +664,10 @@ function Invoke-AgentTurn {
         status = 'step_limit_reached'
         usage_input_tokens = [int]$State.usage_input_tokens
         usage_output_tokens = [int]$State.usage_output_tokens
+    }
+    }
+    finally {
+        Clear-WorkspaceWalkCache
     }
 }
 

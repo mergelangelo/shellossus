@@ -2639,6 +2639,123 @@ Start-Sleep -Seconds 30
             }
         }
     }
+
+    # Task 5: Cached walk budget replay (Constraint A) & mid-turn TOCTOU security re-verification (Constraint C).
+    & {
+        $t5RelRoot = Join-Path $workspacePath 't5-rel-walk'
+        $t5IgnoredDir = Join-Path $t5RelRoot 'ignored-dir'
+        $t5Nested = Join-Path $t5RelRoot 'z-nested'
+        New-Item -ItemType Directory -Path $t5RelRoot, $t5IgnoredDir, $t5Nested -Force | Out-Null
+        Set-Content -LiteralPath (Join-Path $t5RelRoot '.gitignore') -Value "ignored-dir/`nignored.log" -Encoding Ascii
+        Set-Content -LiteralPath (Join-Path $t5RelRoot 'ignored.log') -Value 't5hit' -Encoding Ascii
+        Set-Content -LiteralPath (Join-Path $t5IgnoredDir 'inside.txt') -Value 't5hit' -Encoding Ascii
+        Set-Content -LiteralPath (Join-Path $t5RelRoot 'a.txt') -Value 't5hit' -Encoding Ascii
+        Set-Content -LiteralPath (Join-Path $t5RelRoot 'b.txt') -Value 't5hit' -Encoding Ascii
+        Set-Content -LiteralPath (Join-Path $t5Nested 'c.txt') -Value 't5hit' -Encoding Ascii
+        Set-Content -LiteralPath (Join-Path $t5Nested 'd.txt') -Value 't5hit' -Encoding Ascii
+
+        $savedMaxWalk = $script:AgentMaxWalkEntries
+        $savedCfgPath = $script:AgentConfigPath
+        $t5SecDir = Join-Path $workspacePath 't5-sec'
+        $t5SecSub = Join-Path $t5SecDir 'sub'
+        $t5SecSubSaved = Join-Path $envData.TestRoot 't5-sec-sub-saved'
+        $t5Outside = Join-Path $envData.TestRoot 't5-outside'
+        $t5OutsideSub = Join-Path $t5Outside 'outside-sub'
+        try {
+            Clear-WorkspaceWalkCache
+            $t5WalkItem = Get-Item -LiteralPath $t5RelRoot -Force
+
+            # Constraint A: max_entries truncation and exact entries_visited replay across cache miss + cache hit.
+            $script:AgentMaxWalkEntries = 4
+            $gCap1 = Invoke-AgentGrepFiles -Root $workspacePath -Path $t5RelRoot -Item $t5WalkItem -Arguments @{ pattern = 't5hit'; literal = $true } -ToolStart (Get-Date) | ConvertFrom-Json
+            $gCap2 = Invoke-AgentGrepFiles -Root $workspacePath -Path $t5RelRoot -Item $t5WalkItem -Arguments @{ pattern = 't5hit'; literal = $true } -ToolStart (Get-Date) | ConvertFrom-Json
+            Assert-True ($gCap1.truncated -and $gCap1.truncation_reason -eq 'max_entries' -and (-not $gCap1.total_files_exact) -and $gCap1.entries_visited -eq 4) "Uncached max_entries walk metadata mismatch: $($gCap1 | ConvertTo-Json -Compress)"
+            Assert-True ($gCap2.truncated -and $gCap2.truncation_reason -eq 'max_entries' -and (-not $gCap2.total_files_exact) -and $gCap2.entries_visited -eq 4 -and $gCap2.matches.Count -eq $gCap1.matches.Count) "Cached max_entries walk replay mismatch: $($gCap2 | ConvertTo-Json -Compress)"
+
+            # Raising AgentMaxWalkEntries uses a distinct cache key (does not replay truncated walk) and counts ignored entries in visited.
+            $script:AgentMaxWalkEntries = 50
+            $gFull = Invoke-AgentGrepFiles -Root $workspacePath -Path $t5RelRoot -Item $t5WalkItem -Arguments @{ pattern = 't5hit'; literal = $true } -ToolStart (Get-Date) | ConvertFrom-Json
+            Assert-True ((-not $gFull.truncated) -and $gFull.total_files_exact -and $gFull.matches.Count -eq 4 -and $gFull.entries_visited -eq 8) "Full walk ignored-entry visited count or limit cache key failed: $($gFull | ConvertTo-Json -Compress)"
+
+            # find_files keeps streaming early-stop without descending into z-nested.
+            $fStream = Invoke-AgentFindFiles -Root $workspacePath -Path $t5RelRoot -Item $t5WalkItem -Arguments @{ pattern = '*.txt'; limit = 1 } -ToolStart (Get-Date) | ConvertFrom-Json
+            Assert-True ($fStream.count -eq 1 -and $fStream.truncated -and $fStream.entries_visited -lt $gFull.entries_visited) "find_files lost streaming early-stop: $($fStream | ConvertTo-Json -Compress)"
+
+            # Constraint C: Mid-turn TOCTOU security re-verification on cached candidate paths.
+            New-Item -ItemType Directory -Path $t5SecDir, $t5SecSub, $t5Outside, $t5OutsideSub -Force | Out-Null
+            Set-Content -LiteralPath (Join-Path $t5SecDir 'safe.txt') -Value 'T5_SAFE_HIT' -Encoding Ascii
+            Set-Content -LiteralPath (Join-Path $t5SecDir 'swap-leaf.txt') -Value 'harmless' -Encoding Ascii
+            Set-Content -LiteralPath (Join-Path $t5SecSub 'nested.txt') -Value 'harmless' -Encoding Ascii
+            Set-Content -LiteralPath (Join-Path $t5SecDir 'gone.txt') -Value 'harmless' -Encoding Ascii
+            Set-Content -LiteralPath (Join-Path $t5SecDir 'grow.txt') -Value 'harmless' -Encoding Ascii
+            $dynCfgPath = Join-Path $t5SecDir 'dyn-cfg.txt'
+            Set-Content -LiteralPath $dynCfgPath -Value 'harmless' -Encoding Ascii
+            Set-Content -LiteralPath (Join-Path $t5Outside 'secret-leaf.txt') -Value 'T5_LEAK_TOKEN_LEAF' -Encoding Ascii
+            Set-Content -LiteralPath (Join-Path $t5OutsideSub 'nested.txt') -Value 'T5_LEAK_TOKEN_SUBDIR' -Encoding Ascii
+
+            Clear-WorkspaceWalkCache
+            $seedRes = Invoke-AgentTool -Root $workspacePath -Call @{ id = 't5-sec-seed'; function = @{ name = 'grep_files'; arguments = '{"path":"t5-sec","pattern":"T5_SAFE_HIT","literal":true}' } } | ConvertFrom-Json
+            Assert-True ($seedRes.matches.Count -eq 1 -and $script:WorkspaceWalkCache.Count -gt 0) 'Failed to seed walk cache for security re-verification test.'
+
+            # Mutate filesystem externally mid-turn WITHOUT clearing $script:WorkspaceWalkCache:
+            # 1) Delete a cached file
+            Remove-Item -LiteralPath (Join-Path $t5SecDir 'gone.txt') -Force
+            # 2) Grow a cached file past 1MB
+            Set-Content -LiteralPath (Join-Path $t5SecDir 'grow.txt') -Value (('x' * 1048600) + "`nT5_LEAK_TOKEN_OVERSIZE`n") -Encoding Ascii
+            # 3) Turn a cached file into the active secret config file
+            Set-Content -LiteralPath $dynCfgPath -Value 'SHELLOSSUS_API_KEY=T5_LEAK_TOKEN_SECRET' -Encoding Ascii
+            $script:AgentConfigPath = Format-ConfigPath -Path $dynCfgPath
+            # 4) Replace cached file and cached parent directory with symlinks pointing outside workspace
+            $leafLinkCreated = $false
+            $dirLinkCreated = $false
+            $leafSwapPath = Join-Path $t5SecDir 'swap-leaf.txt'
+            Remove-Item -LiteralPath $leafSwapPath -Force
+            try {
+                New-Item -ItemType SymbolicLink -Path $leafSwapPath -Target (Join-Path $t5Outside 'secret-leaf.txt') -ErrorAction Stop | Out-Null
+                $leafLinkCreated = $true
+            }
+            catch { Write-Warning 'Symbolic link creation unavailable; leaf symlink TOCTOU check skipped.' }
+
+            Move-Item -LiteralPath $t5SecSub -Destination $t5SecSubSaved -ErrorAction Stop
+            try {
+                New-Item -ItemType SymbolicLink -Path $t5SecSub -Target $t5OutsideSub -ErrorAction Stop | Out-Null
+                $dirLinkCreated = $true
+            }
+            catch {
+                Move-Item -LiteralPath $t5SecSubSaved -Destination $t5SecSub -ErrorAction SilentlyContinue
+                Write-Warning 'Symbolic link creation unavailable; directory symlink TOCTOU check skipped.'
+            }
+
+            Assert-True ($script:WorkspaceWalkCache.Count -gt 0) 'Walk cache was unexpectedly cleared before TOCTOU check.'
+
+            $litLeak = Invoke-AgentTool -Root $workspacePath -Call @{ id = 't5-sec-lit'; function = @{ name = 'grep_files'; arguments = '{"path":"t5-sec","pattern":"T5_LEAK_TOKEN","literal":true}' } } | ConvertFrom-Json
+            $rxLeak = Invoke-AgentTool -Root $workspacePath -Call @{ id = 't5-sec-rx'; function = @{ name = 'grep_files'; arguments = '{"path":"t5-sec","pattern":"T5_LEAK_TOKEN","literal":false}' } } | ConvertFrom-Json
+            $safeCheck = Invoke-AgentTool -Root $workspacePath -Call @{ id = 't5-sec-ok'; function = @{ name = 'grep_files'; arguments = '{"path":"t5-sec","pattern":"T5_SAFE_HIT","literal":true}' } } | ConvertFrom-Json
+
+            Assert-True ((-not $litLeak.error) -and $litLeak.matches.Count -eq 0) "Literal grep_files leaked or crashed on mid-turn TOCTOU mutation: $($litLeak | ConvertTo-Json -Compress)"
+            Assert-True ((-not $rxLeak.error) -and $rxLeak.matches.Count -eq 0) "Regex grep_files leaked or crashed on mid-turn TOCTOU mutation: $($rxLeak | ConvertTo-Json -Compress)"
+            Assert-True ((-not $safeCheck.error) -and $safeCheck.matches.Count -eq 1 -and $safeCheck.matches[0].file -eq 'safe.txt') "Safe file search failed after mid-turn TOCTOU mutations: $($safeCheck | ConvertTo-Json -Compress)"
+        }
+        finally {
+            $script:AgentMaxWalkEntries = $savedMaxWalk
+            $script:AgentConfigPath = $savedCfgPath
+            if (Test-Path -LiteralPath $t5SecSub) {
+                if ($env:OS -eq 'Windows_NT') {
+                    $itm = Get-Item -LiteralPath $t5SecSub -Force -ErrorAction SilentlyContinue
+                    if ($itm -and ($itm.Attributes -band 1024) -ne 0) {
+                        & cmd.exe /c rmdir "$t5SecSub" 2>$null | Out-Null
+                    }
+                }
+                else {
+                    Remove-Item -LiteralPath $t5SecSub -Force -Confirm:$false -ErrorAction SilentlyContinue
+                }
+            }
+            if (Test-Path -LiteralPath $t5RelRoot) { Remove-Item -LiteralPath $t5RelRoot -Recurse -Force -ErrorAction SilentlyContinue }
+            if (Test-Path -LiteralPath $t5SecDir) { Remove-Item -LiteralPath $t5SecDir -Recurse -Force -ErrorAction SilentlyContinue }
+            if (Test-Path -LiteralPath $t5SecSubSaved) { Remove-Item -LiteralPath $t5SecSubSaved -Recurse -Force -ErrorAction SilentlyContinue }
+            if (Test-Path -LiteralPath $t5Outside) { Remove-Item -LiteralPath $t5Outside -Recurse -Force -ErrorAction SilentlyContinue }
+        }
+    }
 }
 finally {
     Remove-Item Function:\Invoke-WebRequest -ErrorAction SilentlyContinue

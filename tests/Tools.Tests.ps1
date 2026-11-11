@@ -3027,6 +3027,264 @@ description: Optional subagent role: recon (ReadOnly search), audit (ReadOnly re
         Remove-Variable -Name task13UndoHost -Scope Script -ErrorAction SilentlyContinue
         if (Test-Path -LiteralPath $task13Marker) { Remove-Item -LiteralPath $task13Marker -Force -ErrorAction SilentlyContinue }
     }
+
+    # Task 5: Safe turn-scoped workspace walk cache & literal Select-String pre-filter.
+    & {
+        $t5Dir = Join-Path $workspacePath 't5-cache'
+        $t5Sub = Join-Path $t5Dir 'sub'
+        $t5SessDir = Join-Path $testRoot 't5-sessions'
+        New-Item -ItemType Directory -Path $t5Dir, $t5Sub, $t5SessDir -Force | Out-Null
+        Set-AgentUtf8Content -LiteralPath (Join-Path $t5Dir '.gitignore') -Value "ignored.log`n"
+        Set-AgentUtf8Content -LiteralPath (Join-Path $t5Dir 'ignored.log') -Value "T5_NEEDLE_IGNORED`n"
+
+        $cyrUpper = ([string][char]0x041F) + [char]0x0440 + [char]0x0438 + [char]0x0432 + [char]0x0435 + [char]0x0442
+        $cyrLower = ([string][char]0x043F) + [char]0x0440 + [char]0x0438 + [char]0x0432 + [char]0x0435 + [char]0x0442
+
+        for ($i = 0; $i -lt 80; $i++) {
+            $num = $i.ToString('000')
+            $targetPath = if ($i -eq 75) {
+                Join-Path $t5Sub ("f$num[draft].txt")
+            }
+            else {
+                Join-Path $t5Dir "f$num.txt"
+            }
+            $body = switch ($i) {
+                2 { "ctx-before`nT5_NEEDLE_001`nctx-after`nline-4`nT5_NEEDLE_002`ntail`n" }
+                10 { ('a' * 30) + "!`n" }
+                70 { "l1`nl2`nT5_NEEDLE_003`nl4`n" }
+                75 { "T5_NEEDLE_004 $cyrUpper MixedCaseToken`n" }
+                default { "filler line 1`nfiller line 2`n" }
+            }
+            Set-AgentUtf8Content -LiteralPath $targetPath -Value $body
+        }
+
+        $savedPerm = $script:AgentPermission
+        $savedMode = $script:OutputMode
+        $savedTtl = $script:WorkspaceWalkCacheTTLSeconds
+        $origWalkSb = (Get-Item Function:\Invoke-WorkspaceWalk).ScriptBlock
+        $script:t5WalkCount = 0
+        function script:Invoke-WorkspaceWalk {
+            $script:t5WalkCount++
+            & $origWalkSb @args
+        }
+
+        try {
+            $script:AgentPermission = 'Auto'
+            $script:OutputMode = 'json'
+            Clear-WorkspaceWalkCache
+            Assert-True ($null -ne $script:WorkspaceWalkCache -and $script:WorkspaceWalkCache.Count -eq 0) 'Clear-WorkspaceWalkCache did not reset cache.'
+
+            # Page 1: literal search stops at first match (f002.txt line 2), scanning only 3 files out of 64-file batch.
+            $p1Args = @{ path = 't5-cache'; pattern = 'T5_NEEDLE'; literal = $true; limit = 1; context_lines = 1 } | ConvertTo-Json -Compress
+            $p1 = Invoke-AgentTool -Root $workspacePath -Call @{ id = 't5-p1'; function = @{ name = 'grep_files'; arguments = $p1Args } } | ConvertFrom-Json
+            Assert-True (-not $p1.error) "Task 5 page 1 failed: $($p1.error)"
+            $walksAfterMiss = $script:t5WalkCount
+            Assert-True ($walksAfterMiss -eq 2) "Expected 2 directory visits (t5-cache + sub) on cache miss, got $walksAfterMiss."
+            Assert-True ($p1.matches.Count -eq 1 -and $p1.matches[0].file -eq 'f002.txt' -and $p1.matches[0].line_number -eq 2) 'Task 5 page 1 returned wrong match.'
+            Assert-True (@($p1.matches[0].context).Count -eq 3 -and $p1.matches[0].context[0] -eq 'ctx-before' -and $p1.matches[0].context[2] -eq 'ctx-after') 'Task 5 page 1 context_lines mismatch.'
+            Assert-True ($p1.files_scanned -eq 4 -and $p1.truncated -and $p1.truncation_reason -eq 'max_matches' -and $p1.next_file_offset -eq 3 -and $p1.next_start_line -eq 5) "Task 5 page 1 pagination metadata mismatch: $($p1 | ConvertTo-Json -Compress)"
+
+            # Verify lightweight metadata (no FileSystemInfo instances retained in cache).
+            Assert-True ($script:WorkspaceWalkCache.Count -ge 1) 'Walk cache was not populated after directory grep_files.'
+            foreach ($bucketKey in @($script:WorkspaceWalkCache.Keys)) {
+                foreach ($slot in @($script:WorkspaceWalkCache[$bucketKey])) {
+                    foreach ($cachedItem in @($slot.entries)) {
+                        Assert-True (-not ($cachedItem -is [System.IO.FileSystemInfo])) 'Walk cache retained a FileSystemInfo instance instead of lightweight metadata.'
+                        Assert-True ($cachedItem.ContainsKey('full_path') -and $cachedItem.ContainsKey('rel_path') -and $cachedItem.ContainsKey('name') -and $cachedItem.ContainsKey('length')) 'Walk cache item is missing lightweight metadata fields.'
+                    }
+                }
+            }
+
+            # Page 2: mid-file continuation (file_offset=3, start_line=5) hits walk cache without re-walking.
+            $p2Args = @{ path = 't5-cache'; pattern = 'T5_NEEDLE'; literal = $true; limit = 1; file_offset = 3; start_line = 5 } | ConvertTo-Json -Compress
+            $p2 = Invoke-AgentTool -Root $workspacePath -Call @{ id = 't5-p2'; function = @{ name = 'grep_files'; arguments = $p2Args } } | ConvertFrom-Json
+            Assert-True ($script:t5WalkCount -eq $walksAfterMiss) "Expected cached walk on page 2, got $($script:t5WalkCount) walks."
+            Assert-True ($p2.matches.Count -eq 1 -and $p2.matches[0].file -eq 'f002.txt' -and $p2.matches[0].line_number -eq 5) 'Task 5 page 2 mid-file continuation failed.'
+            Assert-True ($p2.files_scanned -eq 1 -and $p2.next_file_offset -eq 4 -and $p2.next_start_line -eq 1 -and $p2.entries_visited -eq $p1.entries_visited -and $p2.total_files -eq 81) "Task 5 page 2 metadata mismatch: $($p2 | ConvertTo-Json -Compress)"
+
+            # Page 3: spans across 64-file batch boundary into batch 2 and bracketed filename in sub/.
+            $p3Args = @{ path = 't5-cache'; pattern = 'T5_NEEDLE'; literal = $true; limit = 10; file_offset = 4; start_line = 1 } | ConvertTo-Json -Compress
+            $p3 = Invoke-AgentTool -Root $workspacePath -Call @{ id = 't5-p3'; function = @{ name = 'grep_files'; arguments = $p3Args } } | ConvertFrom-Json
+            Assert-True ($script:t5WalkCount -eq $walksAfterMiss) "Expected cached walk on page 3, got $($script:t5WalkCount) walks."
+            Assert-True ($p3.matches.Count -eq 2 -and $p3.matches[0].file -eq 'f070.txt' -and $p3.matches[0].line_number -eq 3 -and $p3.matches[1].file -eq 'sub/f075[draft].txt' -and $p3.matches[1].line_number -eq 1) "Task 5 page 3 multi-batch matches mismatch: $($p3 | ConvertTo-Json -Compress)"
+            Assert-True ($p3.files_scanned -eq 77 -and (-not $p3.truncated) -and $null -eq $p3.next_file_offset -and $null -eq $p3.next_start_line) "Task 5 page 3 completion metadata mismatch: $($p3 | ConvertTo-Json -Compress)"
+
+            # Case sensitivity & Unicode literal pre-filter parity (still cached).
+            $csMiss = Invoke-AgentTool -Root $workspacePath -Call @{ id = 't5-cs0'; function = @{ name = 'grep_files'; arguments = (@{ path = 't5-cache'; pattern = 'mixedcasetoken'; literal = $true; case_sensitive = $true } | ConvertTo-Json -Compress) } } | ConvertFrom-Json
+            $csHit = Invoke-AgentTool -Root $workspacePath -Call @{ id = 't5-cs1'; function = @{ name = 'grep_files'; arguments = (@{ path = 't5-cache'; pattern = 'mixedcasetoken'; literal = $true; case_sensitive = $false } | ConvertTo-Json -Compress) } } | ConvertFrom-Json
+            $uniHit = Invoke-AgentTool -Root $workspacePath -Call @{ id = 't5-uni'; function = @{ name = 'grep_files'; arguments = (@{ path = 't5-cache'; pattern = $cyrLower; literal = $true; case_sensitive = $false } | ConvertTo-Json -Compress) } } | ConvertFrom-Json
+            Assert-True ($csMiss.matches.Count -eq 0 -and $csHit.matches.Count -eq 1 -and $uniHit.matches.Count -eq 1 -and $script:t5WalkCount -eq $walksAfterMiss) 'Case-sensitive or Unicode literal pre-filter parity failed.'
+
+            # Regex mode keeps 100ms timeout and never delegates regexes to Select-String.
+            $rxOk = Invoke-AgentTool -Root $workspacePath -Call @{ id = 't5-rx1'; function = @{ name = 'grep_files'; arguments = (@{ path = 't5-cache'; pattern = 'T5_NEEDLE_00[34]'; literal = $false } | ConvertTo-Json -Compress) } } | ConvertFrom-Json
+            Assert-True ($rxOk.matches.Count -eq 2 -and $script:t5WalkCount -eq $walksAfterMiss) 'Regex grep_files failed on cached walk.'
+            $rxRedos = Invoke-AgentTool -Root $workspacePath -Call @{ id = 't5-rx2'; function = @{ name = 'grep_files'; arguments = (@{ path = 't5-cache/f010.txt'; pattern = '(a+)+$'; literal = $false } | ConvertTo-Json -Compress) } } | ConvertFrom-Json
+            Assert-True ($rxRedos.error -like '*Regular expression exceeded the 100 ms match limit*') "Regex timeout was not enforced: $($rxRedos | ConvertTo-Json -Compress)"
+
+            # Select-String -ErrorVariable fallback: missing/unreadable file triggers fallback_all so zero matches are dropped.
+            $preErr = Invoke-LiteralBatchPreFilter -Paths @((Join-Path $t5Dir 'does-not-exist.txt'), (Join-Path $t5Dir 'f002.txt')) -Pattern 'T5_NEEDLE' -CaseSensitive $false
+            Assert-True ([bool]$preErr.fallback_all) 'Invoke-LiteralBatchPreFilter did not flag fallback_all when Select-String reported an error.'
+            $origPreFilterSb = (Get-Item Function:\Invoke-LiteralBatchPreFilter).ScriptBlock
+            try {
+                function script:Invoke-LiteralBatchPreFilter {
+                    param([string[]]$Paths, [string]$Pattern, [bool]$CaseSensitive)
+                    return @{ matched = @{}; fallback_all = $true; fallback_paths = @{} }
+                }
+                $fbRes = Invoke-AgentTool -Root $workspacePath -Call @{ id = 't5-fb'; function = @{ name = 'grep_files'; arguments = (@{ path = 't5-cache'; pattern = 'T5_NEEDLE'; literal = $true } | ConvertTo-Json -Compress) } } | ConvertFrom-Json
+                Assert-True ($fbRes.matches.Count -eq 4) "Fallback scan after Select-String error lost matches: got $($fbRes.matches.Count)."
+            }
+            finally {
+                Set-Item -Path Function:\script:Invoke-LiteralBatchPreFilter -Value $origPreFilterSb
+            }
+
+            # TTL expiration causes re-walk.
+            $script:WorkspaceWalkCacheTTLSeconds = 0
+            $ttlRes = Invoke-AgentTool -Root $workspacePath -Call @{ id = 't5-ttl'; function = @{ name = 'grep_files'; arguments = (@{ path = 't5-cache'; pattern = 'T5_NEEDLE_001'; literal = $true } | ConvertTo-Json -Compress) } } | ConvertFrom-Json
+            Assert-True ($ttlRes.matches.Count -eq 1 -and $script:t5WalkCount -eq ($walksAfterMiss * 2)) "Expired TTL did not re-walk workspace (walkCount=$($script:t5WalkCount))."
+            $script:WorkspaceWalkCacheTTLSeconds = 15
+
+            # Mutation invalidation boundaries (Constraint B).
+            function Assert-CacheClearedAfter {
+                param([string]$Label, [scriptblock]$Mutation)
+                $null = Invoke-AgentTool -Root $workspacePath -Call @{ id = 't5-seed'; function = @{ name = 'grep_files'; arguments = '{"path":"t5-cache","pattern":"T5_NEEDLE_001","literal":true}' } }
+                Assert-True ($script:WorkspaceWalkCache.Count -gt 0) "Failed to seed walk cache before $Label."
+                & $Mutation
+                Assert-True ($script:WorkspaceWalkCache.Count -eq 0) "Walk cache was not cleared by $Label."
+            }
+
+            Assert-CacheClearedAfter -Label 'write_file' -Mutation {
+                $null = Invoke-AgentTool -Root $workspacePath -Call @{ id = 't5-w'; function = @{ name = 'write_file'; arguments = '{"path":"t5-cache/added.txt","content":"T5_ADDED_TOKEN\n","overwrite":true}' } }
+            }
+            $addedCheck = Invoke-AgentTool -Root $workspacePath -Call @{ id = 't5-added'; function = @{ name = 'grep_files'; arguments = '{"path":"t5-cache","pattern":"T5_ADDED_TOKEN","literal":true}' } } | ConvertFrom-Json
+            Assert-True ($addedCheck.matches.Count -eq 1 -and $addedCheck.matches[0].file -eq 'added.txt') 'Newly written file was not visible to grep_files after write_file invalidation.'
+
+            Assert-CacheClearedAfter -Label 'edit_file' -Mutation {
+                $null = Invoke-AgentTool -Root $workspacePath -Call @{ id = 't5-e'; function = @{ name = 'edit_file'; arguments = '{"path":"t5-cache/added.txt","old_text":"T5_ADDED_TOKEN","new_text":"T5_EDITED_TOKEN"}' } }
+            }
+
+            Assert-CacheClearedAfter -Label 'memory append' -Mutation {
+                $null = Invoke-AgentTool -Root $workspacePath -Call @{ id = 't5-m1'; function = @{ name = 'memory'; arguments = '{"action":"append","content":"t5 note"}' } }
+            }
+            Assert-CacheClearedAfter -Label 'memory set' -Mutation {
+                $null = Invoke-AgentTool -Root $workspacePath -Call @{ id = 't5-m2'; function = @{ name = 'memory'; arguments = '{"action":"set","content":"t5 note 2"}' } }
+            }
+            Assert-CacheClearedAfter -Label 'memory clear' -Mutation {
+                $null = Invoke-AgentTool -Root $workspacePath -Call @{ id = 't5-m3'; function = @{ name = 'memory'; arguments = '{"action":"clear"}' } }
+            }
+
+            Assert-CacheClearedAfter -Label 'run_command' -Mutation {
+                $null = Invoke-AgentTool -Root $workspacePath -Call @{ id = 't5-cmd'; function = @{ name = 'run_command'; arguments = '{"command":"Write-Output ok"}' } }
+            }
+
+            $script:t5SilentHost = @()
+            function Write-Host { param([Parameter(ValueFromRemainingArguments = $true)]$Object, [switch]$NoNewline, $Separator, $ForegroundColor, $BackgroundColor) }
+
+            Assert-CacheClearedAfter -Label '!cmd bang command' -Mutation {
+                $bangState = @{ workspace = $workspacePath; messages = @(@{ role = 'system'; content = 'sys' }) }
+                Invoke-ReplBangCommand -State $bangState -InputText '!!Write-Output bang' -RootPath $workspacePath -SessionFile '' -Model 't5-model'
+            }
+
+            Assert-CacheClearedAfter -Label 'run_agent' -Mutation {
+                function Invoke-WebRequest {
+                    param($Uri, $Method, $Headers, $ContentType, $Body, $TimeoutSec, $ErrorAction, [switch]$UseBasicParsing, $OutFile)
+                    $resp = @{ choices = @(@{ finish_reason = 'stop'; message = @{ content = 'sub ok' } }) } | ConvertTo-Json -Depth 6 -Compress
+                    Set-Content -LiteralPath $OutFile -Value $resp -Encoding UTF8 -NoNewline
+                }
+                try {
+                    $null = Invoke-AgentTool -Root $workspacePath -Call @{ id = 't5-ag'; function = @{ name = 'run_agent'; arguments = '{"role":"recon","prompt":"check"}' } }
+                }
+                finally {
+                    Remove-Item Function:\Invoke-WebRequest -ErrorAction SilentlyContinue
+                }
+            }
+
+            Assert-CacheClearedAfter -Label 'Invoke-AgentUndo' -Mutation {
+                $uState = @{ messages = @(@{ role = 'system'; content = 'sys' }) }
+                Invoke-AgentUndo -State $uState -UndoEntry @{ messages = @(@{ role = 'system'; content = 'sys' }); writes = @() }
+            }
+
+            # Turn start & turn end invalidation + Undo-AgentTurnTransaction invalidation.
+            $null = Invoke-AgentTool -Root $workspacePath -Call @{ id = 't5-preturn'; function = @{ name = 'grep_files'; arguments = '{"path":"t5-cache","pattern":"T5_NEEDLE_001","literal":true}' } }
+            Assert-True ($script:WorkspaceWalkCache.Count -gt 0) 'Failed to seed walk cache before Invoke-AgentTurn.'
+            $t5TurnChecks = @{ step = 0; cleared_at_start = $false; populated_mid_turn = $false }
+            function Invoke-WebRequest {
+                param($Uri, $Method, $Headers, $ContentType, $Body, $TimeoutSec, $ErrorAction, [switch]$UseBasicParsing, $OutFile)
+                $t5TurnChecks.step++
+                if ($t5TurnChecks.step -eq 1) {
+                    $t5TurnChecks.cleared_at_start = ($script:WorkspaceWalkCache.Count -eq 0)
+                    $calls = @(@{ id = 't5-tc1'; type = 'function'; function = @{ name = 'grep_files'; arguments = '{"path":"t5-cache","pattern":"T5_NEEDLE_001","literal":true}' } })
+                    $resp = @{ choices = @(@{ finish_reason = 'tool_calls'; message = @{ content = ''; tool_calls = $calls } }) } | ConvertTo-Json -Depth 8 -Compress
+                    Set-Content -LiteralPath $OutFile -Value $resp -Encoding UTF8 -NoNewline
+                    return
+                }
+                $t5TurnChecks.populated_mid_turn = ($script:WorkspaceWalkCache.Count -gt 0)
+                $resp2 = @{ choices = @(@{ finish_reason = 'stop'; message = @{ content = 'done' } }) } | ConvertTo-Json -Depth 6 -Compress
+                Set-Content -LiteralPath $OutFile -Value $resp2 -Encoding UTF8 -NoNewline
+            }
+            try {
+                $turnState = @{ workspace = $workspacePath; messages = @(@{ role = 'system'; content = 'sys' }, @{ role = 'user'; content = 'go' }) }
+                $null = Invoke-AgentTurn -State $turnState -Endpoint 'https://example.invalid/v1/chat/completions' -ModelId 't5-model' -ApiKey 'fake' -Root $workspacePath -Steps 4
+            }
+            finally {
+                Remove-Item Function:\Invoke-WebRequest -ErrorAction SilentlyContinue
+            }
+            Assert-True ($t5TurnChecks.cleared_at_start -and $t5TurnChecks.populated_mid_turn -and $script:WorkspaceWalkCache.Count -eq 0) 'Invoke-AgentTurn did not clear walk cache at both turn start and turn end.'
+
+            Assert-CacheClearedAfter -Label 'Undo-AgentTurnTransaction' -Mutation {
+                $txState = @{ workspace = $workspacePath; messages = @(@{ role = 'system'; content = 'sys' }) }
+                $tx = Start-AgentTurnTransaction -State $txState
+                $null = Invoke-AgentTool -Root $workspacePath -Call @{ id = 't5-txg'; function = @{ name = 'grep_files'; arguments = '{"path":"t5-cache","pattern":"T5_NEEDLE_001","literal":true}' } }
+                Assert-True ($script:WorkspaceWalkCache.Count -gt 0) 'Failed to seed walk cache inside turn transaction.'
+                $null = Undo-AgentTurnTransaction -Transaction $tx
+            }
+
+            # Session/context reset REPL commands (/reload, /new, /resume, /import, /tree, /fork).
+            $replSys = @{ role = 'system'; content = 'sys' }
+            $replState = @{
+                workspace = $workspacePath
+                session_id = 'sess-t5-orig'
+                messages = @(
+                    $replSys,
+                    @{ role = 'user'; content = 'u1' },
+                    @{ role = 'assistant'; content = 'a1' }
+                )
+            }
+            Ensure-SessionTree -State $replState
+            $savedSessPath = Join-Path $t5SessDir 'sess-t5-orig.jsonl'
+            Save-AgentSession -SessionFile $savedSessPath -State $replState -Workspace $workspacePath -Model 't5-model' -SessionId 'sess-t5-orig'
+            $targetEntryId = [string]$replState.tree_entries[0].id
+
+            Assert-CacheClearedAfter -Label '/reload' -Mutation {
+                Invoke-ReplReloadCommand -State $replState -SystemMessage $replSys -RootPath $workspacePath -ConfigDir $testRoot
+            }
+            Assert-CacheClearedAfter -Label '/new and /clear' -Mutation {
+                $null = Invoke-ReplNewSessionCommand -State $replState -RootPath $workspacePath -ConfigDir $testRoot -Model 't5-model' -SessionDir $t5SessDir -NoSession
+            }
+            Assert-CacheClearedAfter -Label '/resume' -Mutation {
+                $null = Invoke-ReplSessionsCommand -State $replState -SessionDir $t5SessDir -SessionFile $savedSessPath -RootPath $workspacePath -Model 't5-model' -ResumeArg $savedSessPath
+            }
+            Assert-CacheClearedAfter -Label '/import' -Mutation {
+                $null = Invoke-ReplImportCommand -State $replState -RootPath $workspacePath -SessionFile $savedSessPath -Model 't5-model' -ImportArg $savedSessPath
+            }
+            Assert-CacheClearedAfter -Label '/tree' -Mutation {
+                $null = Invoke-ReplTreeCommand -State $replState -SessionFile $savedSessPath -RootPath $workspacePath -Model 't5-model' -TargetEntryId $targetEntryId
+            }
+            Assert-CacheClearedAfter -Label '/fork' -Mutation {
+                $null = Invoke-ReplForkCommand -State $replState -SessionDir $t5SessDir -SessionFile $savedSessPath -NoSession -ForkEntryId $targetEntryId
+            }
+        }
+        finally {
+            Remove-Item Function:\Write-Host -ErrorAction SilentlyContinue
+            Set-Item -Path Function:\script:Invoke-WorkspaceWalk -Value $origWalkSb
+            Remove-Variable -Name t5WalkCount -Scope Script -ErrorAction SilentlyContinue
+            Remove-Variable -Name t5SilentHost -Scope Script -ErrorAction SilentlyContinue
+            $script:AgentPermission = $savedPerm
+            $script:OutputMode = $savedMode
+            if ($null -ne $savedTtl) { $script:WorkspaceWalkCacheTTLSeconds = $savedTtl }
+            if (Test-Path -LiteralPath $t5Dir) { Remove-Item -LiteralPath $t5Dir -Recurse -Force -ErrorAction SilentlyContinue }
+            if (Test-Path -LiteralPath $t5SessDir) { Remove-Item -LiteralPath $t5SessDir -Recurse -Force -ErrorAction SilentlyContinue }
+        }
+    }
 }
 finally {
     Remove-TestEnvironment -Env $envData

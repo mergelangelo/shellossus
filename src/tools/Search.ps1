@@ -126,6 +126,109 @@ function Invoke-AgentFindFiles {
     return (@{ matches = @($found); files = @($found); count = $found.Count; truncated = $truncated; entries_visited = $walk.visited; notice = $notice } | ConvertTo-Json -Depth 5 -Compress)
 }
 
+function Test-ExactPathSetContains {
+    param([hashtable]$SetMap, [string]$PathKey)
+    if ($null -eq $SetMap -or -not $PathKey -or -not $SetMap.ContainsKey($PathKey)) { return $false }
+    return (@($SetMap[$PathKey]) -ccontains $PathKey)
+}
+
+function Test-VerifiedGrepCandidateFile {
+    param($FileItem, [string]$RootFull, [hashtable]$DirReparseCache = $null)
+    if ($null -eq $FileItem) { return $false }
+    if ($FileItem.PSIsContainer) { return $false }
+    if ($FileItem.Length -gt 1MB) { return $false }
+    if (($FileItem.Attributes -band 1024) -ne 0) { return $false }
+    if (Test-IsSecretFile $FileItem) { return $false }
+    if (-not (Test-AgentPathWithinRoot -RootPath $RootFull -TargetPath $FileItem.FullName)) { return $false }
+    if ($null -eq $DirReparseCache) {
+        if (Test-PathHasReparsePoint -Path $FileItem.FullName -StopAt $RootFull) { return $false }
+        return $true
+    }
+    $parentDir = if ($FileItem.DirectoryName) { [string]$FileItem.DirectoryName } else { Split-Path $FileItem.FullName -Parent }
+    if (-not $parentDir) {
+        if (Test-PathHasReparsePoint -Path $FileItem.FullName -StopAt $RootFull) { return $false }
+        return $true
+    }
+    $cachedDirEntry = $null
+    if ($DirReparseCache.ContainsKey($parentDir)) {
+        foreach ($slot in @($DirReparseCache[$parentDir])) {
+            if ($null -ne $slot -and $slot.dir -ceq $parentDir) {
+                $cachedDirEntry = $slot
+                break
+            }
+        }
+    }
+    if ($null -eq $cachedDirEntry) {
+        $hasRep = [bool](Test-PathHasReparsePoint -Path $parentDir -StopAt $RootFull)
+        $cachedDirEntry = @{ dir = $parentDir; has_reparse = $hasRep }
+        if ($DirReparseCache.ContainsKey($parentDir)) {
+            $DirReparseCache[$parentDir] = @($DirReparseCache[$parentDir]) + @($cachedDirEntry)
+        }
+        else {
+            $DirReparseCache[$parentDir] = @($cachedDirEntry)
+        }
+    }
+    if ($cachedDirEntry.has_reparse) { return $false }
+    return $true
+}
+
+function Invoke-LiteralBatchPreFilter {
+    param(
+        [AllowEmptyCollection()][string[]]$Paths,
+        [string]$Pattern,
+        [bool]$CaseSensitive
+    )
+    $matched = @{}
+    $fallbackPaths = @{}
+    $fallbackAll = $false
+    if (-not $Paths -or $Paths.Count -eq 0) {
+        return @{ matched = $matched; fallback_all = $false; fallback_paths = $fallbackPaths }
+    }
+    $ssErrors = @()
+    try {
+        $ssHits = @(Microsoft.PowerShell.Utility\Select-String -LiteralPath $Paths -Pattern $Pattern -SimpleMatch -List -Encoding UTF8 -CaseSensitive:$CaseSensitive -ErrorAction SilentlyContinue -ErrorVariable ssErrors)
+        foreach ($m in $ssHits) {
+            if ($null -ne $m -and $m.Path) {
+                $mp = [string]$m.Path
+                if ($matched.ContainsKey($mp)) {
+                    if (-not (@($matched[$mp]) -ccontains $mp)) {
+                        $matched[$mp] = @($matched[$mp]) + $mp
+                    }
+                }
+                else {
+                    $matched[$mp] = @($mp)
+                }
+            }
+        }
+    }
+    catch {
+        $fallbackAll = $true
+    }
+    if (@($ssErrors).Count -gt 0) {
+        foreach ($errRec in @($ssErrors)) {
+            $targetObj = if ($null -ne $errRec) { $errRec.TargetObject } else { $null }
+            if ($targetObj -is [string] -and $targetObj.Length -gt 0) {
+                if ($fallbackPaths.ContainsKey($targetObj)) {
+                    if (-not (@($fallbackPaths[$targetObj]) -ccontains $targetObj)) {
+                        $fallbackPaths[$targetObj] = @($fallbackPaths[$targetObj]) + $targetObj
+                    }
+                }
+                else {
+                    $fallbackPaths[$targetObj] = @($targetObj)
+                }
+            }
+            else {
+                $fallbackAll = $true
+            }
+        }
+    }
+    return @{
+        matched = $matched
+        fallback_all = $fallbackAll
+        fallback_paths = $fallbackPaths
+    }
+}
+
 function Invoke-AgentGrepFiles {
     param([string]$Root, [string]$Path, $Item, $Arguments, [datetime]$ToolStart)
     if (-not $Arguments.pattern) { throw 'pattern must be a nonempty string.' }
@@ -166,23 +269,23 @@ function Invoke-AgentGrepFiles {
         $regexOptions = if ($isCaseSensitive) { [System.Text.RegularExpressions.RegexOptions]::None } else { [System.Text.RegularExpressions.RegexOptions]::IgnoreCase }
         $pattern = [regex]::new($Arguments.pattern, $regexOptions, [timespan]::FromMilliseconds(100))
     }
+    $rootFull = (Get-Item -LiteralPath $Root -Force -ErrorAction Stop).FullName
     $walk = @{ limit = $script:AgentMaxWalkEntries; visited = 0; truncated = $false }
     $includePatterns = @(if ($includeFilter) { Get-GlobCandidatePatterns -Pattern $includeFilter } else { @() })
     $allCandidateFiles = @(if ($Item.PSIsContainer) {
-        foreach ($walkEntry in @(Get-WorkspaceWalkEntries -Root $Root -SearchPath $Path -FilesOnly -Budget $walk)) {
-            $child = $walkEntry.item
+        foreach ($walkEntry in @(Get-CachedWorkspaceFileEntries -Root $Root -SearchPath $Path -Budget $walk)) {
             $relCandidate = $walkEntry.rel_path
             if ($includePatterns.Count -gt 0) {
                 $incMatched = $false
                 foreach ($incPat in $includePatterns) {
-                    if (($child.Name -like $incPat) -or ($relCandidate -like $incPat)) {
+                    if (($walkEntry.name -like $incPat) -or ($relCandidate -like $incPat)) {
                         $incMatched = $true
                         break
                     }
                 }
                 if (-not $incMatched) { continue }
             }
-            if ($child.Length -le 1MB) { $child.FullName }
+            if ($walkEntry.length -le 1MB) { $walkEntry.full_path }
         }
     }
     else {
@@ -215,75 +318,167 @@ function Invoke-AgentGrepFiles {
     $nextStartLine = $null
     $deadline = [datetime]::UtcNow.AddSeconds(10)
     $timedOut = $false
-    :scan for ($fileIndex = $fileOffset; $fileIndex -lt $totalFiles -and $filesScanned -lt 500; $fileIndex++) {
-        $firstLine = if ($fileIndex -eq $fileOffset) { $startLine } else { 1 }
+    $dirReparseCache = @{}
+    $fileIndex = $fileOffset
+    :scan while ($fileIndex -lt $totalFiles -and $filesScanned -lt 500) {
+        $chunkStart = $fileIndex
+        $firstChunkLine = if ($chunkStart -eq $fileOffset) { $startLine } else { 1 }
         if ([datetime]::UtcNow -ge $deadline) {
             $timedOut = $true
-            $nextFileOffset = $fileIndex
-            $nextStartLine = $firstLine
-            break
+            $nextFileOffset = $chunkStart
+            $nextStartLine = $firstChunkLine
+            break scan
         }
-        $file = Get-Item -LiteralPath $allCandidateFiles[$fileIndex] -Force -ErrorAction Stop
-        $filesScanned++
-        if ($file.Length -le 1MB -and -not $file.PSIsContainer -and ($file.Attributes -band 1024) -eq 0) {
-            $raw = Get-Content -LiteralPath $file.FullName -Raw -Encoding UTF8 -ErrorAction Stop
-            $lines = @($raw -split '\r\n|[\r\n]')
-            $lineCount = $lines.Count
-            if ($lineCount -gt 0 -and $lines[-1] -eq '') { $lineCount-- }
-            for ($i = $firstLine - 1; $i -lt $lineCount; $i++) {
-                if ([datetime]::UtcNow -ge $deadline) {
-                    $timedOut = $true
-                    $nextFileOffset = $fileIndex
-                    $nextStartLine = $i + 1
-                    break scan
+        $maxChunk = 500 - $filesScanned
+        if ($maxChunk -gt 64) { $maxChunk = 64 }
+        $remFiles = $totalFiles - $chunkStart
+        if ($maxChunk -gt $remFiles) { $maxChunk = $remFiles }
+        $chunkEnd = $chunkStart + $maxChunk - 1
+
+        $chunkPaths = @($allCandidateFiles[$chunkStart..$chunkEnd])
+        $batchItems = @(Get-Item -LiteralPath $chunkPaths -Force -ErrorAction SilentlyContinue)
+        $chunkItems = @()
+        if ($batchItems.Count -eq $chunkPaths.Count) {
+            $chunkItems = $batchItems
+        }
+        else {
+            foreach ($cp in $chunkPaths) {
+                $singleItem = Get-Item -LiteralPath $cp -Force -ErrorAction SilentlyContinue
+                $chunkItems += , $singleItem
+            }
+        }
+
+        $chunkVerified = @()
+        for ($cOffset = 0; $cOffset -lt $maxChunk; $cOffset++) {
+            $vItem = $chunkItems[$cOffset]
+            $isSafeItem = [bool](Test-VerifiedGrepCandidateFile -FileItem $vItem -RootFull $rootFull -DirReparseCache $dirReparseCache)
+            $chunkVerified += $isSafeItem
+        }
+
+        $batchFilter = $null
+        if ($isLiteral) {
+            $verifiedBatch = @()
+            for ($cOffset = 0; $cOffset -lt $maxChunk; $cOffset++) {
+                if ($chunkVerified[$cOffset]) {
+                    $verifiedBatch += $chunkItems[$cOffset].FullName
                 }
-                try {
-                    $matched = if ($isLiteral) { $lines[$i].IndexOf($Arguments.pattern, $comparison) -ge 0 }
-                    else { $pattern.IsMatch($lines[$i]) }
-                }
-                catch [System.Text.RegularExpressions.RegexMatchTimeoutException] {
-                    throw 'Regular expression exceeded the 100 ms match limit. Simplify the pattern or use literal matching.'
-                }
-                if (-not $matched) { continue }
-                # Keep one lookahead match so continuation starts at the first omitted hit.
-                if ($hitCount -ge $maxMatches) {
-                    $matchLimitReached = $true
-                    $nextFileOffset = $fileIndex
-                    $nextStartLine = $i + 1
-                    break scan
-                }
-                $hitCount++
-                $firstContext = $i - $ctxLines
-                if ($firstContext -lt 0) { $firstContext = 0 }
-                $lastContext = $i + $ctxLines
-                if ($lastContext -ge $lineCount) { $lastContext = $lineCount - 1 }
-                $excerpt = @(for ($j = $firstContext; $j -le $lastContext; $j++) {
-                    $line = $lines[$j]
-                    if ($line.Length -gt 300) {
-                        $line = $line.Substring(0, 300) + '...'
-                        $linesTruncated = $true
+            }
+            if ([datetime]::UtcNow -ge $deadline) {
+                $timedOut = $true
+                $nextFileOffset = $chunkStart
+                $nextStartLine = $firstChunkLine
+                break scan
+            }
+            if ($verifiedBatch.Count -gt 0) {
+                $batchFilter = Invoke-LiteralBatchPreFilter -Paths $verifiedBatch -Pattern $Arguments.pattern -CaseSensitive $isCaseSensitive
+            }
+            else {
+                $batchFilter = @{ matched = @{}; fallback_all = $false; fallback_paths = @{} }
+            }
+        }
+
+        for ($idx = $chunkStart; $idx -le $chunkEnd; $idx++) {
+            $fileIndex = $idx
+            $firstLine = if ($fileIndex -eq $fileOffset) { $startLine } else { 1 }
+            if ([datetime]::UtcNow -ge $deadline) {
+                $timedOut = $true
+                $nextFileOffset = $fileIndex
+                $nextStartLine = $firstLine
+                break scan
+            }
+            $cSlot = $idx - $chunkStart
+            $file = $chunkItems[$cSlot]
+            if ($null -ne $file) {
+                $filesScanned++
+                if ($chunkVerified[$cSlot]) {
+                    $shouldRead = $true
+                    if ($isLiteral -and $null -ne $batchFilter -and (-not $batchFilter.fallback_all)) {
+                        $fullCandidatePath = $file.FullName
+                        if ((-not (Test-ExactPathSetContains -SetMap $batchFilter.fallback_paths -PathKey $fullCandidatePath)) -and (-not (Test-ExactPathSetContains -SetMap $batchFilter.matched -PathKey $fullCandidatePath))) {
+                            $shouldRead = $false
+                        }
                     }
-                    $line
-                })
-                $hit = @{
-                    path = (Get-WorkspaceRelativePath -Root $Root -FullPath $file.FullName)
-                    file = (Get-WorkspaceRelativePath -Root $Path -FullPath $file.FullName)
-                    line_number = $i + 1
-                    line = $excerpt[$i - $firstContext]
+                    if ($shouldRead) {
+                        if ($isLiteral) {
+                            $file = Get-Item -LiteralPath $allCandidateFiles[$fileIndex] -Force -ErrorAction SilentlyContinue
+                            if (-not (Test-VerifiedGrepCandidateFile -FileItem $file -RootFull $rootFull)) {
+                                $shouldRead = $false
+                            }
+                        }
+                    }
+                    if ($shouldRead) {
+                        $raw = $null
+                        $readOk = $false
+                        try {
+                            $raw = Get-Content -LiteralPath $file.FullName -Raw -Encoding UTF8 -ErrorAction Stop
+                            $readOk = $true
+                        }
+                        catch {
+                            if (Test-Path -LiteralPath $file.FullName) { throw }
+                        }
+                        if ($readOk) {
+                            $lines = @($raw -split '\r\n|[\r\n]')
+                            $lineCount = $lines.Count
+                            if ($lineCount -gt 0 -and $lines[-1] -eq '') { $lineCount-- }
+                            for ($i = $firstLine - 1; $i -lt $lineCount; $i++) {
+                                if ([datetime]::UtcNow -ge $deadline) {
+                                    $timedOut = $true
+                                    $nextFileOffset = $fileIndex
+                                    $nextStartLine = $i + 1
+                                    break scan
+                                }
+                                try {
+                                    $matched = if ($isLiteral) { $lines[$i].IndexOf($Arguments.pattern, $comparison) -ge 0 }
+                                    else { $pattern.IsMatch($lines[$i]) }
+                                }
+                                catch [System.Text.RegularExpressions.RegexMatchTimeoutException] {
+                                    throw 'Regular expression exceeded the 100 ms match limit. Simplify the pattern or use literal matching.'
+                                }
+                                if (-not $matched) { continue }
+                                # Keep one lookahead match so continuation starts at the first omitted hit.
+                                if ($hitCount -ge $maxMatches) {
+                                    $matchLimitReached = $true
+                                    $nextFileOffset = $fileIndex
+                                    $nextStartLine = $i + 1
+                                    break scan
+                                }
+                                $hitCount++
+                                $firstContext = $i - $ctxLines
+                                if ($firstContext -lt 0) { $firstContext = 0 }
+                                $lastContext = $i + $ctxLines
+                                if ($lastContext -ge $lineCount) { $lastContext = $lineCount - 1 }
+                                $excerpt = @(for ($j = $firstContext; $j -le $lastContext; $j++) {
+                                    $line = $lines[$j]
+                                    if ($line.Length -gt 300) {
+                                        $line = $line.Substring(0, 300) + '...'
+                                        $linesTruncated = $true
+                                    }
+                                    $line
+                                })
+                                $hit = @{
+                                    path = (Get-WorkspaceRelativePath -Root $Root -FullPath $file.FullName)
+                                    file = (Get-WorkspaceRelativePath -Root $Path -FullPath $file.FullName)
+                                    line_number = $i + 1
+                                    line = $excerpt[$i - $firstContext]
+                                }
+                                if ($ctxLines -gt 0) { $hit.context = $excerpt }
+                                $hits += $hit
+                            }
+                        }
+                    }
                 }
-                if ($ctxLines -gt 0) { $hit.context = $excerpt }
-                $hits += $hit
+            }
+            if ($fileIndex + 1 -lt $totalFiles) {
+                $matchLimitReached = ($hitCount -ge $maxMatches)
+                $fileLimitReached = ($filesScanned -ge 500)
+                if ($matchLimitReached -or $fileLimitReached) {
+                    $nextFileOffset = $fileIndex + 1
+                    $nextStartLine = 1
+                    break scan
+                }
             }
         }
-        if ($fileIndex + 1 -lt $totalFiles) {
-            $matchLimitReached = ($hitCount -ge $maxMatches)
-            $fileLimitReached = ($filesScanned -ge 500)
-            if ($matchLimitReached -or $fileLimitReached) {
-                $nextFileOffset = $fileIndex + 1
-                $nextStartLine = 1
-                break
-            }
-        }
+        $fileIndex = $chunkEnd + 1
     }
     $truncated = ($fileLimitReached -or $matchLimitReached -or $timedOut -or $walk.truncated)
     $truncReason = if ($timedOut) {

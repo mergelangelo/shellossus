@@ -237,6 +237,7 @@ function Invoke-ShellCommand {
         }
     }
     finally {
+        Clear-WorkspaceWalkCache
         if ($proc -and -not $commandFinished) {
             $null = Stop-AgentProcessTree -Process $proc -Tracked $trackedProcesses
         }

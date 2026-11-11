@@ -222,6 +222,7 @@ function Invoke-AgentMemory {
                 throw
             }
             finally {
+                Clear-WorkspaceWalkCache
                 if ($stageFile) {
                     Remove-Item -LiteralPath $stageFile.FullName -Force -ErrorAction SilentlyContinue
                 }
@@ -230,6 +231,7 @@ function Invoke-AgentMemory {
                 }
             }
         }
+        Clear-WorkspaceWalkCache
         $existing = $updatedText
 
         Sync-AgentMemoryContext -State $script:ActiveState -Root $Root -ConfigDir $configDir | Out-Null

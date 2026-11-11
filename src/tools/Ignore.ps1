@@ -281,6 +281,28 @@ function Test-PathIgnored {
     return $ignored
 }
 
+function Format-WalkRelativePath {
+    param([string]$RootFull, [string]$FullPath)
+    $isWin = ($env:OS -eq 'Windows_NT')
+    $isWinDrivePath = $isWin -and ($RootFull -match '^[a-zA-Z]:(?:[/\\]|$)')
+    $rootNorm = if ($isWin) { $RootFull.TrimEnd('\').TrimEnd('/') } else { $RootFull.TrimEnd('/') }
+    $fullNorm = if ($isWin) { $FullPath.TrimEnd('\').TrimEnd('/') } else { $FullPath.TrimEnd('/') }
+    if ($isWinDrivePath) {
+        if ($fullNorm -ieq $rootNorm) { return '.' }
+        if ($FullPath.StartsWith($rootNorm + '\', [StringComparison]::OrdinalIgnoreCase) -or
+            $FullPath.StartsWith($rootNorm + '/', [StringComparison]::OrdinalIgnoreCase)) {
+            return $FullPath.Substring($rootNorm.Length + 1).Replace('\', '/')
+        }
+        return $FullPath
+    }
+    if ($fullNorm -ceq $rootNorm) { return '.' }
+    if ($FullPath.StartsWith($rootNorm + '/', [StringComparison]::Ordinal) -or
+        ($isWin -and $FullPath.StartsWith($rootNorm + '\', [StringComparison]::Ordinal))) {
+        return $FullPath.Substring($rootNorm.Length + 1).Replace('\', '/')
+    }
+    return $FullPath
+}
+
 function Invoke-WorkspaceWalk {
     param(
         [string]$RootFull,
@@ -317,7 +339,7 @@ function Invoke-WorkspaceWalk {
         if (($child.Attributes -band 1024) -ne 0) { continue }
         if ($child.PSIsContainer) {
             if ($child.Name -ieq '.git' -or $child.Name -ieq 'node_modules') { continue }
-            $relDir = Get-WorkspaceRelativePath -Root $RootFull -FullPath $child.FullName
+            $relDir = Format-WalkRelativePath -RootFull $RootFull -FullPath $child.FullName
             if (Test-PathIgnored -RelativePath $relDir -IsDir $true -Rules $activeRules) { continue }
             if (-not $FilesOnly) {
                 @{ item = $child; rel_path = $relDir; is_dir = $true }
@@ -326,7 +348,7 @@ function Invoke-WorkspaceWalk {
         }
         else {
             if (Test-IsSecretFile $child) { continue }
-            $relFile = Get-WorkspaceRelativePath -Root $RootFull -FullPath $child.FullName
+            $relFile = Format-WalkRelativePath -RootFull $RootFull -FullPath $child.FullName
             if (Test-PathIgnored -RelativePath $relFile -IsDir $false -Rules $activeRules) { continue }
             @{ item = $child; rel_path = $relFile; is_dir = $false }
         }
@@ -348,4 +370,109 @@ function Get-WorkspaceWalkEntries {
     $scanDir = $scanItem.FullName.TrimEnd('\').TrimEnd('/')
     $ancestorRules = @(Get-AncestorIgnoreRules -RootFull $rootFull -ScanDir $scanDir)
     Invoke-WorkspaceWalk -RootFull $rootFull -CurrentDir $scanDir -ParentRules $ancestorRules -FilesOnly:$FilesOnly -Budget $Budget
+}
+
+$script:WorkspaceWalkCache = @{}
+$script:WorkspaceWalkCacheTTLSeconds = 15
+
+function Clear-WorkspaceWalkCache {
+    $script:WorkspaceWalkCache = @{}
+}
+
+function Get-CachedWorkspaceFileEntries {
+    param(
+        [string]$Root,
+        [string]$SearchPath = '',
+        [hashtable]$Budget = @{ limit = $script:AgentMaxWalkEntries; visited = 0; truncated = $false }
+    )
+    if (-not $Root -or -not (Test-Path -LiteralPath $Root)) { return @() }
+    $rootItem = Get-Item -LiteralPath $Root -Force
+    $rootFull = $rootItem.FullName.TrimEnd('\').TrimEnd('/')
+    $scanItem = if ($SearchPath -and (Test-Path -LiteralPath $SearchPath)) { Get-Item -LiteralPath $SearchPath -Force } else { $rootItem }
+    if (-not $scanItem.PSIsContainer) {
+        if (($scanItem.Attributes -band 1024) -ne 0 -or (Test-IsSecretFile $scanItem)) { return @() }
+        $relFile = Get-WorkspaceRelativePath -Root $rootFull -FullPath $scanItem.FullName
+        $rules = @(Get-WorkspaceIgnoreRules -Root $rootFull -SearchPath $scanItem.FullName)
+        if (Test-PathIgnored -RelativePath $relFile -IsDir $false -Rules $rules) { return @() }
+        return @(@{
+            full_path = [string]$scanItem.FullName
+            rel_path = [string]$relFile
+            name = [string]$scanItem.Name
+            length = [long]$scanItem.Length
+        })
+    }
+
+    $scanDir = $scanItem.FullName.TrimEnd('\').TrimEnd('/')
+    $effectiveLimit = [int]$Budget.limit - [int]$Budget.visited
+    if ($effectiveLimit -lt 0) { $effectiveLimit = 0 }
+    $exactKey = "$rootFull|$scanDir|FilesOnly=1|Limit=$effectiveLimit"
+
+    if ($null -eq $script:WorkspaceWalkCache -or $script:WorkspaceWalkCache -isnot [hashtable]) {
+        $script:WorkspaceWalkCache = @{}
+    }
+
+    $now = Get-Date
+    $ttlSec = [double]$script:WorkspaceWalkCacheTTLSeconds
+    if ($ttlSec -gt 0 -and $script:WorkspaceWalkCache.ContainsKey($exactKey)) {
+        $liveSlots = @()
+        $matchedSlot = $null
+        foreach ($slot in @($script:WorkspaceWalkCache[$exactKey])) {
+            if ($null -eq $slot -or $null -eq $slot.cached_at) { continue }
+            $elapsed = ($now - $slot.cached_at).TotalSeconds
+            if ($elapsed -ge 0 -and $elapsed -lt $ttlSec) {
+                $liveSlots += $slot
+                if ($null -eq $matchedSlot -and $slot.exact_key -ceq $exactKey) {
+                    $matchedSlot = $slot
+                }
+            }
+        }
+        if ($liveSlots.Count -gt 0) {
+            $script:WorkspaceWalkCache[$exactKey] = $liveSlots
+        }
+        else {
+            $script:WorkspaceWalkCache.Remove($exactKey)
+        }
+        if ($null -ne $matchedSlot) {
+            $Budget.visited += [int]$matchedSlot.visited
+            if ($matchedSlot.truncated) { $Budget.truncated = $true }
+            return @($matchedSlot.entries)
+        }
+    }
+
+    $walkBudget = @{ limit = $effectiveLimit; visited = 0; truncated = $false }
+    $ancestorRules = @(Get-AncestorIgnoreRules -RootFull $rootFull -ScanDir $scanDir)
+    $rawEntries = @(Invoke-WorkspaceWalk -RootFull $rootFull -CurrentDir $scanDir -ParentRules $ancestorRules -FilesOnly -Budget $walkBudget)
+    $lightEntries = @(foreach ($we in $rawEntries) {
+        $fi = $we.item
+        @{
+            full_path = [string]$fi.FullName
+            rel_path = [string]$we.rel_path
+            name = [string]$fi.Name
+            length = [long]$fi.Length
+        }
+    })
+
+    $Budget.visited += [int]$walkBudget.visited
+    if ($walkBudget.truncated) { $Budget.truncated = $true }
+
+    if ($script:WorkspaceWalkCache.Count -ge 32 -and -not $script:WorkspaceWalkCache.ContainsKey($exactKey)) {
+        $script:WorkspaceWalkCache = @{}
+    }
+    $newSlot = @{
+        exact_key = $exactKey
+        cached_at = (Get-Date)
+        visited = [int]$walkBudget.visited
+        truncated = [bool]$walkBudget.truncated
+        entries = $lightEntries
+    }
+    $keptSlots = @()
+    if ($script:WorkspaceWalkCache.ContainsKey($exactKey)) {
+        foreach ($existingSlot in @($script:WorkspaceWalkCache[$exactKey])) {
+            if ($null -ne $existingSlot -and $existingSlot.exact_key -cne $exactKey) {
+                $keptSlots += $existingSlot
+            }
+        }
+    }
+    $script:WorkspaceWalkCache[$exactKey] = @($keptSlots) + @($newSlot)
+    return $lightEntries
 }

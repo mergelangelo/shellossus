@@ -298,6 +298,17 @@ try {
     Assert-True ($clMemRes.success -and $clMemRes.action -eq 'append' -and ($clMemRes.memory -like '*CL invariant*')) 'ConstrainedLanguage memory execution failed.'
     $clWalk = @(Get-WorkspaceWalkEntries -Root $workspacePath -SearchPath $workspacePath -FilesOnly)
     Assert-True ($clWalk.Count -ge 1) 'ConstrainedLanguage Get-WorkspaceWalkEntries failed.'
+    Clear-WorkspaceWalkCache
+    $clBudget1 = @{ visited = 0; limit = 500; truncated = $false }
+    $clCached1 = @(Get-CachedWorkspaceFileEntries -Root $workspacePath -SearchPath $workspacePath -Budget $clBudget1)
+    $clBudget2 = @{ visited = 0; limit = 500; truncated = $false }
+    $clCached2 = @(Get-CachedWorkspaceFileEntries -Root $workspacePath -SearchPath $workspacePath -Budget $clBudget2)
+    Assert-True ($clCached1.Count -ge 1 -and $clCached2.Count -eq $clCached1.Count -and $clBudget2.visited -eq $clBudget1.visited) 'ConstrainedLanguage Get-CachedWorkspaceFileEntries failed.'
+    $clLitGrep1 = Invoke-AgentTool -Root $workspacePath -Call @{ id = 'cl-lg1'; function = @{ name = 'grep_files'; arguments = '{"path":".","pattern":"row3","literal":true,"limit":1}' } } | ConvertFrom-Json
+    $clLitGrep2 = Invoke-AgentTool -Root $workspacePath -Call @{ id = 'cl-lg2'; function = @{ name = 'grep_files'; arguments = '{"path":".","pattern":"ROW3","literal":true,"case_sensitive":true}' } } | ConvertFrom-Json
+    Assert-True ($clLitGrep1.matches.Count -eq 1 -and $clLitGrep2.matches.Count -eq 0 -and $script:WorkspaceWalkCache.Count -gt 0) 'ConstrainedLanguage cached literal grep_files failed.'
+    Clear-WorkspaceWalkCache
+    Assert-True ($script:WorkspaceWalkCache.Count -eq 0) 'ConstrainedLanguage Clear-WorkspaceWalkCache failed.'
     $clNormSub = Format-RunAgentArguments -ArgsObj ('{"agent":"scout","task":"check"}' | ConvertFrom-Json)
     Assert-True ($clNormSub.role -eq 'scout' -and $clNormSub.prompt -eq 'check') 'ConstrainedLanguage Format-RunAgentArguments failed.'
     $clRole = Resolve-AgentRole -Name 'scout' -Root $workspacePath
@@ -839,6 +850,12 @@ try {
         '$coldResumed = @{ messages = @() }',
         'Invoke-SessionResume -SessionFile $coldSessFile -State $coldResumed -CurrentWorkspace $env:SHELLOSSUS_COLD_WS | Out-Null',
         'if ($coldResumed.session_id -ne ''sid-cold-1'' -or $coldResumed.messages.Count -lt 5) { throw ''Cold CLM Invoke-SessionResume failed.'' }',
+        'Clear-WorkspaceWalkCache',
+        '$coldGrep1 = Invoke-AgentTool -Root $env:SHELLOSSUS_COLD_WS -Call @{ id = ''c-g1''; function = @{ name = ''grep_files''; arguments = ''{"path":".","pattern":"a","literal":true}'' } } | ConvertFrom-Json',
+        '$coldGrep2 = Invoke-AgentTool -Root $env:SHELLOSSUS_COLD_WS -Call @{ id = ''c-g2''; function = @{ name = ''grep_files''; arguments = ''{"path":".","pattern":"b","literal":true}'' } } | ConvertFrom-Json',
+        'if ($coldGrep1.matches.Count -ne 1 -or $coldGrep2.matches.Count -ne 1 -or $script:WorkspaceWalkCache.Count -eq 0) { throw ''Cold CLM cached literal grep_files failed.'' }',
+        '$null = Invoke-AgentTool -Root $env:SHELLOSSUS_COLD_WS -Call @{ id = ''c-w3''; function = @{ name = ''write_file''; arguments = ''{"path":"cold-added.txt","content":"gamma","overwrite":true}'' } } | ConvertFrom-Json',
+        'if ($script:WorkspaceWalkCache.Count -ne 0) { throw ''Cold CLM write_file did not invalidate walk cache.'' }',
         '$resolvedSelf = Resolve-StandaloneScriptPath -Required',
         '$workerArgs = Get-AgentWorkerArguments -ScriptPath $resolvedSelf -WorkerMode ''http''',
         'if (-not $workerArgs) { throw ''Cold CLM Get-AgentWorkerArguments returned empty result.'' }',

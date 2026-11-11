@@ -69,6 +69,7 @@ function Invoke-ReplNewSessionCommand {
     $State.last_failed_question = ''
     $script:ActiveSessionTodos = @()
     Reset-AgentSessionApprovals -State $State
+    Clear-WorkspaceWalkCache
     Clear-AgentUndoBackups -UndoEntries $UndoStack
     $sessionFile = if ($NoSession) { '' } else { Join-Path $SessionDir ($newId + '.jsonl') }
     $script:ActiveSessionId = $newId
@@ -123,6 +124,7 @@ function Invoke-ReplTreeCommand {
     if ($targetId) {
         try {
             Switch-SessionBranch -State $State -TargetId $targetId | Out-Null
+            Clear-WorkspaceWalkCache
             Clear-AgentUndoBackups -UndoEntries $UndoStack
             $UndoStack = @()
             Save-AgentSession -SessionFile $SessionFile -State $State -Workspace $RootPath -Model $Model
@@ -149,6 +151,7 @@ function Invoke-ReplForkCommand {
         $SessionFile = if ($NoSession) { '' } else { $forkRes.session_file }
         Clear-AgentUndoBackups -UndoEntries $UndoStack
         $UndoStack = @()
+        Clear-WorkspaceWalkCache
         Reset-AgentSessionApprovals -State $State
         Write-Host ($script:Gm.Green + "  Forked session to: $(Format-TuiText $forkRes.session_file) (id=$(Format-TuiText $forkRes.session_id))" + $script:Gm.Reset)
     }
@@ -196,6 +199,7 @@ function Invoke-ReplImportCommand {
         $UndoStack = @()
         $LastFailedQuestion = ''
         if ($State.model) { $Model = $State.model }
+        Clear-WorkspaceWalkCache
         Reset-AgentSessionApprovals -State $State
         Write-Host ($script:Gm.Green + "  Imported session: $(Format-TuiText $impPath) ($($State.messages.Count) messages)" + $script:Gm.Reset)
     }
@@ -229,6 +233,7 @@ function Invoke-ReplCopyCommand {
 
 function Invoke-ReplReloadCommand {
     param($State, $SystemMessage, [string]$RootPath, [string]$ConfigDir = '')
+    Clear-WorkspaceWalkCache
     $State.scoped_instr_cache = @{}
     $fullSystemPrompt = Build-SystemPrompt -Root $RootPath -ConfigDir $ConfigDir
     $SystemMessage.content = $fullSystemPrompt
@@ -410,6 +415,7 @@ function Invoke-ReplSessionsCommand {
             $UndoStack = @()
             $LastFailedQuestion = ''
             if ($State.model) { $Model = $State.model }
+            Clear-WorkspaceWalkCache
             Reset-AgentSessionApprovals -State $State
             Write-Host ($script:Gm.Green + "  Resumed session: $(Format-TuiText $chosen) ($($State.messages.Count) messages, model=$(Format-TuiText $Model), permission=$($script:AgentPermission))" + $script:Gm.Reset)
         }
@@ -481,8 +487,10 @@ function Invoke-ReplBangCommand {
     $localOnly = $InputText.StartsWith('!!')
     $cmdStr = if ($localOnly) { $InputText.Substring(2).Trim() } else { $InputText.Substring(1).Trim() }
     if (-not $cmdStr) { return }
+    Clear-WorkspaceWalkCache
     try {
         $res = Invoke-ShellCommand -Root $RootPath -Command $cmdStr
+        Clear-WorkspaceWalkCache
         if ($res.output) { Write-Host ($script:Gm.Fg + (Format-TuiText -Text $res.output -Multiline) + $script:Gm.Reset) }
         Write-Host ($script:Gm.Grey1 + "  [exit $($res.exit_code)]" + $script:Gm.Reset)
         if (-not $localOnly) {

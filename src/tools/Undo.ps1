@@ -265,9 +265,11 @@ function Invoke-AgentUndo {
             $expectedByPath[$fullKey] = $w
         }
         catch {
+            Clear-WorkspaceWalkCache
             Stop-AgentUndo -UndoEntry $UndoEntry -Reason $_.Exception.Message
         }
     }
+    Clear-WorkspaceWalkCache
     for ($i = $writes.Count - 1; $i -ge 0; $i--) {
         $w = $writes[$i]
         if (-not $w -or $w.undone) { continue }
@@ -312,9 +314,11 @@ function Invoke-AgentUndo {
             }
         }
         catch {
+            Clear-WorkspaceWalkCache
             Stop-AgentUndo -UndoEntry $UndoEntry -Reason $_.Exception.Message
         }
     }
+    Clear-WorkspaceWalkCache
     if ($UndoEntry -is [hashtable]) {
         if ($UndoEntry.ContainsKey('todos')) {
             $State.todos = @(Copy-SessionHashtableArray -Items $UndoEntry.todos)

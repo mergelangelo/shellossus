@@ -4217,6 +4217,28 @@ function Test-PathIgnored {
     return $ignored
 }
 
+function Format-WalkRelativePath {
+    param([string]$RootFull, [string]$FullPath)
+    $isWin = ($env:OS -eq 'Windows_NT')
+    $isWinDrivePath = $isWin -and ($RootFull -match '^[a-zA-Z]:(?:[/\\]|$)')
+    $rootNorm = if ($isWin) { $RootFull.TrimEnd('\').TrimEnd('/') } else { $RootFull.TrimEnd('/') }
+    $fullNorm = if ($isWin) { $FullPath.TrimEnd('\').TrimEnd('/') } else { $FullPath.TrimEnd('/') }
+    if ($isWinDrivePath) {
+        if ($fullNorm -ieq $rootNorm) { return '.' }
+        if ($FullPath.StartsWith($rootNorm + '\', [StringComparison]::OrdinalIgnoreCase) -or
+            $FullPath.StartsWith($rootNorm + '/', [StringComparison]::OrdinalIgnoreCase)) {
+            return $FullPath.Substring($rootNorm.Length + 1).Replace('\', '/')
+        }
+        return $FullPath
+    }
+    if ($fullNorm -ceq $rootNorm) { return '.' }
+    if ($FullPath.StartsWith($rootNorm + '/', [StringComparison]::Ordinal) -or
+        ($isWin -and $FullPath.StartsWith($rootNorm + '\', [StringComparison]::Ordinal))) {
+        return $FullPath.Substring($rootNorm.Length + 1).Replace('\', '/')
+    }
+    return $FullPath
+}
+
 function Invoke-WorkspaceWalk {
     param(
         [string]$RootFull,
@@ -4253,7 +4275,7 @@ function Invoke-WorkspaceWalk {
         if (($child.Attributes -band 1024) -ne 0) { continue }
         if ($child.PSIsContainer) {
             if ($child.Name -ieq '.git' -or $child.Name -ieq 'node_modules') { continue }
-            $relDir = Get-WorkspaceRelativePath -Root $RootFull -FullPath $child.FullName
+            $relDir = Format-WalkRelativePath -RootFull $RootFull -FullPath $child.FullName
             if (Test-PathIgnored -RelativePath $relDir -IsDir $true -Rules $activeRules) { continue }
             if (-not $FilesOnly) {
                 @{ item = $child; rel_path = $relDir; is_dir = $true }
@@ -4262,7 +4284,7 @@ function Invoke-WorkspaceWalk {
         }
         else {
             if (Test-IsSecretFile $child) { continue }
-            $relFile = Get-WorkspaceRelativePath -Root $RootFull -FullPath $child.FullName
+            $relFile = Format-WalkRelativePath -RootFull $RootFull -FullPath $child.FullName
             if (Test-PathIgnored -RelativePath $relFile -IsDir $false -Rules $activeRules) { continue }
             @{ item = $child; rel_path = $relFile; is_dir = $false }
         }
@@ -4284,6 +4306,111 @@ function Get-WorkspaceWalkEntries {
     $scanDir = $scanItem.FullName.TrimEnd('\').TrimEnd('/')
     $ancestorRules = @(Get-AncestorIgnoreRules -RootFull $rootFull -ScanDir $scanDir)
     Invoke-WorkspaceWalk -RootFull $rootFull -CurrentDir $scanDir -ParentRules $ancestorRules -FilesOnly:$FilesOnly -Budget $Budget
+}
+
+$script:WorkspaceWalkCache = @{}
+$script:WorkspaceWalkCacheTTLSeconds = 15
+
+function Clear-WorkspaceWalkCache {
+    $script:WorkspaceWalkCache = @{}
+}
+
+function Get-CachedWorkspaceFileEntries {
+    param(
+        [string]$Root,
+        [string]$SearchPath = '',
+        [hashtable]$Budget = @{ limit = $script:AgentMaxWalkEntries; visited = 0; truncated = $false }
+    )
+    if (-not $Root -or -not (Test-Path -LiteralPath $Root)) { return @() }
+    $rootItem = Get-Item -LiteralPath $Root -Force
+    $rootFull = $rootItem.FullName.TrimEnd('\').TrimEnd('/')
+    $scanItem = if ($SearchPath -and (Test-Path -LiteralPath $SearchPath)) { Get-Item -LiteralPath $SearchPath -Force } else { $rootItem }
+    if (-not $scanItem.PSIsContainer) {
+        if (($scanItem.Attributes -band 1024) -ne 0 -or (Test-IsSecretFile $scanItem)) { return @() }
+        $relFile = Get-WorkspaceRelativePath -Root $rootFull -FullPath $scanItem.FullName
+        $rules = @(Get-WorkspaceIgnoreRules -Root $rootFull -SearchPath $scanItem.FullName)
+        if (Test-PathIgnored -RelativePath $relFile -IsDir $false -Rules $rules) { return @() }
+        return @(@{
+            full_path = [string]$scanItem.FullName
+            rel_path = [string]$relFile
+            name = [string]$scanItem.Name
+            length = [long]$scanItem.Length
+        })
+    }
+
+    $scanDir = $scanItem.FullName.TrimEnd('\').TrimEnd('/')
+    $effectiveLimit = [int]$Budget.limit - [int]$Budget.visited
+    if ($effectiveLimit -lt 0) { $effectiveLimit = 0 }
+    $exactKey = "$rootFull|$scanDir|FilesOnly=1|Limit=$effectiveLimit"
+
+    if ($null -eq $script:WorkspaceWalkCache -or $script:WorkspaceWalkCache -isnot [hashtable]) {
+        $script:WorkspaceWalkCache = @{}
+    }
+
+    $now = Get-Date
+    $ttlSec = [double]$script:WorkspaceWalkCacheTTLSeconds
+    if ($ttlSec -gt 0 -and $script:WorkspaceWalkCache.ContainsKey($exactKey)) {
+        $liveSlots = @()
+        $matchedSlot = $null
+        foreach ($slot in @($script:WorkspaceWalkCache[$exactKey])) {
+            if ($null -eq $slot -or $null -eq $slot.cached_at) { continue }
+            $elapsed = ($now - $slot.cached_at).TotalSeconds
+            if ($elapsed -ge 0 -and $elapsed -lt $ttlSec) {
+                $liveSlots += $slot
+                if ($null -eq $matchedSlot -and $slot.exact_key -ceq $exactKey) {
+                    $matchedSlot = $slot
+                }
+            }
+        }
+        if ($liveSlots.Count -gt 0) {
+            $script:WorkspaceWalkCache[$exactKey] = $liveSlots
+        }
+        else {
+            $script:WorkspaceWalkCache.Remove($exactKey)
+        }
+        if ($null -ne $matchedSlot) {
+            $Budget.visited += [int]$matchedSlot.visited
+            if ($matchedSlot.truncated) { $Budget.truncated = $true }
+            return @($matchedSlot.entries)
+        }
+    }
+
+    $walkBudget = @{ limit = $effectiveLimit; visited = 0; truncated = $false }
+    $ancestorRules = @(Get-AncestorIgnoreRules -RootFull $rootFull -ScanDir $scanDir)
+    $rawEntries = @(Invoke-WorkspaceWalk -RootFull $rootFull -CurrentDir $scanDir -ParentRules $ancestorRules -FilesOnly -Budget $walkBudget)
+    $lightEntries = @(foreach ($we in $rawEntries) {
+        $fi = $we.item
+        @{
+            full_path = [string]$fi.FullName
+            rel_path = [string]$we.rel_path
+            name = [string]$fi.Name
+            length = [long]$fi.Length
+        }
+    })
+
+    $Budget.visited += [int]$walkBudget.visited
+    if ($walkBudget.truncated) { $Budget.truncated = $true }
+
+    if ($script:WorkspaceWalkCache.Count -ge 32 -and -not $script:WorkspaceWalkCache.ContainsKey($exactKey)) {
+        $script:WorkspaceWalkCache = @{}
+    }
+    $newSlot = @{
+        exact_key = $exactKey
+        cached_at = (Get-Date)
+        visited = [int]$walkBudget.visited
+        truncated = [bool]$walkBudget.truncated
+        entries = $lightEntries
+    }
+    $keptSlots = @()
+    if ($script:WorkspaceWalkCache.ContainsKey($exactKey)) {
+        foreach ($existingSlot in @($script:WorkspaceWalkCache[$exactKey])) {
+            if ($null -ne $existingSlot -and $existingSlot.exact_key -cne $exactKey) {
+                $keptSlots += $existingSlot
+            }
+        }
+    }
+    $script:WorkspaceWalkCache[$exactKey] = @($keptSlots) + @($newSlot)
+    return $lightEntries
 }
 
 # --- src/tools/Files.ps1 ---
@@ -4574,6 +4701,7 @@ function Invoke-AgentStagedWrite {
         }
     }
     finally {
+        Clear-WorkspaceWalkCache
         if (Test-Path -LiteralPath $stageFile.FullName) {
             Remove-Item -LiteralPath $stageFile.FullName -Force -ErrorAction SilentlyContinue
         }
@@ -4787,6 +4915,109 @@ function Invoke-AgentFindFiles {
     return (@{ matches = @($found); files = @($found); count = $found.Count; truncated = $truncated; entries_visited = $walk.visited; notice = $notice } | ConvertTo-Json -Depth 5 -Compress)
 }
 
+function Test-ExactPathSetContains {
+    param([hashtable]$SetMap, [string]$PathKey)
+    if ($null -eq $SetMap -or -not $PathKey -or -not $SetMap.ContainsKey($PathKey)) { return $false }
+    return (@($SetMap[$PathKey]) -ccontains $PathKey)
+}
+
+function Test-VerifiedGrepCandidateFile {
+    param($FileItem, [string]$RootFull, [hashtable]$DirReparseCache = $null)
+    if ($null -eq $FileItem) { return $false }
+    if ($FileItem.PSIsContainer) { return $false }
+    if ($FileItem.Length -gt 1MB) { return $false }
+    if (($FileItem.Attributes -band 1024) -ne 0) { return $false }
+    if (Test-IsSecretFile $FileItem) { return $false }
+    if (-not (Test-AgentPathWithinRoot -RootPath $RootFull -TargetPath $FileItem.FullName)) { return $false }
+    if ($null -eq $DirReparseCache) {
+        if (Test-PathHasReparsePoint -Path $FileItem.FullName -StopAt $RootFull) { return $false }
+        return $true
+    }
+    $parentDir = if ($FileItem.DirectoryName) { [string]$FileItem.DirectoryName } else { Split-Path $FileItem.FullName -Parent }
+    if (-not $parentDir) {
+        if (Test-PathHasReparsePoint -Path $FileItem.FullName -StopAt $RootFull) { return $false }
+        return $true
+    }
+    $cachedDirEntry = $null
+    if ($DirReparseCache.ContainsKey($parentDir)) {
+        foreach ($slot in @($DirReparseCache[$parentDir])) {
+            if ($null -ne $slot -and $slot.dir -ceq $parentDir) {
+                $cachedDirEntry = $slot
+                break
+            }
+        }
+    }
+    if ($null -eq $cachedDirEntry) {
+        $hasRep = [bool](Test-PathHasReparsePoint -Path $parentDir -StopAt $RootFull)
+        $cachedDirEntry = @{ dir = $parentDir; has_reparse = $hasRep }
+        if ($DirReparseCache.ContainsKey($parentDir)) {
+            $DirReparseCache[$parentDir] = @($DirReparseCache[$parentDir]) + @($cachedDirEntry)
+        }
+        else {
+            $DirReparseCache[$parentDir] = @($cachedDirEntry)
+        }
+    }
+    if ($cachedDirEntry.has_reparse) { return $false }
+    return $true
+}
+
+function Invoke-LiteralBatchPreFilter {
+    param(
+        [AllowEmptyCollection()][string[]]$Paths,
+        [string]$Pattern,
+        [bool]$CaseSensitive
+    )
+    $matched = @{}
+    $fallbackPaths = @{}
+    $fallbackAll = $false
+    if (-not $Paths -or $Paths.Count -eq 0) {
+        return @{ matched = $matched; fallback_all = $false; fallback_paths = $fallbackPaths }
+    }
+    $ssErrors = @()
+    try {
+        $ssHits = @(Microsoft.PowerShell.Utility\Select-String -LiteralPath $Paths -Pattern $Pattern -SimpleMatch -List -Encoding UTF8 -CaseSensitive:$CaseSensitive -ErrorAction SilentlyContinue -ErrorVariable ssErrors)
+        foreach ($m in $ssHits) {
+            if ($null -ne $m -and $m.Path) {
+                $mp = [string]$m.Path
+                if ($matched.ContainsKey($mp)) {
+                    if (-not (@($matched[$mp]) -ccontains $mp)) {
+                        $matched[$mp] = @($matched[$mp]) + $mp
+                    }
+                }
+                else {
+                    $matched[$mp] = @($mp)
+                }
+            }
+        }
+    }
+    catch {
+        $fallbackAll = $true
+    }
+    if (@($ssErrors).Count -gt 0) {
+        foreach ($errRec in @($ssErrors)) {
+            $targetObj = if ($null -ne $errRec) { $errRec.TargetObject } else { $null }
+            if ($targetObj -is [string] -and $targetObj.Length -gt 0) {
+                if ($fallbackPaths.ContainsKey($targetObj)) {
+                    if (-not (@($fallbackPaths[$targetObj]) -ccontains $targetObj)) {
+                        $fallbackPaths[$targetObj] = @($fallbackPaths[$targetObj]) + $targetObj
+                    }
+                }
+                else {
+                    $fallbackPaths[$targetObj] = @($targetObj)
+                }
+            }
+            else {
+                $fallbackAll = $true
+            }
+        }
+    }
+    return @{
+        matched = $matched
+        fallback_all = $fallbackAll
+        fallback_paths = $fallbackPaths
+    }
+}
+
 function Invoke-AgentGrepFiles {
     param([string]$Root, [string]$Path, $Item, $Arguments, [datetime]$ToolStart)
     if (-not $Arguments.pattern) { throw 'pattern must be a nonempty string.' }
@@ -4827,23 +5058,23 @@ function Invoke-AgentGrepFiles {
         $regexOptions = if ($isCaseSensitive) { [System.Text.RegularExpressions.RegexOptions]::None } else { [System.Text.RegularExpressions.RegexOptions]::IgnoreCase }
         $pattern = [regex]::new($Arguments.pattern, $regexOptions, [timespan]::FromMilliseconds(100))
     }
+    $rootFull = (Get-Item -LiteralPath $Root -Force -ErrorAction Stop).FullName
     $walk = @{ limit = $script:AgentMaxWalkEntries; visited = 0; truncated = $false }
     $includePatterns = @(if ($includeFilter) { Get-GlobCandidatePatterns -Pattern $includeFilter } else { @() })
     $allCandidateFiles = @(if ($Item.PSIsContainer) {
-        foreach ($walkEntry in @(Get-WorkspaceWalkEntries -Root $Root -SearchPath $Path -FilesOnly -Budget $walk)) {
-            $child = $walkEntry.item
+        foreach ($walkEntry in @(Get-CachedWorkspaceFileEntries -Root $Root -SearchPath $Path -Budget $walk)) {
             $relCandidate = $walkEntry.rel_path
             if ($includePatterns.Count -gt 0) {
                 $incMatched = $false
                 foreach ($incPat in $includePatterns) {
-                    if (($child.Name -like $incPat) -or ($relCandidate -like $incPat)) {
+                    if (($walkEntry.name -like $incPat) -or ($relCandidate -like $incPat)) {
                         $incMatched = $true
                         break
                     }
                 }
                 if (-not $incMatched) { continue }
             }
-            if ($child.Length -le 1MB) { $child.FullName }
+            if ($walkEntry.length -le 1MB) { $walkEntry.full_path }
         }
     }
     else {
@@ -4876,75 +5107,167 @@ function Invoke-AgentGrepFiles {
     $nextStartLine = $null
     $deadline = [datetime]::UtcNow.AddSeconds(10)
     $timedOut = $false
-    :scan for ($fileIndex = $fileOffset; $fileIndex -lt $totalFiles -and $filesScanned -lt 500; $fileIndex++) {
-        $firstLine = if ($fileIndex -eq $fileOffset) { $startLine } else { 1 }
+    $dirReparseCache = @{}
+    $fileIndex = $fileOffset
+    :scan while ($fileIndex -lt $totalFiles -and $filesScanned -lt 500) {
+        $chunkStart = $fileIndex
+        $firstChunkLine = if ($chunkStart -eq $fileOffset) { $startLine } else { 1 }
         if ([datetime]::UtcNow -ge $deadline) {
             $timedOut = $true
-            $nextFileOffset = $fileIndex
-            $nextStartLine = $firstLine
-            break
+            $nextFileOffset = $chunkStart
+            $nextStartLine = $firstChunkLine
+            break scan
         }
-        $file = Get-Item -LiteralPath $allCandidateFiles[$fileIndex] -Force -ErrorAction Stop
-        $filesScanned++
-        if ($file.Length -le 1MB -and -not $file.PSIsContainer -and ($file.Attributes -band 1024) -eq 0) {
-            $raw = Get-Content -LiteralPath $file.FullName -Raw -Encoding UTF8 -ErrorAction Stop
-            $lines = @($raw -split '\r\n|[\r\n]')
-            $lineCount = $lines.Count
-            if ($lineCount -gt 0 -and $lines[-1] -eq '') { $lineCount-- }
-            for ($i = $firstLine - 1; $i -lt $lineCount; $i++) {
-                if ([datetime]::UtcNow -ge $deadline) {
-                    $timedOut = $true
-                    $nextFileOffset = $fileIndex
-                    $nextStartLine = $i + 1
-                    break scan
+        $maxChunk = 500 - $filesScanned
+        if ($maxChunk -gt 64) { $maxChunk = 64 }
+        $remFiles = $totalFiles - $chunkStart
+        if ($maxChunk -gt $remFiles) { $maxChunk = $remFiles }
+        $chunkEnd = $chunkStart + $maxChunk - 1
+
+        $chunkPaths = @($allCandidateFiles[$chunkStart..$chunkEnd])
+        $batchItems = @(Get-Item -LiteralPath $chunkPaths -Force -ErrorAction SilentlyContinue)
+        $chunkItems = @()
+        if ($batchItems.Count -eq $chunkPaths.Count) {
+            $chunkItems = $batchItems
+        }
+        else {
+            foreach ($cp in $chunkPaths) {
+                $singleItem = Get-Item -LiteralPath $cp -Force -ErrorAction SilentlyContinue
+                $chunkItems += , $singleItem
+            }
+        }
+
+        $chunkVerified = @()
+        for ($cOffset = 0; $cOffset -lt $maxChunk; $cOffset++) {
+            $vItem = $chunkItems[$cOffset]
+            $isSafeItem = [bool](Test-VerifiedGrepCandidateFile -FileItem $vItem -RootFull $rootFull -DirReparseCache $dirReparseCache)
+            $chunkVerified += $isSafeItem
+        }
+
+        $batchFilter = $null
+        if ($isLiteral) {
+            $verifiedBatch = @()
+            for ($cOffset = 0; $cOffset -lt $maxChunk; $cOffset++) {
+                if ($chunkVerified[$cOffset]) {
+                    $verifiedBatch += $chunkItems[$cOffset].FullName
                 }
-                try {
-                    $matched = if ($isLiteral) { $lines[$i].IndexOf($Arguments.pattern, $comparison) -ge 0 }
-                    else { $pattern.IsMatch($lines[$i]) }
-                }
-                catch [System.Text.RegularExpressions.RegexMatchTimeoutException] {
-                    throw 'Regular expression exceeded the 100 ms match limit. Simplify the pattern or use literal matching.'
-                }
-                if (-not $matched) { continue }
-                # Keep one lookahead match so continuation starts at the first omitted hit.
-                if ($hitCount -ge $maxMatches) {
-                    $matchLimitReached = $true
-                    $nextFileOffset = $fileIndex
-                    $nextStartLine = $i + 1
-                    break scan
-                }
-                $hitCount++
-                $firstContext = $i - $ctxLines
-                if ($firstContext -lt 0) { $firstContext = 0 }
-                $lastContext = $i + $ctxLines
-                if ($lastContext -ge $lineCount) { $lastContext = $lineCount - 1 }
-                $excerpt = @(for ($j = $firstContext; $j -le $lastContext; $j++) {
-                    $line = $lines[$j]
-                    if ($line.Length -gt 300) {
-                        $line = $line.Substring(0, 300) + '...'
-                        $linesTruncated = $true
+            }
+            if ([datetime]::UtcNow -ge $deadline) {
+                $timedOut = $true
+                $nextFileOffset = $chunkStart
+                $nextStartLine = $firstChunkLine
+                break scan
+            }
+            if ($verifiedBatch.Count -gt 0) {
+                $batchFilter = Invoke-LiteralBatchPreFilter -Paths $verifiedBatch -Pattern $Arguments.pattern -CaseSensitive $isCaseSensitive
+            }
+            else {
+                $batchFilter = @{ matched = @{}; fallback_all = $false; fallback_paths = @{} }
+            }
+        }
+
+        for ($idx = $chunkStart; $idx -le $chunkEnd; $idx++) {
+            $fileIndex = $idx
+            $firstLine = if ($fileIndex -eq $fileOffset) { $startLine } else { 1 }
+            if ([datetime]::UtcNow -ge $deadline) {
+                $timedOut = $true
+                $nextFileOffset = $fileIndex
+                $nextStartLine = $firstLine
+                break scan
+            }
+            $cSlot = $idx - $chunkStart
+            $file = $chunkItems[$cSlot]
+            if ($null -ne $file) {
+                $filesScanned++
+                if ($chunkVerified[$cSlot]) {
+                    $shouldRead = $true
+                    if ($isLiteral -and $null -ne $batchFilter -and (-not $batchFilter.fallback_all)) {
+                        $fullCandidatePath = $file.FullName
+                        if ((-not (Test-ExactPathSetContains -SetMap $batchFilter.fallback_paths -PathKey $fullCandidatePath)) -and (-not (Test-ExactPathSetContains -SetMap $batchFilter.matched -PathKey $fullCandidatePath))) {
+                            $shouldRead = $false
+                        }
                     }
-                    $line
-                })
-                $hit = @{
-                    path = (Get-WorkspaceRelativePath -Root $Root -FullPath $file.FullName)
-                    file = (Get-WorkspaceRelativePath -Root $Path -FullPath $file.FullName)
-                    line_number = $i + 1
-                    line = $excerpt[$i - $firstContext]
+                    if ($shouldRead) {
+                        if ($isLiteral) {
+                            $file = Get-Item -LiteralPath $allCandidateFiles[$fileIndex] -Force -ErrorAction SilentlyContinue
+                            if (-not (Test-VerifiedGrepCandidateFile -FileItem $file -RootFull $rootFull)) {
+                                $shouldRead = $false
+                            }
+                        }
+                    }
+                    if ($shouldRead) {
+                        $raw = $null
+                        $readOk = $false
+                        try {
+                            $raw = Get-Content -LiteralPath $file.FullName -Raw -Encoding UTF8 -ErrorAction Stop
+                            $readOk = $true
+                        }
+                        catch {
+                            if (Test-Path -LiteralPath $file.FullName) { throw }
+                        }
+                        if ($readOk) {
+                            $lines = @($raw -split '\r\n|[\r\n]')
+                            $lineCount = $lines.Count
+                            if ($lineCount -gt 0 -and $lines[-1] -eq '') { $lineCount-- }
+                            for ($i = $firstLine - 1; $i -lt $lineCount; $i++) {
+                                if ([datetime]::UtcNow -ge $deadline) {
+                                    $timedOut = $true
+                                    $nextFileOffset = $fileIndex
+                                    $nextStartLine = $i + 1
+                                    break scan
+                                }
+                                try {
+                                    $matched = if ($isLiteral) { $lines[$i].IndexOf($Arguments.pattern, $comparison) -ge 0 }
+                                    else { $pattern.IsMatch($lines[$i]) }
+                                }
+                                catch [System.Text.RegularExpressions.RegexMatchTimeoutException] {
+                                    throw 'Regular expression exceeded the 100 ms match limit. Simplify the pattern or use literal matching.'
+                                }
+                                if (-not $matched) { continue }
+                                # Keep one lookahead match so continuation starts at the first omitted hit.
+                                if ($hitCount -ge $maxMatches) {
+                                    $matchLimitReached = $true
+                                    $nextFileOffset = $fileIndex
+                                    $nextStartLine = $i + 1
+                                    break scan
+                                }
+                                $hitCount++
+                                $firstContext = $i - $ctxLines
+                                if ($firstContext -lt 0) { $firstContext = 0 }
+                                $lastContext = $i + $ctxLines
+                                if ($lastContext -ge $lineCount) { $lastContext = $lineCount - 1 }
+                                $excerpt = @(for ($j = $firstContext; $j -le $lastContext; $j++) {
+                                    $line = $lines[$j]
+                                    if ($line.Length -gt 300) {
+                                        $line = $line.Substring(0, 300) + '...'
+                                        $linesTruncated = $true
+                                    }
+                                    $line
+                                })
+                                $hit = @{
+                                    path = (Get-WorkspaceRelativePath -Root $Root -FullPath $file.FullName)
+                                    file = (Get-WorkspaceRelativePath -Root $Path -FullPath $file.FullName)
+                                    line_number = $i + 1
+                                    line = $excerpt[$i - $firstContext]
+                                }
+                                if ($ctxLines -gt 0) { $hit.context = $excerpt }
+                                $hits += $hit
+                            }
+                        }
+                    }
                 }
-                if ($ctxLines -gt 0) { $hit.context = $excerpt }
-                $hits += $hit
+            }
+            if ($fileIndex + 1 -lt $totalFiles) {
+                $matchLimitReached = ($hitCount -ge $maxMatches)
+                $fileLimitReached = ($filesScanned -ge 500)
+                if ($matchLimitReached -or $fileLimitReached) {
+                    $nextFileOffset = $fileIndex + 1
+                    $nextStartLine = 1
+                    break scan
+                }
             }
         }
-        if ($fileIndex + 1 -lt $totalFiles) {
-            $matchLimitReached = ($hitCount -ge $maxMatches)
-            $fileLimitReached = ($filesScanned -ge 500)
-            if ($matchLimitReached -or $fileLimitReached) {
-                $nextFileOffset = $fileIndex + 1
-                $nextStartLine = 1
-                break
-            }
-        }
+        $fileIndex = $chunkEnd + 1
     }
     $truncated = ($fileLimitReached -or $matchLimitReached -or $timedOut -or $walk.truncated)
     $truncReason = if ($timedOut) {
@@ -5360,6 +5683,7 @@ function Invoke-ShellCommand {
         }
     }
     finally {
+        Clear-WorkspaceWalkCache
         if ($proc -and -not $commandFinished) {
             $null = Stop-AgentProcessTree -Process $proc -Tracked $trackedProcesses
         }
@@ -5701,9 +6025,11 @@ function Invoke-AgentUndo {
             $expectedByPath[$fullKey] = $w
         }
         catch {
+            Clear-WorkspaceWalkCache
             Stop-AgentUndo -UndoEntry $UndoEntry -Reason $_.Exception.Message
         }
     }
+    Clear-WorkspaceWalkCache
     for ($i = $writes.Count - 1; $i -ge 0; $i--) {
         $w = $writes[$i]
         if (-not $w -or $w.undone) { continue }
@@ -5748,9 +6074,11 @@ function Invoke-AgentUndo {
             }
         }
         catch {
+            Clear-WorkspaceWalkCache
             Stop-AgentUndo -UndoEntry $UndoEntry -Reason $_.Exception.Message
         }
     }
+    Clear-WorkspaceWalkCache
     if ($UndoEntry -is [hashtable]) {
         if ($UndoEntry.ContainsKey('todos')) {
             $State.todos = @(Copy-SessionHashtableArray -Items $UndoEntry.todos)
@@ -6868,6 +7196,7 @@ function Invoke-AgentMemory {
                 throw
             }
             finally {
+                Clear-WorkspaceWalkCache
                 if ($stageFile) {
                     Remove-Item -LiteralPath $stageFile.FullName -Force -ErrorAction SilentlyContinue
                 }
@@ -6876,6 +7205,7 @@ function Invoke-AgentMemory {
                 }
             }
         }
+        Clear-WorkspaceWalkCache
         $existing = $updatedText
 
         Sync-AgentMemoryContext -State $script:ActiveState -Root $Root -ConfigDir $configDir | Out-Null
@@ -7375,6 +7705,7 @@ function Invoke-SubagentInProcess {
         }
     }
     finally {
+        Clear-WorkspaceWalkCache
         $permRank = @{ 'ReadOnly' = 0; 'Ask' = 1; 'AutoEdit' = 2; 'Auto' = 3 }
         if (-not $ForceReadOnly -and $roleObj.permission -ne 'ReadOnly' -and $permRank[$script:AgentPermission] -gt $permRank[$savedPerm]) {
             # Keep session-wide [a]ll permission upgrade approved by the user during craft subagent
@@ -7456,6 +7787,7 @@ function Invoke-AgentSubagent {
             if ($rItem.usage_output_tokens) { $totalUsageOut += [int]$rItem.usage_output_tokens }
         }
         $aggStatus = Resolve-SubagentAggregateStatus -Results $results
+        Clear-WorkspaceWalkCache
         return (@{
             status = $aggStatus
             mode = 'parallel'
@@ -10789,6 +11121,7 @@ function Invoke-AgentTurnRollback {
 
 function Start-AgentTurnTransaction {
     param($State, $UndoBox = $null, [AllowEmptyCollection()][array]$UndoStack = @())
+    Clear-WorkspaceWalkCache
     Ensure-SessionTree -State $State
     $snapshot = New-AgentTurnSnapshot -State $State
     $script:CurrentTurnWrites = @()
@@ -10818,10 +11151,12 @@ function Complete-AgentTurnTransaction {
     }
     $script:CurrentTurnWrites = @()
     $Transaction.state = 'committed'
+    Clear-WorkspaceWalkCache
 }
 
 function Undo-AgentTurnTransaction {
     param($Transaction, $State, [string]$Reason = 'turn_failed')
+    Clear-WorkspaceWalkCache
     if ($null -eq $Transaction) { return $null }
     if ($Transaction.state -ne 'active') { return $Transaction.rollback }
     Protect-AgentTurnBackups -Writes @($script:CurrentTurnWrites)
@@ -10835,6 +11170,7 @@ function Undo-AgentTurnTransaction {
     else {
         $Transaction.state = 'recovery_required'
     }
+    Clear-WorkspaceWalkCache
     return $rollback
 }
 
@@ -10928,8 +11264,10 @@ function New-AgentTurnRequest {
 function Invoke-AgentTurn {
     param($State, [string]$Endpoint, [string]$ModelId, [string]$ApiKey, [string]$Root, [int]$Steps = 50, [int]$MaxRepeatCalls = 0)
     if (-not (Test-ValidConversationBoundary -Messages $State.messages)) {
+        Clear-WorkspaceWalkCache
         throw 'Cannot send conversation with inconsistent tool calls or results.'
     }
+    Clear-WorkspaceWalkCache
     $overflowRetried = $false
     $recoverOverflow = $false
     $script:ActiveModelId = $ModelId
@@ -10950,6 +11288,7 @@ function Invoke-AgentTurn {
         $State.scoped_instr_cache = @{}
     }
     $scopedInstrCache = $State.scoped_instr_cache
+    try {
     for ($step = 0; $step -lt $Steps; $step++) {
         $capSync = Sync-AgentCapabilities -State $State -Root $Root
         $activeTools = @(Get-AgentTools)
@@ -11307,6 +11646,10 @@ function Invoke-AgentTurn {
         status = 'step_limit_reached'
         usage_input_tokens = [int]$State.usage_input_tokens
         usage_output_tokens = [int]$State.usage_output_tokens
+    }
+    }
+    finally {
+        Clear-WorkspaceWalkCache
     }
 }
 
@@ -11916,6 +12259,7 @@ function Invoke-ReplNewSessionCommand {
     $State.last_failed_question = ''
     $script:ActiveSessionTodos = @()
     Reset-AgentSessionApprovals -State $State
+    Clear-WorkspaceWalkCache
     Clear-AgentUndoBackups -UndoEntries $UndoStack
     $sessionFile = if ($NoSession) { '' } else { Join-Path $SessionDir ($newId + '.jsonl') }
     $script:ActiveSessionId = $newId
@@ -11970,6 +12314,7 @@ function Invoke-ReplTreeCommand {
     if ($targetId) {
         try {
             Switch-SessionBranch -State $State -TargetId $targetId | Out-Null
+            Clear-WorkspaceWalkCache
             Clear-AgentUndoBackups -UndoEntries $UndoStack
             $UndoStack = @()
             Save-AgentSession -SessionFile $SessionFile -State $State -Workspace $RootPath -Model $Model
@@ -11996,6 +12341,7 @@ function Invoke-ReplForkCommand {
         $SessionFile = if ($NoSession) { '' } else { $forkRes.session_file }
         Clear-AgentUndoBackups -UndoEntries $UndoStack
         $UndoStack = @()
+        Clear-WorkspaceWalkCache
         Reset-AgentSessionApprovals -State $State
         Write-Host ($script:Gm.Green + "  Forked session to: $(Format-TuiText $forkRes.session_file) (id=$(Format-TuiText $forkRes.session_id))" + $script:Gm.Reset)
     }
@@ -12043,6 +12389,7 @@ function Invoke-ReplImportCommand {
         $UndoStack = @()
         $LastFailedQuestion = ''
         if ($State.model) { $Model = $State.model }
+        Clear-WorkspaceWalkCache
         Reset-AgentSessionApprovals -State $State
         Write-Host ($script:Gm.Green + "  Imported session: $(Format-TuiText $impPath) ($($State.messages.Count) messages)" + $script:Gm.Reset)
     }
@@ -12076,6 +12423,7 @@ function Invoke-ReplCopyCommand {
 
 function Invoke-ReplReloadCommand {
     param($State, $SystemMessage, [string]$RootPath, [string]$ConfigDir = '')
+    Clear-WorkspaceWalkCache
     $State.scoped_instr_cache = @{}
     $fullSystemPrompt = Build-SystemPrompt -Root $RootPath -ConfigDir $ConfigDir
     $SystemMessage.content = $fullSystemPrompt
@@ -12257,6 +12605,7 @@ function Invoke-ReplSessionsCommand {
             $UndoStack = @()
             $LastFailedQuestion = ''
             if ($State.model) { $Model = $State.model }
+            Clear-WorkspaceWalkCache
             Reset-AgentSessionApprovals -State $State
             Write-Host ($script:Gm.Green + "  Resumed session: $(Format-TuiText $chosen) ($($State.messages.Count) messages, model=$(Format-TuiText $Model), permission=$($script:AgentPermission))" + $script:Gm.Reset)
         }
@@ -12328,8 +12677,10 @@ function Invoke-ReplBangCommand {
     $localOnly = $InputText.StartsWith('!!')
     $cmdStr = if ($localOnly) { $InputText.Substring(2).Trim() } else { $InputText.Substring(1).Trim() }
     if (-not $cmdStr) { return }
+    Clear-WorkspaceWalkCache
     try {
         $res = Invoke-ShellCommand -Root $RootPath -Command $cmdStr
+        Clear-WorkspaceWalkCache
         if ($res.output) { Write-Host ($script:Gm.Fg + (Format-TuiText -Text $res.output -Multiline) + $script:Gm.Reset) }
         Write-Host ($script:Gm.Grey1 + "  [exit $($res.exit_code)]" + $script:Gm.Reset)
         if (-not $localOnly) {
