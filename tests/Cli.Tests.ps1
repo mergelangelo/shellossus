@@ -1520,9 +1520,6 @@ if ($resolved -cne (Get-Item -LiteralPath $AgentPath -Force).FullName) {
 }
 $env:OPENAI_API_KEY = 'keep-openai-parent'
 Invoke-AgentHttpRequest -Uri "http://127.0.0.1:$Port/v1/chat/completions" -ApiKey 'secret-key-xyz' -Body '{"ping":1}' -OutFile $HttpOut -TimeoutSec 10 -ForceBackgroundWorker
-# Failed requests can overwrite OutFile in Windows PowerShell 5.1.
-# Capture the successful response before exercising the error paths.
-$httpOkBody = Get-Content -LiteralPath $HttpOut -Raw -Encoding UTF8
 if ($env:OPENAI_API_KEY -cne 'keep-openai-parent') {
     throw 'OPENAI_API_KEY was not restored after background HTTP worker.'
 }
@@ -1552,7 +1549,8 @@ $script:ActiveModelId = 'loopback-model'
 $script:AgentConfigPath = Join-Path $WorkspacePath '.nonexistent-env'
 $subRes = @(Invoke-ParallelSubagentProcesses -Root $WorkspacePath -Tasks @(@{ role = 'recon'; prompt = 'check renamed worker' }) -MaxSteps 3 -TimeoutSec 20 -ApiKey 'secret-key-xyz')
 @{
-    http_body = $httpOkBody
+    # Strip provider metadata so Windows PowerShell 5.1 serializes a JSON string.
+    http_body = [string](Get-Content -LiteralPath $HttpOut -Raw -Encoding UTF8)
     err_401 = $err401
     err_scheme = $errScheme
     web_err = $webErr
@@ -1567,8 +1565,8 @@ $subRes = @(Invoke-ParallelSubagentProcesses -Root $WorkspacePath -Tasks @(@{ ro
             $driverJsonLine = @($driverRaw | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_.StartsWith('{') })[-1]
             Assert-True ([bool]$driverJsonLine) "Renamed worker driver did not return JSON output: $($driverRaw -join "`n")"
             $driverRes = $driverJsonLine | ConvertFrom-Json
-            try { $parsedOk = $driverRes.http_body | ConvertFrom-Json -ErrorAction Stop }
-            catch { throw "Background HTTP worker returned invalid JSON: $($driverRes | ConvertTo-Json -Depth 6 -Compress)" }
+            Assert-True ($driverRes.http_body -is [string]) 'Background HTTP worker response must be serialized as a JSON string without provider metadata.'
+            $parsedOk = $driverRes.http_body | ConvertFrom-Json
             Assert-True ($parsedOk.ok -eq $true -and $parsedOk.worker -ceq 'file-http') "Background HTTP worker via -File did not return expected 200 payload: $($driverRes.http_body)"
             Assert-True ($driverRes.err_401 -like '*401*' -and $driverRes.err_401 -notlike '*secret-key-xyz*') "Background HTTP 401 error failed or leaked ApiKey: $($driverRes.err_401)"
             Assert-True ([bool]$driverRes.err_scheme -and $driverRes.err_scheme.Contains('[redacted]') -and (-not $driverRes.err_scheme.Contains('badkeyscheme'))) "Background HTTP error did not redact ApiKey: $($driverRes.err_scheme)"
