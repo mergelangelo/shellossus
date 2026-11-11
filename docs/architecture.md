@@ -25,7 +25,7 @@
   - Renders model `reasoning_content` in `compact` (last 3 lines), `full`, or `hide` mode (`Write-AgentReasoning`) and the ASCII/Unicode mascot (`Write-TuiMascotCard`).
 
 ### 3. [`src/tools/`](../src/tools/)
-- **Common State & Truncation (`Common.ps1`):** Runtime state variables, canonical name mapping (`Resolve-ToolCanonicalName`), tool enablement check (`Test-IsToolEnabled`), `ConstrainedLanguage`-safe file content digests (`Get-AgentFileContentDigest`), line/head/tail truncation, and environment inspection (`Get-AgentEnvironment`).
+- **Common State & Truncation (`Common.ps1`):** Runtime state variables, scoped execution context snapshot/restore (`Get-AgentExecutionContext`, `Restore-AgentExecutionContext`), canonical name mapping (`Resolve-ToolCanonicalName`), tool enablement check (`Test-IsToolEnabled`), `ConstrainedLanguage`-safe file content digests (`Get-AgentFileContentDigest`), line/head/tail truncation, and environment inspection (`Get-AgentEnvironment`).
 - **Schemas & Capabilities (`Schemas.ps1`):** Capability probing (`Get-AgentCapabilities`) and OpenAI tool schema definitions (`Get-AgentTools`).
 - **Argument Normalizers (`Normalizers.ps1`):** Tolerant alias and schema normalizers (`Format-EditArguments`, `Format-RunAgentArguments`, `Format-TodoArguments`, `Format-AskUserArguments`, `Format-MemoryArguments`).
 - **Schema Validation (`Validation.ps1`):** Strict tool argument validation before execution (`Test-AgentToolArguments`).
@@ -38,7 +38,7 @@
 - **Task Tracking (`Todo.ps1`):** Lightweight task state tracking tool (`Invoke-AgentTodo`).
 - **Interactive Questioning (`AskUser.ps1`):** Plan review and user clarification questions tool (`Invoke-AgentAskUser`).
 - **Persistent Memory (`Memory.ps1`):** Long-term cross-session knowledge storage in `MEMORY.md` (`Invoke-AgentMemory`).
-- **Subagents (`Agents.ps1`):** Delegated task execution across specialized roles (`Invoke-AgentSubagent`).
+- **Subagents (`Agents.ps1`):** Delegated task execution and scoped child execution (`Enter-SubagentExecutionScope`, `Exit-SubagentExecutionScope`, `Invoke-SubagentInProcess`, `Invoke-AgentSubagent`).
 - **Dispatcher (`Dispatch.ps1`):** Master tool router (`Invoke-AgentTool`).
 
 ### 4. [`src/context/`](../src/context/)

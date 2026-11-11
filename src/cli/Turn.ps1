@@ -31,6 +31,7 @@ function Get-ToolCallSignature {
 
 function New-AgentTurnSnapshot {
     param($State)
+    $execCtx = Get-AgentExecutionContext
     $leafId = if ($State.leaf_id) { [string]$State.leaf_id } else { '' }
     $messages = @(Copy-SessionHashtableArray -Items $State.messages)
     $treeEntries = @(Copy-SessionHashtableArray -Items $State.tree_entries)
@@ -39,11 +40,11 @@ function New-AgentTurnSnapshot {
         leaf_id = $leafId
         tree_entries = $treeEntries
         todos = @(Copy-SessionHashtableArray -Items $State.todos)
-        active_session_todos = @(Copy-SessionHashtableArray -Items $script:ActiveSessionTodos)
-        agent_permission = [string]$script:AgentPermission
-        permission_revision = $script:PermissionRevision
-        auto_approve_commands = [bool]$script:AutoApproveCommands
-        auto_approve_web = [bool]$script:AutoApproveWeb
+        active_session_todos = @($execCtx.active_session_todos)
+        agent_permission = $execCtx.agent_permission
+        permission_revision = $execCtx.permission_revision
+        auto_approve_commands = $execCtx.auto_approve_commands
+        auto_approve_web = $execCtx.auto_approve_web
     }
 }
 

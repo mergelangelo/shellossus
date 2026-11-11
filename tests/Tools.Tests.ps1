@@ -3285,6 +3285,209 @@ description: Optional subagent role: recon (ReadOnly search), audit (ReadOnly re
             if (Test-Path -LiteralPath $t5SessDir) { Remove-Item -LiteralPath $t5SessDir -Recurse -Force -ErrorAction SilentlyContinue }
         }
     }
+
+    # Regression (Task 6): Scoped execution context snapshot/restore (Get-AgentExecutionContext,
+    # Restore-AgentExecutionContext, Enter-SubagentExecutionScope, Exit-SubagentExecutionScope)
+    # isolates ActiveEndpoint, ActiveWorkspace, ExcludedTools, EnabledTools, NoTools, SubagentDepth,
+    # ActiveModelId, ActiveState, deep-copied ActiveSessionTodos, and ReadOnly/clamped permission flags,
+    # while preserving CurrentTurnWrites accumulation and intentional craft [a]ll session upgrades.
+    & {
+        $t6SavedPerm = $script:AgentPermission
+        $t6SavedRev = $script:PermissionRevision
+        $t6SavedCmd = $script:AutoApproveCommands
+        $t6SavedWeb = $script:AutoApproveWeb
+        $t6SavedEnabled = @($script:EnabledTools)
+        $t6SavedExcluded = @($script:ExcludedTools)
+        $t6SavedNoTools = $script:NoTools
+        $t6SavedDepth = $script:SubagentDepth
+        $t6SavedModel = $script:ActiveModelId
+        $t6SavedEndpoint = $script:ActiveEndpoint
+        $t6SavedWorkspace = $script:ActiveWorkspace
+        $t6SavedState = $script:ActiveState
+        $t6SavedTodos = @(if ($null -ne $script:ActiveSessionTodos) { Copy-SessionHashtableArray -Items $script:ActiveSessionTodos } else { @() })
+        $t6SavedWrites = @($script:CurrentTurnWrites)
+        $t6SavedMode = $script:OutputMode
+        $t6SubWs = Join-Path $testRoot 't6-subagent-ws'
+        New-Item -ItemType Directory -Path $t6SubWs -Force | Out-Null
+        $t6SubWs = (Get-Item -LiteralPath $t6SubWs -Force).FullName
+        try {
+            # 1) Verify Invoke-SubagentInProcess restores previously leaked globals (ActiveEndpoint,
+            #    ActiveWorkspace, ExcludedTools, ReadOnly subagent AutoApprove*, and deep-copied ActiveSessionTodos)
+            #    across both normal completion and thrown errors.
+            $t6ParentTodoRef = @{ content = 'Parent task alpha'; status = 'in_progress' }
+            $t6ParentState = @{
+                session_id = 't6-parent-sess'
+                workspace = $workspacePath
+                model = 't6-parent-model'
+                messages = @(@{ role = 'system'; content = 'sys' })
+            }
+            $script:OutputMode = 'json'
+            $script:AgentPermission = 'Ask'
+            $script:PermissionRevision = 7
+            $script:AutoApproveCommands = $false
+            $script:AutoApproveWeb = $false
+            $script:EnabledTools = @('read_file', 'grep_files', 'fetch_url', 'run_agent')
+            $script:ExcludedTools = @('web_search')
+            $script:NoTools = $false
+            $script:SubagentDepth = 0
+            $script:ActiveModelId = 't6-parent-model'
+            $script:ActiveEndpoint = ''
+            $script:ActiveWorkspace = $workspacePath
+            $script:ActiveState = $t6ParentState
+            $script:ActiveSessionTodos = @($t6ParentTodoRef)
+            $script:t6CallIdx = 0
+            function Invoke-WebRequest {
+                param($Uri, $Method, $Headers, $ContentType, $Body, $TimeoutSec, $ErrorAction, [switch]$UseBasicParsing, $OutFile)
+                $script:t6CallIdx++
+                # Mutate globals inside ReadOnly subagent (including the original parent todo ref if shallow-copied)
+                $script:ExcludedTools = @('read_file')
+                $script:AutoApproveCommands = $true
+                $script:AutoApproveWeb = $true
+                $script:PermissionRevision = 42
+                $t6ParentTodoRef.status = 'completed'
+                if ($script:t6CallIdx -eq 2) {
+                    throw 't6-subagent-boom'
+                }
+                $resp = @{ choices = @(@{ finish_reason = 'stop'; message = @{ content = 't6 recon ok' } }) } | ConvertTo-Json -Depth 8 -Compress
+                Set-Content -LiteralPath $OutFile -Value $resp -Encoding UTF8 -NoNewline
+            }
+
+            $t6OkRes = Invoke-SubagentInProcess -Root $t6SubWs -RoleName 'recon' -TaskPrompt 'Check leak on completion' -ContextMode 'clean' -MaxSteps 3
+            Assert-True ($t6OkRes.status -eq 'completed') 'Task 6 recon subagent did not complete.'
+            Assert-True ($script:ActiveEndpoint -ceq '') "Invoke-SubagentInProcess leaked ActiveEndpoint ('$($script:ActiveEndpoint)')."
+            Assert-True ($script:ActiveWorkspace -ceq $workspacePath) "Invoke-SubagentInProcess leaked ActiveWorkspace ('$($script:ActiveWorkspace)')."
+            Assert-True (($script:ExcludedTools -join ',') -ceq 'web_search') "Invoke-SubagentInProcess leaked ExcludedTools ('$($script:ExcludedTools -join ',')')."
+            Assert-True (($script:EnabledTools -join ',') -ceq 'read_file,grep_files,fetch_url,run_agent') 'Invoke-SubagentInProcess did not restore EnabledTools.'
+            Assert-True ((-not $script:NoTools) -and $script:SubagentDepth -eq 0 -and $script:ActiveModelId -ceq 't6-parent-model' -and $script:ActiveState -eq $t6ParentState) 'Invoke-SubagentInProcess did not restore NoTools, SubagentDepth, ActiveModelId, or ActiveState.'
+            Assert-True ($script:AgentPermission -ceq 'Ask' -and $script:PermissionRevision -eq 7 -and (-not $script:AutoApproveCommands) -and (-not $script:AutoApproveWeb)) 'ReadOnly recon subagent leaked permission or auto-approval flags into parent.'
+            Assert-True ($script:ActiveSessionTodos.Count -eq 1 -and $script:ActiveSessionTodos[0].content -ceq 'Parent task alpha' -and $script:ActiveSessionTodos[0].status -ceq 'in_progress') "Shallow copy of ActiveSessionTodos allowed in-place todo mutation (status='$($script:ActiveSessionTodos[0].status)')."
+
+            $t6Threw = $false
+            try {
+                $null = Invoke-SubagentInProcess -Root $t6SubWs -RoleName 'recon' -TaskPrompt 'Check leak on throw' -ContextMode 'clean' -MaxSteps 3
+            }
+            catch {
+                if ($_.Exception.Message -like '*t6-subagent-boom*') { $t6Threw = $true } else { throw }
+            }
+            Assert-True $t6Threw 'Expected throwing recon subagent to propagate error.'
+            Assert-True ($script:ActiveEndpoint -ceq '' -and $script:ActiveWorkspace -ceq $workspacePath -and ($script:ExcludedTools -join ',') -ceq 'web_search') 'Throwing subagent leaked ActiveEndpoint, ActiveWorkspace, or ExcludedTools.'
+            Assert-True ($script:AgentPermission -ceq 'Ask' -and $script:PermissionRevision -eq 7 -and (-not $script:AutoApproveCommands) -and (-not $script:AutoApproveWeb)) 'Throwing ReadOnly subagent leaked permission or auto-approval flags.'
+            Assert-True ($script:ActiveSessionTodos.Count -eq 1 -and $script:ActiveSessionTodos[0].status -ceq 'in_progress') 'Throwing subagent corrupted parent ActiveSessionTodos.'
+
+            # ForceReadOnly on craft role and ReadOnly parent with craft role never leak permission upgrades.
+            function Invoke-WebRequest {
+                param($Uri, $Method, $Headers, $ContentType, $Body, $TimeoutSec, $ErrorAction, [switch]$UseBasicParsing, $OutFile)
+                $script:AgentPermission = 'AutoEdit'
+                $script:AutoApproveCommands = $true
+                $script:AutoApproveWeb = $true
+                $script:PermissionRevision = 88
+                $resp = @{ choices = @(@{ finish_reason = 'stop'; message = @{ content = 'clamped ok' } }) } | ConvertTo-Json -Depth 8 -Compress
+                Set-Content -LiteralPath $OutFile -Value $resp -Encoding UTF8 -NoNewline
+            }
+            $null = Invoke-SubagentInProcess -Root $t6SubWs -RoleName 'craft' -TaskPrompt 'Forced ReadOnly craft' -ForceReadOnly -MaxSteps 2
+            Assert-True ($script:AgentPermission -ceq 'Ask' -and $script:PermissionRevision -eq 7 -and (-not $script:AutoApproveCommands) -and (-not $script:AutoApproveWeb)) 'ForceReadOnly craft subagent leaked permission or approval flags.'
+
+            $script:AgentPermission = 'ReadOnly'
+            $null = Invoke-SubagentInProcess -Root $t6SubWs -RoleName 'craft' -TaskPrompt 'Parent ReadOnly craft' -MaxSteps 2
+            Assert-True ($script:AgentPermission -ceq 'ReadOnly' -and $script:PermissionRevision -eq 7 -and (-not $script:AutoApproveCommands) -and (-not $script:AutoApproveWeb)) 'Craft subagent under ReadOnly parent escalated permission or approval flags.'
+            Remove-Item Function:\Invoke-WebRequest -ErrorAction SilentlyContinue
+
+            # 2) Direct Get-AgentExecutionContext and Restore-AgentExecutionContext contract tests.
+            $script:AgentPermission = 'Ask'
+            $script:PermissionRevision = 3
+            $script:AutoApproveCommands = $false
+            $script:AutoApproveWeb = $false
+            $script:EnabledTools = @('read_file', 'write_file')
+            $script:ExcludedTools = @('fetch_url')
+            $script:NoTools = $false
+            $script:SubagentDepth = 0
+            $script:ActiveModelId = 'ctx-model-1'
+            $script:ActiveEndpoint = 'https://ctx1.example.invalid/v1/chat/completions'
+            $script:ActiveWorkspace = $workspacePath
+            $script:ActiveState = $t6ParentState
+            $script:ActiveSessionTodos = @(@{ content = 'Deep todo'; status = 'pending' })
+            $script:CurrentTurnWrites = @(@{ action = 'created'; rel_path = 'first.txt' })
+
+            $ctx = Get-AgentExecutionContext
+            Assert-True ($ctx -is [hashtable]) 'Get-AgentExecutionContext must return a plain hashtable.'
+            $expectedKeys = 'active_endpoint,active_model_id,active_session_todos,active_state,active_workspace,agent_permission,auto_approve_commands,auto_approve_web,enabled_tools,excluded_tools,no_tools,permission_revision,subagent_depth,writes_count'
+            Assert-True ((@($ctx.Keys | Sort-Object) -join ',') -ceq $expectedKeys) "Unexpected Get-AgentExecutionContext keys: $(@($ctx.Keys | Sort-Object) -join ',')"
+            Assert-True ($ctx.writes_count -eq 1) "Expected writes_count=1, got $($ctx.writes_count)."
+
+            # Mutate live state including in-place hashtable element and array elements, plus append a write journal entry.
+            $script:ActiveSessionTodos[0].status = 'completed'
+            Assert-True ($ctx.active_session_todos[0].status -ceq 'pending') 'Get-AgentExecutionContext did not deep-copy active_session_todos.'
+            $script:AgentPermission = 'AutoEdit'
+            $script:PermissionRevision = 9
+            $script:AutoApproveCommands = $true
+            $script:AutoApproveWeb = $true
+            $script:EnabledTools = @('grep_files')
+            $script:ExcludedTools = @()
+            $script:NoTools = $true
+            $script:SubagentDepth = 1
+            $script:ActiveModelId = 'ctx-model-2'
+            $script:ActiveEndpoint = 'https://ctx2.example.invalid/v1/chat/completions'
+            $script:ActiveWorkspace = $t6SubWs
+            $script:ActiveState = $null
+            $script:CurrentTurnWrites += @{ action = 'modified'; rel_path = 'second.txt' }
+
+            # Default Restore-AgentExecutionContext restores all permission/approval fields and preserves CurrentTurnWrites.
+            Restore-AgentExecutionContext -Context $ctx
+            Assert-True ($script:AgentPermission -ceq 'Ask' -and $script:PermissionRevision -eq 3 -and (-not $script:AutoApproveCommands) -and (-not $script:AutoApproveWeb)) 'Default Restore-AgentExecutionContext did not restore permission fields.'
+            Assert-True (($script:EnabledTools -join ',') -ceq 'read_file,write_file' -and ($script:ExcludedTools -join ',') -ceq 'fetch_url' -and (-not $script:NoTools)) 'Restore-AgentExecutionContext did not restore tool filter fields.'
+            Assert-True ($script:SubagentDepth -eq 0 -and $script:ActiveModelId -ceq 'ctx-model-1' -and $script:ActiveEndpoint -ceq 'https://ctx1.example.invalid/v1/chat/completions' -and $script:ActiveWorkspace -ceq $workspacePath -and $script:ActiveState -eq $t6ParentState) 'Restore-AgentExecutionContext did not restore active turn/subagent fields.'
+            Assert-True ($script:ActiveSessionTodos.Count -eq 1 -and $script:ActiveSessionTodos[0].status -ceq 'pending') 'Restore-AgentExecutionContext did not restore deep-copied todos.'
+            Assert-True (@($script:CurrentTurnWrites).Count -eq 2) 'Restore-AgentExecutionContext must preserve accumulated CurrentTurnWrites.'
+
+            # Mutating restored $script:ActiveSessionTodos must not mutate $ctx.active_session_todos.
+            $script:ActiveSessionTodos[0].status = 'in_progress'
+            Assert-True ($ctx.active_session_todos[0].status -ceq 'pending') 'Restore-AgentExecutionContext aliased $ctx.active_session_todos.'
+
+            # PreserveSessionPermissionUpgrade with AllowPermissionUpgrade=$false still restores parent permissions.
+            $script:AgentPermission = 'AutoEdit'
+            $script:PermissionRevision = 10
+            $script:AutoApproveCommands = $true
+            $script:AutoApproveWeb = $true
+            Restore-AgentExecutionContext -Context $ctx -PreserveSessionPermissionUpgrade -AllowPermissionUpgrade $false
+            Assert-True ($script:AgentPermission -ceq 'Ask' -and $script:PermissionRevision -eq 3 -and (-not $script:AutoApproveCommands) -and (-not $script:AutoApproveWeb)) 'AllowPermissionUpgrade=$false failed to clamp subagent permission changes.'
+
+            # PreserveSessionPermissionUpgrade with AllowPermissionUpgrade=$true keeps monotonic upgrades & approvals, never downgrades.
+            $script:AgentPermission = 'ReadOnly'
+            $script:PermissionRevision = 1
+            $script:AutoApproveCommands = $true
+            $script:AutoApproveWeb = $false
+            Restore-AgentExecutionContext -Context $ctx -PreserveSessionPermissionUpgrade -AllowPermissionUpgrade $true
+            Assert-True ($script:AgentPermission -ceq 'Ask' -and $script:PermissionRevision -eq 3 -and $script:AutoApproveCommands -and (-not $script:AutoApproveWeb)) 'PreserveSessionPermissionUpgrade downgraded permission/revision or dropped command approval.'
+
+            # Enter-SubagentExecutionScope / Exit-SubagentExecutionScope direct roundtrip.
+            $craftRoleT6 = Resolve-AgentRole -Name 'craft' -Root $workspacePath -ConfigDir ''
+            $entered = Enter-SubagentExecutionScope -Role $craftRoleT6
+            Assert-True ($entered.effective_permission -ceq 'Ask' -and $entered.allow_permission_upgrade -and $script:SubagentDepth -eq 1 -and $script:ActiveSessionTodos.Count -eq 0) 'Enter-SubagentExecutionScope did not enter child scope.'
+            $script:AgentPermission = 'AutoEdit'
+            Exit-SubagentExecutionScope -Scope $entered -Root $workspacePath -ConfigDir ''
+            Assert-True ($script:SubagentDepth -eq 0 -and $script:AgentPermission -ceq 'AutoEdit' -and $script:ActiveSessionTodos.Count -eq 1) 'Exit-SubagentExecutionScope did not exit child scope cleanly.'
+        }
+        finally {
+            Remove-Item Function:\Invoke-WebRequest -ErrorAction SilentlyContinue
+            Remove-Variable -Name t6CallIdx -Scope Script -ErrorAction SilentlyContinue
+            if (Test-Path -LiteralPath $t6SubWs) { Remove-Item -LiteralPath $t6SubWs -Recurse -Force -ErrorAction SilentlyContinue }
+            $script:AgentPermission = $t6SavedPerm
+            $script:PermissionRevision = $t6SavedRev
+            $script:AutoApproveCommands = $t6SavedCmd
+            $script:AutoApproveWeb = $t6SavedWeb
+            $script:EnabledTools = @($t6SavedEnabled)
+            $script:ExcludedTools = @($t6SavedExcluded)
+            $script:NoTools = $t6SavedNoTools
+            $script:SubagentDepth = $t6SavedDepth
+            $script:ActiveModelId = $t6SavedModel
+            $script:ActiveEndpoint = $t6SavedEndpoint
+            $script:ActiveWorkspace = $t6SavedWorkspace
+            $script:ActiveState = $t6SavedState
+            $script:ActiveSessionTodos = @($t6SavedTodos)
+            $script:CurrentTurnWrites = @($t6SavedWrites)
+            $script:OutputMode = $t6SavedMode
+        }
+    }
 }
 finally {
     Remove-TestEnvironment -Env $envData

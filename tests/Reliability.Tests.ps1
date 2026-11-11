@@ -2756,6 +2756,95 @@ Start-Sleep -Seconds 30
             if (Test-Path -LiteralPath $t5Outside) { Remove-Item -LiteralPath $t5Outside -Recurse -Force -ErrorAction SilentlyContinue }
         }
     }
+
+    # Task 6: Execution context isolation across genuine PipelineStoppedException (unwinding via finally
+    # while bypassing catch) and multi-step pipeline/parallel failures.
+    & {
+        $t6RelPerm = $script:AgentPermission
+        $t6RelRev = $script:PermissionRevision
+        $t6RelCmd = $script:AutoApproveCommands
+        $t6RelWeb = $script:AutoApproveWeb
+        $t6RelEnabled = @($script:EnabledTools)
+        $t6RelExcluded = @($script:ExcludedTools)
+        $t6RelNoTools = $script:NoTools
+        $t6RelDepth = $script:SubagentDepth
+        $t6RelModel = $script:ActiveModelId
+        $t6RelEndpoint = $script:ActiveEndpoint
+        $t6RelWorkspace = $script:ActiveWorkspace
+        $t6RelState = $script:ActiveState
+        $t6RelTodos = @(if ($null -ne $script:ActiveSessionTodos) { Copy-SessionHashtableArray -Items $script:ActiveSessionTodos } else { @() })
+        $t6RelMode = $script:OutputMode
+        $t6RelChildWs = Join-Path $envData.TestRoot 't6-rel-child-ws'
+        New-Item -ItemType Directory -Path (Join-Path $t6RelChildWs '.shellossus/agents') -Force | Out-Null
+        $t6RelChildWs = (Get-Item -LiteralPath $t6RelChildWs -Force).FullName
+        Set-Content -LiteralPath (Join-Path $t6RelChildWs '.shellossus/agents/custom-ro.md') -Encoding UTF8 -Value "---`nname: custom-ro`npermission: ReadOnly`nmodel: child-override-model`ntools: read_file`n---`nInspect only."
+        $script:AgentRolesByName = @{}
+        try {
+            $t6ParentTodoObj = @{ content = 'Parent live todo'; status = 'in_progress' }
+            $t6ParentStateObj = @{
+                session_id = 't6-rel-parent'
+                workspace = $workspacePath
+                model = 'rel-parent-model'
+                messages = @(@{ role = 'system'; content = 'sys' })
+            }
+            $script:OutputMode = 'json'
+            $script:AgentPermission = 'AutoEdit'
+            $script:PermissionRevision = 11
+            $script:AutoApproveCommands = $false
+            $script:AutoApproveWeb = $false
+            $script:EnabledTools = @('read_file', 'run_agent')
+            $script:ExcludedTools = @('web_search')
+            $script:NoTools = $false
+            $script:SubagentDepth = 0
+            $script:ActiveModelId = 'rel-parent-model'
+            $script:ActiveEndpoint = 'https://parent.example.invalid/v1/chat/completions'
+            $script:ActiveWorkspace = $workspacePath
+            $script:ActiveState = $t6ParentStateObj
+            $script:ActiveSessionTodos = @($t6ParentTodoObj)
+
+            $t6Checks = @{ saw_child = $false }
+            function Invoke-WebRequest {
+                param($Uri, $Method, $Headers, $ContentType, $Body, $TimeoutSec, $ErrorAction, [switch]$UseBasicParsing, $OutFile)
+                if ($script:SubagentDepth -eq 1 -and $script:ActiveModelId -ceq 'child-override-model' -and $script:ActiveWorkspace -ceq $t6RelChildWs -and $script:AgentPermission -ceq 'ReadOnly') {
+                    $t6Checks.saw_child = $true
+                }
+                $script:ExcludedTools = @('grep_files')
+                $script:AutoApproveWeb = $true
+                $script:PermissionRevision = 99
+                $t6ParentTodoObj.status = 'completed'
+                # Emitting an object into Select-Object -First 1 throws genuine PipelineStoppedException!
+                Write-Output 'pipeline-stopped-token'
+                $resp = @{ choices = @(@{ finish_reason = 'stop'; message = @{ content = 'unreachable' } }) } | ConvertTo-Json -Depth 6 -Compress
+                Set-Content -LiteralPath $OutFile -Value $resp -Encoding UTF8 -NoNewline
+            }
+
+            $stoppedToken = @(Invoke-SubagentInProcess -Root $t6RelChildWs -RoleName 'custom-ro' -TaskPrompt 'Trigger PipelineStoppedException' -MaxSteps 2 | Select-Object -First 1)
+            Assert-True ($t6Checks.saw_child -and $stoppedToken.Count -eq 1 -and $stoppedToken[0] -ceq 'pipeline-stopped-token') 'Pipeline stop test did not enter child scope or did not receive pipeline-stopped-token.'
+            Assert-True ($script:AgentPermission -ceq 'AutoEdit' -and $script:PermissionRevision -eq 11 -and (-not $script:AutoApproveCommands) -and (-not $script:AutoApproveWeb)) 'PipelineStoppedException leaked ReadOnly subagent permission or approval mutations.'
+            Assert-True (($script:EnabledTools -join ',') -ceq 'read_file,run_agent' -and ($script:ExcludedTools -join ',') -ceq 'web_search' -and (-not $script:NoTools)) 'PipelineStoppedException leaked subagent tool filters.'
+            Assert-True ($script:SubagentDepth -eq 0 -and $script:ActiveModelId -ceq 'rel-parent-model' -and $script:ActiveEndpoint -ceq 'https://parent.example.invalid/v1/chat/completions' -and $script:ActiveWorkspace -ceq $workspacePath -and $script:ActiveState -eq $t6ParentStateObj) 'PipelineStoppedException leaked ActiveModelId, ActiveEndpoint, ActiveWorkspace, ActiveState, or SubagentDepth.'
+            Assert-True ($script:ActiveSessionTodos.Count -eq 1 -and $script:ActiveSessionTodos[0].content -ceq 'Parent live todo' -and $script:ActiveSessionTodos[0].status -ceq 'in_progress') 'PipelineStoppedException failed to restore deep-copied ActiveSessionTodos.'
+        }
+        finally {
+            Remove-Item Function:\Invoke-WebRequest -ErrorAction SilentlyContinue
+            $script:AgentRolesByName = @{}
+            if (Test-Path -LiteralPath $t6RelChildWs) { Remove-Item -LiteralPath $t6RelChildWs -Recurse -Force -ErrorAction SilentlyContinue }
+            $script:AgentPermission = $t6RelPerm
+            $script:PermissionRevision = $t6RelRev
+            $script:AutoApproveCommands = $t6RelCmd
+            $script:AutoApproveWeb = $t6RelWeb
+            $script:EnabledTools = @($t6RelEnabled)
+            $script:ExcludedTools = @($t6RelExcluded)
+            $script:NoTools = $t6RelNoTools
+            $script:SubagentDepth = $t6RelDepth
+            $script:ActiveModelId = $t6RelModel
+            $script:ActiveEndpoint = $t6RelEndpoint
+            $script:ActiveWorkspace = $t6RelWorkspace
+            $script:ActiveState = $t6RelState
+            $script:ActiveSessionTodos = @($t6RelTodos)
+            $script:OutputMode = $t6RelMode
+        }
+    }
 }
 finally {
     Remove-Item Function:\Invoke-WebRequest -ErrorAction SilentlyContinue

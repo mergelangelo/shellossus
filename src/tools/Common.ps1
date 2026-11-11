@@ -85,6 +85,70 @@ function Get-CurrentTurnWritePathsSince {
     return ,$paths
 }
 
+function Get-AgentExecutionContext {
+    return @{
+        agent_permission = [string]$script:AgentPermission
+        permission_revision = [long]$script:PermissionRevision
+        auto_approve_commands = [bool]$script:AutoApproveCommands
+        auto_approve_web = [bool]$script:AutoApproveWeb
+        enabled_tools = @(if ($null -ne $script:EnabledTools) { @($script:EnabledTools) })
+        excluded_tools = @(if ($null -ne $script:ExcludedTools) { @($script:ExcludedTools) })
+        no_tools = [bool]$script:NoTools
+        subagent_depth = [int]$script:SubagentDepth
+        active_model_id = [string]$script:ActiveModelId
+        active_endpoint = [string]$script:ActiveEndpoint
+        active_workspace = [string]$script:ActiveWorkspace
+        active_state = $script:ActiveState
+        active_session_todos = @(if ($null -ne $script:ActiveSessionTodos) { Copy-SessionHashtableArray -Items $script:ActiveSessionTodos } else { @() })
+        writes_count = @(if ($null -ne $script:CurrentTurnWrites) { @($script:CurrentTurnWrites) }).Count
+    }
+}
+
+function Restore-AgentExecutionContext {
+    param(
+        [Parameter(Mandatory = $true)][hashtable]$Context,
+        [switch]$PreserveSessionPermissionUpgrade,
+        [bool]$AllowPermissionUpgrade = $false
+    )
+    $permRank = @{ ReadOnly = 0; Ask = 1; AutoEdit = 2; Auto = 3 }
+    if ($PreserveSessionPermissionUpgrade -and $AllowPermissionUpgrade -and $Context.agent_permission -ne 'ReadOnly') {
+        $curPerm = [string]$script:AgentPermission
+        $ctxPerm = [string]$Context.agent_permission
+        $curRank = if ($curPerm -and $null -ne $permRank[$curPerm]) { [int]$permRank[$curPerm] } else { -1 }
+        $ctxRank = if ($ctxPerm -and $null -ne $permRank[$ctxPerm]) { [int]$permRank[$ctxPerm] } else { 0 }
+        if ($curRank -gt $ctxRank) {
+            # Keep session-wide [a]ll permission upgrade approved by the user during craft subagent
+            $script:AgentPermission = $curPerm
+        }
+        else {
+            $script:AgentPermission = $ctxPerm
+        }
+        if ([long]$script:PermissionRevision -gt [long]$Context.permission_revision) {
+            $script:PermissionRevision = [long]$script:PermissionRevision
+        }
+        else {
+            $script:PermissionRevision = [long]$Context.permission_revision
+        }
+        $script:AutoApproveCommands = [bool]($Context.auto_approve_commands -or $script:AutoApproveCommands)
+        $script:AutoApproveWeb = [bool]($Context.auto_approve_web -or $script:AutoApproveWeb)
+    }
+    else {
+        $script:AgentPermission = [string]$Context.agent_permission
+        $script:PermissionRevision = [long]$Context.permission_revision
+        $script:AutoApproveCommands = [bool]$Context.auto_approve_commands
+        $script:AutoApproveWeb = [bool]$Context.auto_approve_web
+    }
+    $script:EnabledTools = @(if ($null -ne $Context.enabled_tools) { @($Context.enabled_tools) })
+    $script:ExcludedTools = @(if ($null -ne $Context.excluded_tools) { @($Context.excluded_tools) })
+    $script:NoTools = [bool]$Context.no_tools
+    $script:SubagentDepth = [int]$Context.subagent_depth
+    $script:ActiveModelId = [string]$Context.active_model_id
+    $script:ActiveEndpoint = [string]$Context.active_endpoint
+    $script:ActiveWorkspace = [string]$Context.active_workspace
+    $script:ActiveState = $Context.active_state
+    $script:ActiveSessionTodos = @(if ($null -ne $Context.active_session_todos) { Copy-SessionHashtableArray -Items $Context.active_session_todos } else { @() })
+}
+
 function Resolve-ToolCanonicalName {
     param([string]$Name)
     if (-not $Name) { return '' }

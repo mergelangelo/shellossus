@@ -2388,6 +2388,70 @@ function Get-CurrentTurnWritePathsSince {
     return ,$paths
 }
 
+function Get-AgentExecutionContext {
+    return @{
+        agent_permission = [string]$script:AgentPermission
+        permission_revision = [long]$script:PermissionRevision
+        auto_approve_commands = [bool]$script:AutoApproveCommands
+        auto_approve_web = [bool]$script:AutoApproveWeb
+        enabled_tools = @(if ($null -ne $script:EnabledTools) { @($script:EnabledTools) })
+        excluded_tools = @(if ($null -ne $script:ExcludedTools) { @($script:ExcludedTools) })
+        no_tools = [bool]$script:NoTools
+        subagent_depth = [int]$script:SubagentDepth
+        active_model_id = [string]$script:ActiveModelId
+        active_endpoint = [string]$script:ActiveEndpoint
+        active_workspace = [string]$script:ActiveWorkspace
+        active_state = $script:ActiveState
+        active_session_todos = @(if ($null -ne $script:ActiveSessionTodos) { Copy-SessionHashtableArray -Items $script:ActiveSessionTodos } else { @() })
+        writes_count = @(if ($null -ne $script:CurrentTurnWrites) { @($script:CurrentTurnWrites) }).Count
+    }
+}
+
+function Restore-AgentExecutionContext {
+    param(
+        [Parameter(Mandatory = $true)][hashtable]$Context,
+        [switch]$PreserveSessionPermissionUpgrade,
+        [bool]$AllowPermissionUpgrade = $false
+    )
+    $permRank = @{ ReadOnly = 0; Ask = 1; AutoEdit = 2; Auto = 3 }
+    if ($PreserveSessionPermissionUpgrade -and $AllowPermissionUpgrade -and $Context.agent_permission -ne 'ReadOnly') {
+        $curPerm = [string]$script:AgentPermission
+        $ctxPerm = [string]$Context.agent_permission
+        $curRank = if ($curPerm -and $null -ne $permRank[$curPerm]) { [int]$permRank[$curPerm] } else { -1 }
+        $ctxRank = if ($ctxPerm -and $null -ne $permRank[$ctxPerm]) { [int]$permRank[$ctxPerm] } else { 0 }
+        if ($curRank -gt $ctxRank) {
+            # Keep session-wide [a]ll permission upgrade approved by the user during craft subagent
+            $script:AgentPermission = $curPerm
+        }
+        else {
+            $script:AgentPermission = $ctxPerm
+        }
+        if ([long]$script:PermissionRevision -gt [long]$Context.permission_revision) {
+            $script:PermissionRevision = [long]$script:PermissionRevision
+        }
+        else {
+            $script:PermissionRevision = [long]$Context.permission_revision
+        }
+        $script:AutoApproveCommands = [bool]($Context.auto_approve_commands -or $script:AutoApproveCommands)
+        $script:AutoApproveWeb = [bool]($Context.auto_approve_web -or $script:AutoApproveWeb)
+    }
+    else {
+        $script:AgentPermission = [string]$Context.agent_permission
+        $script:PermissionRevision = [long]$Context.permission_revision
+        $script:AutoApproveCommands = [bool]$Context.auto_approve_commands
+        $script:AutoApproveWeb = [bool]$Context.auto_approve_web
+    }
+    $script:EnabledTools = @(if ($null -ne $Context.enabled_tools) { @($Context.enabled_tools) })
+    $script:ExcludedTools = @(if ($null -ne $Context.excluded_tools) { @($Context.excluded_tools) })
+    $script:NoTools = [bool]$Context.no_tools
+    $script:SubagentDepth = [int]$Context.subagent_depth
+    $script:ActiveModelId = [string]$Context.active_model_id
+    $script:ActiveEndpoint = [string]$Context.active_endpoint
+    $script:ActiveWorkspace = [string]$Context.active_workspace
+    $script:ActiveState = $Context.active_state
+    $script:ActiveSessionTodos = @(if ($null -ne $Context.active_session_todos) { Copy-SessionHashtableArray -Items $Context.active_session_todos } else { @() })
+}
+
 function Resolve-ToolCanonicalName {
     param([string]$Name)
     if (-not $Name) { return '' }
@@ -7615,6 +7679,59 @@ function Get-SubagentToolNames {
     }
 }
 
+function Enter-SubagentExecutionScope {
+    param(
+        [hashtable]$ParentContext = $null,
+        $Role,
+        [switch]$ForceReadOnly
+    )
+    if ($null -eq $ParentContext) {
+        $ParentContext = Get-AgentExecutionContext
+    }
+    $effPerm = if ($ForceReadOnly -or $ParentContext.agent_permission -eq 'ReadOnly' -or ($Role -and $Role.permission -eq 'ReadOnly')) {
+        'ReadOnly'
+    }
+    else {
+        [string]$ParentContext.agent_permission
+    }
+    $allowPermUpgrade = (-not $ForceReadOnly -and $ParentContext.agent_permission -ne 'ReadOnly' -and (-not $Role -or $Role.permission -ne 'ReadOnly'))
+    $childTools = @(Get-SubagentToolNames -Role $Role -ForceReadOnly:$ForceReadOnly)
+    $script:SubagentDepth = [int]$ParentContext.subagent_depth + 1
+    $script:AgentPermission = $effPerm
+    $script:EnabledTools = $childTools
+    $script:NoTools = ([bool]$ParentContext.no_tools -or $childTools.Count -eq 0)
+    $script:ActiveSessionTodos = @()
+    return @{
+        parent_context = $ParentContext
+        effective_permission = $effPerm
+        allow_permission_upgrade = [bool]$allowPermUpgrade
+        child_tools = $childTools
+    }
+}
+
+function Exit-SubagentExecutionScope {
+    param(
+        [hashtable]$ParentContext = $null,
+        [hashtable]$Scope = $null,
+        [bool]$AllowPermissionUpgrade = $false,
+        [string]$Root = '',
+        [string]$ConfigDir = ''
+    )
+    if ($null -eq $ParentContext -and $null -ne $Scope) {
+        $ParentContext = $Scope.parent_context
+        if (-not ($PSBoundParameters.Keys -contains 'AllowPermissionUpgrade')) {
+            $AllowPermissionUpgrade = [bool]$Scope.allow_permission_upgrade
+        }
+    }
+    Clear-WorkspaceWalkCache
+    if ($null -eq $ParentContext) { return }
+    Restore-AgentExecutionContext -Context $ParentContext -PreserveSessionPermissionUpgrade -AllowPermissionUpgrade $AllowPermissionUpgrade
+    $parentState = $ParentContext.active_state
+    if ($null -ne $parentState -and $parentState.messages -and $parentState.messages.Count -gt 0) {
+        Sync-AgentMemoryContext -State $parentState -Root $Root -ConfigDir $ConfigDir | Out-Null
+    }
+}
+
 function Invoke-SubagentInProcess {
     param(
         [string]$Root,
@@ -7627,29 +7744,15 @@ function Invoke-SubagentInProcess {
     )
     $configDir = if ($script:AgentConfigPath) { Split-Path $script:AgentConfigPath -Parent } else { '' }
     $roleObj = Resolve-AgentRole -Name $RoleName -Root $Root -ConfigDir $configDir
-    $effPerm = if ($ForceReadOnly -or $script:AgentPermission -eq 'ReadOnly' -or $roleObj.permission -eq 'ReadOnly') {
-        'ReadOnly'
-    }
-    else {
-        $script:AgentPermission
-    }
-    $effEndpoint = if ($script:ActiveEndpoint) { $script:ActiveEndpoint } else { 'https://example.invalid/v1/chat/completions' }
-    $effModel = if ($roleObj.model) { [string]$roleObj.model } elseif ($script:ActiveModelId) { $script:ActiveModelId } else { 'test-model' }
+    $parentCtx = Get-AgentExecutionContext
+    $effEndpoint = if ($parentCtx.active_endpoint) { $parentCtx.active_endpoint } else { 'https://example.invalid/v1/chat/completions' }
+    $effModel = if ($roleObj.model) { [string]$roleObj.model } elseif ($parentCtx.active_model_id) { $parentCtx.active_model_id } else { 'test-model' }
     $effKey = if ($ApiKey) { $ApiKey } else { 'subagent-key' }
-    $savedPerm = $script:AgentPermission
-    $savedDepth = $script:SubagentDepth
-    $savedTools = @($script:EnabledTools)
-    $savedNoTools = $script:NoTools
-    $childTools = @(Get-SubagentToolNames -Role $roleObj -ForceReadOnly:$ForceReadOnly)
-    $savedModel = $script:ActiveModelId
-    $savedState = $script:ActiveState
-    $savedTodos = @($script:ActiveSessionTodos)
+    $allowPermUpgrade = (-not $ForceReadOnly -and $parentCtx.agent_permission -ne 'ReadOnly' -and $roleObj.permission -ne 'ReadOnly')
+    $savedState = $parentCtx.active_state
     try {
-        $script:SubagentDepth = $savedDepth + 1
-        $script:AgentPermission = $effPerm
-        $script:EnabledTools = $childTools
-        $script:NoTools = ($savedNoTools -or $childTools.Count -eq 0)
-        $script:ActiveSessionTodos = @()
+        $scope = Enter-SubagentExecutionScope -ParentContext $parentCtx -Role $roleObj -ForceReadOnly:$ForceReadOnly
+        $effPerm = $scope.effective_permission
         $baseSys = Build-SystemPrompt -Root $Root -ConfigDir $configDir
         $subSys = $baseSys + "`n`n[Subagent Role: $($roleObj.name)]`n" + $roleObj.system_prompt
         $initMsgs = @(if ($ContextMode -eq 'fork') {
@@ -7705,23 +7808,7 @@ function Invoke-SubagentInProcess {
         }
     }
     finally {
-        Clear-WorkspaceWalkCache
-        $permRank = @{ 'ReadOnly' = 0; 'Ask' = 1; 'AutoEdit' = 2; 'Auto' = 3 }
-        if (-not $ForceReadOnly -and $roleObj.permission -ne 'ReadOnly' -and $permRank[$script:AgentPermission] -gt $permRank[$savedPerm]) {
-            # Keep session-wide [a]ll permission upgrade approved by the user during craft subagent
-        }
-        else {
-            $script:AgentPermission = $savedPerm
-        }
-        $script:SubagentDepth = $savedDepth
-        $script:EnabledTools = $savedTools
-        $script:NoTools = $savedNoTools
-        $script:ActiveModelId = $savedModel
-        $script:ActiveState = $savedState
-        $script:ActiveSessionTodos = $savedTodos
-        if ($null -ne $savedState -and $savedState.messages -and $savedState.messages.Count -gt 0) {
-            Sync-AgentMemoryContext -State $savedState -Root $Root -ConfigDir $configDir | Out-Null
-        }
+        Exit-SubagentExecutionScope -ParentContext $parentCtx -AllowPermissionUpgrade $allowPermUpgrade -Root $Root -ConfigDir $configDir
     }
 }
 
@@ -7760,7 +7847,7 @@ function Invoke-AgentSubagent {
         else {
             foreach ($pt in $Arguments.parallel) {
                 $rName = if ($pt.role) { [string]$pt.role } else { 'recon' }
-                $writeStart = @($script:CurrentTurnWrites).Count
+                $writeStart = (Get-AgentExecutionContext).writes_count
                 try {
                     $subRes = Invoke-SubagentInProcess -Root $Root -RoleName $rName -TaskPrompt ([string]$pt.prompt) -ContextMode 'clean' -MaxSteps $maxSteps -ForceReadOnly -ApiKey $ApiKey
                 }
@@ -7818,7 +7905,7 @@ function Invoke-AgentSubagent {
             $stepCtx = if ($ps.context) { [string]$ps.context } else { $ctxMode }
             $rawPrompt = [string]$ps.prompt
             $resolvedPrompt = $rawPrompt.Replace('{previous}', $prevOutput).Replace('$PREVIOUS', $prevOutput)
-            $writeStart = @($script:CurrentTurnWrites).Count
+            $writeStart = (Get-AgentExecutionContext).writes_count
             try {
                 $stepRes = Invoke-SubagentInProcess -Root $Root -RoleName $rName -TaskPrompt $resolvedPrompt -ContextMode $stepCtx -MaxSteps $maxSteps -ApiKey $ApiKey
             }
@@ -11013,6 +11100,7 @@ function Get-ToolCallSignature {
 
 function New-AgentTurnSnapshot {
     param($State)
+    $execCtx = Get-AgentExecutionContext
     $leafId = if ($State.leaf_id) { [string]$State.leaf_id } else { '' }
     $messages = @(Copy-SessionHashtableArray -Items $State.messages)
     $treeEntries = @(Copy-SessionHashtableArray -Items $State.tree_entries)
@@ -11021,11 +11109,11 @@ function New-AgentTurnSnapshot {
         leaf_id = $leafId
         tree_entries = $treeEntries
         todos = @(Copy-SessionHashtableArray -Items $State.todos)
-        active_session_todos = @(Copy-SessionHashtableArray -Items $script:ActiveSessionTodos)
-        agent_permission = [string]$script:AgentPermission
-        permission_revision = $script:PermissionRevision
-        auto_approve_commands = [bool]$script:AutoApproveCommands
-        auto_approve_web = [bool]$script:AutoApproveWeb
+        active_session_todos = @($execCtx.active_session_todos)
+        agent_permission = $execCtx.agent_permission
+        permission_revision = $execCtx.permission_revision
+        auto_approve_commands = $execCtx.auto_approve_commands
+        auto_approve_web = $execCtx.auto_approve_web
     }
 }
 

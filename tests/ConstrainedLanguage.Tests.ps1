@@ -793,6 +793,81 @@ try {
         }
     }
 
+    # Task 6: Get-AgentExecutionContext, Restore-AgentExecutionContext, Enter-SubagentExecutionScope,
+    # Exit-SubagentExecutionScope, and Invoke-SubagentInProcess isolation in ConstrainedLanguage mode.
+    & {
+        $cl6Perm = $script:AgentPermission
+        $cl6Rev = $script:PermissionRevision
+        $cl6Cmd = $script:AutoApproveCommands
+        $cl6Web = $script:AutoApproveWeb
+        $cl6Enabled = @($script:EnabledTools)
+        $cl6Excluded = @($script:ExcludedTools)
+        $cl6NoTools = $script:NoTools
+        $cl6Depth = $script:SubagentDepth
+        $cl6Model = $script:ActiveModelId
+        $cl6Endpoint = $script:ActiveEndpoint
+        $cl6Workspace = $script:ActiveWorkspace
+        $cl6State = $script:ActiveState
+        $cl6Todos = @(if ($null -ne $script:ActiveSessionTodos) { Copy-SessionHashtableArray -Items $script:ActiveSessionTodos } else { @() })
+        $cl6Mode = $script:OutputMode
+        $cl6SubWs = Join-Path $testRoot 'cl6-sub-ws'
+        New-Item -ItemType Directory -Path $cl6SubWs -Force | Out-Null
+        $cl6SubWs = (Get-Item -LiteralPath $cl6SubWs -Force).FullName
+        try {
+            $cl6TodoRef = @{ content = 'CL parent todo'; status = 'pending' }
+            $cl6ParentState = @{ session_id = 'cl6-sess'; workspace = $workspacePath; model = 'cl6-model'; messages = @(@{ role = 'system'; content = 'sys' }) }
+            $script:OutputMode = 'json'
+            $script:AgentPermission = 'Ask'
+            $script:PermissionRevision = 5
+            $script:AutoApproveCommands = $false
+            $script:AutoApproveWeb = $false
+            $script:EnabledTools = @('read_file', 'run_agent')
+            $script:ExcludedTools = @('web_search')
+            $script:NoTools = $false
+            $script:SubagentDepth = 0
+            $script:ActiveModelId = 'cl6-model'
+            $script:ActiveEndpoint = ''
+            $script:ActiveWorkspace = $workspacePath
+            $script:ActiveState = $cl6ParentState
+            $script:ActiveSessionTodos = @($cl6TodoRef)
+
+            $cl6Ctx = Get-AgentExecutionContext
+            Assert-True ($cl6Ctx -is [hashtable] -and $cl6Ctx.permission_revision -eq 5 -and $cl6Ctx.active_session_todos.Count -eq 1) 'ConstrainedLanguage Get-AgentExecutionContext failed.'
+            $cl6TodoRef.status = 'completed'
+            Assert-True ($cl6Ctx.active_session_todos[0].status -ceq 'pending') 'ConstrainedLanguage Get-AgentExecutionContext did not deep-copy todos.'
+            Restore-AgentExecutionContext -Context $cl6Ctx
+            Assert-True ($script:ActiveSessionTodos[0].status -ceq 'pending') 'ConstrainedLanguage Restore-AgentExecutionContext did not restore deep-copied todos.'
+
+            function Invoke-WebRequest {
+                param($Uri, $Method, $Headers, $ContentType, $Body, $TimeoutSec, $ErrorAction, [switch]$UseBasicParsing, $OutFile)
+                $script:ExcludedTools = @('read_file')
+                $script:AutoApproveWeb = $true
+                $resp = @{ choices = @(@{ finish_reason = 'stop'; message = @{ content = 'cl6 sub ok' } }) } | ConvertTo-Json -Depth 6 -Compress
+                Set-Content -LiteralPath $OutFile -Value $resp -Encoding UTF8 -NoNewline
+            }
+            $cl6SubOut = Invoke-SubagentInProcess -Root $cl6SubWs -RoleName 'recon' -TaskPrompt 'CL6 isolation' -MaxSteps 2
+            Assert-True ($cl6SubOut.status -eq 'completed' -and $script:ActiveEndpoint -ceq '' -and $script:ActiveWorkspace -ceq $workspacePath -and ($script:ExcludedTools -join ',') -ceq 'web_search' -and (-not $script:AutoApproveWeb)) 'ConstrainedLanguage Invoke-SubagentInProcess leaked execution context.'
+        }
+        finally {
+            Remove-Item Function:\Invoke-WebRequest -ErrorAction SilentlyContinue
+            if (Test-Path -LiteralPath $cl6SubWs) { Remove-Item -LiteralPath $cl6SubWs -Recurse -Force -ErrorAction SilentlyContinue }
+            $script:AgentPermission = $cl6Perm
+            $script:PermissionRevision = $cl6Rev
+            $script:AutoApproveCommands = $cl6Cmd
+            $script:AutoApproveWeb = $cl6Web
+            $script:EnabledTools = @($cl6Enabled)
+            $script:ExcludedTools = @($cl6Excluded)
+            $script:NoTools = $cl6NoTools
+            $script:SubagentDepth = $cl6Depth
+            $script:ActiveModelId = $cl6Model
+            $script:ActiveEndpoint = $cl6Endpoint
+            $script:ActiveWorkspace = $cl6Workspace
+            $script:ActiveState = $cl6State
+            $script:ActiveSessionTodos = @($cl6Todos)
+            $script:OutputMode = $cl6Mode
+        }
+    }
+
     # Task 4: True cold-start ConstrainedLanguage child-process verification (LanguageMode set on line 1 before loading any module or script).
     $coldRoot = Join-Path $testRoot 'cold-clm-child'
     $coldWs = Join-Path $coldRoot 'workspace'
@@ -859,6 +934,13 @@ try {
         '$resolvedSelf = Resolve-StandaloneScriptPath -Required',
         '$workerArgs = Get-AgentWorkerArguments -ScriptPath $resolvedSelf -WorkerMode ''http''',
         'if (-not $workerArgs) { throw ''Cold CLM Get-AgentWorkerArguments returned empty result.'' }',
+        '$coldTodo = @{ content = ''cold task''; status = ''pending'' }',
+        '$script:ActiveSessionTodos = @($coldTodo)',
+        '$coldCtx = Get-AgentExecutionContext',
+        '$coldTodo.status = ''completed''',
+        '$script:ActiveEndpoint = ''https://leaked.example.invalid/v1/chat/completions''',
+        'Restore-AgentExecutionContext -Context $coldCtx',
+        'if ($script:ActiveSessionTodos[0].status -cne ''pending'' -or $script:ActiveEndpoint -cne $coldCtx.active_endpoint) { throw ''Cold CLM execution context roundtrip failed.'' }',
         'Write-Output ''COLD_CLM_CHILD_OK'''
     )
     Set-AgentUtf8Content -LiteralPath $coldRunnerPath -Value ($coldRunnerLines -join "`n")
