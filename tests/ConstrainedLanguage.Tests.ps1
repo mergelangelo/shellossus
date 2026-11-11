@@ -605,6 +605,261 @@ try {
         $clSubMissingThrew = $true
     }
     Assert-True $clSubMissingThrew 'ConstrainedLanguage Invoke-InternalSubagentWorker accepted missing SHELLOSSUS_SUB_SCRIPT.'
+
+    # Task 4: Get-AgentFileContentDigest native + ConstrainedLanguage pure-PowerShell fallback verification.
+    function Set-TestRawBytes {
+        param([string]$LiteralPath, [byte[]]$Bytes)
+        if ($Bytes.Count -eq 0) {
+            $null = New-Item -ItemType File -Path $LiteralPath -Force -ErrorAction Stop
+            return
+        }
+        if ($PSVersionTable.PSEdition -eq 'Desktop') {
+            Set-Content -LiteralPath $LiteralPath -Value $Bytes -Encoding Byte -ErrorAction Stop
+        }
+        else {
+            Set-Content -LiteralPath $LiteralPath -Value $Bytes -AsByteStream -ErrorAction Stop
+        }
+    }
+
+    $digestDir = Join-Path $testRoot 'digest-checks'
+    New-Item -ItemType Directory -Path $digestDir -Force | Out-Null
+    $nativeSamplePath = Join-Path $digestDir 'native-sample.bin'
+    Set-TestRawBytes -LiteralPath $nativeSamplePath -Bytes ([byte[]]@(1, 2, 3, 4, 250, 255))
+    $nativeDigest = Get-AgentFileContentDigest -LiteralPath $nativeSamplePath
+    Assert-True ([bool]$nativeDigest -and $nativeDigest -cmatch '^[0-9A-F]{64}$') "Expected 64-char hex SHA-256 digest from native Get-AgentFileContentDigest, got: $nativeDigest"
+
+    $missingDigestThrew = $false
+    try { $null = Get-AgentFileContentDigest -LiteralPath (Join-Path $digestDir 'does-not-exist.bin') }
+    catch { $missingDigestThrew = $true }
+    Assert-True $missingDigestThrew 'Get-AgentFileContentDigest did not throw on missing file.'
+
+    $dirDigestThrew = $false
+    try { $null = Get-AgentFileContentDigest -LiteralPath $digestDir }
+    catch { $dirDigestThrew = $true }
+    Assert-True $dirDigestThrew 'Get-AgentFileContentDigest did not throw on directory path.'
+
+    & {
+        function Get-FileHash {
+            throw 'Simulated non-CLM I/O failure.'
+        }
+        $nonClmRethrown = $false
+        try { $null = Get-AgentFileContentDigest -LiteralPath $nativeSamplePath }
+        catch {
+            if ($_.Exception.Message -like '*Simulated non-CLM I/O failure*') {
+                $nonClmRethrown = $true
+            }
+        }
+        Assert-True $nonClmRethrown 'Get-AgentFileContentDigest swallowed a non-ConstrainedLanguage error.'
+    }
+
+    & {
+        function Get-FileHash {
+            throw 'Cannot invoke method. Method invocation is supported only on core types in this language mode.'
+        }
+
+        $fbMissingThrew = $false
+        try { $null = Get-AgentFileContentDigest -LiteralPath (Join-Path $digestDir 'fb-missing.bin') }
+        catch { $fbMissingThrew = $true }
+        Assert-True $fbMissingThrew 'Fallback Get-AgentFileContentDigest did not throw on missing file.'
+
+        $fbDirThrew = $false
+        try { $null = Get-AgentFileContentDigest -LiteralPath $digestDir }
+        catch { $fbDirThrew = $true }
+        Assert-True $fbDirThrew 'Fallback Get-AgentFileContentDigest did not throw on directory.'
+
+        $fbEmptyPath = Join-Path $digestDir 'empty.bin'
+        Set-TestRawBytes -LiteralPath $fbEmptyPath -Bytes ([byte[]]@())
+        $fbEmptyDigest1 = Get-AgentFileContentDigest -LiteralPath $fbEmptyPath
+        $fbEmptyDigest2 = Get-AgentFileContentDigest -LiteralPath $fbEmptyPath
+        Assert-True ([bool]$fbEmptyDigest1 -and $fbEmptyDigest1 -ceq $fbEmptyDigest2) 'Fallback Get-AgentFileContentDigest failed or was non-deterministic on empty file.'
+
+        [byte[]]$baseBytes = @(10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120, 130, 140, 150, 160, 170, 180, 190, 200)
+        $fbBaseA = Join-Path $digestDir 'base-a.bin'
+        $fbBaseB = Join-Path $digestDir 'base-b.bin'
+        $fbFlipStart = Join-Path $digestDir 'flip-start.bin'
+        $fbFlipMid = Join-Path $digestDir 'flip-mid.bin'
+        $fbFlipEnd = Join-Path $digestDir 'flip-end.bin'
+        $fbLenPlus = Join-Path $digestDir 'len-plus.bin'
+
+        [byte[]]$startBytes = @($baseBytes); $startBytes[0] = 11
+        [byte[]]$midBytes = @($baseBytes); $midBytes[10] = 111
+        [byte[]]$endBytes = @($baseBytes); $endBytes[19] = 201
+        [byte[]]$lenBytes = @($baseBytes) + @([byte]0)
+
+        Set-TestRawBytes -LiteralPath $fbBaseA -Bytes $baseBytes
+        Set-TestRawBytes -LiteralPath $fbBaseB -Bytes $baseBytes
+        Set-TestRawBytes -LiteralPath $fbFlipStart -Bytes $startBytes
+        Set-TestRawBytes -LiteralPath $fbFlipMid -Bytes $midBytes
+        Set-TestRawBytes -LiteralPath $fbFlipEnd -Bytes $endBytes
+        Set-TestRawBytes -LiteralPath $fbLenPlus -Bytes $lenBytes
+
+        $dBaseA = Get-AgentFileContentDigest -LiteralPath $fbBaseA
+        $dBaseB = Get-AgentFileContentDigest -LiteralPath $fbBaseB
+        $dStart = Get-AgentFileContentDigest -LiteralPath $fbFlipStart
+        $dMid = Get-AgentFileContentDigest -LiteralPath $fbFlipMid
+        $dEnd = Get-AgentFileContentDigest -LiteralPath $fbFlipEnd
+        $dLen = Get-AgentFileContentDigest -LiteralPath $fbLenPlus
+
+        Assert-True ($dBaseA -ceq $dBaseB) 'Fallback Get-AgentFileContentDigest returned different digests for identical bytes.'
+        Assert-True ($dBaseA -cne $fbEmptyDigest1) 'Fallback digest collided with empty file.'
+        Assert-True ($dBaseA -cne $dStart) 'Fallback digest did not change on 1-byte flip at start.'
+        Assert-True ($dBaseA -cne $dMid) 'Fallback digest did not change on 1-byte flip in middle.'
+        Assert-True ($dBaseA -cne $dEnd) 'Fallback digest did not change on 1-byte flip at end.'
+        Assert-True ($dBaseA -cne $dLen) 'Fallback digest did not change on length extension.'
+        $uniqueSet = @($dBaseA, $dStart, $dMid, $dEnd, $dLen, $fbEmptyDigest1 | Select-Object -Unique)
+        Assert-True ($uniqueSet.Count -eq 6) 'Fallback digests were not pairwise distinct across byte mutations.'
+
+        # Verify Save-AgentSession + Assert-AgentSessionRevision + Invoke-SessionResume under fallback.
+        $fbSessFile = Join-Path $sessionDirTest 'fb-clm-sess.jsonl'
+        $fbSessState = @{
+            messages = @(
+                @{ role = 'system'; content = 'sys' },
+                @{ role = 'user'; content = 'fallback user msg' },
+                @{ role = 'assistant'; content = 'fallback assistant reply' }
+            )
+        }
+        Save-AgentSession -SessionFile $fbSessFile -State $fbSessState -Workspace $workspacePath -Model 'fb-model' -SessionId 'sid-fb-1'
+        $fbSessState.messages += @{ role = 'user'; content = 'second turn' }
+        $fbSessState.messages += @{ role = 'assistant'; content = 'second reply' }
+        Save-AgentSession -SessionFile $fbSessFile -State $fbSessState -Workspace $workspacePath -Model 'fb-model' -SessionId 'sid-fb-1'
+        $fbResumed = @{ messages = @() }
+        Invoke-SessionResume -SessionFile $fbSessFile -State $fbResumed -CurrentWorkspace $workspacePath | Out-Null
+        Assert-True ($fbResumed.session_id -eq 'sid-fb-1' -and $fbResumed.messages.Count -ge 5) 'Invoke-SessionResume failed under Get-AgentFileContentDigest fallback.'
+        $fbResumed.messages += @{ role = 'user'; content = 'post-resume turn' }
+        $fbResumed.messages += @{ role = 'assistant'; content = 'post-resume reply' }
+        Save-AgentSession -SessionFile $fbSessFile -State $fbResumed -Workspace $workspacePath -Model 'fb-model' -SessionId 'sid-fb-1'
+
+        # Verify UTF-16 LE BOM edit_file + write_file + Invoke-AgentUndo + invalid binary rejection under fallback.
+        $savedPermFb = $script:AgentPermission
+        $savedModeFb = $script:OutputMode
+        $script:AgentPermission = 'AutoEdit'
+        $script:OutputMode = 'json'
+        try {
+            $fbUtf16Rel = 'fb-utf16le.txt'
+            $fbUtf16Full = Join-Path $workspacePath $fbUtf16Rel
+            [byte[]]$utf16OrigBytes = @(255, 254, 111, 0, 110, 0, 101, 0, 10, 0, 116, 0, 119, 0, 111, 0)
+            Set-TestRawBytes -LiteralPath $fbUtf16Full -Bytes $utf16OrigBytes
+            $utf16OrigDigest = Get-AgentFileContentDigest -LiteralPath $fbUtf16Full
+
+            $script:CurrentTurnWrites = @()
+            $fbEditArgs = @{ path = $fbUtf16Rel; old_text = 'two'; new_text = '2' } | ConvertTo-Json -Compress
+            $fbEditRes = Invoke-AgentTool -Root $workspacePath -Call @{ id = 'fb-ed'; function = @{ name = 'edit_file'; arguments = $fbEditArgs } } | ConvertFrom-Json
+            Assert-True ($fbEditRes.status -eq 'written') "Fallback UTF-16 LE edit_file failed: $($fbEditRes.error)"
+
+            $fbWriteArgs = @{ path = $fbUtf16Rel; content = "alpha`nbeta"; overwrite = $true } | ConvertTo-Json -Compress
+            $fbWriteRes = Invoke-AgentTool -Root $workspacePath -Call @{ id = 'fb-wr'; function = @{ name = 'write_file'; arguments = $fbWriteArgs } } | ConvertFrom-Json
+            Assert-True ($fbWriteRes.status -eq 'written') "Fallback UTF-16 LE overwrite write_file failed: $($fbWriteRes.error)"
+            Assert-True ((Get-AgentFileContentDigest -LiteralPath $fbUtf16Full) -cne $utf16OrigDigest) 'Fallback UTF-16 LE file digest did not change after edits.'
+
+            $fbUndoState = @{ messages = @(@{ role = 'user'; content = 'u' }) }
+            Invoke-AgentUndo -State $fbUndoState -UndoEntry @{ messages = @(); writes = @($script:CurrentTurnWrites) }
+            Assert-True ((Get-AgentFileContentDigest -LiteralPath $fbUtf16Full) -ceq $utf16OrigDigest) 'Fallback Invoke-AgentUndo did not restore exact original UTF-16 LE bytes.'
+
+            $fbBadBinRel = 'fb-invalid-utf8.txt'
+            $fbBadBinFull = Join-Path $workspacePath $fbBadBinRel
+            Set-TestRawBytes -LiteralPath $fbBadBinFull -Bytes ([byte[]]@(195, 40))
+            $badOrigDigest = Get-AgentFileContentDigest -LiteralPath $fbBadBinFull
+            $fbBadEditArgs = @{ path = $fbBadBinRel; old_text = 'a'; new_text = 'b' } | ConvertTo-Json -Compress
+            $fbBadEditRes = Invoke-AgentTool -Root $workspacePath -Call @{ id = 'fb-bad'; function = @{ name = 'edit_file'; arguments = $fbBadEditArgs } } | ConvertFrom-Json
+            Assert-True ($fbBadEditRes.error -like '*Invalid or unsupported file encoding*') "Fallback edit_file did not reject invalid UTF-8 bytes: $($fbBadEditRes | ConvertTo-Json -Compress)"
+            Assert-True ((Get-AgentFileContentDigest -LiteralPath $fbBadBinFull) -ceq $badOrigDigest) 'Fallback edit_file altered invalid UTF-8 file.'
+
+            $script:CurrentTurnWrites = @()
+            $fbConflictRel = 'fb-manual-conflict.txt'
+            $fbConflictFull = Join-Path $workspacePath $fbConflictRel
+            $null = Invoke-AgentTool -Root $workspacePath -Call @{ id = 'fb-cw'; function = @{ name = 'write_file'; arguments = (@{ path = $fbConflictRel; content = 'agent-v1' } | ConvertTo-Json -Compress) } } | ConvertFrom-Json
+            Set-AgentUtf8Content -LiteralPath $fbConflictFull -Value 'user-manual-edit'
+            $fbConflictThrew = $false
+            try { Invoke-AgentUndo -State @{ messages = @() } -UndoEntry @{ messages = @(); writes = @($script:CurrentTurnWrites) } }
+            catch {
+                if ($_.Exception.Message -like '*Refusing to overwrite manual changes*') { $fbConflictThrew = $true }
+            }
+            Assert-True $fbConflictThrew 'Fallback Invoke-AgentUndo did not detect manual modification after write_file.'
+        }
+        finally {
+            $script:AgentPermission = $savedPermFb
+            $script:OutputMode = $savedModeFb
+        }
+    }
+
+    # Task 4: True cold-start ConstrainedLanguage child-process verification (LanguageMode set on line 1 before loading any module or script).
+    $coldRoot = Join-Path $testRoot 'cold-clm-child'
+    $coldWs = Join-Path $coldRoot 'workspace'
+    $coldCfg = Join-Path $coldRoot 'missing-config.env'
+    $coldSessDir = Join-Path $coldRoot 'sessions'
+    New-Item -ItemType Directory -Path $coldWs, $coldSessDir -Force | Out-Null
+    Set-TestRawBytes -LiteralPath (Join-Path $coldWs 'utf16le.txt') -Bytes ([byte[]]@(255, 254, 97, 0, 10, 0, 98, 0))
+    Set-TestRawBytes -LiteralPath (Join-Path $coldWs 'bad-utf8.txt') -Bytes ([byte[]]@(195, 40))
+
+    $coldRunnerPath = Join-Path $coldRoot 'cold-clm-runner.ps1'
+    $coldRunnerLines = @(
+        '$ExecutionContext.SessionState.LanguageMode = ''ConstrainedLanguage''',
+        '$ErrorActionPreference = ''Stop''',
+        'if ($ExecutionContext.SessionState.LanguageMode -ne ''ConstrainedLanguage'') { throw ''Cold child is not in ConstrainedLanguage.'' }',
+        '$docLines = @(& $env:SHELLOSSUS_COLD_BUNDLED -Doctor -Mode json -Workspace $env:SHELLOSSUS_COLD_WS -ConfigPath $env:SHELLOSSUS_COLD_CFG -BaseUrl ''https://example.invalid/v1'' -Model ''test-model'' -NoSession)',
+        '$global:LASTEXITCODE = 0',
+        'if ($docLines.Count -ne 1) { throw "Expected 1 JSON line from -Doctor, got $($docLines.Count)." }',
+        '$docObj = $docLines[0] | ConvertFrom-Json',
+        '$langCheck = @($docObj.checks | Where-Object { $_.name -eq ''language_mode'' })[0]',
+        'if ($docObj.type -ne ''doctor'' -or -not $langCheck -or $langCheck.status -ne ''pass'' -or $langCheck.message -notlike ''*Language mode: ConstrainedLanguage*'') {',
+        '    throw "Unexpected cold CLM doctor output: $($docLines[0])"',
+        '}',
+        '. $env:SHELLOSSUS_COLD_BUNDLED -LibraryOnly',
+        'if ($ExecutionContext.SessionState.LanguageMode -ne ''ConstrainedLanguage'') { throw ''LanguageMode changed after sourcing shellossus.ps1.'' }',
+        '$script:OutputMode = ''json''',
+        '$script:AgentPermission = ''AutoEdit''',
+        '$script:AgentConfigPath = $env:SHELLOSSUS_COLD_CFG',
+        '$script:ActiveWorkspace = $env:SHELLOSSUS_COLD_WS',
+        '$script:CurrentTurnWrites = @()',
+        '$utf16Full = Join-Path $env:SHELLOSSUS_COLD_WS ''utf16le.txt''',
+        '$origUtf16Digest = Get-AgentFileContentDigest -LiteralPath $utf16Full',
+        '$badRes = Invoke-AgentTool -Root $env:SHELLOSSUS_COLD_WS -Call @{ id = ''c-bad''; function = @{ name = ''edit_file''; arguments = ''{"path":"bad-utf8.txt","old_text":"x","new_text":"y"}'' } } | ConvertFrom-Json',
+        'if ($badRes.error -notlike ''*Invalid or unsupported file encoding*'') { throw "Cold CLM bad-utf8 check failed: $($badRes | ConvertTo-Json -Compress)" }',
+        '$nonAsciiText = ''Write-Output "'' + ([string][char]0x00E9) + ''"''',
+        '$wrBomArgs = @{ path = ''bom-script.ps1''; content = $nonAsciiText } | ConvertTo-Json -Compress',
+        '$wrBomRes = Invoke-AgentTool -Root $env:SHELLOSSUS_COLD_WS -Call @{ id = ''c-w1''; function = @{ name = ''write_file''; arguments = $wrBomArgs } } | ConvertFrom-Json',
+        'if ($wrBomRes.status -ne ''written'') { throw "Cold CLM write_file bom-script.ps1 failed: $($wrBomRes.error)" }',
+        '$edBomArgs = @{ path = ''bom-script.ps1''; old_text = ''Write-Output''; new_text = ''Write-Host'' } | ConvertTo-Json -Compress',
+        '$edBomRes = Invoke-AgentTool -Root $env:SHELLOSSUS_COLD_WS -Call @{ id = ''c-e1''; function = @{ name = ''edit_file''; arguments = $edBomArgs } } | ConvertFrom-Json',
+        'if ($edBomRes.status -ne ''written'') { throw "Cold CLM edit_file bom-script.ps1 failed: $($edBomRes.error)" }',
+        '$edUtf16Res = Invoke-AgentTool -Root $env:SHELLOSSUS_COLD_WS -Call @{ id = ''c-e2''; function = @{ name = ''edit_file''; arguments = ''{"path":"utf16le.txt","old_text":"b","new_text":"beta"}'' } } | ConvertFrom-Json',
+        'if ($edUtf16Res.status -ne ''written'') { throw "Cold CLM edit_file utf16le.txt failed: $($edUtf16Res.error)" }',
+        '$wrUtf16Res = Invoke-AgentTool -Root $env:SHELLOSSUS_COLD_WS -Call @{ id = ''c-w2''; function = @{ name = ''write_file''; arguments = ''{"path":"utf16le.txt","content":"alpha\nbeta","overwrite":true}'' } } | ConvertFrom-Json',
+        'if ($wrUtf16Res.status -ne ''written'') { throw "Cold CLM overwrite utf16le.txt failed: $($wrUtf16Res.error)" }',
+        '$coldUndoState = @{ messages = @(@{ role = ''user''; content = ''u'' }) }',
+        'Invoke-AgentUndo -State $coldUndoState -UndoEntry @{ messages = @(); writes = @($script:CurrentTurnWrites) }',
+        'if (Test-Path -LiteralPath (Join-Path $env:SHELLOSSUS_COLD_WS ''bom-script.ps1'')) { throw ''Cold CLM undo did not remove created bom-script.ps1.'' }',
+        'if ((Get-AgentFileContentDigest -LiteralPath $utf16Full) -cne $origUtf16Digest) { throw ''Cold CLM undo did not restore original UTF-16 LE bytes.'' }',
+        '$coldSessFile = Join-Path $env:SHELLOSSUS_COLD_SESS ''cold-sess.jsonl''',
+        '$coldState = @{ messages = @(@{ role = ''system''; content = ''sys'' }, @{ role = ''user''; content = ''hello cold clm'' }, @{ role = ''assistant''; content = ''ok'' }) }',
+        'Save-AgentSession -SessionFile $coldSessFile -State $coldState -Workspace $env:SHELLOSSUS_COLD_WS -Model ''test-model'' -SessionId ''sid-cold-1''',
+        '$coldState.messages += @{ role = ''user''; content = ''turn 2'' }',
+        '$coldState.messages += @{ role = ''assistant''; content = ''reply 2'' }',
+        'Save-AgentSession -SessionFile $coldSessFile -State $coldState -Workspace $env:SHELLOSSUS_COLD_WS -Model ''test-model'' -SessionId ''sid-cold-1''',
+        '$coldResumed = @{ messages = @() }',
+        'Invoke-SessionResume -SessionFile $coldSessFile -State $coldResumed -CurrentWorkspace $env:SHELLOSSUS_COLD_WS | Out-Null',
+        'if ($coldResumed.session_id -ne ''sid-cold-1'' -or $coldResumed.messages.Count -lt 5) { throw ''Cold CLM Invoke-SessionResume failed.'' }',
+        '$resolvedSelf = Resolve-StandaloneScriptPath -Required',
+        '$workerArgs = Get-AgentWorkerArguments -ScriptPath $resolvedSelf -WorkerMode ''http''',
+        'if (-not $workerArgs) { throw ''Cold CLM Get-AgentWorkerArguments returned empty result.'' }',
+        'Write-Output ''COLD_CLM_CHILD_OK'''
+    )
+    Set-AgentUtf8Content -LiteralPath $coldRunnerPath -Value ($coldRunnerLines -join "`n")
+
+    $coldPsExe = Get-AgentPowerShellExecutable
+    $coldBundledPath = (Get-Item -LiteralPath "$PSScriptRoot\..\shellossus.ps1" -Force).FullName
+    $coldOutput = @(Invoke-WithProcessEnvironment -Values @{
+        SHELLOSSUS_COLD_BUNDLED = $coldBundledPath
+        SHELLOSSUS_COLD_WS = $coldWs
+        SHELLOSSUS_COLD_CFG = $coldCfg
+        SHELLOSSUS_COLD_SESS = $coldSessDir
+        SHELLOSSUS_API_KEY = $null
+    } -Action {
+        & $coldPsExe -NoProfile -NonInteractive -File $coldRunnerPath 2>&1
+    })
+    $coldExit = $LASTEXITCODE
+    $coldJoined = ($coldOutput | ForEach-Object { [string]$_ }) -join "`n"
+    Assert-True ($coldExit -eq 0 -and ($coldOutput -contains 'COLD_CLM_CHILD_OK')) "Cold-start ConstrainedLanguage child check failed (exit=$coldExit): $coldJoined"
 }
 finally {
     Remove-TestEnvironment -Env $envData

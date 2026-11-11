@@ -25,7 +25,7 @@
   - Renders model `reasoning_content` in `compact` (last 3 lines), `full`, or `hide` mode (`Write-AgentReasoning`) and the ASCII/Unicode mascot (`Write-TuiMascotCard`).
 
 ### 3. [`src/tools/`](../src/tools/)
-- **Common State & Truncation (`Common.ps1`):** Runtime state variables, canonical name mapping (`Resolve-ToolCanonicalName`), tool enablement check (`Test-IsToolEnabled`), line/head/tail truncation, and environment inspection (`Get-AgentEnvironment`).
+- **Common State & Truncation (`Common.ps1`):** Runtime state variables, canonical name mapping (`Resolve-ToolCanonicalName`), tool enablement check (`Test-IsToolEnabled`), `ConstrainedLanguage`-safe file content digests (`Get-AgentFileContentDigest`), line/head/tail truncation, and environment inspection (`Get-AgentEnvironment`).
 - **Schemas & Capabilities (`Schemas.ps1`):** Capability probing (`Get-AgentCapabilities`) and OpenAI tool schema definitions (`Get-AgentTools`).
 - **Argument Normalizers (`Normalizers.ps1`):** Tolerant alias and schema normalizers (`Format-EditArguments`, `Format-RunAgentArguments`, `Format-TodoArguments`, `Format-AskUserArguments`, `Format-MemoryArguments`).
 - **Schema Validation (`Validation.ps1`):** Strict tool argument validation before execution (`Test-AgentToolArguments`).
@@ -96,6 +96,6 @@ These are the 13 canonical tools from `Get-AgentTools` in `src/tools/Schemas.ps1
 3. Run `.\tests\smoke.ps1`, which:
    - Calls `.\build.ps1 -Check` to ensure `shellossus.ps1` matches `src/*.ps1`.
    - Executes modular test suites (`Config.Tests.ps1`, `Theme.Tests.ps1`, `Tools.Tests.ps1`, `Context.Tests.ps1`, `Cli.Tests.ps1`, `Doctor.Tests.ps1`, `Reliability.Tests.ps1`) with isolated temporary workspaces, and runs both `Doctor.Tests.ps1 -ConstrainedLanguage` and `Reliability.Tests.ps1 -ConstrainedLanguage` in fresh `ConstrainedLanguage` child processes. Endpoint results are mocked, so tests send no real API requests.
-   - Runs `ConstrainedLanguage.Tests.ps1` to verify core operations under PowerShell `ConstrainedLanguage` mode.
+   - Runs `ConstrainedLanguage.Tests.ps1` to verify core operations under PowerShell `ConstrainedLanguage` mode, including a cold-start child process that switches to `ConstrainedLanguage` on line 1 before loading `shellossus.ps1`.
 
-The Windows CI workflow runs `.\tests\smoke.ps1` under Windows PowerShell 5.1.
+The CI workflow (`.github/workflows/check.yml`) runs `tests/smoke.ps1` on Windows PowerShell 5.1 (`windows-latest`) and on PowerShell 7 (`pwsh`) across Windows, Linux, and macOS.

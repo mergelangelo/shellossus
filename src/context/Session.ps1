@@ -145,7 +145,7 @@ function Write-AgentSessionFile {
     $tempPath = Join-Path (Split-Path $Path -Parent) ('.session-tmp-' + $PID + '-' + (Get-Random -Minimum 100000 -Maximum 999999) + '.tmp')
     try {
         Get-AgentSessionLines -State $State -Meta $meta | Set-Content -LiteralPath $tempPath -Encoding UTF8 -ErrorAction Stop
-        $revision = (Get-FileHash -LiteralPath $tempPath -Algorithm SHA256 -ErrorAction Stop).Hash
+        $revision = Get-AgentFileContentDigest -LiteralPath $tempPath
         Assert-AgentSessionRevision -Path $Path -Expected $Expected
         Move-Item -LiteralPath $tempPath -Destination $Path -Force -ErrorAction Stop
     }
@@ -335,7 +335,7 @@ function Get-AgentSessionCandidate {
         $lines = @(Get-Content -LiteralPath $snapshot.FullName -TotalCount ($script:AgentMaxSessionRecords + 1) -Encoding UTF8 -ErrorAction Stop)
         $candidate = ConvertFrom-AgentSessionLines -Lines $lines
         $candidate.session_revision_path = $path
-        $candidate.session_revision_hash = (Get-FileHash -LiteralPath $snapshot.FullName -Algorithm SHA256 -ErrorAction Stop).Hash
+        $candidate.session_revision_hash = Get-AgentFileContentDigest -LiteralPath $snapshot.FullName
         return $candidate
     }
     finally {

@@ -138,7 +138,7 @@ function Read-AgentUndoContent {
         throw "File exceeds the $MaxBytes-byte limit: $Path"
     }
     if ($Hash) {
-        return (Get-FileHash -LiteralPath $Path -Algorithm SHA256 -ErrorAction Stop).Hash
+        return (Get-AgentFileContentDigest -LiteralPath $Path)
     }
     $content = Get-Content -LiteralPath $Path -Raw -Encoding UTF8 -ErrorAction Stop
     if ($null -eq $content) { return '' }

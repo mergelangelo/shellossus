@@ -1,7 +1,7 @@
 name: PowerShell checks
 on: [push, pull_request]
 jobs:
-  windows-powershell:
+  windows-powershell-5_1:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -20,6 +20,33 @@ jobs:
             Write-Host "::error title=Smoke Check Failed::$encMsg"
             if ($env:GITHUB_STEP_SUMMARY) {
               "# Smoke Test Failure`n`n``````text`n$tail`n``````" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8
+            }
+            exit 1
+          }
+  pwsh-cross-platform:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test PowerShell 7 (${{ matrix.os }})
+        shell: pwsh
+        run: |
+          $tempDir = if ($env:RUNNER_TEMP) { $env:RUNNER_TEMP } elseif ($env:TEMP) { $env:TEMP } elseif ($env:TMPDIR) { $env:TMPDIR } else { '/tmp' }
+          $logFile = Join-Path $tempDir 'smoke_transcript.log'
+          try {
+            Start-Transcript -Path $logFile -Force
+            ./tests/smoke.ps1
+            Stop-Transcript
+          } catch {
+            try { Stop-Transcript } catch {}
+            $tail = if (Test-Path -LiteralPath $logFile) { (Get-Content -LiteralPath $logFile -Tail 40) -join "`n" } else { "No log file found." }
+            $encMsg = "$($_.Exception.Message)`n$($_.ScriptStackTrace)`n--- Last 40 lines of output ---`n$tail" -replace '%', '%25' -replace "`r", '%0D' -replace "`n", '%0A'
+            Write-Host "::error title=Smoke Check Failed (${{ matrix.os }})::$encMsg"
+            if ($env:GITHUB_STEP_SUMMARY) {
+              "# Smoke Test Failure (${{ matrix.os }})`n`n``````text`n$tail`n``````" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8
             }
             exit 1
           }

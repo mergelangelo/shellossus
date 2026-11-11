@@ -2467,6 +2467,101 @@ function Get-AgentUtf8ByteCount {
     return ($Text -creplace '[\ud800-\udbff][\udc00-\udfff]', 'xxxx' -creplace '[\u0080-\u07ff]', 'xx' -creplace '[\u0800-\uffff]', 'xxx').Length
 }
 
+function Get-AgentFileContentDigest {
+    param([Parameter(Mandatory = $true)][AllowEmptyString()][string]$LiteralPath)
+    try {
+        return (Get-FileHash -LiteralPath $LiteralPath -Algorithm SHA256 -ErrorAction Stop).Hash
+    }
+    catch {
+        $errId = [string]$_.FullyQualifiedErrorId
+        $nestedId = if ($_.Exception -and $_.Exception.ErrorRecord) { [string]$_.Exception.ErrorRecord.FullyQualifiedErrorId } else { '' }
+        $errMsg = [string]$_.Exception.Message
+        $innerMsg = if ($_.Exception -and $_.Exception.InnerException) { [string]$_.Exception.InnerException.Message } else { '' }
+        $isLanguageModeError = (
+            $errId -match 'ConstrainedLanguage' -or
+            $nestedId -match 'ConstrainedLanguage' -or
+            $errMsg -match 'in this language mode' -or
+            $innerMsg -match 'in this language mode'
+        )
+        if (-not $isLanguageModeError) {
+            throw
+        }
+    }
+    $item = Get-Item -LiteralPath $LiteralPath -Force -ErrorAction Stop
+    if ($item.PSIsContainer) {
+        throw "Expected a file at $LiteralPath."
+    }
+    $rawBytes = if ($PSVersionTable.PSEdition -eq 'Desktop') {
+        Get-Content -LiteralPath $LiteralPath -Encoding Byte -ReadCount 0 -ErrorAction Stop
+    }
+    else {
+        Get-Content -LiteralPath $LiteralPath -AsByteStream -ReadCount 0 -ErrorAction Stop
+    }
+    if ($null -eq $rawBytes) {
+        $bytes = @()
+    }
+    elseif ($rawBytes -is [array]) {
+        if ($rawBytes.Count -eq 1 -and $rawBytes[0] -is [array]) {
+            $bytes = $rawBytes[0]
+        }
+        else {
+            $bytes = $rawBytes
+        }
+    }
+    else {
+        $bytes = @([byte]$rawBytes)
+    }
+    $n = [long]$bytes.Count
+    $m = 4294967295L
+    $p1 = 16777619L
+    $p2 = 15485863L
+    $p3 = 16769023L
+    $nLo = $n -band $m
+    $nHi = ($n -shr 32) -band $m
+    $h0 = (2166136261L -bxor $nLo) -band $m
+    $h1 = (3266489917L -bxor (($nLo * $p2) -band $m)) -band $m
+    $h2 = (668265263L -bxor ((($nLo -shl 7) -band $m) -bxor $nHi)) -band $m
+    $h3 = (374761393L -bxor (($nLo * $p1) -band $m)) -band $m
+    $h4 = (2654435761L + $nLo + $nHi) -band $m
+    $h5 = (2246822519L -bxor (($nLo * 31L) -band $m)) -band $m
+    $h6 = (3266489909L + (($nLo * 131L) -band $m)) -band $m
+    $h7 = (1597334677L -bxor (($nLo * 8191L) -band $m)) -band $m
+    $limit = $n - ($n % 16L)
+    for ($i = 0L; $i -lt $limit; $i += 16L) {
+        $idx = [int]$i
+        $off = $i -band $m
+        $w0 = [long]$bytes[$idx] -bor ([long]$bytes[$idx + 1] -shl 8) -bor ([long]$bytes[$idx + 2] -shl 16) -bor ([long]$bytes[$idx + 3] -shl 24)
+        $w1 = [long]$bytes[$idx + 4] -bor ([long]$bytes[$idx + 5] -shl 8) -bor ([long]$bytes[$idx + 6] -shl 16) -bor ([long]$bytes[$idx + 7] -shl 24)
+        $w2 = [long]$bytes[$idx + 8] -bor ([long]$bytes[$idx + 9] -shl 8) -bor ([long]$bytes[$idx + 10] -shl 16) -bor ([long]$bytes[$idx + 11] -shl 24)
+        $w3 = [long]$bytes[$idx + 12] -bor ([long]$bytes[$idx + 13] -shl 8) -bor ([long]$bytes[$idx + 14] -shl 16) -bor ([long]$bytes[$idx + 15] -shl 24)
+        $h0 = (((($h0 -bxor $w0 -bxor $off) * $p1) -band $m) + (($h7 -shr 11) -bxor (($h7 -shl 21) -band $m))) -band $m
+        $h1 = (((($h1 -bxor $w1) * $p1) -band $m) + (($h0 -shr 13) -bxor (($h0 -shl 19) -band $m))) -band $m
+        $h2 = (((($h2 -bxor $w2) * $p1) -band $m) + (($h1 -shr 17) -bxor (($h1 -shl 15) -band $m))) -band $m
+        $h3 = (((($h3 -bxor $w3) * $p1) -band $m) + (($h2 -shr 7) -bxor (($h2 -shl 25) -band $m))) -band $m
+        $h4 = ((((($h4 + $w2) -band $m) * $p2) -band $m) -bxor $h1) -band $m
+        $h5 = ((((($h5 + $w3) -band $m) * $p2) -band $m) -bxor $h2) -band $m
+        $h6 = ((((($h6 + $w0) -band $m) * $p3) -band $m) -bxor $h3) -band $m
+        $h7 = ((((($h7 + $w1) -band $m) * $p3) -band $m) -bxor $h0) -band $m
+    }
+    for ($j = [int]$limit; $j -lt $n; $j++) {
+        $b = [long]$bytes[$j]
+        $h0 = (((($h0 -bxor $b) * $p1) -band $m) + (($j + 1L) -band $m)) -band $m
+        $h4 = ((((($h4 + $b + 1L) -band $m) * $p2) -band $m) -bxor $h0) -band $m
+        $t = $h0; $h0 = $h1; $h1 = $h2; $h2 = $h3; $h3 = $h4; $h4 = $h5; $h5 = $h6; $h6 = $h7; $h7 = $t
+    }
+    for ($r = 0; $r -lt 4; $r++) {
+        $h0 = (((($h0 -bxor ($h7 -shr 15)) * $p1) -band $m) + $h3) -band $m
+        $h1 = (((($h1 -bxor ($h0 -shr 13)) * $p2) -band $m) + $h4) -band $m
+        $h2 = (((($h2 -bxor ($h1 -shr 16)) * $p3) -band $m) + $h5) -band $m
+        $h3 = (((($h3 -bxor ($h2 -shr 15)) * $p1) -band $m) + $h6) -band $m
+        $h4 = (((($h4 -bxor ($h3 -shr 13)) * $p2) -band $m) + $h7) -band $m
+        $h5 = (((($h5 -bxor ($h4 -shr 16)) * $p3) -band $m) + $h0) -band $m
+        $h6 = (((($h6 -bxor ($h5 -shr 15)) * $p1) -band $m) + $h1) -band $m
+        $h7 = (((($h7 -bxor ($h6 -shr 13)) * $p2) -band $m) + $h2) -band $m
+    }
+    return ('CLM256-{0:X8}{1:X8}{2:X8}{3:X8}{4:X8}{5:X8}{6:X8}{7:X8}-{8:X12}' -f $h0, $h1, $h2, $h3, $h4, $h5, $h6, $h7, $n)
+}
+
 function Format-ByteSize {
     param([long]$Bytes)
     if ($Bytes -lt 1024) { return "${Bytes}B" }
@@ -5479,7 +5574,7 @@ function Read-AgentUndoContent {
         throw "File exceeds the $MaxBytes-byte limit: $Path"
     }
     if ($Hash) {
-        return (Get-FileHash -LiteralPath $Path -Algorithm SHA256 -ErrorAction Stop).Hash
+        return (Get-AgentFileContentDigest -LiteralPath $Path)
     }
     $content = Get-Content -LiteralPath $Path -Raw -Encoding UTF8 -ErrorAction Stop
     if ($null -eq $content) { return '' }
@@ -8895,7 +8990,7 @@ function Write-AgentSessionFile {
     $tempPath = Join-Path (Split-Path $Path -Parent) ('.session-tmp-' + $PID + '-' + (Get-Random -Minimum 100000 -Maximum 999999) + '.tmp')
     try {
         Get-AgentSessionLines -State $State -Meta $meta | Set-Content -LiteralPath $tempPath -Encoding UTF8 -ErrorAction Stop
-        $revision = (Get-FileHash -LiteralPath $tempPath -Algorithm SHA256 -ErrorAction Stop).Hash
+        $revision = Get-AgentFileContentDigest -LiteralPath $tempPath
         Assert-AgentSessionRevision -Path $Path -Expected $Expected
         Move-Item -LiteralPath $tempPath -Destination $Path -Force -ErrorAction Stop
     }
@@ -9085,7 +9180,7 @@ function Get-AgentSessionCandidate {
         $lines = @(Get-Content -LiteralPath $snapshot.FullName -TotalCount ($script:AgentMaxSessionRecords + 1) -Encoding UTF8 -ErrorAction Stop)
         $candidate = ConvertFrom-AgentSessionLines -Lines $lines
         $candidate.session_revision_path = $path
-        $candidate.session_revision_hash = (Get-FileHash -LiteralPath $snapshot.FullName -Algorithm SHA256 -ErrorAction Stop).Hash
+        $candidate.session_revision_hash = Get-AgentFileContentDigest -LiteralPath $snapshot.FullName
         return $candidate
     }
     finally {
