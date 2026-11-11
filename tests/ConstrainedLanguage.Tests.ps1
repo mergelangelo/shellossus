@@ -941,6 +941,11 @@ try {
         '$script:ActiveEndpoint = ''https://leaked.example.invalid/v1/chat/completions''',
         'Restore-AgentExecutionContext -Context $coldCtx',
         'if ($script:ActiveSessionTodos[0].status -cne ''pending'' -or $script:ActiveEndpoint -cne $coldCtx.active_endpoint) { throw ''Cold CLM execution context roundtrip failed.'' }',
+        '$null = Set-AgentStreamSetting -StreamSpec ''true''',
+        'if (-not $script:StreamRequests) { throw ''Cold CLM Set-AgentStreamSetting failed.'' }',
+        '$coldSse = ConvertFrom-AgentSseResponse -RawText (": keepalive`ndata: {`"choices`":[{`"index`":0,`"delta`":{`"content`":`"cold-`"}}]}", "", "data: {`"choices`":[{`"index`":0,`"delta`":{`"content`":`"sse`"},`"finish_reason`":`"stop`"}]}", "", "data: [DONE]" -join "`n")',
+        'if ($coldSse.choices[0].message.content -cne ''cold-sse'' -or $coldSse.choices[0].finish_reason -cne ''stop'') { throw ''Cold CLM ConvertFrom-AgentSseResponse failed.'' }',
+        '$null = Set-AgentStreamSetting -StreamSpec ''false''',
         'Write-Output ''COLD_CLM_CHILD_OK'''
     )
     Set-AgentUtf8Content -LiteralPath $coldRunnerPath -Value ($coldRunnerLines -join "`n")
@@ -959,6 +964,98 @@ try {
     $coldExit = $LASTEXITCODE
     $coldJoined = ($coldOutput | ForEach-Object { [string]$_ }) -join "`n"
     Assert-True ($coldExit -eq 0 -and ($coldOutput -contains 'COLD_CLM_CHILD_OK')) "Cold-start ConstrainedLanguage child check failed (exit=$coldExit): $coldJoined"
+
+    # Task 7: ConstrainedLanguage verification for Set-AgentStreamSetting, ConvertFrom-AgentSseResponse,
+    # Invoke-AgentTurn over SSE, Invoke-AgentCompact over SSE, and truncated SSE safety rejection.
+    $savedClStream = $script:StreamRequests
+    $savedClPerm7 = $script:AgentPermission
+    $savedClMode7 = $script:OutputMode
+    try {
+        Assert-True ($ExecutionContext.SessionState.LanguageMode -eq 'ConstrainedLanguage') 'Expected ConstrainedLanguage before Task 7 SSE checks.'
+        $clStreamTrue = Set-AgentStreamSetting -StreamSpec 'true'
+        Assert-True ($clStreamTrue -and $script:StreamRequests) 'ConstrainedLanguage Set-AgentStreamSetting true failed.'
+
+        $clSseRaw = @(
+            ': clm keepalive',
+            'data: {"choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":"clm-think-","content":"clm-"}}]}',
+            '',
+            'data: {"choices":[{"index":0,"delta":{"reasoning_content":"done","content":"reply","tool_calls":[{"index":0,"id":"cl_tc_0","type":"function","extra_content":{"provider":"x"},"function":{"name":"read_file","arguments":"{\"path\":"}},{"index":1,"id":"cl_tc_1","type":"function","function":{"name":"list_files","arguments":"{}"}}]}}]}',
+            '',
+            'data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"a/b/keep.txt\"}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":18,"completion_tokens":9}}',
+            '',
+            'data: [DONE]'
+        ) -join "`r`n"
+        $clSseObj = ConvertFrom-AgentSseResponse -RawText $clSseRaw
+        Assert-True ($clSseObj.choices[0].finish_reason -ceq 'tool_calls' -and $clSseObj.choices[0].message.reasoning_content -ceq 'clm-think-done' -and $clSseObj.choices[0].message.content -ceq 'clm-reply') 'ConstrainedLanguage ConvertFrom-AgentSseResponse content/reasoning failed.'
+        Assert-True (@($clSseObj.choices[0].message.tool_calls).Count -eq 2 -and $clSseObj.choices[0].message.tool_calls[0].function.arguments -ceq '{"path":"a/b/keep.txt"}' -and $clSseObj.choices[0].message.tool_calls[0].extra_content.provider -ceq 'x') 'ConstrainedLanguage ConvertFrom-AgentSseResponse indexed tool_calls or extension failed.'
+        Assert-True ([int]$clSseObj.usage.prompt_tokens -eq 18 -and [int]$clSseObj.usage.completion_tokens -eq 9) 'ConstrainedLanguage ConvertFrom-AgentSseResponse usage failed.'
+
+        foreach ($clBadSse in @(
+            'data: {"choices":[{"index":0,"delta":{"content":"no-done"},"finish_reason":"stop"}]}',
+            ("data: {`"choices`":[{`"index`":0,`"delta`":{`"content`":`"no-finish`"}}]}`n`ndata: [DONE]"),
+            ("data: {broken`n`ndata: [DONE]"),
+            ("event: error`ndata: {`"error`":{`"message`":`"clm-stream-err`"}}`n`ndata: [DONE]")
+        )) {
+            $clBadThrew = $false
+            try { $null = ConvertFrom-AgentSseResponse -RawText $clBadSse }
+            catch { $clBadThrew = $true }
+            Assert-True $clBadThrew "ConstrainedLanguage ConvertFrom-AgentSseResponse accepted unsafe stream: $clBadSse"
+        }
+
+        $script:OutputMode = 'json'
+        $script:AgentPermission = 'AutoEdit'
+        $script:clSseTurnStep = 0
+        function Invoke-WebRequest {
+            param($Uri, $Method, $Headers, $ContentType, $Body, $TimeoutSec, $ErrorAction, [switch]$UseBasicParsing, $OutFile)
+            $script:clSseTurnStep++
+            $reqJson = $Body | ConvertFrom-Json
+            Assert-True ([bool]$reqJson.stream -and $Headers['Accept'] -eq 'text/event-stream, application/json') 'ConstrainedLanguage SSE request missing stream=true or Accept header.'
+            if ($script:clSseTurnStep -eq 1) {
+                $out1 = @(
+                    'data: {"choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"clm_r1","type":"function","function":{"name":"read_file","arguments":"{\"path\":\"a/b/keep.txt\"}"}}]},"finish_reason":"tool_calls"}]}',
+                    '',
+                    'data: [DONE]'
+                ) -join "`n"
+                Set-Content -LiteralPath $OutFile -Value $out1 -Encoding UTF8 -NoNewline
+                return
+            }
+            $out2 = @(
+                'data: {"choices":[{"index":0,"delta":{"role":"assistant","content":"CLM SSE complete"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":4}}',
+                '',
+                'data: [DONE]'
+            ) -join "`n"
+            Set-Content -LiteralPath $OutFile -Value $out2 -Encoding UTF8 -NoNewline
+        }
+        try {
+            $clSseState = @{
+                session_id = 'clm-sse-turn'
+                workspace = $workspacePath
+                model = 'test-model'
+                usage_input_tokens = 0
+                usage_output_tokens = 0
+                messages = @(
+                    @{ role = 'system'; content = 'sys' },
+                    @{ role = 'user'; content = 'Read keep.txt in CLM over SSE' }
+                )
+            }
+            Invoke-AgentTurn -State $clSseState -Endpoint 'https://example.invalid/v1/chat/completions' -ModelId 'test-model' -ApiKey 'k' -Root $workspacePath -Steps 4
+            Assert-True ($clSseState.messages[-1].content -ceq 'CLM SSE complete' -and $clSseState.usage_input_tokens -eq 10 -and $clSseState.usage_output_tokens -eq 4) 'ConstrainedLanguage Invoke-AgentTurn over SSE failed.'
+
+            $clSseState.messages += @{ role = 'user'; content = 'Recent user turn' }
+            $clSseState.messages += @{ role = 'assistant'; content = 'Recent assistant turn' }
+            $didClSseCompact = Invoke-AgentCompact -State $clSseState -Endpoint 'https://example.invalid/v1/chat/completions' -ModelId 'test-model' -ApiKey 'k' -KeepRecent 2
+            Assert-True ([bool]$didClSseCompact -and ([string]$clSseState.messages[1].content).Contains('CLM SSE complete')) 'ConstrainedLanguage Invoke-AgentCompact over SSE failed.'
+        }
+        finally {
+            Remove-Item Function:\Invoke-WebRequest -ErrorAction SilentlyContinue
+            Remove-Variable -Name clSseTurnStep -Scope Script -ErrorAction SilentlyContinue
+        }
+    }
+    finally {
+        $script:StreamRequests = $savedClStream
+        $script:AgentPermission = $savedClPerm7
+        $script:OutputMode = $savedClMode7
+    }
 }
 finally {
     Remove-TestEnvironment -Env $envData

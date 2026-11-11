@@ -378,7 +378,7 @@ function Invoke-CompactionBatch {
             @{ role = 'system'; content = $SystemPrompt },
             @{ role = 'user'; content = $UserBody }
         )
-        stream = $false
+        stream = [bool]$script:StreamRequests
     } | ConvertTo-Json -Depth 20 -Compress
     $tempFile = New-AgentTempFile
     try {

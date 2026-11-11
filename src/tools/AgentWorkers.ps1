@@ -30,6 +30,8 @@ function Invoke-InternalSubagentWorker {
         LiteralPrompt = $true
     }
     if ($env:SHELLOSSUS_SUB_REQUEST_TIMEOUT) { $workerArgs.RequestTimeoutSec = $env:SHELLOSSUS_SUB_REQUEST_TIMEOUT }
+    if ($env:SHELLOSSUS_SUB_STREAM -eq '1') { $workerArgs.Stream = $true }
+    elseif ($env:SHELLOSSUS_SUB_STREAM -eq '0') { $workerArgs.Stream = $false }
     if ($env:SHELLOSSUS_SUB_CONFIG) { $workerArgs.ConfigPath = $env:SHELLOSSUS_SUB_CONFIG }
     if ($env:SHELLOSSUS_SUB_NO_SKILLS -eq '1') { $workerArgs.NoSkills = $true }
     if ($env:SHELLOSSUS_SUB_NO_TEMPLATES -eq '1') { $workerArgs.NoPromptTemplates = $true }
@@ -159,6 +161,8 @@ function Invoke-ParallelSubagentProcesses {
                     SHELLOSSUS_SUB_CONTEXT_WINDOW = [string]$script:ContextWindowTokens
                     SHELLOSSUS_SUB_COMPACT_THRESHOLD = [string]$script:CompactThresholdTokens
                     SHELLOSSUS_SUB_REQUEST_TIMEOUT = [string]$script:RequestTimeoutSec
+                    SHELLOSSUS_STREAM = $null
+                    SHELLOSSUS_SUB_STREAM = $(if ($script:StreamRequests) { '1' } else { '0' })
                     SHELLOSSUS_SUB_PROMPT = $promptTemp.FullName
                     SHELLOSSUS_SUB_TOOLS = ($childTools -join ',')
                     SHELLOSSUS_SUB_NO_TOOLS = $(if ($childTools.Count -eq 0) { '1' } else { '0' })

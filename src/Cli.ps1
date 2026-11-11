@@ -92,14 +92,18 @@ if (-not $LibraryOnly) {
             SHELLOSSUS_API_KEY = $inputKey
             SHELLOSSUS_WORKSPACE = $inputWorkspace
         }
-        foreach ($optK in @('SHELLOSSUS_CONTEXT_WINDOW', 'SHELLOSSUS_COMPACT_THRESHOLD', 'SHELLOSSUS_REQUEST_TIMEOUT_SEC', 'SHELLOSSUS_THEME')) {
-            if ($config.ContainsKey($optK) -and $config[$optK]) { $newCfg[$optK] = $config[$optK] }
+        foreach ($optK in @('SHELLOSSUS_CONTEXT_WINDOW', 'SHELLOSSUS_COMPACT_THRESHOLD', 'SHELLOSSUS_REQUEST_TIMEOUT_SEC', 'SHELLOSSUS_STREAM', 'SHELLOSSUS_THEME')) {
+            if ($config.ContainsKey($optK) -and $null -ne $config[$optK] -and ([string]$config[$optK]).Length -gt 0) { $newCfg[$optK] = $config[$optK] }
         }
         if (($PSBoundParameters.Keys -contains 'ContextWindow') -and $ContextWindow) { $newCfg['SHELLOSSUS_CONTEXT_WINDOW'] = $ContextWindow }
         if (($PSBoundParameters.Keys -contains 'CompactThreshold') -and $CompactThreshold) { $newCfg['SHELLOSSUS_COMPACT_THRESHOLD'] = $CompactThreshold }
         if ($script:StartupRequestTimeoutBound -and $script:StartupRequestTimeoutSpec) {
             $null = Set-AgentRequestTimeout -TimeoutSpec $script:StartupRequestTimeoutSpec
             $newCfg['SHELLOSSUS_REQUEST_TIMEOUT_SEC'] = [string]$script:RequestTimeoutSec
+        }
+        if ($script:StartupStreamBound) {
+            $null = Set-AgentStreamSetting -StreamSpec ($(if ($script:StartupStreamValue) { 'true' } else { 'false' }))
+            $newCfg['SHELLOSSUS_STREAM'] = if ($script:StreamRequests) { 'true' } else { 'false' }
         }
         if (($PSBoundParameters.Keys -contains 'Theme') -and $Theme -and $script:ActiveTheme) { $newCfg['SHELLOSSUS_THEME'] = $script:ActiveTheme }
         try { Save-AgentConfig -Path $ConfigPath -Config $newCfg }
@@ -132,10 +136,22 @@ if (-not $LibraryOnly) {
         $sessionDir = $SessionDir
     }
     $effectiveTimeoutSpec = if ($script:StartupRequestTimeoutSpec) { $script:StartupRequestTimeoutSpec } elseif ($config.SHELLOSSUS_REQUEST_TIMEOUT_SEC) { $config.SHELLOSSUS_REQUEST_TIMEOUT_SEC } else { '' }
+    $effectiveStreamSpec = if ($script:StartupStreamBound) {
+        if ($script:StartupStreamValue) { 'true' } else { 'false' }
+    }
+    elseif ($null -ne $env:SHELLOSSUS_STREAM -and ([string]$env:SHELLOSSUS_STREAM).Trim().Length -gt 0) {
+        [string]$env:SHELLOSSUS_STREAM
+    }
+    elseif ($config.ContainsKey('SHELLOSSUS_STREAM') -and $null -ne $config['SHELLOSSUS_STREAM'] -and ([string]$config['SHELLOSSUS_STREAM']).Trim().Length -gt 0) {
+        [string]$config['SHELLOSSUS_STREAM']
+    }
+    else {
+        ''
+    }
     if ($Doctor) {
         $doctorKey = Get-AgentConfiguredApiKey -Config $config
         try {
-            $report = Get-AgentDoctorReport -BaseUrl $BaseUrl -ModelId $Model -ApiKey $doctorKey -Workspace $Workspace -SessionDir $sessionDir -NoSession:$NoSession -ConfigState $doctorConfigState -KeyStorageWarning $keyStorageWarning -RequestTimeoutSpec $effectiveTimeoutSpec
+            $report = Get-AgentDoctorReport -BaseUrl $BaseUrl -ModelId $Model -ApiKey $doctorKey -Workspace $Workspace -SessionDir $sessionDir -NoSession:$NoSession -ConfigState $doctorConfigState -KeyStorageWarning $keyStorageWarning -RequestTimeoutSpec $effectiveTimeoutSpec -StreamSpec $effectiveStreamSpec
             Write-AgentDoctorReport -Report $report -Mode $Mode
         }
         finally { Remove-Variable doctorKey -ErrorAction SilentlyContinue; $config.Clear() }
@@ -152,6 +168,13 @@ if (-not $LibraryOnly) {
     }
     else {
         $script:RequestTimeoutSec = 180
+    }
+    try {
+        $null = Set-AgentStreamSetting -StreamSpec $effectiveStreamSpec
+    }
+    catch {
+        Write-AgentJsonEvent -EventType 'turn_end' -Payload @{ status = 'error'; error = $_.Exception.Message }
+        throw
     }
     $rootItem = Get-Item -LiteralPath $Workspace -Force -ErrorAction Stop
     if (-not $rootItem.PSIsContainer) { throw 'Workspace must be a directory.' }

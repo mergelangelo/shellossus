@@ -45,6 +45,7 @@ $script:RequestTimeoutSec = 180
 $script:MinRequestTimeoutSec = 10
 $script:MaxRequestTimeoutSec = 1800
 $script:MaxStepRetryBudgetSec = 3600
+$script:StreamRequests = $false
 
 function ConvertTo-AgentRequestTimeout {
     param([AllowEmptyString()][string]$TimeoutSpec)
@@ -64,6 +65,23 @@ function Set-AgentRequestTimeout {
     $val = ConvertTo-AgentRequestTimeout -TimeoutSpec $TimeoutSpec
     $script:RequestTimeoutSec = $val
     return $script:RequestTimeoutSec
+}
+
+function ConvertTo-AgentStreamSetting {
+    param([AllowEmptyString()][string]$StreamSpec)
+    if ($null -eq $StreamSpec) { return $false }
+    $trimmed = $StreamSpec.Trim()
+    if (-not $trimmed) { return $false }
+    if ($trimmed -ieq 'true' -or $trimmed -ceq '1') { return $true }
+    if ($trimmed -ieq 'false' -or $trimmed -ceq '0') { return $false }
+    throw 'Stream setting must be true, false, 1, or 0.'
+}
+
+function Set-AgentStreamSetting {
+    param([AllowEmptyString()][string]$StreamSpec)
+    $val = ConvertTo-AgentStreamSetting -StreamSpec $StreamSpec
+    $script:StreamRequests = [bool]$val
+    return $script:StreamRequests
 }
 
 function Get-CurrentTurnWritePathsSince {

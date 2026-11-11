@@ -2711,6 +2711,389 @@ $subRes = @(Invoke-ParallelSubagentProcesses -Root $WorkspacePath -Tasks @(@{ ro
         if ($null -eq $savedEnvKeyForTimeout) { Remove-Item Env:SHELLOSSUS_API_KEY -ErrorAction SilentlyContinue }
         else { $env:SHELLOSSUS_API_KEY = $savedEnvKeyForTimeout }
     }
+
+    # Task 7: Optional network-level SSE transport (-Stream / SHELLOSSUS_STREAM), strict ConvertFrom-AgentSseResponse assembly,
+    # safety rejection before tool execution, plain JSON fallback, and O(N) high-chunk assembly.
+    $savedCliStream = $script:StreamRequests
+    $savedEnvStream = $env:SHELLOSSUS_STREAM
+    $savedEnvKeyForStream = $env:SHELLOSSUS_API_KEY
+    $savedPermForStream = $script:AgentPermission
+    $savedModeForStream = $script:OutputMode
+    try {
+        Remove-Item Env:SHELLOSSUS_STREAM -ErrorAction SilentlyContinue
+        $env:SHELLOSSUS_API_KEY = 'stream-test-key'
+
+        # 7a. Precedence: CLI -Stream / -Stream:$false > $env:SHELLOSSUS_STREAM > $config.SHELLOSSUS_STREAM > $false,
+        # no stream_options sent, and Accept header set when streaming.
+        $streamEmptyCfg = Join-Path $testRoot 'stream-prec-empty.env'
+        Save-AgentConfig -Path $streamEmptyCfg -Config @{
+            SHELLOSSUS_BASE_URL = 'https://example.invalid/v1'
+            SHELLOSSUS_MODEL = 'test-model'
+        }
+        $streamTrueCfg = Join-Path $testRoot 'stream-prec-true.env'
+        Save-AgentConfig -Path $streamTrueCfg -Config @{
+            SHELLOSSUS_BASE_URL = 'https://example.invalid/v1'
+            SHELLOSSUS_MODEL = 'test-model'
+            SHELLOSSUS_STREAM = 'true'
+        }
+
+        $global:capturedStreamFlags = @()
+        $global:capturedAcceptHeaders = @()
+        $global:sawStreamOptions = $false
+        function Invoke-WebRequest {
+            param($Uri, $Method, $Headers, $ContentType, $Body, $TimeoutSec, $ErrorAction, [switch]$UseBasicParsing, $OutFile)
+            $parsedReq = $Body | ConvertFrom-Json
+            $global:capturedStreamFlags += [bool]$parsedReq.stream
+            if ($null -ne $parsedReq.stream_options) { $global:sawStreamOptions = $true }
+            $global:capturedAcceptHeaders += ([string]$Headers['Accept'])
+            $resp = @{ choices = @(@{ finish_reason = 'stop'; message = @{ content = 'ok' } }) } | ConvertTo-Json -Depth 8 -Compress
+            Set-Content -LiteralPath $OutFile -Value $resp -Encoding UTF8 -NoNewline
+        }
+        try {
+            $null = & "$PSScriptRoot\..\shellossus.ps1" -Workspace $workspacePath -ConfigPath $streamEmptyCfg -Prompt 'ping' -Mode json -NoSession
+            $null = & "$PSScriptRoot\..\shellossus.ps1" -Workspace $workspacePath -ConfigPath $streamTrueCfg -Prompt 'ping' -Mode json -NoSession
+            $env:SHELLOSSUS_STREAM = 'false'
+            $null = & "$PSScriptRoot\..\shellossus.ps1" -Workspace $workspacePath -ConfigPath $streamTrueCfg -Prompt 'ping' -Mode json -NoSession
+            $null = & "$PSScriptRoot\..\shellossus.ps1" -Workspace $workspacePath -ConfigPath $streamTrueCfg -Stream -Prompt 'ping' -Mode json -NoSession
+            $env:SHELLOSSUS_STREAM = 'true'
+            $null = & "$PSScriptRoot\..\shellossus.ps1" -Workspace $workspacePath -ConfigPath $streamTrueCfg -Stream:$false -Prompt 'ping' -Mode json -NoSession
+            Remove-Item Env:SHELLOSSUS_STREAM -ErrorAction SilentlyContinue
+            Assert-True (($global:capturedStreamFlags -join ',') -eq 'False,True,False,True,False') "Unexpected Stream precedence order: $($global:capturedStreamFlags -join ',')"
+            Assert-True (-not $global:sawStreamOptions) 'New-AgentTurnRequest must not send stream_options.'
+            Assert-True ($global:capturedAcceptHeaders[0] -eq '' -and $global:capturedAcceptHeaders[1] -eq 'text/event-stream, application/json' -and $global:capturedAcceptHeaders[2] -eq '' -and $global:capturedAcceptHeaders[3] -eq 'text/event-stream, application/json' -and $global:capturedAcceptHeaders[4] -eq '') "Unexpected Accept headers for stream toggle: $($global:capturedAcceptHeaders -join '|')"
+        }
+        finally {
+            Remove-Item Function:\Invoke-WebRequest -ErrorAction SilentlyContinue
+            Remove-Variable -Name capturedStreamFlags, capturedAcceptHeaders, sawStreamOptions -Scope Global -ErrorAction SilentlyContinue
+            Remove-Item Env:SHELLOSSUS_STREAM -ErrorAction SilentlyContinue
+        }
+
+        # 7b. -Setup preserves SHELLOSSUS_STREAM ('true' and 'false') when -Stream is unbound, and overrides when -Stream or -Stream:$false is bound.
+        $setupStreamCfg = Join-Path $testRoot 'setup-stream.env'
+        Save-AgentConfig -Path $setupStreamCfg -Config @{
+            SHELLOSSUS_BASE_URL = 'https://old.invalid/v1'
+            SHELLOSSUS_MODEL = 'old-model'
+            SHELLOSSUS_API_KEY = 'old-key'
+            SHELLOSSUS_STREAM = 'true'
+        }
+        function global:Read-Host {
+            param($Prompt, [switch]$AsSecureString)
+            if ($AsSecureString) { return }
+            return ''
+        }
+        function Write-Host {
+            param([Parameter(Position = 0, ValueFromRemainingArguments = $true)]$Object, [switch]$NoNewline, $ForegroundColor, $BackgroundColor)
+        }
+        try {
+            & "$PSScriptRoot\..\shellossus.ps1" -Setup -ConfigPath $setupStreamCfg -BaseUrl 'https://new.invalid/v1' -Model 'new-model'
+            Assert-True ((Read-AgentConfig -Path $setupStreamCfg).SHELLOSSUS_STREAM -eq 'true') '-Setup without -Stream did not preserve SHELLOSSUS_STREAM=true.'
+
+            & "$PSScriptRoot\..\shellossus.ps1" -Setup -ConfigPath $setupStreamCfg -BaseUrl 'https://new.invalid/v1' -Model 'new-model' -Stream:$false
+            Assert-True ((Read-AgentConfig -Path $setupStreamCfg).SHELLOSSUS_STREAM -eq 'false') '-Setup with -Stream:$false did not persist false.'
+
+            & "$PSScriptRoot\..\shellossus.ps1" -Setup -ConfigPath $setupStreamCfg -BaseUrl 'https://new.invalid/v1' -Model 'new-model'
+            Assert-True ((Read-AgentConfig -Path $setupStreamCfg).SHELLOSSUS_STREAM -eq 'false') '-Setup without -Stream did not preserve SHELLOSSUS_STREAM=false.'
+
+            & "$PSScriptRoot\..\shellossus.ps1" -Setup -ConfigPath $setupStreamCfg -BaseUrl 'https://new.invalid/v1' -Model 'new-model' -Stream
+            Assert-True ((Read-AgentConfig -Path $setupStreamCfg).SHELLOSSUS_STREAM -eq 'true') '-Setup with -Stream did not persist true.'
+        }
+        finally {
+            Remove-Item Function:\global:Read-Host -ErrorAction SilentlyContinue
+            Remove-Item Function:\Write-Host -ErrorAction SilentlyContinue
+        }
+
+        # 7c. Invalid SHELLOSSUS_STREAM at launch in -Mode json emits turn_end error and throws.
+        foreach ($badStreamEnv in @('yes', 'on', '2', 'invalid')) {
+            $env:SHELLOSSUS_STREAM = $badStreamEnv
+            $script:badStreamJsonLines = @()
+            $badStreamLaunchThrew = $false
+            try {
+                & "$PSScriptRoot\..\shellossus.ps1" -Workspace $workspacePath -ConfigPath $streamEmptyCfg -Prompt 'ping' -Mode json -NoSession 6>&1 | ForEach-Object { $script:badStreamJsonLines += [string]$_ }
+            }
+            catch {
+                if ($_.Exception.Message -eq 'Stream setting must be true, false, 1, or 0.') { $badStreamLaunchThrew = $true }
+            }
+            finally {
+                Remove-Item Env:SHELLOSSUS_STREAM -ErrorAction SilentlyContinue
+            }
+            $sawStreamTurnEndErr = $false
+            foreach ($jl in $script:badStreamJsonLines) {
+                if (-not ([string]$jl).Trim()) { continue }
+                $jev = ([string]$jl) | ConvertFrom-Json -ErrorAction Stop
+                if ($jev.type -eq 'turn_end' -and $jev.status -eq 'error' -and $jev.error -eq 'Stream setting must be true, false, 1, or 0.') {
+                    $sawStreamTurnEndErr = $true
+                }
+            }
+            Remove-Variable -Name badStreamJsonLines -Scope Script -ErrorAction SilentlyContinue
+            Assert-True ($badStreamLaunchThrew -and $sawStreamTurnEndErr) "Expected JSON turn_end error and exception for SHELLOSSUS_STREAM='$badStreamEnv'."
+        }
+
+        # 7d. Multi-chunk SSE assembly in Invoke-AgentTurn: CRLF + LF, : keepalive comments, multi-line data:,
+        # reasoning_content, content, multiple indexed tool_calls (index=0 and index=1) with chunked name/arguments and provider extensions,
+        # usage token accounting, plain JSON fallback (with UTF-8 BOM), and auto-detected SSE when StreamRequests=false.
+        $sseTargetA = Join-Path $workspacePath 'sse-read-a.txt'
+        $sseTargetB = Join-Path $workspacePath 'sse-read-b.txt'
+        Set-Content -LiteralPath $sseTargetA -Value 'alpha-sse-data' -Encoding UTF8 -NoNewline
+        Set-Content -LiteralPath $sseTargetB -Value 'beta-sse-data' -Encoding UTF8 -NoNewline
+
+        $script:OutputMode = 'json'
+        $script:AgentPermission = 'AutoEdit'
+        $script:StreamRequests = $true
+        $script:sseTurnStep = 0
+        $script:sseCapturedToolCallsReplay = $null
+        function Invoke-WebRequest {
+            param($Uri, $Method, $Headers, $ContentType, $Body, $TimeoutSec, $ErrorAction, [switch]$UseBasicParsing, $OutFile)
+            $script:sseTurnStep++
+            $reqObj = $Body | ConvertFrom-Json
+            Assert-True ([bool]$reqObj.stream -and $null -eq $reqObj.stream_options -and $Headers['Accept'] -eq 'text/event-stream, application/json') 'SSE turn request missing stream=true or Accept header, or sent stream_options.'
+            if ($script:sseTurnStep -eq 1) {
+                $sseStep1 = @(
+                    ': keepalive comment 1',
+                    'id: 1',
+                    'retry: 1000',
+                    'data: {"choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":"Think "}}]}',
+                    '',
+                    ': keepalive comment 2',
+                    'data: {"choices":[{"index":0,"delta":{"reasoning_content":"carefully.","content":"Checking "}}]}',
+                    '',
+                    'data: {"choices":[{"index":0,"delta":{"content":"both files.","tool_calls":[{"index":0,"id":"call_sse_0","type":"function","extra_content":{"google":{"thought_signature":"sig-0"}},"function":{"name":"read_","arguments":"{\"pa"}}]}}]}',
+                    '',
+                    'data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":1,"id":"call_sse_1","type":"function","function":{"name":"read_file","arguments":"{\"path\":\"sse-"}}]}}]}',
+                    '',
+                    'data: {',
+                    'data:  "choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_sse_0","extra_content":{},"function":{"name":"file","arguments":"th\":\"sse-read-a.txt\"}"}},{"index":1,"function":{"arguments":"read-b.txt\"}"}}]}}]',
+                    'data: }',
+                    '',
+                    'data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":40,"completion_tokens":15,"total_tokens":55}}',
+                    '',
+                    'data: [DONE]',
+                    ''
+                ) -join "`r`n"
+                Set-Content -LiteralPath $OutFile -Value $sseStep1 -Encoding UTF8 -NoNewline
+                return
+            }
+            foreach ($m in @($reqObj.messages)) {
+                if ($m.role -eq 'assistant' -and $m.tool_calls) {
+                    $script:sseCapturedToolCallsReplay = $m.tool_calls
+                }
+            }
+            $sseStep2 = @(
+                ': final answer stream',
+                'data: {"choices":[{"index":0,"delta":{"role":"assistant","content":"Read: "}}]}',
+                '',
+                'data: {"choices":[{"index":0,"delta":{"content":"alpha + beta"}}]}',
+                '',
+                'data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":60,"completion_tokens":10,"total_tokens":70}}',
+                '',
+                'data: [DONE]'
+            ) -join "`n"
+            Set-Content -LiteralPath $OutFile -Value $sseStep2 -Encoding UTF8 -NoNewline
+        }
+        try {
+            $sseState = @{
+                session_id = 'sse-turn-test'
+                workspace = $workspacePath
+                model = 'test-model'
+                usage_input_tokens = 0
+                usage_output_tokens = 0
+                messages = @(
+                    @{ role = 'system'; content = 'sys' },
+                    @{ role = 'user'; content = 'Read both files over SSE.' }
+                )
+            }
+            Invoke-AgentTurn -State $sseState -Endpoint 'https://example.invalid/v1/chat/completions' -ModelId 'test-model' -ApiKey 'k' -Root $workspacePath -Steps 4
+            Assert-True ($sseState.messages[-1].role -eq 'assistant' -and $sseState.messages[-1].content -ceq 'Read: alpha + beta') "Unexpected final SSE assistant message: $($sseState.messages[-1].content)"
+            $sseAsst1 = @($sseState.messages | Where-Object { $_.role -eq 'assistant' })[0]
+            Assert-True ($sseAsst1.reasoning_content -ceq 'Think carefully.' -and $sseAsst1.content -ceq 'Checking both files.') 'SSE assistant reasoning_content or content was not assembled accurately.'
+            Assert-True (@($sseAsst1.tool_calls).Count -eq 2 -and $sseAsst1.tool_calls[0].id -ceq 'call_sse_0' -and $sseAsst1.tool_calls[1].id -ceq 'call_sse_1') 'SSE indexed tool_calls were not assembled in index order.'
+            Assert-True ($sseAsst1.tool_calls[0].extra_content.google.thought_signature -ceq 'sig-0' -and $script:sseCapturedToolCallsReplay[0].extra_content.google.thought_signature -ceq 'sig-0') 'SSE tool_call provider extension (extra_content) was not preserved and replayed.'
+            $sseToolMsgs = @($sseState.messages | Where-Object { $_.role -eq 'tool' })
+            Assert-True ($sseToolMsgs.Count -eq 2 -and ([string]$sseToolMsgs[0].content).Contains('alpha-sse-data') -and ([string]$sseToolMsgs[1].content).Contains('beta-sse-data')) 'SSE assembled tool calls did not execute against both target files.'
+            Assert-True ($sseState.usage_input_tokens -eq 100 -and $sseState.usage_output_tokens -eq 25) "SSE usage tokens were not accumulated accurately: in=$($sseState.usage_input_tokens), out=$($sseState.usage_output_tokens)"
+        }
+        finally {
+            Remove-Item Function:\Invoke-WebRequest -ErrorAction SilentlyContinue
+            Remove-Variable -Name sseTurnStep, sseCapturedToolCallsReplay -Scope Script -ErrorAction SilentlyContinue
+        }
+
+        # 7e. O(N) high-chunk SSE stream assembly (600 content chunks) and plain-JSON + BOM fallback + auto-detected SSE.
+        $manyLines = @(foreach ($ci in 1..600) {
+            'data: {"choices":[{"index":0,"delta":{"content":"x"}}]}'
+            ''
+        }) + @(
+            'data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":12,"completion_tokens":600}}',
+            '',
+            'data: [DONE]'
+        )
+        $manyRes = ConvertFrom-AgentSseResponse -RawText ($manyLines -join "`n")
+        Assert-True ($manyRes.choices[0].finish_reason -ceq 'stop' -and $manyRes.choices[0].message.content -ceq ('x' * 600) -and [int]$manyRes.usage.completion_tokens -eq 600) 'High-chunk SSE assembly corrupted content or usage.'
+
+        $bomJsonTmp = New-AgentTempFile
+        $autoSseTmp = New-AgentTempFile
+        try {
+            $script:StreamRequests = $true
+            $bomPrefix = [string][char]0xFEFF
+            Set-AgentUtf8Content -LiteralPath $bomJsonTmp.FullName -Value ($bomPrefix + '  {"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"plain-json-fallback"}}]}')
+            $parsedFallback = Read-AgentApiResponse -Path $bomJsonTmp.FullName
+            Assert-True ($parsedFallback.choices[0].message.content -ceq 'plain-json-fallback') 'Read-AgentApiResponse failed plain JSON fallback with UTF-8 BOM when StreamRequests=true.'
+
+            $script:StreamRequests = $false
+            Set-AgentUtf8Content -LiteralPath $autoSseTmp.FullName -Value ($bomPrefix + ": comment`ndata: {`"choices`":[{`"index`":0,`"delta`":{`"content`":`"auto-sse`"},`"finish_reason`":`"stop`"}]}`n`ndata: [DONE]`n")
+            $parsedAutoSse = Read-AgentApiResponse -Path $autoSseTmp.FullName
+            Assert-True ($parsedAutoSse.choices[0].message.content -ceq 'auto-sse' -and $parsedAutoSse.choices[0].finish_reason -ceq 'stop') 'Read-AgentApiResponse failed auto-detected SSE when StreamRequests=false.'
+        }
+        finally {
+            Remove-Item -LiteralPath $bomJsonTmp.FullName, $autoSseTmp.FullName -Force -ErrorAction SilentlyContinue
+        }
+
+        # 7f. CRITICAL SAFETY INVARIANT: Incomplete, truncated, malformed, error, length, or content_filter SSE streams
+        # MUST throw BEFORE returning or executing ANY tool calls, leaving zero side effects on disk or in $State!
+        $neverWriteRel = 'sse-must-never-exist.txt'
+        $neverWriteFull = Join-Path $workspacePath $neverWriteRel
+        Remove-Item -LiteralPath $neverWriteFull -Force -ErrorAction SilentlyContinue
+
+        $safetyStreams = @(
+            @{
+                Name = 'missing_done'
+                Like = '*Incomplete SSE stream*'
+                Body = (@(
+                    'data: {"choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"c_bad_1","type":"function","function":{"name":"write_file","arguments":"{\"path\":\"sse-must-never-exist.txt\",\"content\":\"pwned\"}"}}]},"finish_reason":"tool_calls"}]}',
+                    ''
+                ) -join "`n")
+            },
+            @{
+                Name = 'missing_finish_reason'
+                Like = '*Incomplete SSE stream*'
+                Body = (@(
+                    'data: {"choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"c_bad_2","type":"function","function":{"name":"write_file","arguments":"{\"path\":\"sse-must-never-exist.txt\",\"content\":\"pwned\"}"}}]}}]}',
+                    '',
+                    'data: [DONE]'
+                ) -join "`n")
+            },
+            @{
+                Name = 'finish_length'
+                Like = '*length*'
+                Body = (@(
+                    'data: {"choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"c_bad_3","type":"function","function":{"name":"write_file","arguments":"{\"path\":\"sse-must-never-exist.txt\",\"content\":\"pwned\"}"}}]},"finish_reason":"length"}]}',
+                    '',
+                    'data: [DONE]'
+                ) -join "`n")
+            },
+            @{
+                Name = 'finish_content_filter'
+                Like = '*content_filter*'
+                Body = (@(
+                    'data: {"choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"c_bad_4","type":"function","function":{"name":"write_file","arguments":"{\"path\":\"sse-must-never-exist.txt\",\"content\":\"pwned\"}"}}]},"finish_reason":"content_filter"}]}',
+                    '',
+                    'data: [DONE]'
+                ) -join "`n")
+            },
+            @{
+                Name = 'corrupted_json_delta'
+                Like = '*Invalid JSON*SSE*'
+                Body = (@(
+                    'data: {"choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"c_bad_5","type":"function","function":{"name":"write_file","arguments":"{\"path\":\"sse-must-never-exist.txt\",\"content\":\"pwned\"}"}}]}}]}',
+                    '',
+                    'data: {"choices":[{"broken_json',
+                    '',
+                    'data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}',
+                    '',
+                    'data: [DONE]'
+                ) -join "`n")
+            },
+            @{
+                Name = 'event_error'
+                Like = '*Upstream gateway stream aborted*'
+                Body = (@(
+                    'data: {"choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"c_bad_6","type":"function","function":{"name":"write_file","arguments":"{\"path\":\"sse-must-never-exist.txt\",\"content\":\"pwned\"}"}}]}}]}',
+                    '',
+                    'event: error',
+                    'data: {"error":{"message":"Upstream gateway stream aborted"}}',
+                    '',
+                    'data: [DONE]'
+                ) -join "`n")
+            },
+            @{
+                Name = 'chunk_error_object'
+                Like = '*Provider overloaded mid-stream*'
+                Body = (@(
+                    'data: {"choices":[{"index":0,"delta":{"content":"partial"}}]}',
+                    '',
+                    'data: {"error":{"message":"Provider overloaded mid-stream"}}',
+                    '',
+                    'data: [DONE]'
+                ) -join "`n")
+            },
+            @{
+                Name = 'raw_html_gateway_fault'
+                Like = '*SSE*'
+                Body = "<html><body>502 Bad Gateway</body></html>"
+            },
+            @{
+                Name = 'huge_tool_call_index'
+                Like = '*Invalid tool_call index*'
+                Body = (@(
+                    'data: {"choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":9999999999999,"id":"c_bad_idx","type":"function","function":{"name":"write_file","arguments":"{}"}}]},"finish_reason":"tool_calls"}]}',
+                    '',
+                    'data: [DONE]'
+                ) -join "`n")
+            }
+        )
+
+        $script:StreamRequests = $true
+        $script:AgentPermission = 'AutoEdit'
+        $script:OutputMode = 'json'
+        foreach ($sc in $safetyStreams) {
+            $script:currentBadSseBody = $sc.Body
+            $script:toolDispatchCountOnBadSse = 0
+            $origDispatch = ${function:Invoke-AgentTool}
+            function Invoke-AgentTool {
+                $script:toolDispatchCountOnBadSse++
+                & $origDispatch @args
+            }
+            function Invoke-WebRequest {
+                param($Uri, $Method, $Headers, $ContentType, $Body, $TimeoutSec, $ErrorAction, [switch]$UseBasicParsing, $OutFile)
+                Set-Content -LiteralPath $OutFile -Value $script:currentBadSseBody -Encoding UTF8 -NoNewline
+            }
+            try {
+                $badTurnState = @{
+                    session_id = "bad-sse-$($sc.Name)"
+                    workspace = $workspacePath
+                    model = 'test-model'
+                    messages = @(
+                        @{ role = 'system'; content = 'sys' },
+                        @{ role = 'user'; content = 'Attempt unsafe stream' }
+                    )
+                }
+                $badThrew = $false
+                $badMsg = ''
+                try {
+                    Invoke-AgentTurn -State $badTurnState -Endpoint 'https://example.invalid/v1/chat/completions' -ModelId 'test-model' -ApiKey 'k' -Root $workspacePath -Steps 3
+                }
+                catch {
+                    $badThrew = $true
+                    $badMsg = [string]$_.Exception.Message
+                }
+                Assert-True ($badThrew -and ($badMsg -like $sc.Like)) "Safety SSE case '$($sc.Name)' did not throw expected error '$($sc.Like)' (got: '$badMsg')."
+                Assert-True ($script:toolDispatchCountOnBadSse -eq 0 -and (-not (Test-Path -LiteralPath $neverWriteFull))) "CRITICAL VIOLATION: Tool executed during unsafe SSE case '$($sc.Name)'!"
+                Assert-True ($badTurnState.messages.Count -eq 2 -and $badTurnState.messages[-1].role -eq 'user') "Failed SSE case '$($sc.Name)' mutated conversation messages."
+            }
+            finally {
+                Set-Item Function:\Invoke-AgentTool -Value $origDispatch
+                Remove-Item Function:\Invoke-WebRequest -ErrorAction SilentlyContinue
+                Remove-Variable -Name currentBadSseBody, toolDispatchCountOnBadSse -Scope Script -ErrorAction SilentlyContinue
+            }
+        }
+    }
+    finally {
+        $script:StreamRequests = $savedCliStream
+        $script:AgentPermission = $savedPermForStream
+        $script:OutputMode = $savedModeForStream
+        if ($null -eq $savedEnvStream) { Remove-Item Env:SHELLOSSUS_STREAM -ErrorAction SilentlyContinue }
+        else { $env:SHELLOSSUS_STREAM = $savedEnvStream }
+        if ($null -eq $savedEnvKeyForStream) { Remove-Item Env:SHELLOSSUS_API_KEY -ErrorAction SilentlyContinue }
+        else { $env:SHELLOSSUS_API_KEY = $savedEnvKeyForStream }
+    }
 }
 finally {
     Remove-TestEnvironment -Env $envData

@@ -1616,6 +1616,7 @@ param(
     $ContextWindow,
     $CompactThreshold,
     $RequestTimeoutSec,
+    [switch]$Stream,
     $Tools,
     [switch]$NoTools,
     $ExcludeTools,
@@ -1637,6 +1638,8 @@ $passedReasoning = [string]$ReasoningEffort
 $passedWindow = [string]$ContextWindow
 $passedThreshold = [string]$CompactThreshold
 $passedTimeout = [string]$RequestTimeoutSec
+$passedStream = [bool]$Stream
+$passedStreamBound = ($PSBoundParameters.Keys -contains 'Stream')
 $passedPrompt = [string]$Prompt
 $passedLiteralPrompt = [bool]$LiteralPrompt
 . '__LIBRARY__' -LibraryOnly
@@ -1660,6 +1663,9 @@ $payload = @{
     context_window = $passedWindow
     compact_threshold = $passedThreshold
     request_timeout = $passedTimeout
+    stream = $passedStream
+    stream_bound = $passedStreamBound
+    env_stream_scrubbed = ($null -eq $env:SHELLOSSUS_STREAM -or $env:SHELLOSSUS_STREAM -eq '')
     user_prompt = $passedPrompt
     literal_prompt = $passedLiteralPrompt
     sys_has_role = $sysPrompt.Contains("[Subagent Role: $($env:SHELLOSSUS_SUB_ROLE)]")
@@ -1694,8 +1700,30 @@ $payload = @{
         Assert-True ($reader.no_skills -and $reader.no_templates -and $reader.no_context -and $reader.reasoning_effort -eq 'high') 'Worker did not receive -NoSkills, -NoPromptTemplates, -NoContextFiles, or -ReasoningEffort.'
         Assert-True ($reader.context_window -eq '8000' -and $reader.compact_threshold -eq '4000') 'Worker did not inherit the active context limits.'
         Assert-True ($reader.request_timeout -eq '480' -and $writer.request_timeout -eq '480') "Worker did not inherit RequestTimeoutSec=480 (got reader='$($reader.request_timeout)', writer='$($writer.request_timeout)')."
+        Assert-True ($reader.stream_bound -and (-not $reader.stream) -and (-not $writer.stream)) 'Parallel worker did not receive explicit Stream=$false when parent StreamRequests is false.'
         Assert-True ($reader.user_prompt -ceq '/check-files @model-only.txt' -and $reader.literal_prompt -and $reader.sys_has_role) ("Parallel worker did not receive a literal user prompt and separate role: " + ($reader | ConvertTo-Json -Compress))
         Assert-True ($parentStateForParallel.usage_input_tokens -eq 260 -and $parentStateForParallel.usage_output_tokens -eq 75) "Parallel worker token usage was not aggregated into parent state (got in=$($parentStateForParallel.usage_input_tokens), out=$($parentStateForParallel.usage_output_tokens))."
+
+        $savedWorkerStream = $script:StreamRequests
+        $savedOuterEnvStream = $env:SHELLOSSUS_STREAM
+        try {
+            $script:StreamRequests = $true
+            $env:SHELLOSSUS_STREAM = 'false'
+            $streamTrueWorkerRes = @(Invoke-ParallelSubagentProcesses -Root $workspacePath -Tasks @(@{ role = 'reader'; prompt = 'stream check' }) -ScriptPath $workerScript -ApiKey 'worker-fixture-key')
+            $streamTrueReader = $streamTrueWorkerRes[0].output | ConvertFrom-Json
+            Assert-True ($streamTrueReader.stream_bound -and $streamTrueReader.stream -and $streamTrueReader.env_stream_scrubbed) 'Parallel worker did not inherit StreamRequests=true or failed to scrub outer SHELLOSSUS_STREAM.'
+
+            $script:StreamRequests = $false
+            $env:SHELLOSSUS_STREAM = 'true'
+            $streamFalseWorkerRes = @(Invoke-ParallelSubagentProcesses -Root $workspacePath -Tasks @(@{ role = 'reader'; prompt = 'stream false check' }) -ScriptPath $workerScript -ApiKey 'worker-fixture-key')
+            $streamFalseReader = $streamFalseWorkerRes[0].output | ConvertFrom-Json
+            Assert-True ($streamFalseReader.stream_bound -and (-not $streamFalseReader.stream) -and $streamFalseReader.env_stream_scrubbed) 'Parallel worker inherited stale outer SHELLOSSUS_STREAM=true when parent StreamRequests=false.'
+        }
+        finally {
+            $script:StreamRequests = $savedWorkerStream
+            if ($null -eq $savedOuterEnvStream) { Remove-Item Env:SHELLOSSUS_STREAM -ErrorAction SilentlyContinue }
+            else { $env:SHELLOSSUS_STREAM = $savedOuterEnvStream }
+        }
 
         # Parallel supervisor default TimeoutSec scales dynamically to max(180, min(3600, RequestTimeoutSec + 30)) when omitted.
         foreach ($supCase in @(
@@ -2843,6 +2871,103 @@ Start-Sleep -Seconds 30
             $script:ActiveState = $t6RelState
             $script:ActiveSessionTodos = @($t6RelTodos)
             $script:OutputMode = $t6RelMode
+        }
+    }
+
+    # Task 7: Multi-step SSE turn transaction rollback when step 1 edits a file over SSE and step 2 drops mid-stream (missing [DONE]),
+    # plus background HTTP worker SHELLOSSUS_HTTP_STREAM forwarding.
+    & {
+        $savedT7Perm = $script:AgentPermission
+        $savedT7Mode = $script:OutputMode
+        $savedT7Stream = $script:StreamRequests
+        $t7ModRel = 't7-sse-rollback.txt'
+        $t7ModFull = Join-Path $workspacePath $t7ModRel
+        Set-Content -LiteralPath $t7ModFull -Value 'original-before-sse-turn' -Encoding UTF8 -NoNewline
+        $script:t7Step = 0
+        $script:t7ToolCallsRun = 0
+        $origT7Tool = ${function:Invoke-AgentTool}
+        function Invoke-AgentTool {
+            $script:t7ToolCallsRun++
+            & $origT7Tool @args
+        }
+        function Invoke-WebRequest {
+            param($Uri, $Method, $Headers, $ContentType, $Body, $TimeoutSec, $ErrorAction, [switch]$UseBasicParsing, $OutFile)
+            $script:t7Step++
+            if ($script:t7Step -eq 1) {
+                $sse1 = @(
+                    'data: {"choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"t7_edit_1","type":"function","function":{"name":"edit_file","arguments":"{\"path\":\"t7-sse-rollback.txt\",\"old_text\":\"original-before-sse-turn\",\"new_text\":\"mutated-in-step-1\"}"}}]}}]}',
+                    '',
+                    'data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}',
+                    '',
+                    'data: [DONE]'
+                ) -join "`n"
+                Set-Content -LiteralPath $OutFile -Value $sse1 -Encoding UTF8 -NoNewline
+                return
+            }
+            # Step 2 drops mid-stream with a second dangerous write_file tool_call and NO [DONE]!
+            $sse2Trunc = @(
+                'data: {"choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"t7_write_2","type":"function","function":{"name":"write_file","arguments":"{\"path\":\"t7-never-created.txt\",\"content\":\"bad\"}"}}]},"finish_reason":"tool_calls"}]}',
+                ''
+            ) -join "`n"
+            Set-Content -LiteralPath $OutFile -Value $sse2Trunc -Encoding UTF8 -NoNewline
+        }
+        try {
+            $script:AgentPermission = 'AutoEdit'
+            $script:OutputMode = 'json'
+            $script:StreamRequests = $true
+            $t7State = @{
+                session_id = 't7-sse-tx'
+                workspace = $workspacePath
+                model = 'test-model'
+                messages = @(
+                    @{ role = 'system'; content = 'sys' },
+                    @{ role = 'user'; content = 'Edit file then stream drops.' }
+                )
+            }
+            $t7Box = @{ undo_stack = @() }
+            $t7Tx = Start-AgentTurnTransaction -State $t7State -UndoBox $t7Box -UndoStack @()
+            $t7Threw = $false
+            try {
+                Invoke-AgentTurn -State $t7State -Endpoint 'https://example.invalid/v1/chat/completions' -ModelId 'test-model' -ApiKey 'k' -Root $workspacePath -Steps 4
+                Complete-AgentTurnTransaction -Transaction $t7Tx -DiscardUndoFrame
+            }
+            catch {
+                if ($_.Exception.Message -like '*Incomplete SSE stream*') { $t7Threw = $true }
+                $null = Undo-AgentTurnTransaction -Transaction $t7Tx -State $t7State -Reason 'turn_failed'
+            }
+            Assert-True ($t7Threw -and $script:t7Step -eq 2 -and $script:t7ToolCallsRun -eq 1) "Expected step 1 tool to run and step 2 truncated SSE to abort before second tool (steps=$($script:t7Step), tools=$($script:t7ToolCallsRun))."
+            Assert-True (((Get-Content -LiteralPath $t7ModFull -Raw -Encoding UTF8) -ceq 'original-before-sse-turn') -and (-not (Test-Path -LiteralPath (Join-Path $workspacePath 't7-never-created.txt')))) 'Turn transaction rollback did not restore step 1 edit or allowed step 2 tool on truncated SSE.'
+            Assert-True ($t7State.messages.Count -eq 2) 'Turn transaction rollback did not restore pre-turn messages after truncated SSE.'
+
+            # Verify Invoke-AgentHttpRequest -ForceBackgroundWorker forwards SHELLOSSUS_HTTP_STREAM='1' when StreamRequests=$true.
+            $script:capturedBgStreamEnv = ''
+            & {
+                function Start-Process {
+                    param($FilePath, $ArgumentList, $RedirectStandardOutput, $RedirectStandardError, [switch]$NoNewWindow, [switch]$PassThru, $ErrorAction)
+                    $script:capturedBgStreamEnv = [string]$env:SHELLOSSUS_HTTP_STREAM
+                    Set-Content -LiteralPath $env:SHELLOSSUS_HTTP_OUT -Value "data: {`"choices`":[{`"index`":0,`"delta`":{`"content`":`"bg-sse`"},`"finish_reason`":`"stop`"}]}`n`ndata: [DONE]`n" -Encoding UTF8 -NoNewline
+                    return @{ HasExited = $true; Id = 999996; ExitCode = 0 }
+                }
+                $bgTmp = New-AgentTempFile
+                try {
+                    $script:StreamRequests = $true
+                    Invoke-AgentHttpRequest -Uri 'https://example.invalid/v1/chat/completions' -ApiKey 'k' -Body '{"stream":true}' -OutFile $bgTmp.FullName -ForceBackgroundWorker
+                    $bgParsed = Read-AgentApiResponse -Path $bgTmp.FullName
+                    Assert-True ($script:capturedBgStreamEnv -ceq '1' -and $bgParsed.choices[0].message.content -ceq 'bg-sse') "Background HTTP worker did not receive SHELLOSSUS_HTTP_STREAM='1' or failed SSE parse."
+                }
+                finally {
+                    Remove-Item -LiteralPath $bgTmp.FullName -Force -ErrorAction SilentlyContinue
+                }
+            }
+        }
+        finally {
+            Set-Item Function:\Invoke-AgentTool -Value $origT7Tool
+            Remove-Item Function:\Invoke-WebRequest -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $t7ModFull -Force -ErrorAction SilentlyContinue
+            Remove-Variable -Name t7Step, t7ToolCallsRun, capturedBgStreamEnv -Scope Script -ErrorAction SilentlyContinue
+            $script:AgentPermission = $savedT7Perm
+            $script:OutputMode = $savedT7Mode
+            $script:StreamRequests = $savedT7Stream
         }
     }
 }

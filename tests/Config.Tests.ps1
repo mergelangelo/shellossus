@@ -537,6 +537,56 @@ try {
     finally {
         $script:RequestTimeoutSec = $savedReqTimeout
     }
+
+    # Optional SSE streaming setting: default false, ConvertTo-AgentStreamSetting / Set-AgentStreamSetting validation, and config round-trip.
+    Assert-True ($script:StreamRequests -eq $false) "Expected default StreamRequests false, got $($script:StreamRequests)."
+    $savedStreamReq = $script:StreamRequests
+    try {
+        foreach ($validStreamCase in @(
+            @{ Spec = 'true'; Expected = $true },
+            @{ Spec = 'TRUE'; Expected = $true },
+            @{ Spec = ' 1 '; Expected = $true },
+            @{ Spec = 'false'; Expected = $false },
+            @{ Spec = 'False'; Expected = $false },
+            @{ Spec = ' 0 '; Expected = $false },
+            @{ Spec = ''; Expected = $false },
+            @{ Spec = '   '; Expected = $false }
+        )) {
+            $convVal = ConvertTo-AgentStreamSetting -StreamSpec $validStreamCase.Spec
+            Assert-True ($convVal -is [bool] -and $convVal -eq $validStreamCase.Expected) "ConvertTo-AgentStreamSetting failed for '$($validStreamCase.Spec)'."
+            $setVal = Set-AgentStreamSetting -StreamSpec $validStreamCase.Spec
+            Assert-True ($setVal -is [bool] -and $setVal -eq $validStreamCase.Expected -and $script:StreamRequests -eq $validStreamCase.Expected) "Set-AgentStreamSetting failed for '$($validStreamCase.Spec)'."
+        }
+        $null = Set-AgentStreamSetting -StreamSpec 'true'
+        foreach ($badStreamSpec in @('yes', 'no', 'on', 'off', '2', '-1', 'abc', 'truee')) {
+            $badStreamThrew = $false
+            $badStreamErr = ''
+            try {
+                $null = Set-AgentStreamSetting -StreamSpec $badStreamSpec
+            }
+            catch {
+                $badStreamThrew = $true
+                $badStreamErr = [string]$_.Exception.Message
+            }
+            Assert-True ($badStreamThrew -and $badStreamErr -eq 'Stream setting must be true, false, 1, or 0.') "Set-AgentStreamSetting accepted or returned wrong error for '$badStreamSpec': $badStreamErr"
+            Assert-True ($script:StreamRequests -eq $true) "Failed Set-AgentStreamSetting mutated StreamRequests on '$badStreamSpec'."
+        }
+
+        $streamCfgPath = Join-Path $testRoot 'stream-roundtrip.env'
+        Save-AgentConfig -Path $streamCfgPath -Config @{
+            SHELLOSSUS_BASE_URL = 'https://example.invalid/v1'
+            SHELLOSSUS_MODEL = 'test-model'
+            SHELLOSSUS_STREAM = 'true'
+        }
+        $loadedStreamCfg = Read-AgentConfig -Path $streamCfgPath
+        Assert-True ($loadedStreamCfg.SHELLOSSUS_STREAM -eq 'true') "Save/Read-AgentConfig did not round-trip SHELLOSSUS_STREAM='true': $($loadedStreamCfg.SHELLOSSUS_STREAM)"
+        Assert-True (Update-AgentConfigOptionalKey -Path $streamCfgPath -Key 'SHELLOSSUS_STREAM' -Value 'false') 'Update-AgentConfigOptionalKey failed for SHELLOSSUS_STREAM=false.'
+        $updatedStreamCfg = Read-AgentConfig -Path $streamCfgPath
+        Assert-True ($updatedStreamCfg.SHELLOSSUS_STREAM -eq 'false') "Update-AgentConfigOptionalKey did not persist SHELLOSSUS_STREAM='false': $($updatedStreamCfg.SHELLOSSUS_STREAM)"
+    }
+    finally {
+        $script:StreamRequests = $savedStreamReq
+    }
 }
 finally {
     Remove-TestEnvironment -Env $envData

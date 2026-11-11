@@ -79,6 +79,8 @@ shellossus -Mascot                          # Display the 20x16 half-block masco
 
 `-RequestTimeoutSec N` (or `SHELLOSSUS_REQUEST_TIMEOUT_SEC` in the environment / `.env`) sets the per-request model HTTP timeout from `10` to `1800` seconds (default `180`s), applying across chat steps, context compaction, and delegated subagents, with a `3600`s total wall-clock cap per step across transient retries.
 
+`-Stream` (or `SHELLOSSUS_STREAM=true` / `1` in the environment / `.env`; `-Stream:$false` overrides) enables optional network-level Server-Sent Events (`stream = true`) response assembly across chat steps, context compaction, and delegated subagents so gateways with strict inter-packet read timeouts keep bytes moving on the wire. Responses are assembled in full before terminal rendering or tool dispatch (not rendered token-by-token), and any stream missing terminal `[DONE]` or `finish_reason` is rejected before any tool executes.
+
 `-NoContextFiles` skips automatic loading of `SYSTEM.md`, `APPEND_SYSTEM.md`, `AGENTS.md`, `SOUL.md` (including its aliases), and `MEMORY.md` from the workspace and user configuration. Built-in capability and permission rules still apply. Skills, prompt templates, and explicit attachments are controlled separately.
 
 ## Interactive Commands

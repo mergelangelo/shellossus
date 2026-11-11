@@ -1164,6 +1164,81 @@ tools: list_files
         $script:RequestTimeoutSec = $savedCompactTimeout
         $script:OutputMode = $savedCompactMode
     }
+
+    # Task 7: Invoke-CompactionBatch and Invoke-AgentCompact support SSE streaming when $script:StreamRequests = $true,
+    # and reject incomplete SSE compaction streams without mutating $State.messages.
+    $savedCompactStream = $script:StreamRequests
+    $savedCompactStreamMode = $script:OutputMode
+    $script:compactStreamPayloads = @()
+    $script:compactStreamAccepts = @()
+    $script:compactStreamTruncate = $false
+    function Invoke-WebRequest {
+        param($Uri, $Method, $Headers, $ContentType, $Body, $TimeoutSec, $ErrorAction, [switch]$UseBasicParsing, $OutFile)
+        $reqJson = $Body | ConvertFrom-Json
+        $script:compactStreamPayloads += $reqJson
+        $script:compactStreamAccepts += ([string]$Headers['Accept'])
+        if ($script:compactStreamTruncate) {
+            $truncSse = @(
+                'data: {"choices":[{"index":0,"delta":{"role":"assistant","content":"## Goal\nTruncated"}}]}',
+                ''
+            ) -join "`n"
+            Set-Content -LiteralPath $OutFile -Value $truncSse -Encoding UTF8 -NoNewline
+            return
+        }
+        $sseSummary = @(
+            ': compaction keepalive',
+            'data: {"choices":[{"index":0,"delta":{"role":"assistant","content":"## Goal\nSSE "}}]}',
+            '',
+            'data: {"choices":[{"index":0,"delta":{"content":"compacted summary\n## Progress\nDone"}}]}',
+            '',
+            'data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":22,"completion_tokens":14,"total_tokens":36}}',
+            '',
+            'data: [DONE]'
+        ) -join "`r`n"
+        Set-Content -LiteralPath $OutFile -Value $sseSummary -Encoding UTF8 -NoNewline
+    }
+    try {
+        $script:OutputMode = 'json'
+        $script:StreamRequests = $true
+        $sseCompState = @{
+            session_id = 'compact-sse'
+            workspace = $workspacePath
+            model = 'test-model'
+            usage_input_tokens = 0
+            usage_output_tokens = 0
+            messages = @(
+                @{ role = 'system'; content = 'sys' },
+                @{ role = 'user'; content = 'Turn 1 user' },
+                @{ role = 'assistant'; content = 'Turn 1 assistant' },
+                @{ role = 'user'; content = 'Turn 2 user' },
+                @{ role = 'assistant'; content = 'Turn 2 assistant' }
+            )
+        }
+
+        $script:compactStreamTruncate = $true
+        $truncCompactThrew = $false
+        try {
+            $null = Invoke-AgentCompact -State $sseCompState -Endpoint 'https://example.invalid/v1/chat/completions' -ModelId 'test-model' -ApiKey 'test-key' -KeepRecent 2
+        }
+        catch {
+            if ($_.Exception.Message -like '*Incomplete SSE stream*') { $truncCompactThrew = $true }
+        }
+        Assert-True ($truncCompactThrew -and $sseCompState.messages.Count -eq 5 -and $sseCompState.messages[1].content -ceq 'Turn 1 user') 'Truncated SSE compaction did not throw or mutated conversation history.'
+
+        $script:compactStreamTruncate = $false
+        $script:compactStreamPayloads = @()
+        $script:compactStreamAccepts = @()
+        $didSseCompact = Invoke-AgentCompact -State $sseCompState -Endpoint 'https://example.invalid/v1/chat/completions' -ModelId 'test-model' -ApiKey 'test-key' -KeepRecent 2
+        Assert-True ([bool]$didSseCompact -and ([string]$sseCompState.messages[1].content).Contains('SSE compacted summary')) 'Invoke-AgentCompact over SSE did not assemble compacted summary.'
+        Assert-True ($script:compactStreamPayloads.Count -eq 1 -and [bool]$script:compactStreamPayloads[0].stream -and $null -eq $script:compactStreamPayloads[0].stream_options -and $script:compactStreamAccepts[0] -eq 'text/event-stream, application/json') 'Invoke-CompactionBatch did not send stream=true and Accept header without stream_options.'
+        Assert-True ($sseCompState.usage_input_tokens -eq 22 -and $sseCompState.usage_output_tokens -eq 14) "SSE compaction did not record usage tokens: in=$($sseCompState.usage_input_tokens), out=$($sseCompState.usage_output_tokens)"
+    }
+    finally {
+        Remove-Item Function:\Invoke-WebRequest -ErrorAction SilentlyContinue
+        Remove-Variable -Name compactStreamPayloads, compactStreamAccepts, compactStreamTruncate -Scope Script -ErrorAction SilentlyContinue
+        $script:StreamRequests = $savedCompactStream
+        $script:OutputMode = $savedCompactStreamMode
+    }
 }
 finally {
     Remove-TestEnvironment -Env $envData

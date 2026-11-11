@@ -51,7 +51,7 @@
 
 ### 5. [`src/cli/`](../src/cli/) & [`src/Cli.ps1`](../src/Cli.ps1)
 - **Profile Installer (`cli/Install.ps1`):** Built-in `-Install` launcher installer (`Invoke-AgentProfileInstall`) registering `global:shellossus` and optional conflict-checked shortcuts in `$PROFILE`.
-- **HTTP Transport & JSON Events (`cli/Http.ps1`):** UTF-8 file-backed HTTP transport (`Invoke-AgentHttpRequest`) with transient retry/backoff, spinner (`Wait-AgentProcessWithSpinner`), and JSON mode event emitter (`Write-AgentJsonEvent`).
+- **HTTP Transport, SSE Assembly & JSON Events (`cli/Http.ps1`):** UTF-8 file-backed HTTP transport (`Invoke-AgentHttpRequest`) with transient retry/backoff, spinner (`Wait-AgentProcessWithSpinner`), `ConstrainedLanguage`-compatible network-level SSE response assembler (`ConvertFrom-AgentSseResponse`, enabled via `-Stream` / `SHELLOSSUS_STREAM` with plain-JSON fallback and strict `[DONE]` + `finish_reason` verification before returning), and JSON mode event emitter (`Write-AgentJsonEvent`).
 - **Turn Loop (`cli/Turn.ps1`):**
   - Loop detection via canonical tool call signatures (`Get-ToolCallSignature`).
   - Automatically triggers `Invoke-AgentCompact` and retries once if the API reports a context-length overflow.

@@ -193,7 +193,7 @@ try {
 
     # Exercise real startup and REPL routing with isolated config and mocked I/O.
     $savedEnvironment = @{}
-    $envNames = @('SHELLOSSUS_BASE_URL', 'SHELLOSSUS_MODEL', 'SHELLOSSUS_API_KEY', 'SHELLOSSUS_WORKSPACE', 'SHELLOSSUS_CONTEXT_WINDOW', 'SHELLOSSUS_COMPACT_THRESHOLD', 'SHELLOSSUS_REQUEST_TIMEOUT_SEC')
+    $envNames = @('SHELLOSSUS_BASE_URL', 'SHELLOSSUS_MODEL', 'SHELLOSSUS_API_KEY', 'SHELLOSSUS_WORKSPACE', 'SHELLOSSUS_CONTEXT_WINDOW', 'SHELLOSSUS_COMPACT_THRESHOLD', 'SHELLOSSUS_REQUEST_TIMEOUT_SEC', 'SHELLOSSUS_STREAM')
     foreach ($envName in $envNames) {
         $savedEnvironment[$envName] = (Get-Item -LiteralPath ('Env:' + $envName) -ErrorAction SilentlyContinue).Value
         Remove-Item -LiteralPath ('Env:' + $envName) -ErrorAction SilentlyContinue
@@ -269,6 +269,35 @@ try {
         $badCfgTimeoutReport = $badCfgTimeoutRaw | ConvertFrom-Json
         $badCfgTimeoutCheck = Get-DoctorCheck $badCfgTimeoutReport 'request_timeout'
         Assert-True ($LASTEXITCODE -eq 1 -and $badCfgTimeoutCheck.status -eq 'fail' -and ($badCfgTimeoutRaw -notlike '*doctor-secret-key*')) 'Doctor did not fail invalid config SHELLOSSUS_REQUEST_TIMEOUT_SEC cleanly or leaked its raw value.'
+
+        # Optional SSE stream setting in Get-AgentDoctorReport and standalone -Doctor (valid passes; invalid env/config fails cleanly without crashing or leaking secret values).
+        $validStreamRaw = & $entryPoint -Doctor -Stream -ConfigPath $validTimeoutCfg -Workspace $workspacePath -NoSession -Mode json
+        $validStreamReport = $validStreamRaw | ConvertFrom-Json
+        $validStreamCheck = Get-DoctorCheck $validStreamReport 'stream'
+        Assert-True ($LASTEXITCODE -eq 0 -and $validStreamReport.failures -eq 0 -and $validStreamCheck.status -eq 'pass' -and ([string]$validStreamCheck.message -like '*enabled*')) ("Standalone -Doctor rejected valid -Stream: " + $validStreamRaw)
+
+        $env:SHELLOSSUS_STREAM = 'doctor-secret-key'
+        try {
+            $badEnvStreamRaw = & $entryPoint -Doctor -ConfigPath $validTimeoutCfg -Workspace $workspacePath -NoSession -Mode json
+            $badEnvStreamReport = $badEnvStreamRaw | ConvertFrom-Json
+            $badEnvStreamCheck = Get-DoctorCheck $badEnvStreamReport 'stream'
+            Assert-True ($LASTEXITCODE -eq 1 -and $badEnvStreamReport.failures -ge 1 -and $badEnvStreamCheck.status -eq 'fail' -and $badEnvStreamCheck.message -eq 'Stream setting must be true, false, 1, or 0.' -and ($badEnvStreamRaw -notlike '*doctor-secret-key*')) ("Standalone -Doctor did not fail invalid env SHELLOSSUS_STREAM cleanly: " + $badEnvStreamRaw)
+
+            $overrideEnvStreamRaw = & $entryPoint -Doctor -Stream:$false -ConfigPath $validTimeoutCfg -Workspace $workspacePath -NoSession -Mode json
+            $overrideEnvStreamReport = $overrideEnvStreamRaw | ConvertFrom-Json
+            $overrideEnvStreamCheck = Get-DoctorCheck $overrideEnvStreamReport 'stream'
+            Assert-True ($LASTEXITCODE -eq 0 -and $overrideEnvStreamCheck.status -eq 'pass' -and ([string]$overrideEnvStreamCheck.message -like '*disabled*')) ("Explicit -Stream:`$false did not override invalid env SHELLOSSUS_STREAM in -Doctor: " + $overrideEnvStreamRaw)
+        }
+        finally {
+            Remove-Item -LiteralPath 'Env:SHELLOSSUS_STREAM' -ErrorAction SilentlyContinue
+        }
+
+        $badCfgStreamFile = Join-Path $envData.TestRoot 'doctor-stream-secret.env'
+        Set-Content -LiteralPath $badCfgStreamFile -Value "SHELLOSSUS_BASE_URL=`"https://example.invalid/v1`"`nSHELLOSSUS_MODEL=`"test-model`"`nSHELLOSSUS_API_KEY=`"doctor-secret-key`"`nSHELLOSSUS_STREAM=`"doctor-secret-key`"" -Encoding Ascii
+        $badCfgStreamRaw = & $entryPoint -Doctor -ConfigPath $badCfgStreamFile -Workspace $workspacePath -NoSession -Mode json
+        $badCfgStreamReport = $badCfgStreamRaw | ConvertFrom-Json
+        $badCfgStreamCheck = Get-DoctorCheck $badCfgStreamReport 'stream'
+        Assert-True ($LASTEXITCODE -eq 1 -and $badCfgStreamCheck.status -eq 'fail' -and $badCfgStreamCheck.message -eq 'Stream setting must be true, false, 1, or 0.' -and ($badCfgStreamRaw -notlike '*doctor-secret-key*')) 'Doctor did not fail invalid config SHELLOSSUS_STREAM cleanly or leaked its raw value.'
     }
     finally {
         Remove-Item Function:\Read-Host -ErrorAction SilentlyContinue

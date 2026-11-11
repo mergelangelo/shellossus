@@ -85,7 +85,8 @@ function Get-AgentDoctorReport {
         [switch]$NoSession,
         [string]$ConfigState = 'loaded',
         [string]$KeyStorageWarning,
-        [string]$RequestTimeoutSpec = ''
+        [string]$RequestTimeoutSpec = '',
+        [string]$StreamSpec = ''
     )
     $checks = @()
     $version = $PSVersionTable.PSVersion
@@ -118,6 +119,23 @@ function Get-AgentDoctorReport {
     }
     else {
         $checks += @{ name = 'request_timeout'; status = 'fail'; message = 'RequestTimeoutSec must be an integer between 10 and 1800.' }
+    }
+    $resolvedStream = [bool]$script:StreamRequests
+    $streamValid = $true
+    if ($null -ne $StreamSpec -and $StreamSpec.Trim().Length -gt 0) {
+        try {
+            $resolvedStream = ConvertTo-AgentStreamSetting -StreamSpec $StreamSpec
+        }
+        catch {
+            $streamValid = $false
+        }
+    }
+    if ($streamValid) {
+        $streamLabel = if ($resolvedStream) { 'enabled' } else { 'disabled' }
+        $checks += @{ name = 'stream'; status = 'pass'; message = "SSE response streaming: $streamLabel." }
+    }
+    else {
+        $checks += @{ name = 'stream'; status = 'fail'; message = 'Stream setting must be true, false, 1, or 0.' }
     }
     try {
         $root = Get-Item -LiteralPath $Workspace -Force -ErrorAction Stop

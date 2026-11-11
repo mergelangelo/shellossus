@@ -206,7 +206,7 @@ function New-AgentTurnRequest {
         model = $ModelId
         messages = @(ConvertTo-AgentApiMessages -Messages $State.messages)
         tools = $Tools
-        stream = $false
+        stream = [bool]$script:StreamRequests
     }
     if ($script:ReasoningEffort) { $request.reasoning_effort = $script:ReasoningEffort }
     $body = $request | ConvertTo-Json -Depth 40 -Compress
