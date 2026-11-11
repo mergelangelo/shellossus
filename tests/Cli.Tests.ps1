@@ -1481,7 +1481,8 @@ try {
                         $respJson = @{ ok = $true; worker = 'file-http' } | ConvertTo-Json -Compress
                     }
                     elseif ($reqIdx -eq 1) {
-                        $statusLine = 'HTTP/1.1 401 Unauthorized'
+                        # Both PowerShell editions include status text in HTTP errors.
+                        $statusLine = 'HTTP/1.1 401 Unauthorized secret-key-xyz'
                         $respJson = @{ error = @{ message = 'Denied token secret-key-xyz' } } | ConvertTo-Json -Compress
                     }
                     else {
@@ -1568,8 +1569,8 @@ $subRes = @(Invoke-ParallelSubagentProcesses -Root $WorkspacePath -Tasks @(@{ ro
             Assert-True ($driverRes.http_body -is [string]) 'Background HTTP worker response must be serialized as a JSON string without provider metadata.'
             $parsedOk = $driverRes.http_body | ConvertFrom-Json
             Assert-True ($parsedOk.ok -eq $true -and $parsedOk.worker -ceq 'file-http') "Background HTTP worker via -File did not return expected 200 payload: $($driverRes.http_body)"
-            Assert-True ($driverRes.err_401 -like '*401*' -and $driverRes.err_401 -notlike '*secret-key-xyz*') "Background HTTP 401 error failed or leaked ApiKey: $($driverRes.err_401)"
-            Assert-True ([bool]$driverRes.err_scheme -and $driverRes.err_scheme.Contains('[redacted]') -and (-not $driverRes.err_scheme.Contains('badkeyscheme'))) "Background HTTP error did not redact ApiKey: $($driverRes.err_scheme)"
+            Assert-True ($driverRes.err_401 -like '*401*' -and $driverRes.err_401.Contains('[redacted]') -and $driverRes.err_401 -notlike '*secret-key-xyz*') "Background HTTP 401 error failed to redact ApiKey: $($driverRes.err_401)"
+            Assert-True ([bool]$driverRes.err_scheme -and (-not $driverRes.err_scheme.Contains('badkeyscheme'))) "Unsupported URI did not fail or leaked ApiKey: $($driverRes.err_scheme)"
             Assert-True ($driverRes.web_err -like '*Blocked request*') "Renamed script -InternalWorker web did not block loopback SSRF: $($driverRes.web_err)"
             Assert-True ($driverRes.sub_status -ceq 'completed' -and $driverRes.sub_output -ceq 'renamed subagent ok') "Renamed script -InternalWorker subagent failed: status=$($driverRes.sub_status) output=$($driverRes.sub_output)"
 
