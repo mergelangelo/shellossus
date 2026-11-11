@@ -248,6 +248,10 @@ function Get-AgentUtf8ByteCount {
 
 function Get-AgentFileContentDigest {
     param([Parameter(Mandatory = $true)][AllowEmptyString()][string]$LiteralPath)
+    $item = Get-Item -LiteralPath $LiteralPath -Force -ErrorAction Stop
+    if ($item.PSIsContainer) {
+        throw "Expected a file at $LiteralPath."
+    }
     try {
         return (Get-FileHash -LiteralPath $LiteralPath -Algorithm SHA256 -ErrorAction Stop).Hash
     }
@@ -265,10 +269,6 @@ function Get-AgentFileContentDigest {
         if (-not $isLanguageModeError) {
             throw
         }
-    }
-    $item = Get-Item -LiteralPath $LiteralPath -Force -ErrorAction Stop
-    if ($item.PSIsContainer) {
-        throw "Expected a file at $LiteralPath."
     }
     $rawBytes = if ($PSVersionTable.PSEdition -eq 'Desktop') {
         Get-Content -LiteralPath $LiteralPath -Encoding Byte -ReadCount 0 -ErrorAction Stop

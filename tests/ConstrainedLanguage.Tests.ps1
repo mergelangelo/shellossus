@@ -650,6 +650,15 @@ try {
     Assert-True $dirDigestThrew 'Get-AgentFileContentDigest did not throw on directory path.'
 
     & {
+        # Windows PowerShell 5.1 Get-FileHash silently skips directories.
+        function Get-FileHash { return $null }
+        $skippedDirDigestThrew = $false
+        try { $null = Get-AgentFileContentDigest -LiteralPath $digestDir }
+        catch { $skippedDirDigestThrew = $true }
+        Assert-True $skippedDirDigestThrew 'Get-AgentFileContentDigest accepted a directory when Get-FileHash silently skipped it.'
+    }
+
+    & {
         function Get-FileHash {
             throw 'Simulated non-CLM I/O failure.'
         }
@@ -692,10 +701,12 @@ try {
         $fbFlipEnd = Join-Path $digestDir 'flip-end.bin'
         $fbLenPlus = Join-Path $digestDir 'len-plus.bin'
 
-        [byte[]]$startBytes = @($baseBytes); $startBytes[0] = 11
-        [byte[]]$midBytes = @($baseBytes); $midBytes[10] = 111
-        [byte[]]$endBytes = @($baseBytes); $endBytes[19] = 201
+        # Enumerate into independent arrays on Windows PowerShell 5.1 as well.
+        [byte[]]$startBytes = @($baseBytes | ForEach-Object { $_ }); $startBytes[0] = 11
+        [byte[]]$midBytes = @($baseBytes | ForEach-Object { $_ }); $midBytes[10] = 111
+        [byte[]]$endBytes = @($baseBytes | ForEach-Object { $_ }); $endBytes[19] = 201
         [byte[]]$lenBytes = @($baseBytes) + @([byte]0)
+        Assert-True ($baseBytes[0] -eq 10 -and $baseBytes[10] -eq 110 -and $baseBytes[19] -eq 200) 'Byte mutation fixtures changed the original sample.'
 
         Set-TestRawBytes -LiteralPath $fbBaseA -Bytes $baseBytes
         Set-TestRawBytes -LiteralPath $fbBaseB -Bytes $baseBytes
@@ -713,7 +724,7 @@ try {
 
         Assert-True ($dBaseA -ceq $dBaseB) 'Fallback Get-AgentFileContentDigest returned different digests for identical bytes.'
         Assert-True ($dBaseA -cne $fbEmptyDigest1) 'Fallback digest collided with empty file.'
-        Assert-True ($dBaseA -cne $dStart) 'Fallback digest did not change on 1-byte flip at start.'
+        Assert-True ($dBaseA -cne $dStart) "Fallback digest did not change on 1-byte flip at start (base=$dBaseA, changed=$dStart)."
         Assert-True ($dBaseA -cne $dMid) 'Fallback digest did not change on 1-byte flip in middle.'
         Assert-True ($dBaseA -cne $dEnd) 'Fallback digest did not change on 1-byte flip at end.'
         Assert-True ($dBaseA -cne $dLen) 'Fallback digest did not change on length extension.'

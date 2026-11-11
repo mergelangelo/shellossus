@@ -1481,7 +1481,8 @@ try {
                         $respJson = @{ ok = $true; worker = 'file-http' } | ConvertTo-Json -Compress
                     }
                     elseif ($reqIdx -eq 1) {
-                        $statusLine = 'HTTP/1.1 401 Unauthorized'
+                        # Both PowerShell editions include status text in HTTP errors.
+                        $statusLine = 'HTTP/1.1 401 Unauthorized secret-key-xyz'
                         $respJson = @{ error = @{ message = 'Denied token secret-key-xyz' } } | ConvertTo-Json -Compress
                     }
                     else {
@@ -1549,7 +1550,8 @@ $script:ActiveModelId = 'loopback-model'
 $script:AgentConfigPath = Join-Path $WorkspacePath '.nonexistent-env'
 $subRes = @(Invoke-ParallelSubagentProcesses -Root $WorkspacePath -Tasks @(@{ role = 'recon'; prompt = 'check renamed worker' }) -MaxSteps 3 -TimeoutSec 20 -ApiKey 'secret-key-xyz')
 @{
-    http_body = (Get-Content -LiteralPath $HttpOut -Raw -Encoding UTF8)
+    # Strip provider metadata so Windows PowerShell 5.1 serializes a JSON string.
+    http_body = [string](Get-Content -LiteralPath $HttpOut -Raw -Encoding UTF8)
     err_401 = $err401
     err_scheme = $errScheme
     web_err = $webErr
@@ -1560,13 +1562,15 @@ $subRes = @(Invoke-ParallelSubagentProcesses -Root $WorkspacePath -Tasks @(@{ ro
         Set-Content -LiteralPath $driverScript -Value $driverCode -Encoding Ascii
         try {
             $driverRaw = & $childShell -NoProfile -NonInteractive -File $driverScript -AgentPath $renamedScript -Port $port -WorkspacePath $workspacePath -HttpOut $driverOutFile -WebOut $driverWebOut
+            Assert-True ($LASTEXITCODE -eq 0) "Renamed worker driver failed (exit=$LASTEXITCODE): $($driverRaw -join "`n")"
             $driverJsonLine = @($driverRaw | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_.StartsWith('{') })[-1]
             Assert-True ([bool]$driverJsonLine) "Renamed worker driver did not return JSON output: $($driverRaw -join "`n")"
             $driverRes = $driverJsonLine | ConvertFrom-Json
+            Assert-True ($driverRes.http_body -is [string]) 'Background HTTP worker response must be serialized as a JSON string without provider metadata.'
             $parsedOk = $driverRes.http_body | ConvertFrom-Json
             Assert-True ($parsedOk.ok -eq $true -and $parsedOk.worker -ceq 'file-http') "Background HTTP worker via -File did not return expected 200 payload: $($driverRes.http_body)"
-            Assert-True ($driverRes.err_401 -like '*401*' -and $driverRes.err_401 -notlike '*secret-key-xyz*') "Background HTTP 401 error failed or leaked ApiKey: $($driverRes.err_401)"
-            Assert-True ([bool]$driverRes.err_scheme -and $driverRes.err_scheme.Contains('[redacted]') -and (-not $driverRes.err_scheme.Contains('badkeyscheme'))) "Background HTTP error did not redact ApiKey: $($driverRes.err_scheme)"
+            Assert-True ($driverRes.err_401 -like '*401*' -and $driverRes.err_401.Contains('[redacted]') -and $driverRes.err_401 -notlike '*secret-key-xyz*') "Background HTTP 401 error failed to redact ApiKey: $($driverRes.err_401)"
+            Assert-True ([bool]$driverRes.err_scheme -and (-not $driverRes.err_scheme.Contains('badkeyscheme'))) "Unsupported URI did not fail or leaked ApiKey: $($driverRes.err_scheme)"
             Assert-True ($driverRes.web_err -like '*Blocked request*') "Renamed script -InternalWorker web did not block loopback SSRF: $($driverRes.web_err)"
             Assert-True ($driverRes.sub_status -ceq 'completed' -and $driverRes.sub_output -ceq 'renamed subagent ok') "Renamed script -InternalWorker subagent failed: status=$($driverRes.sub_status) output=$($driverRes.sub_output)"
 
