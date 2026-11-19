@@ -81,10 +81,14 @@ try {
 
     $clWhc = New-Object System.Net.WebHeaderCollection
     $clWhc.Add('Retry-After', '17')
+    $clWhc.Add('Location', '/clm-whc-target')
     $clHttpMsg429 = $null
+    $clHttpMsg302 = $null
     if ($PSVersionTable.PSVersion.Major -ge 6) {
         $clHttpMsg429 = [System.Net.Http.HttpResponseMessage]::new([System.Net.HttpStatusCode]::TooManyRequests)
         $clHttpMsg429.Headers.Add('Retry-After', '11')
+        $clHttpMsg302 = [System.Net.Http.HttpResponseMessage]::new([System.Net.HttpStatusCode]::Found)
+        $clHttpMsg302.Headers.Location = [uri]::new('/clm-rel-target', [System.UriKind]::Relative)
     }
 
     $script:approval = 'WRITE'
@@ -1085,11 +1089,25 @@ try {
         $clVerObj = (& "$PSScriptRoot\..\shellossus.ps1" -Version -Mode json) | ConvertFrom-Json
         Assert-True ($clVerObj.type -ceq 'version' -and $clVerObj.version -ceq $script:AgentVersion) 'Standalone -Version -Mode json failed in ConstrainedLanguage.'
 
-        # Verify Retry-After header extraction works under ConstrainedLanguage with real .NET header collections.
+        # Verify SSRF-checked fetch_url redirects and Retry-After header extraction work under ConstrainedLanguage with real .NET header collections.
         Assert-True ((Get-AgentRetryAfterSeconds -ErrorRecord @{ Exception = @{ Response = @{ Headers = $clWhc } } }) -eq 17) 'Get-AgentRetryAfterSeconds failed on real WebHeaderCollection in ConstrainedLanguage.'
+        $clRedirWhc = Get-WebRedirectInfo -Response @{ StatusCode = 302; Headers = $clWhc }
+        Assert-True ($null -ne $clRedirWhc -and $clRedirWhc.status_code -eq 302 -and $clRedirWhc.location -ceq '/clm-whc-target') 'Get-WebRedirectInfo failed on real WebHeaderCollection in ConstrainedLanguage.'
         if ($null -ne $clHttpMsg429) {
             Assert-True ((Get-AgentRetryAfterSeconds -ErrorRecord @{ Exception = @{ Response = $clHttpMsg429 } }) -eq 11) 'Get-AgentRetryAfterSeconds failed on real HttpResponseMessage in ConstrainedLanguage.'
+            $clRedirHttp = Get-WebRedirectInfo -ErrorRecord @{ Exception = @{ Response = $clHttpMsg302 } }
+            Assert-True ($null -ne $clRedirHttp -and $clRedirHttp.status_code -eq 302 -and $clRedirHttp.location -ceq '/clm-rel-target') 'Get-WebRedirectInfo failed on real HttpResponseMessage in ConstrainedLanguage.'
         }
+        Assert-True ((Resolve-SafeWebRedirectUrl -BaseUrl 'http://example.com/docs/v1/a' -Location '../v2/b' -StatusCode 302) -ceq 'http://example.com/docs/v2/b') 'Resolve-SafeWebRedirectUrl relative path failed in ConstrainedLanguage.'
+        Assert-True ((Resolve-SafeWebRedirectUrl -BaseUrl 'http://example.com/a' -Location 'https://example.com/a/' -StatusCode 301) -ceq 'https://example.com/a/') 'Resolve-SafeWebRedirectUrl upgrade failed in ConstrainedLanguage.'
+        $clDownBlocked = $false
+        try { $null = Resolve-SafeWebRedirectUrl -BaseUrl 'https://example.com/a' -Location 'http://example.com/a' -StatusCode 301 }
+        catch { $clDownBlocked = $true }
+        Assert-True $clDownBlocked 'Resolve-SafeWebRedirectUrl did not block https->http downgrade in ConstrainedLanguage.'
+        $clMetaBlocked = $false
+        try { $null = Resolve-SafeWebRedirectUrl -BaseUrl 'https://example.com/a' -Location 'https://169.254.169.254/latest/meta-data/' -StatusCode 302 }
+        catch { $clMetaBlocked = $true }
+        Assert-True $clMetaBlocked 'Resolve-SafeWebRedirectUrl did not block metadata IP in ConstrainedLanguage.'
     }
     finally {
         $script:SearchUrl = $savedClSearchUrl

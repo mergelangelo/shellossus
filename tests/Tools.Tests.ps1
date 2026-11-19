@@ -3538,6 +3538,227 @@ description: Optional subagent role: recon (ReadOnly search), audit (ReadOnly re
             $script:OutputMode = $t6SavedMode
         }
     }
+
+    # Task 6 (Stage B): safe SSRF-checked redirect handling for fetch_url (max 3 hops, relative Location, no https->http downgrade, SSRF blocking).
+    & {
+        Assert-True ((Resolve-SafeWebRedirectUrl -BaseUrl 'http://example.com/docs' -Location 'https://example.com/docs/' -StatusCode 301) -ceq 'https://example.com/docs/') 'Resolve-SafeWebRedirectUrl failed for http->https upgrade.'
+        Assert-True ((Resolve-SafeWebRedirectUrl -BaseUrl 'https://example.com:8443/docs/v1/page.html?x=1' -Location '/v2/index.html' -StatusCode 302) -ceq 'https://example.com:8443/v2/index.html') 'Resolve-SafeWebRedirectUrl failed for root-relative Location.'
+        Assert-True ((Resolve-SafeWebRedirectUrl -BaseUrl 'https://example.com/docs/v1/page.html' -Location '../v2/guide.html?q=1' -StatusCode 307) -ceq 'https://example.com/docs/v2/guide.html?q=1') 'Resolve-SafeWebRedirectUrl failed for parent-relative Location.'
+        Assert-True ((Resolve-SafeWebRedirectUrl -BaseUrl 'https://example.com/docs/v1/page.html' -Location 'sibling.html' -StatusCode 308) -ceq 'https://example.com/docs/v1/sibling.html') 'Resolve-SafeWebRedirectUrl failed for sibling-relative Location.'
+        Assert-True ((Resolve-SafeWebRedirectUrl -BaseUrl 'https://example.com/docs/page' -Location '?tab=api' -StatusCode 302) -ceq 'https://example.com/docs/page?tab=api') 'Resolve-SafeWebRedirectUrl failed for query-relative Location.'
+        Assert-True ((Resolve-SafeWebRedirectUrl -BaseUrl 'https://example.com/docs' -Location '//cdn.example.com/latest' -StatusCode 302) -ceq 'https://cdn.example.com/latest') 'Resolve-SafeWebRedirectUrl failed for scheme-relative Location.'
+
+        $unsafeRedirectCases = @(
+            @{ base = 'https://example.com/secure'; loc = 'http://example.com/insecure'; desc = 'https->http downgrade' },
+            @{ base = 'https://example.com/a'; loc = 'https://127.0.0.1/admin'; desc = 'loopback IPv4' },
+            @{ base = 'https://example.com/a'; loc = 'https://169.254.169.254/latest/meta-data/'; desc = 'cloud metadata IP' },
+            @{ base = 'https://example.com/a'; loc = '//127.0.0.1/secret'; desc = 'scheme-relative loopback' },
+            @{ base = 'https://example.com/a'; loc = '//[::1]/secret'; desc = 'scheme-relative IPv6 loopback' },
+            @{ base = 'https://example.com/a'; loc = '/\127.0.0.1'; desc = 'backslash authority confusion' },
+            @{ base = 'https://example.com/a'; loc = '///127.0.0.1/secret'; desc = 'triple-slash malformed Location' },
+            @{ base = 'https://example.com/a'; loc = 'https://user:pass@example.com/x'; desc = 'embedded credentials' },
+            @{ base = 'https://example.com/a'; loc = 'file:///etc/passwd'; desc = 'non-http scheme' },
+            @{ base = 'https://example.com/a'; loc = ''; desc = 'missing Location' }
+        )
+        foreach ($rc in $unsafeRedirectCases) {
+            $rBlocked = $false
+            try { $null = Resolve-SafeWebRedirectUrl -BaseUrl $rc.base -Location $rc.loc -StatusCode 302 }
+            catch { $rBlocked = $true }
+            Assert-True $rBlocked "Resolve-SafeWebRedirectUrl failed to block $($rc.desc) ($($rc.loc))."
+        }
+
+        $riResp = Get-WebRedirectInfo -Response @{ StatusCode = 301; Headers = @{ Location = '/moved' } }
+        Assert-True ($null -ne $riResp -and $riResp.status_code -eq 301 -and $riResp.location -ceq '/moved') 'Get-WebRedirectInfo failed for response hashtable.'
+        $riErr = Get-WebRedirectInfo -ErrorRecord @{ Exception = @{ Response = @{ StatusCode = 307; Headers = @{ 'location' = @('https://example.org/next') } } } }
+        Assert-True ($null -ne $riErr -and $riErr.status_code -eq 307 -and $riErr.location -ceq 'https://example.org/next') 'Get-WebRedirectInfo failed for error record.'
+        $whcRedir = New-Object System.Net.WebHeaderCollection
+        $whcRedir.Add('Location', '/whc-moved?a=1')
+        $riWhc = Get-WebRedirectInfo -Response @{ StatusCode = 302; Headers = $whcRedir }
+        Assert-True ($null -ne $riWhc -and $riWhc.status_code -eq 302 -and $riWhc.location -ceq '/whc-moved?a=1') "Get-WebRedirectInfo failed for real System.Net.WebHeaderCollection (got '$($riWhc.location)')."
+        if ($PSVersionTable.PSVersion.Major -ge 6) {
+            $httpRedirMsg = [System.Net.Http.HttpResponseMessage]::new([System.Net.HttpStatusCode]::MovedPermanently)
+            $httpRedirMsg.Headers.Location = [uri]::new('/ps7-moved', [System.UriKind]::Relative)
+            $riPs7 = Get-WebRedirectInfo -ErrorRecord @{ Exception = @{ Response = $httpRedirMsg } }
+            Assert-True ($null -ne $riPs7 -and $riPs7.status_code -eq 301 -and $riPs7.location -ceq '/ps7-moved') "Get-WebRedirectInfo failed for real HttpResponseMessage (got '$($riPs7.location)')."
+        }
+        $insecErrStr = Format-WebRequestError -ErrorRecord @{ FullyQualifiedErrorId = 'InsecureRedirection,Microsoft.PowerShell.Commands.InvokeWebRequestCommand'; Exception = @{ Message = 'Cannot perform insecure redirection.' } }
+        Assert-True ($insecErrStr -like '*Blocked insecure redirect downgrade*') "Format-WebRequestError did not normalize InsecureRedirection: $insecErrStr"
+        Assert-True ($null -eq (Get-WebRedirectInfo -Response @{ StatusCode = 200; Headers = @{ Location = '/ignored' } })) 'Get-WebRedirectInfo treated 200 as redirect.'
+        Assert-True ($null -eq (Get-WebRedirectInfo -Response @{ StatusCode = 304; Headers = @{} })) 'Get-WebRedirectInfo treated 304 as redirect.'
+
+        $savedPermR = $script:AgentPermission
+        $savedAutoWebR = $script:AutoApproveWeb
+        $savedModeR = $script:OutputMode
+        $savedHostCmdR = $script:WebDownloadUseHostCommand
+        $script:AgentPermission = 'Auto'
+        $script:AutoApproveWeb = $true
+        $script:OutputMode = 'json'
+        $script:WebDownloadUseHostCommand = $true
+        $script:redirVisited = @()
+        $script:redirSeenMax = @()
+        $script:redirMode = ''
+        try {
+            & {
+                function Invoke-WebRequest {
+                    param($Uri, $Method, $Headers, $ContentType, $Body, $TimeoutSec, $ErrorAction, [switch]$UseBasicParsing, [switch]$PassThru, $OutFile, $MaximumRedirection)
+                    $script:redirVisited += [string]$Uri
+                    $script:redirSeenMax += $MaximumRedirection
+                    if ($script:redirMode -eq 'chain3') {
+                        if ($Uri -eq 'http://example.com/start') {
+                            return @{ StatusCode = 301; Headers = @{ Location = 'https://example.com/docs/v1/index.html' } }
+                        }
+                        if ($Uri -eq 'https://example.com/docs/v1/index.html') {
+                            return @{ StatusCode = 302; Headers = @{ Location = '../v2/guide.html?lang=ps' } }
+                        }
+                        if ($Uri -eq 'https://example.com/docs/v2/guide.html?lang=ps') {
+                            return @{ StatusCode = 308; Headers = @{ Location = '/final/doc.html' } }
+                        }
+                        if ($Uri -eq 'https://example.com/final/doc.html') {
+                            Set-Content -LiteralPath $OutFile -Value '<html><body><h1>Final Doc</h1><p>Arrived safely.</p></body></html>' -Encoding UTF8 -NoNewline
+                            return @{ StatusCode = 200; Headers = @{} }
+                        }
+                    }
+                    elseif ($script:redirMode -eq 'chain4') {
+                        if ($Uri -eq 'https://example.com/h0') { return @{ StatusCode = 302; Headers = @{ Location = '/h1' } } }
+                        if ($Uri -eq 'https://example.com/h1') { return @{ StatusCode = 302; Headers = @{ Location = '/h2' } } }
+                        if ($Uri -eq 'https://example.com/h2') { return @{ StatusCode = 302; Headers = @{ Location = '/h3' } } }
+                        if ($Uri -eq 'https://example.com/h3') { return @{ StatusCode = 302; Headers = @{ Location = '/h4' } } }
+                        Set-Content -LiteralPath $OutFile -Value 'should-not-reach' -Encoding UTF8 -NoNewline
+                        return @{ StatusCode = 200; Headers = @{} }
+                    }
+                    elseif ($script:redirMode -eq 'ssrf_loopback') {
+                        if ($Uri -eq 'https://example.com/public') { return @{ StatusCode = 302; Headers = @{ Location = 'https://127.0.0.1/secret' } } }
+                        Set-Content -LiteralPath $OutFile -Value 'LEAKED' -Encoding UTF8 -NoNewline
+                        return @{ StatusCode = 200; Headers = @{} }
+                    }
+                    elseif ($script:redirMode -eq 'ssrf_metadata') {
+                        if ($Uri -eq 'https://example.com/public') { return @{ StatusCode = 307; Headers = @{ Location = 'https://169.254.169.254/latest/meta-data/' } } }
+                        Set-Content -LiteralPath $OutFile -Value 'LEAKED' -Encoding UTF8 -NoNewline
+                        return @{ StatusCode = 200; Headers = @{} }
+                    }
+                    elseif ($script:redirMode -eq 'downgrade') {
+                        if ($Uri -eq 'https://example.com/secure') { return @{ StatusCode = 301; Headers = @{ Location = 'http://example.com/plain' } } }
+                        Set-Content -LiteralPath $OutFile -Value 'DOWNGRADED' -Encoding UTF8 -NoNewline
+                        return @{ StatusCode = 200; Headers = @{} }
+                    }
+                    elseif ($script:redirMode -eq 'missing_loc') {
+                        return @{ StatusCode = 302; Headers = @{} }
+                    }
+                    elseif ($script:redirMode -eq 'case_path') {
+                        if ($Uri -ceq 'https://example.com/Docs') {
+                            return @{ StatusCode = 301; Headers = @{ Location = 'https://example.com/docs' } }
+                        }
+                        if ($Uri -ceq 'https://example.com/docs') {
+                            Set-Content -LiteralPath $OutFile -Value 'Lowercase docs' -Encoding UTF8 -NoNewline
+                            return @{ StatusCode = 200; Headers = @{} }
+                        }
+                    }
+                    elseif ($script:redirMode -eq 'web_search_302') {
+                        return @{ StatusCode = 302; Headers = @{ Location = 'https://example.com/other-search' } }
+                    }
+                    elseif ($script:redirMode -eq 'throw_302') {
+                        if ($Uri -eq 'https://example.com/throw-start') {
+                            $rMsg = [System.Net.Http.HttpResponseMessage]::new([System.Net.HttpStatusCode]::Found)
+                            $rMsg.Headers.Location = [uri]::new('/throw-final', [System.UriKind]::Relative)
+                            $hEx = [Microsoft.PowerShell.Commands.HttpResponseException]::new('302 Found', $rMsg)
+                            throw $hEx
+                        }
+                        if ($Uri -eq 'https://example.com/throw-final') {
+                            Set-Content -LiteralPath $OutFile -Value 'Thrown 302 resolved.' -Encoding UTF8 -NoNewline
+                            return
+                        }
+                    }
+                    throw "Unexpected URI in redirect mock: $Uri"
+                }
+
+                # 1. Valid 3-hop chain (http->https + relative + root-relative) succeeds and always passes MaximumRedirection=0.
+                $script:redirMode = 'chain3'
+                $script:redirVisited = @()
+                $script:redirSeenMax = @()
+                $r3 = Invoke-AgentTool -Root $workspacePath -Call @{ id = 'r-3'; function = @{ name = 'fetch_url'; arguments = '{"url":"http://example.com/start"}' } } | ConvertFrom-Json
+                Assert-True ($r3.url -ceq 'http://example.com/start' -and $r3.final_url -ceq 'https://example.com/final/doc.html' -and $r3.content.Contains('Arrived safely.')) "3-hop redirect failed: $($r3 | ConvertTo-Json -Compress)"
+                Assert-True ($script:redirVisited.Count -eq 4 -and (@($script:redirSeenMax | Where-Object { $_ -ne 0 }).Count -eq 0)) "3-hop redirect did not keep MaximumRedirection=0 on every hop."
+
+                # 2. 4-hop chain exceeds max 3 hops and fails closed without reaching hop 4.
+                $script:redirMode = 'chain4'
+                $script:redirVisited = @()
+                $r4 = Invoke-AgentTool -Root $workspacePath -Call @{ id = 'r-4'; function = @{ name = 'fetch_url'; arguments = '{"url":"https://example.com/h0"}' } } | ConvertFrom-Json
+                Assert-True ($r4.error -like '*maximum redirect*' -and ($script:redirVisited -notcontains 'https://example.com/h4')) "4-hop redirect was not stopped at 3 hops: $($r4.error)"
+
+                # 3. SSRF redirect to 127.0.0.1 is blocked before connecting to target.
+                $script:redirMode = 'ssrf_loopback'
+                $script:redirVisited = @()
+                $rLoop = Invoke-AgentTool -Root $workspacePath -Call @{ id = 'r-loop'; function = @{ name = 'fetch_url'; arguments = '{"url":"https://example.com/public"}' } } | ConvertFrom-Json
+                Assert-True ($rLoop.error -like '*Blocked*' -and $script:redirVisited.Count -eq 1) "SSRF loopback redirect was not blocked before connecting: $($rLoop.error)"
+
+                # 4. SSRF redirect to 169.254.169.254 metadata is blocked before connecting.
+                $script:redirMode = 'ssrf_metadata'
+                $script:redirVisited = @()
+                $rMeta = Invoke-AgentTool -Root $workspacePath -Call @{ id = 'r-meta'; function = @{ name = 'fetch_url'; arguments = '{"url":"https://example.com/public"}' } } | ConvertFrom-Json
+                Assert-True ($rMeta.error -like '*Blocked*' -and $script:redirVisited.Count -eq 1) "SSRF metadata redirect was not blocked before connecting: $($rMeta.error)"
+
+                # 5. https->http downgrade is blocked before connecting.
+                $script:redirMode = 'downgrade'
+                $script:redirVisited = @()
+                $rDown = Invoke-AgentTool -Root $workspacePath -Call @{ id = 'r-down'; function = @{ name = 'fetch_url'; arguments = '{"url":"https://example.com/secure"}' } } | ConvertFrom-Json
+                Assert-True ($rDown.error -like '*downgrade*' -and $script:redirVisited.Count -eq 1) "https->http redirect downgrade was not blocked: $($rDown.error)"
+
+                # 6. Missing Location header fails cleanly.
+                $script:redirMode = 'missing_loc'
+                $script:redirVisited = @()
+                $rNoLoc = Invoke-AgentTool -Root $workspacePath -Call @{ id = 'r-noloc'; function = @{ name = 'fetch_url'; arguments = '{"url":"https://example.com/noloc"}' } } | ConvertFrom-Json
+                Assert-True ($rNoLoc.error -like '*Location*') "Missing Location header did not report clear error: $($rNoLoc.error)"
+
+                # 6b. Throwing 302 (real PS 7 HttpResponseException / PS 5.1 WebException style) resolves relative Location cleanly.
+                if ($PSVersionTable.PSVersion.Major -ge 6) {
+                    $script:redirMode = 'throw_302'
+                    $script:redirVisited = @()
+                    $rThrow302 = Invoke-AgentTool -Root $workspacePath -Call @{ id = 'r-t302'; function = @{ name = 'fetch_url'; arguments = '{"url":"https://example.com/throw-start"}' } } | ConvertFrom-Json
+                    Assert-True ($rThrow302.final_url -ceq 'https://example.com/throw-final' -and $rThrow302.content -ceq 'Thrown 302 resolved.') "Throwing 302 redirect did not resolve cleanly: $($rThrow302 | ConvertTo-Json -Compress)"
+                }
+
+                # 6c. Case-only path redirect (/Docs -> /docs) records final_url case-sensitively.
+                $script:redirMode = 'case_path'
+                $script:redirVisited = @()
+                $rCase = Invoke-AgentTool -Root $workspacePath -Call @{ id = 'r-case'; function = @{ name = 'fetch_url'; arguments = '{"url":"https://example.com/Docs"}' } } | ConvertFrom-Json
+                Assert-True ($rCase.final_url -ceq 'https://example.com/docs' -and $rCase.content -ceq 'Lowercase docs') "Case-only path redirect did not set final_url: $($rCase | ConvertTo-Json -Compress)"
+
+                # 6d. web_search keeps redirects disabled (MaxRedirects=0) and fails closed on 302.
+                $script:redirMode = 'web_search_302'
+                $script:redirVisited = @()
+                $rSearch302 = Invoke-AgentTool -Root $workspacePath -Call @{ id = 'r-ws302'; function = @{ name = 'web_search'; arguments = '{"query":"test redirect block"}' } } | ConvertFrom-Json
+                Assert-True ($rSearch302.error -like '*redirects are disabled*' -and $script:redirVisited.Count -eq 1) "web_search did not block 302 redirect: $($rSearch302.error)"
+            }
+
+            # 7. Worker mode passes SHELLOSSUS_WEB_MAX_REDIRECTS=3, reads SHELLOSSUS_WEB_META final_url, and cleans up temp file.
+            $script:WebDownloadUseHostCommand = $false
+            $script:seenWebMaxRedirEnv = ''
+            $script:seenWebMetaPath = ''
+            & {
+                function Start-Process {
+                    param($FilePath, $ArgumentList, $RedirectStandardOutput, $RedirectStandardError, [switch]$NoNewWindow, [switch]$PassThru, $ErrorAction)
+                    $script:seenWebMaxRedirEnv = [string]$env:SHELLOSSUS_WEB_MAX_REDIRECTS
+                    $script:seenWebMetaPath = [string]$env:SHELLOSSUS_WEB_META
+                    Set-AgentUtf8Content -LiteralPath $env:SHELLOSSUS_WEB_DOWNLOAD_FILE -Value 'Worker redirected body'
+                    if ($env:SHELLOSSUS_WEB_META) {
+                        Set-AgentUtf8Content -LiteralPath $env:SHELLOSSUS_WEB_META -Value '{"final_url":"https://example.com/final-worker"}'
+                    }
+                    return @{ HasExited = $true; Id = 0; ExitCode = 0 }
+                }
+                $rWorker = Invoke-AgentTool -Root $workspacePath -Call @{ id = 'r-worker'; function = @{ name = 'fetch_url'; arguments = '{"url":"https://example.com/start-worker"}' } } | ConvertFrom-Json
+                Assert-True ($script:seenWebMaxRedirEnv -ceq '3') "Worker mode did not pass SHELLOSSUS_WEB_MAX_REDIRECTS=3 (got '$($script:seenWebMaxRedirEnv)')."
+                Assert-True ($rWorker.final_url -ceq 'https://example.com/final-worker' -and $rWorker.content -ceq 'Worker redirected body') "Worker mode did not propagate final_url from SHELLOSSUS_WEB_META."
+                Assert-True ($script:seenWebMetaPath -and (-not (Test-Path -LiteralPath $script:seenWebMetaPath))) 'Worker mode leaked SHELLOSSUS_WEB_META temp file.'
+            }
+        }
+        finally {
+            $script:AgentPermission = $savedPermR
+            $script:AutoApproveWeb = $savedAutoWebR
+            $script:OutputMode = $savedModeR
+            $script:WebDownloadUseHostCommand = $savedHostCmdR
+            Remove-Variable -Name redirVisited, redirSeenMax, redirMode, seenWebMaxRedirEnv, seenWebMetaPath -Scope Script -ErrorAction SilentlyContinue
+        }
+    }
 }
 finally {
     Remove-TestEnvironment -Env $envData

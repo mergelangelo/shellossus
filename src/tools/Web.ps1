@@ -1,5 +1,162 @@
 # SSRF validation, outbound web confirmation, HTML-to-text conversion, and HTTP page fetching.
 
+$script:LastWebFinalUrl = ''
+
+function Get-WebRedirectInfo {
+    param($Response = $null, $ErrorRecord = $null)
+    $respObj = $null
+    if ($null -ne $Response) {
+        $respObj = $Response
+    }
+    elseif ($null -ne $ErrorRecord) {
+        try {
+            if ($ErrorRecord.Exception -and $ErrorRecord.Exception.Response) {
+                $respObj = $ErrorRecord.Exception.Response
+            }
+            elseif ($ErrorRecord.Exception -and $ErrorRecord.Exception.InnerException -and $ErrorRecord.Exception.InnerException.Response) {
+                $respObj = $ErrorRecord.Exception.InnerException.Response
+            }
+        }
+        catch { return $null }
+    }
+    if ($null -eq $respObj) { return $null }
+    $code = 0
+    try {
+        if ($null -ne $respObj.StatusCode) {
+            $code = [int]$respObj.StatusCode
+        }
+    }
+    catch { return $null }
+    if ($code -notin @(301, 302, 303, 307, 308)) { return $null }
+
+    $locStr = ''
+    $headerSources = @()
+    try {
+        if ($null -ne $respObj.Headers) { $headerSources += ,$respObj.Headers }
+    }
+    catch {}
+    try {
+        if ($null -ne $respObj.BaseResponse -and $null -ne $respObj.BaseResponse.Headers) {
+            $headerSources += ,$respObj.BaseResponse.Headers
+        }
+    }
+    catch {}
+
+    foreach ($headers in $headerSources) {
+        if ($locStr) { break }
+        if ($null -eq $headers) { continue }
+        $rawLoc = $null
+        try {
+            if ($headers -is [hashtable]) {
+                foreach ($k in $headers.Keys) {
+                    if ([string]$k -ieq 'Location') {
+                        $rawLoc = $headers[$k]
+                        break
+                    }
+                }
+            }
+            else {
+                try {
+                    if ($null -ne $headers.Location) { $rawLoc = $headers.Location }
+                }
+                catch {}
+                if ($null -eq $rawLoc) {
+                    try {
+                        $directLoc = $headers['Location']
+                        if ($null -ne $directLoc) { $rawLoc = $directLoc }
+                    }
+                    catch {}
+                }
+                if ($null -eq $rawLoc) {
+                    foreach ($entry in $headers) {
+                        if ($null -ne $entry -and $entry.Key -is [string] -and $entry.Key -ieq 'Location') {
+                            $rawLoc = $entry.Value
+                            break
+                        }
+                    }
+                }
+            }
+        }
+        catch {}
+        if ($null -ne $rawLoc) {
+            if ($rawLoc -is [string] -or $rawLoc -is [uri]) {
+                $locStr = ([string]$rawLoc).Trim()
+            }
+            else {
+                $firstLoc = @($rawLoc) | Select-Object -First 1
+                if ($null -ne $firstLoc) { $locStr = ([string]$firstLoc).Trim() }
+            }
+        }
+    }
+    return @{
+        status_code = $code
+        location = $locStr
+    }
+}
+
+function Resolve-SafeWebRedirectUrl {
+    param(
+        [string]$BaseUrl,
+        [AllowEmptyString()][string]$Location,
+        [int]$StatusCode = 302
+    )
+    $null = Test-SafeWebUrl -Url $BaseUrl
+    $baseUri = [uri]$BaseUrl
+    $loc = if ($null -ne $Location) { $Location.Trim() } else { '' }
+    if (-not $loc) {
+        throw "Redirect response (HTTP $StatusCode) is missing a Location header."
+    }
+    if ($loc.Contains('\') -or ($loc -match '[\s\x00-\x1F\x7F]')) {
+        throw 'Redirect Location contains invalid characters.'
+    }
+    $origin = $baseUri.Scheme + '://' + $baseUri.Authority
+    $candidate = ''
+    if ($loc -match '^[A-Za-z][A-Za-z0-9+.-]*:') {
+        if ($loc -notmatch '^https?://[^/]') {
+            throw 'Redirect Location must be a valid http:// or https:// URL.'
+        }
+        $candidate = $loc
+    }
+    elseif ($loc.StartsWith('//')) {
+        if ($loc.StartsWith('///') -or $loc.Length -le 2) {
+            throw 'Redirect Location is malformed.'
+        }
+        $candidate = $baseUri.Scheme + ':' + $loc
+    }
+    elseif ($loc.StartsWith('/')) {
+        $candidate = $origin + $loc
+    }
+    elseif ($loc.StartsWith('?')) {
+        $candidate = $origin + $baseUri.AbsolutePath + $loc
+    }
+    elseif ($loc.StartsWith('#')) {
+        $candidate = $origin + $baseUri.AbsolutePath + $baseUri.Query + $loc
+    }
+    else {
+        $basePath = $baseUri.AbsolutePath
+        $lastSlash = $basePath.LastIndexOf('/')
+        $baseDir = if ($lastSlash -ge 0) { $basePath.Substring(0, $lastSlash + 1) } else { '/' }
+        $candidate = $origin + $baseDir + $loc
+    }
+    $null = Test-SafeWebUrl -Url $candidate
+    $targetUri = $null
+    try {
+        $targetUri = [uri]$candidate
+    }
+    catch {
+        throw 'Redirect Location could not be parsed as a valid URL.'
+    }
+    if (-not $targetUri.IsAbsoluteUri -or $targetUri.Scheme -notin @('http', 'https') -or -not $targetUri.Host) {
+        throw 'Redirect Location must resolve to a valid http:// or https:// URL.'
+    }
+    if ($baseUri.Scheme -ieq 'https' -and $targetUri.Scheme -ine 'https') {
+        throw "Blocked insecure redirect downgrade from https to $($targetUri.Scheme)."
+    }
+    $resolvedUrl = $targetUri.AbsoluteUri
+    $null = Test-SafeWebUrl -Url $resolvedUrl
+    return $resolvedUrl
+}
+
 function Test-BlockedWebAddress {
     param([string]$Address)
     # Operators only. This runs in ConstrainedLanguage and is copied into the download worker.
@@ -282,6 +439,14 @@ function Format-WebRequestError {
         [string]$ErrorRecord
     }
     $cleanMsg = (($rawMsg -replace '[\r\n]+', ' ').Trim())
+    $fqId = ''
+    try {
+        if ($ErrorRecord -and $ErrorRecord.FullyQualifiedErrorId) { $fqId = [string]$ErrorRecord.FullyQualifiedErrorId }
+    }
+    catch {}
+    if (($fqId -like 'InsecureRedirection*') -or ($cleanMsg -match '(?i)insecure redirection')) {
+        return 'Blocked insecure redirect downgrade from https to http.'
+    }
     if ($cleanMsg.Length -gt 240) {
         $cleanMsg = $cleanMsg.Substring(0, 240) + '...'
     }
@@ -320,6 +485,10 @@ function ConvertFrom-HtmlToText {
 
 function Invoke-InternalWebWorker {
     $script:InternalWorkerFailed = $false
+    $currentUrl = ''
+    $maxRedirects = 0
+    $totalTimeoutSec = 30
+    $started = Get-Date
     try {
         if (-not $env:SHELLOSSUS_WEB_DOWNLOAD_URI) {
             throw 'Web download URI is required.'
@@ -327,56 +496,202 @@ function Invoke-InternalWebWorker {
         if (-not $env:SHELLOSSUS_WEB_DOWNLOAD_FILE) {
             throw 'Web download output file is required.'
         }
-        Assert-SafeWebResolution -Target ([uri]$env:SHELLOSSUS_WEB_DOWNLOAD_URI)
+        $currentUrl = [string]$env:SHELLOSSUS_WEB_DOWNLOAD_URI
+        if ($env:SHELLOSSUS_WEB_MAX_REDIRECTS -and $env:SHELLOSSUS_WEB_MAX_REDIRECTS -match '^[0-9]{1,2}$') {
+            $maxRedirects = [int]$env:SHELLOSSUS_WEB_MAX_REDIRECTS
+            if ($maxRedirects -lt 0) { $maxRedirects = 0 }
+            if ($maxRedirects -gt 3) { $maxRedirects = 3 }
+        }
+        $null = Test-SafeWebUrl -Url $currentUrl
     }
     catch {
         Write-Output $_.Exception.Message
         $script:InternalWorkerFailed = $true
         return
     }
-    try {
-        $null = Microsoft.PowerShell.Utility\Invoke-WebRequest -Uri $env:SHELLOSSUS_WEB_DOWNLOAD_URI -Method Get -Headers @{ 'User-Agent' = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Shellossus/1.0' } -MaximumRedirection 0 -TimeoutSec 30 -UseBasicParsing -OutFile $env:SHELLOSSUS_WEB_DOWNLOAD_FILE -ErrorAction Stop
-    }
-    catch {
-        Write-Output (Format-WebRequestError -ErrorRecord $_)
-        $script:InternalWorkerFailed = $true
-        return
+    $webHeaders = @{ 'User-Agent' = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Shellossus/1.0' }
+    $isDesktopPs = ($PSVersionTable.PSEdition -eq 'Desktop')
+    for ($hop = 0; $hop -le $maxRedirects; $hop++) {
+        try {
+            $null = Test-SafeWebUrl -Url $currentUrl
+            Assert-SafeWebResolution -Target ([uri]$currentUrl)
+        }
+        catch {
+            Remove-Item -LiteralPath $env:SHELLOSSUS_WEB_DOWNLOAD_FILE -Force -ErrorAction SilentlyContinue
+            Write-Output $_.Exception.Message
+            $script:InternalWorkerFailed = $true
+            return
+        }
+        $remainingSec = $totalTimeoutSec - [int](((Get-Date) - $started).TotalSeconds)
+        if ($remainingSec -lt 1) {
+            Remove-Item -LiteralPath $env:SHELLOSSUS_WEB_DOWNLOAD_FILE -Force -ErrorAction SilentlyContinue
+            Write-Output 'Web request timed out.'
+            $script:InternalWorkerFailed = $true
+            return
+        }
+        $resp = $null
+        $redir = $null
+        if ($isDesktopPs) {
+            # Windows PowerShell 5.1 does not attach Response to MaximumRedirectExceeded and
+            # does not treat 308 as a redirect. Probe with HEAD without -OutFile to inspect 3xx
+            # status and Location cleanly while avoiding the PS 5.1 -OutFile + -PassThru bug.
+            $headResp = $null
+            $headErr = @()
+            try {
+                $headResp = Microsoft.PowerShell.Utility\Invoke-WebRequest -Uri $currentUrl -Method Head -Headers $webHeaders -MaximumRedirection 0 -TimeoutSec $remainingSec -UseBasicParsing -ErrorAction SilentlyContinue -ErrorVariable headErr
+            }
+            catch {}
+            $redir = Get-WebRedirectInfo -Response $headResp
+            if ($null -eq $redir -and $headErr -and $headErr.Count -gt 0) {
+                $redir = Get-WebRedirectInfo -ErrorRecord $headErr[0]
+            }
+        }
+        if ($null -eq $redir) {
+            $remainingSec = $totalTimeoutSec - [int](((Get-Date) - $started).TotalSeconds)
+            if ($remainingSec -lt 1) {
+                Remove-Item -LiteralPath $env:SHELLOSSUS_WEB_DOWNLOAD_FILE -Force -ErrorAction SilentlyContinue
+                Write-Output 'Web request timed out.'
+                $script:InternalWorkerFailed = $true
+                return
+            }
+            try {
+                # Avoid -PassThru with -OutFile: older PowerShell versions can leave -OutFile empty.
+                $resp = Microsoft.PowerShell.Utility\Invoke-WebRequest -Uri $currentUrl -Method Get -Headers $webHeaders -MaximumRedirection 0 -TimeoutSec $remainingSec -UseBasicParsing -OutFile $env:SHELLOSSUS_WEB_DOWNLOAD_FILE -ErrorAction Stop
+                $redir = Get-WebRedirectInfo -Response $resp
+            }
+            catch {
+                $errRec = $_
+                $redir = Get-WebRedirectInfo -ErrorRecord $errRec
+                if ($null -eq $redir -and $isDesktopPs -and (($errRec.FullyQualifiedErrorId -like 'MaximumRedirectExceeded*') -or ([string]$errRec.Exception.Message -like '*maximum redirection count*'))) {
+                    Remove-Item -LiteralPath $env:SHELLOSSUS_WEB_DOWNLOAD_FILE -Force -ErrorAction SilentlyContinue
+                    if ($maxRedirects -eq 0) {
+                        Write-Output 'Web request failed: redirects are disabled.'
+                        $script:InternalWorkerFailed = $true
+                        return
+                    }
+                    # Server rejected HEAD (e.g., 405) and redirected GET: inspect 3xx without -OutFile.
+                    $getRedirResp = $null
+                    $getRedirErr = @()
+                    $fallbackRem = $totalTimeoutSec - [int](((Get-Date) - $started).TotalSeconds)
+                    if ($fallbackRem -ge 1) {
+                        try {
+                            $getRedirResp = Microsoft.PowerShell.Utility\Invoke-WebRequest -Uri $currentUrl -Method Get -Headers $webHeaders -MaximumRedirection 0 -TimeoutSec $fallbackRem -UseBasicParsing -ErrorAction SilentlyContinue -ErrorVariable getRedirErr
+                        }
+                        catch {}
+                        $redir = Get-WebRedirectInfo -Response $getRedirResp
+                        if ($null -eq $redir -and $getRedirErr -and $getRedirErr.Count -gt 0) {
+                            $redir = Get-WebRedirectInfo -ErrorRecord $getRedirErr[0]
+                        }
+                    }
+                }
+                if ($null -eq $redir) {
+                    Remove-Item -LiteralPath $env:SHELLOSSUS_WEB_DOWNLOAD_FILE -Force -ErrorAction SilentlyContinue
+                    Write-Output (Format-WebRequestError -ErrorRecord $errRec)
+                    $script:InternalWorkerFailed = $true
+                    return
+                }
+            }
+        }
+        if ($null -eq $redir) {
+            if ($env:SHELLOSSUS_WEB_META) {
+                try {
+                    Set-AgentUtf8Content -LiteralPath $env:SHELLOSSUS_WEB_META -Value (@{ final_url = $currentUrl } | ConvertTo-Json -Compress)
+                }
+                catch {}
+            }
+            return
+        }
+        Remove-Item -LiteralPath $env:SHELLOSSUS_WEB_DOWNLOAD_FILE -Force -ErrorAction SilentlyContinue
+        if ($hop -ge $maxRedirects) {
+            if ($maxRedirects -eq 0) {
+                Write-Output "Web request failed (HTTP $($redir.status_code)): redirects are disabled."
+            }
+            else {
+                Write-Output "Web request failed: exceeded maximum redirect limit ($maxRedirects)."
+            }
+            $script:InternalWorkerFailed = $true
+            return
+        }
+        try {
+            $currentUrl = Resolve-SafeWebRedirectUrl -BaseUrl $currentUrl -Location $redir.location -StatusCode $redir.status_code
+        }
+        catch {
+            Write-Output $_.Exception.Message
+            $script:InternalWorkerFailed = $true
+            return
+        }
     }
 }
 
 function Invoke-AgentWebDownload {
-    param([string]$Uri, [string]$OutFile, [int]$MaxBytes = 2097152)
-    $request = @{
-        Uri = $Uri
-        Method = 'Get'
-        Headers = @{ 'User-Agent' = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Shellossus/1.0' }
-        TimeoutSec = 30
-        UseBasicParsing = $true
-        OutFile = $OutFile
-        ErrorAction = 'Stop'
-    }
+    param([string]$Uri, [string]$OutFile, [int]$MaxBytes = 2097152, [int]$MaxRedirects = 0)
+    $script:LastWebFinalUrl = $Uri
+    if ($MaxRedirects -lt 0) { $MaxRedirects = 0 }
+    if ($MaxRedirects -gt 3) { $MaxRedirects = 3 }
     if ($script:WebDownloadUseHostCommand -eq $true) {
         $webCommand = Get-Command -Name 'Invoke-WebRequest' -ErrorAction SilentlyContinue
-        if ($webCommand -and $webCommand.Parameters -and $webCommand.Parameters.MaximumRedirection) {
-            $request['MaximumRedirection'] = 0
-        }
+        $hasMaxRedir = [bool]($webCommand -and $webCommand.Parameters -and $webCommand.Parameters.MaximumRedirection)
+        $webState = @{ final_url = $Uri }
+        $started = Get-Date
+        $totalTimeoutSec = 30
         Invoke-WithProcessEnvironment -Values @{
             SHELLOSSUS_API_KEY = $null
             OPENAI_API_KEY = $null
         } -Action {
-            try {
-                Invoke-WebRequest @request
-            }
-            catch {
-                throw (Format-WebRequestError -ErrorRecord $_)
+            $currentUrl = $Uri
+            for ($hop = 0; $hop -le $MaxRedirects; $hop++) {
+                $null = Test-SafeWebUrl -Url $currentUrl
+                $remainingSec = $totalTimeoutSec - [int](((Get-Date) - $started).TotalSeconds)
+                if ($remainingSec -lt 1) {
+                    Remove-Item -LiteralPath $OutFile -Force -ErrorAction SilentlyContinue
+                    throw 'Web request timed out.'
+                }
+                $request = @{
+                    Uri = $currentUrl
+                    Method = 'Get'
+                    Headers = @{ 'User-Agent' = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Shellossus/1.0' }
+                    TimeoutSec = $remainingSec
+                    UseBasicParsing = $true
+                    OutFile = $OutFile
+                    ErrorAction = 'Stop'
+                }
+                if ($hasMaxRedir) { $request['MaximumRedirection'] = 0 }
+                $resp = $null
+                $redir = $null
+                try {
+                    $resp = Invoke-WebRequest @request
+                    $redir = Get-WebRedirectInfo -Response $resp
+                }
+                catch {
+                    $errRec = $_
+                    $redir = Get-WebRedirectInfo -ErrorRecord $errRec
+                    if ($null -eq $redir) {
+                        Remove-Item -LiteralPath $OutFile -Force -ErrorAction SilentlyContinue
+                        throw (Format-WebRequestError -ErrorRecord $errRec)
+                    }
+                }
+                if ($null -eq $redir) {
+                    $webState.final_url = $currentUrl
+                    break
+                }
+                Remove-Item -LiteralPath $OutFile -Force -ErrorAction SilentlyContinue
+                if ($hop -ge $MaxRedirects) {
+                    if ($MaxRedirects -eq 0) {
+                        throw "Web request failed (HTTP $($redir.status_code)): redirects are disabled."
+                    }
+                    throw "Web request failed: exceeded maximum redirect limit ($MaxRedirects)."
+                }
+                $currentUrl = Resolve-SafeWebRedirectUrl -BaseUrl $currentUrl -Location $redir.location -StatusCode $redir.status_code
             }
         }
+        $script:LastWebFinalUrl = $webState.final_url
     }
     else {
         $shellExe = Get-AgentPowerShellExecutable
         $workerScript = Resolve-StandaloneScriptPath -Required
         $stdout = New-AgentTempFile
         $stderr = New-AgentTempFile
+        $meta = New-AgentTempFile
         $proc = $null
         $procId = 0
         try {
@@ -386,6 +701,8 @@ function Invoke-AgentWebDownload {
                 OPENAI_API_KEY = $null
                 SHELLOSSUS_WEB_DOWNLOAD_URI = $Uri
                 SHELLOSSUS_WEB_DOWNLOAD_FILE = $OutFile
+                SHELLOSSUS_WEB_MAX_REDIRECTS = [string]$MaxRedirects
+                SHELLOSSUS_WEB_META = $meta.FullName
             } -Action {
                 Start-Process -FilePath $shellExe -ArgumentList $workerArguments -RedirectStandardOutput $stdout.FullName -RedirectStandardError $stderr.FullName -NoNewWindow -PassThru -ErrorAction Stop
             }
@@ -393,12 +710,10 @@ function Invoke-AgentWebDownload {
             try { $procId = [int]$proc.Id } catch { $procId = 0 }
             $started = Get-Date
             while ($procId -gt 0 -and (Get-Process -Id $procId -ErrorAction SilentlyContinue)) {
-                if (Test-Path -LiteralPath $OutFile) {
-                    $file = Get-Item -LiteralPath $OutFile -Force -ErrorAction Stop
-                    if ($file.Length -gt $MaxBytes) {
-                        Stop-Process -Id $procId -Force -ErrorAction SilentlyContinue
-                        throw "Web response exceeds $MaxBytes bytes."
-                    }
+                $file = Get-Item -LiteralPath $OutFile -Force -ErrorAction SilentlyContinue
+                if ($file -and $file.Length -gt $MaxBytes) {
+                    Stop-Process -Id $procId -Force -ErrorAction SilentlyContinue
+                    throw "Web response exceeds $MaxBytes bytes."
                 }
                 if (((Get-Date) - $started).TotalSeconds -gt 35) {
                     Stop-Process -Id $procId -Force -ErrorAction SilentlyContinue
@@ -419,12 +734,23 @@ function Invoke-AgentWebDownload {
             if (($null -ne $proc.ExitCode -and $proc.ExitCode -ne 0) -or -not (Test-Path -LiteralPath $OutFile)) {
                 throw 'Web request failed.'
             }
+            $metaItem = Get-Item -LiteralPath $meta.FullName -Force -ErrorAction SilentlyContinue
+            if ($metaItem -and $metaItem.Length -gt 0 -and $metaItem.Length -le 4096) {
+                try {
+                    $metaRaw = Get-Content -LiteralPath $meta.FullName -Raw -Encoding UTF8 -ErrorAction Stop
+                    $metaObj = $metaRaw | ConvertFrom-Json -ErrorAction Stop
+                    if ((Test-IsJsonObject -Value $metaObj) -and $metaObj.final_url -is [string] -and $metaObj.final_url.Trim()) {
+                        $script:LastWebFinalUrl = $metaObj.final_url.Trim()
+                    }
+                }
+                catch {}
+            }
         }
         finally {
             if ($procId -gt 0 -and (Get-Process -Id $procId -ErrorAction SilentlyContinue)) {
                 Stop-Process -Id $procId -Force -ErrorAction SilentlyContinue
             }
-            Remove-Item -LiteralPath $stdout.FullName, $stderr.FullName -Force -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $stdout.FullName, $stderr.FullName, $meta.FullName -Force -ErrorAction SilentlyContinue
         }
     }
     $resultFile = Get-Item -LiteralPath $OutFile -Force -ErrorAction Stop
@@ -446,7 +772,8 @@ function Invoke-AgentFetchUrl {
     $rawMode = ($Arguments.raw -eq $true)
     $tempOut = New-AgentTempFile
     try {
-        Invoke-AgentWebDownload -Uri $url -OutFile $tempOut.FullName
+        Invoke-AgentWebDownload -Uri $url -OutFile $tempOut.FullName -MaxRedirects 3
+        $finalUrl = if ($script:LastWebFinalUrl) { [string]$script:LastWebFinalUrl } else { $url }
         $rawText = Get-Content -LiteralPath $tempOut.FullName -Raw -Encoding UTF8 -ErrorAction Stop
         if ($null -eq $rawText) { $rawText = '' }
         $isHtml = ($rawText -match '(?is)<\s*(!doctype\s+html|html|body|div|p|article|main|section|table|h1)\b')
@@ -465,12 +792,16 @@ function Invoke-AgentFetchUrl {
         $elapsedMs = [int](((Get-Date) - $toolStart).TotalMilliseconds)
         $sumStr = "$($content.Length) chars" + $(if ($truncated) { " (of $totalLen)" } else { '' })
         Write-ToolCallCard -Name 'fetch_url' -Target $url -Status 'ok' -Summary $sumStr -ElapsedMs $elapsedMs
-        return (@{
+        $fetchPayload = @{
             url = $url
             content = $content
             length = $totalLen
             truncated = $truncated
-        } | ConvertTo-Json -Depth 5 -Compress)
+        }
+        if ($finalUrl -and ($finalUrl -cne $url)) {
+            $fetchPayload['final_url'] = $finalUrl
+        }
+        return ($fetchPayload | ConvertTo-Json -Depth 5 -Compress)
     }
     finally {
         Remove-Item -LiteralPath $tempOut.FullName -Force -ErrorAction SilentlyContinue

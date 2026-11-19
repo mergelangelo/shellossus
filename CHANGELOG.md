@@ -8,6 +8,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 - `Retry-After` header support (delta seconds and HTTP-date) with up to 3 transient HTTP retries and exponential backoff + jitter in `Invoke-AgentTurn` and the isolated `http` worker.
+- Safe SSRF-validated redirect following (up to 3 hops, relative `Location` resolution, `https -> http` downgrade blocking, and per-hop `Test-SafeWebUrl` + `Assert-SafeWebResolution` checks with `-MaximumRedirection 0`) for `fetch_url`.
 
 ## [0.9.0] - 2026-11-19
 
