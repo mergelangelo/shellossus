@@ -29,6 +29,7 @@ param(
     [switch]$HideReasoning,
     [switch]$Diagnostics,
     [switch]$Doctor,
+    [switch]$Version,
     [switch]$Mascot,
     [switch]$Continue,
     [switch]$Setup,
@@ -56,6 +57,7 @@ Remove-Variable -Name Stream -Scope Script -ErrorAction SilentlyContinue
 # Configuration, path validation, and security boundary helpers.
 # Windows PowerShell 5.1 and ConstrainedLanguage compatible.
 
+$script:AgentVersion = '0.9.0'
 $script:RegisteredSkills = @{}
 
 function Read-AgentConfig {
@@ -10938,17 +10940,18 @@ function Get-AgentDoctorReport {
         @{ name = 'chat_contract'; message = 'Completion and tool-call compatibility with the configured model.' },
         @{ name = 'web_tools'; message = 'fetch_url and web_search, including their ConstrainedLanguage compatibility.' }
     )
-    return @{ checks = $checks; not_tested = $notTested; failures = $failed; warnings = $warnings; exit_code = $(if ($failed) { 1 } else { 0 }) }
+    return @{ version = [string]$script:AgentVersion; checks = $checks; not_tested = $notTested; failures = $failed; warnings = $warnings; exit_code = $(if ($failed) { 1 } else { 0 }) }
 }
 
 function Write-AgentDoctorReport {
     param($Report, [string]$Mode = 'text')
+    $reportVersion = if ($Report.version) { [string]$Report.version } else { [string]$script:AgentVersion }
     if ($Mode -eq 'json') {
-        $event = @{ type = 'doctor'; checks = @($Report.checks); not_tested = @($Report.not_tested); failures = $Report.failures; warnings = $Report.warnings; exit_code = $Report.exit_code }
+        $event = @{ type = 'doctor'; version = $reportVersion; checks = @($Report.checks); not_tested = @($Report.not_tested); failures = $Report.failures; warnings = $Report.warnings; exit_code = $Report.exit_code }
         Write-Output (ConvertTo-AsciiJson -Json ($event | ConvertTo-Json -Depth 6 -Compress))
         return
     }
-    Write-Host ($script:Gm.BoldGreen + 'Shellossus doctor' + $script:Gm.Reset)
+    Write-Host ($script:Gm.BoldGreen + "Shellossus doctor v$reportVersion" + $script:Gm.Reset)
     foreach ($check in $Report.checks) {
         $stUpper = $check.status.ToUpper()
         $stColor = switch ($stUpper) {
@@ -12651,7 +12654,7 @@ function Write-TuiStartupBanner {
     param([string]$RootPath, [string]$ConfigDir, [string]$Model)
     if ($script:OutputMode -eq 'json') { return }
     $wInit = Get-TerminalWidth
-    $hdrInit = ' ' + $script:Gm.BoldGreen + $script:Box.Dot + ' shellossus ' + $script:Gm.Grey1 + 'inline TUI' + $script:Gm.Reset + ' '
+    $hdrInit = ' ' + $script:Gm.BoldGreen + $script:Box.Dot + " shellossus v$($script:AgentVersion) " + $script:Gm.Grey1 + 'inline TUI' + $script:Gm.Reset + ' '
     $ctxLoaded = @()
     if (Get-SoulContext -Root $RootPath -ConfigDir $ConfigDir) { $ctxLoaded += 'SOUL.md' }
     if (Get-MemoryContext -Root $RootPath -ConfigDir $ConfigDir) { $ctxLoaded += 'MEMORY.md' }
@@ -13558,6 +13561,15 @@ if (-not $LibraryOnly) {
     }
     $script:OutputMode = if ($Mode) { $Mode.ToLower() } else { 'text' }
     if ($script:OutputMode -notin @('text', 'json')) { throw 'Mode must be text or json.' }
+    if ($Version) {
+        if ($script:OutputMode -eq 'json') {
+            Write-Output (ConvertTo-AsciiJson -Json (@{ type = 'version'; version = [string]$script:AgentVersion } | ConvertTo-Json -Compress))
+        }
+        else {
+            Write-Output "shellossus $($script:AgentVersion)"
+        }
+        return
+    }
     if ($Install) {
         $targetAgentPath = if ($PSCommandPath) { $PSCommandPath } else { Join-Path $PSScriptRoot 'shellossus.ps1' }
         Invoke-AgentProfileInstall -AgentPath $targetAgentPath -ProfilePath $ProfilePath -Shortcut $Shortcut -ShortcutSpecified:($PSBoundParameters.Keys -contains 'Shortcut') -NoShortcut:$NoShortcut

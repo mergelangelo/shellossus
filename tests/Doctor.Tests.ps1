@@ -64,10 +64,12 @@ try {
     $argsDoctor = @{ BaseUrl = 'https://example.invalid/v1/'; ModelId = 'test-model'; ApiKey = 'doctor-secret-key'; Workspace = $workspacePath; SessionDir = $sessionPath }
     $report = Get-AgentDoctorReport @argsDoctor
     Assert-True ($report.failures -eq 0 -and $report.warnings -eq 0 -and $report.exit_code -eq 0) ("Healthy doctor check failed: " + ($report | ConvertTo-Json -Depth 6 -Compress))
+    Assert-True ($script:AgentVersion -match '^\d+\.\d+\.\d+$' -and $report.version -ceq $script:AgentVersion) "Doctor report missing or mismatched version: $($report.version)"
     Assert-True ((Get-DoctorCheck $report 'model').message -like '*is listed*') 'Doctor did not verify the configured model.'
     Assert-True ((Get-DoctorCheck $report 'endpoint').message -like '*Direct GET /models*') 'Doctor did not identify the transport actually checked.'
     Assert-True ($global:ShellossusDoctorFixture.requests -eq 1) 'Healthy Doctor did not issue exactly one catalog request.'
     $healthyJson = Write-AgentDoctorReport -Report $report -Mode json | ConvertFrom-Json
+    Assert-True ($healthyJson.version -ceq $script:AgentVersion) "Doctor JSON missing version field: $($healthyJson.version)"
     Assert-True (($healthyJson.not_tested.name -join ',') -ceq 'chat_transport,chat_contract,web_tools') 'Doctor marked untested capabilities as verified or omitted them from JSON.'
     Assert-True ($healthyJson.not_tested[0].message -like '*Unicode*error reporting*cancellation*' -and $healthyJson.not_tested[2].message -like '*ConstrainedLanguage*') 'Doctor omitted untested worker or web behavior.'
     Assert-True ((Get-DoctorCheck $report 'language_mode').message -like "* $($ExecutionContext.SessionState.LanguageMode).*" ) 'Doctor reported the wrong language mode.'
@@ -104,7 +106,7 @@ try {
     $global:ShellossusDoctorFixture.throwInnerResponseCode = 0
 
     $textOut = @(Write-AgentDoctorReport -Report $report -Mode text 6>&1 | ForEach-Object { [string]$_ }) -join "`n"
-    Assert-True ($textOut.Contains($script:Gm.BoldGreen) -and $textOut.Contains('[PASS]') -and $textOut.Contains('Shellossus doctor')) 'Write-AgentDoctorReport text mode missing ANSI status colors.'
+    Assert-True ($textOut.Contains($script:Gm.BoldGreen) -and $textOut.Contains('[PASS]') -and $textOut.Contains("Shellossus doctor v$($script:AgentVersion)")) 'Write-AgentDoctorReport text mode missing ANSI status colors or version.'
     foreach ($name in @('chat_transport', 'chat_contract', 'web_tools')) {
         Assert-True ($textOut -match ('\[NOT TESTED\][^\r\n]* ' + $name + ':')) "Doctor text did not mark $name as untested."
     }
@@ -223,6 +225,7 @@ try {
         $beforeRequestCount = $global:ShellossusDoctorFixture.requests
         $replOutput = (& $entryPoint -ConfigPath $cliConfig -Workspace $workspacePath -NoSession -NoContextFiles -NoSkills -NoPromptTemplates 6>&1 | Out-String)
         Assert-True ($global:ShellossusDoctorFixture.inputIndex -eq 3 -and $global:ShellossusDoctorFixture.requests -eq $beforeRequestCount + 1) '/doctor did not route to a single diagnostic request.'
+        Assert-True ($replOutput -like "*shellossus v$($script:AgentVersion)*") 'Startup banner did not display version.'
         Assert-True ($replOutput -like '*Shellossus doctor*' -and $replOutput -like '*Configured model is not in /models: active-model*') '/doctor did not inspect the active model.'
         Assert-True ((Read-AgentConfig -Path $cliConfig).SHELLOSSUS_MODEL -eq 'active-model') '/model in REPL did not persist SHELLOSSUS_MODEL to ConfigPath.'
         $global:ShellossusDoctorFixture.inputs = @()
@@ -298,6 +301,15 @@ try {
         $badCfgStreamReport = $badCfgStreamRaw | ConvertFrom-Json
         $badCfgStreamCheck = Get-DoctorCheck $badCfgStreamReport 'stream'
         Assert-True ($LASTEXITCODE -eq 1 -and $badCfgStreamCheck.status -eq 'fail' -and $badCfgStreamCheck.message -eq 'Stream setting must be true, false, 1, or 0.' -and ($badCfgStreamRaw -notlike '*doctor-secret-key*')) 'Doctor did not fail invalid config SHELLOSSUS_STREAM cleanly or leaked its raw value.'
+
+        # Standalone -Version (text and JSON) prints version immediately without requiring config, workspace, or network.
+        $reqBeforeVersion = $global:ShellossusDoctorFixture.requests
+        $verTextOut = (& $entryPoint -Version -ConfigPath $cliConfig -Workspace $blockedPath | Out-String).Trim()
+        Assert-True ($verTextOut -ceq "shellossus $($script:AgentVersion)") "Unexpected -Version text output: '$verTextOut'"
+        $verJsonRaw = & $entryPoint -Version -Mode json -ConfigPath $cliConfig -Workspace $blockedPath
+        $verJsonObj = $verJsonRaw | ConvertFrom-Json
+        Assert-True ($verJsonObj.type -ceq 'version' -and $verJsonObj.version -ceq $script:AgentVersion) "Unexpected -Version JSON output: '$verJsonRaw'"
+        Assert-True ($global:ShellossusDoctorFixture.requests -eq $reqBeforeVersion) '-Version triggered an unexpected network request.'
     }
     finally {
         Remove-Item Function:\Read-Host -ErrorAction SilentlyContinue

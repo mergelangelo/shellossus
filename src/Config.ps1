@@ -1,6 +1,7 @@
 # Configuration, path validation, and security boundary helpers.
 # Windows PowerShell 5.1 and ConstrainedLanguage compatible.
 
+$script:AgentVersion = '0.9.0'
 $script:RegisteredSkills = @{}
 
 function Read-AgentConfig {

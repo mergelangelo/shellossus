@@ -44,6 +44,7 @@ The configuration file is parsed strictly as plain `KEY=VALUE` data (never evalu
 | `-Setup` | off | Interactive wizard to configure endpoint, model, masked API key, and default workspace. |
 | `-ConfigPath <path>` | `~/.shellossus/.env` | Path to the `SHELLOSSUS_*` configuration file. |
 | `-Doctor` | off | Run runtime, config, workspace, session-storage, and `GET /models` checks, then exit (`0` if all checks pass/warn, `1` on any failed check). |
+| `-Version` | off | Print the `shellossus` version (`text` or `-Mode json`) and exit immediately without reading configuration or workspace state. |
 | `-Mascot` | off | Render the 20x16 half-block pixel mascot and exit. |
 
 ### Connection, Execution & Permissions
@@ -54,7 +55,7 @@ The configuration file is parsed strictly as plain `KEY=VALUE` data (never evalu
 | `-Model <id>` | `$env:SHELLOSSUS_MODEL` | Active model ID. |
 | `-Workspace <dir>` | `.` | Active workspace boundary for file tools and command working directory. |
 | `-Permission <mode>` | `Ask` | Tool permission mode: `ReadOnly`, `Ask`, `AutoEdit`, or `Auto` (see [`docs/security.md`](security.md)). |
-| `-Prompt <text>` | `''` | Run a single prompt non-interactively and exit. Required when `-Mode json` is used without `-Doctor`. |
+| `-Prompt <text>` | `''` | Run a single prompt non-interactively and exit. Required when `-Mode json` is used without `-Doctor` or `-Version`. |
 | `-LiteralPrompt` | off | Treat `-Prompt` as literal text without expanding `/template` commands or `@file` attachments. |
 | `-Mode <text\|json>` | `text` | Output format: `text` (24-bit TUI) or `json` (machine-readable JSONL event stream). |
 | `-Stream` | off | Assemble model responses over SSE (`stream = true`) across chat turns, compaction, and subagents. Responses are verified for terminal `[DONE]` and `finish_reason` before rendering or tool execution. |
@@ -182,4 +183,5 @@ In `json` mode, `stdout` emits strictly valid, ASCII-escaped JSONL objects (one 
 | `tool_execution_start` | Before a tool call executes | `id`, `name` |
 | `tool_execution_end` | After a tool call completes (or loop-guard triggers) | `id`, `name`, `result` (JSON string) |
 | `turn_end` | Turn finishes or aborts | `status` (`completed`, `error`, `loop_detected`, `step_limit_reached`), `step`, `usage_input_tokens`, `usage_output_tokens`, `error` / `rollback_error` / `recovery_manifest` |
-| `doctor` | `shellossus -Doctor -Mode json` | `checks`, `not_tested`, `failures`, `warnings`, `exit_code` |
+| `doctor` | `shellossus -Doctor -Mode json` | `version`, `checks`, `not_tested`, `failures`, `warnings`, `exit_code` |
+| `version` | `shellossus -Version -Mode json` | `version` |

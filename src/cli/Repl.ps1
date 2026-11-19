@@ -143,7 +143,7 @@ function Write-TuiStartupBanner {
     param([string]$RootPath, [string]$ConfigDir, [string]$Model)
     if ($script:OutputMode -eq 'json') { return }
     $wInit = Get-TerminalWidth
-    $hdrInit = ' ' + $script:Gm.BoldGreen + $script:Box.Dot + ' shellossus ' + $script:Gm.Grey1 + 'inline TUI' + $script:Gm.Reset + ' '
+    $hdrInit = ' ' + $script:Gm.BoldGreen + $script:Box.Dot + " shellossus v$($script:AgentVersion) " + $script:Gm.Grey1 + 'inline TUI' + $script:Gm.Reset + ' '
     $ctxLoaded = @()
     if (Get-SoulContext -Root $RootPath -ConfigDir $ConfigDir) { $ctxLoaded += 'SOUL.md' }
     if (Get-MemoryContext -Root $RootPath -ConfigDir $ConfigDir) { $ctxLoaded += 'MEMORY.md' }

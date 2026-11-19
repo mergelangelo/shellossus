@@ -234,17 +234,18 @@ function Get-AgentDoctorReport {
         @{ name = 'chat_contract'; message = 'Completion and tool-call compatibility with the configured model.' },
         @{ name = 'web_tools'; message = 'fetch_url and web_search, including their ConstrainedLanguage compatibility.' }
     )
-    return @{ checks = $checks; not_tested = $notTested; failures = $failed; warnings = $warnings; exit_code = $(if ($failed) { 1 } else { 0 }) }
+    return @{ version = [string]$script:AgentVersion; checks = $checks; not_tested = $notTested; failures = $failed; warnings = $warnings; exit_code = $(if ($failed) { 1 } else { 0 }) }
 }
 
 function Write-AgentDoctorReport {
     param($Report, [string]$Mode = 'text')
+    $reportVersion = if ($Report.version) { [string]$Report.version } else { [string]$script:AgentVersion }
     if ($Mode -eq 'json') {
-        $event = @{ type = 'doctor'; checks = @($Report.checks); not_tested = @($Report.not_tested); failures = $Report.failures; warnings = $Report.warnings; exit_code = $Report.exit_code }
+        $event = @{ type = 'doctor'; version = $reportVersion; checks = @($Report.checks); not_tested = @($Report.not_tested); failures = $Report.failures; warnings = $Report.warnings; exit_code = $Report.exit_code }
         Write-Output (ConvertTo-AsciiJson -Json ($event | ConvertTo-Json -Depth 6 -Compress))
         return
     }
-    Write-Host ($script:Gm.BoldGreen + 'Shellossus doctor' + $script:Gm.Reset)
+    Write-Host ($script:Gm.BoldGreen + "Shellossus doctor v$reportVersion" + $script:Gm.Reset)
     foreach ($check in $Report.checks) {
         $stUpper = $check.status.ToUpper()
         $stColor = switch ($stUpper) {

@@ -16,6 +16,15 @@ if (-not $LibraryOnly) {
     }
     $script:OutputMode = if ($Mode) { $Mode.ToLower() } else { 'text' }
     if ($script:OutputMode -notin @('text', 'json')) { throw 'Mode must be text or json.' }
+    if ($Version) {
+        if ($script:OutputMode -eq 'json') {
+            Write-Output (ConvertTo-AsciiJson -Json (@{ type = 'version'; version = [string]$script:AgentVersion } | ConvertTo-Json -Compress))
+        }
+        else {
+            Write-Output "shellossus $($script:AgentVersion)"
+        }
+        return
+    }
     if ($Install) {
         $targetAgentPath = if ($PSCommandPath) { $PSCommandPath } else { Join-Path $PSScriptRoot 'shellossus.ps1' }
         Invoke-AgentProfileInstall -AgentPath $targetAgentPath -ProfilePath $ProfilePath -Shortcut $Shortcut -ShortcutSpecified:($PSBoundParameters.Keys -contains 'Shortcut') -NoShortcut:$NoShortcut

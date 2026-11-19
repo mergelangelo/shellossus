@@ -54,7 +54,7 @@ This design gives maintainers clean separation of concerns and fast unit testing
 - **[`src/cli/Turn.ps1`](../src/cli/Turn.ps1):** Core agent turn loop (`Invoke-AgentTurn`, `Invoke-AgentContinue`): preflight budget check, auto-compaction on context overflow, `finish_reason` and tool-batch validation, repetition loop-guard, scoped `AGENTS.md` gating, and tool dispatch.
 - **[`src/cli/Repl.ps1`](../src/cli/Repl.ps1):** Slash-command alias resolver (`Resolve-ReplCommandAlias`), status/tree/help/skills/agents cards, `/memory` parser, and interactive pickers (`/permission`, `/reasoning`, `/context`, `/model`, `/theme`).
 - **[`src/cli/Commands.ps1`](../src/cli/Commands.ps1):** Interactive REPL handlers for `/new`, `/todo`, `/name`, `/tree`, `/fork`, `/export`, `/import`, `/copy`, `/reload`, `/save`, `/undo`, `/compact`, `/sessions` / `/resume`, `/continue`, and `!` / `!!`.
-- **[`src/Cli.ps1`](../src/Cli.ps1):** Top-level entrypoint dispatching `-InternalWorker`, `-Install`, `-Setup`, `-Mascot`, `-Doctor`, `-Export`, single-shot `-Prompt`, and the interactive REPL loop wrapped in turn transactions.
+- **[`src/Cli.ps1`](../src/Cli.ps1):** Top-level entrypoint dispatching `-InternalWorker`, `-Version`, `-Install`, `-Setup`, `-Mascot`, `-Doctor`, `-Export`, single-shot `-Prompt`, and the interactive REPL loop wrapped in turn transactions.
 
 ---
 

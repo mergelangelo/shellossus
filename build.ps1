@@ -106,6 +106,7 @@ param(
     [switch]$HideReasoning,
     [switch]$Diagnostics,
     [switch]$Doctor,
+    [switch]$Version,
     [switch]$Mascot,
     [switch]$Continue,
     [switch]$Setup,
