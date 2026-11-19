@@ -2038,7 +2038,7 @@ description: Complete file contents, up to 1 MiB.
 property: overwrite
 description: Set true to overwrite an existing file (saves a backup).
 property: path
-description: Workspace-relative text file path. Parent directory must exist.
+description: Workspace-relative text file path. Missing parent directories inside the workspace are created automatically.
 
 tool: edit_file
 description: Replace one or more unique blocks in a UTF-8 text file (supports single old_text/new_text or batch edits[] array; saves a backup).
@@ -2053,7 +2053,7 @@ description: Single edit: replacement text.
 property: old_text
 description: Single edit: nonempty text occurring once in the file.
 property: path
-description: Workspace-relative text file path. Parent directory must exist.
+description: Workspace-relative path to an existing text file.
 
 tool: run_command
 description: Execute PowerShell with the user's OS permissions, starting in the workspace directory.

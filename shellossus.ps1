@@ -3149,7 +3149,7 @@ function Get-AgentToolSpecifications {
             description = 'Create a UTF-8 text file (or overwrite when overwrite=true).'
             required = @('path', 'content')
             properties = @{
-                path = @{ type = 'string'; description = 'Workspace-relative text file path. Parent directory must exist.' }
+                path = @{ type = 'string'; description = 'Workspace-relative text file path. Missing parent directories inside the workspace are created automatically.' }
                 content = @{ type = 'string'; description = 'Complete file contents, up to 1 MiB.' }
                 overwrite = @{ type = 'boolean'; description = 'Set true to overwrite an existing file (saves a backup).' }
             }
@@ -3160,7 +3160,7 @@ function Get-AgentToolSpecifications {
             required = @('path')
             extra = 'Test-AgentEditFileArguments'
             properties = @{
-                path = @{ type = 'string'; description = 'Workspace-relative text file path. Parent directory must exist.' }
+                path = @{ type = 'string'; description = 'Workspace-relative path to an existing text file.' }
                 old_text = @{ type = 'string'; description = 'Single edit: nonempty text occurring once in the file.' }
                 new_text = @{ type = 'string'; description = 'Single edit: replacement text.' }
                 edits = @{
