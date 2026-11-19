@@ -86,6 +86,9 @@ param(
     [string]$CompactThreshold = $env:SHELLOSSUS_COMPACT_THRESHOLD,
     [string]$RequestTimeoutSec = $env:SHELLOSSUS_REQUEST_TIMEOUT_SEC,
     [switch]$Stream,
+    [string]$AuthHeader = $env:SHELLOSSUS_AUTH_HEADER,
+    [string]$MaxTokens = $env:SHELLOSSUS_MAX_TOKENS,
+    [string]$Temperature = $env:SHELLOSSUS_TEMPERATURE,
     [string]$Permission = 'Ask',
     [string]$Theme = $env:SHELLOSSUS_THEME,
     [string]$ReasoningEffort = '',
@@ -126,6 +129,15 @@ Remove-Variable -Name RequestTimeoutSec -Scope Script -ErrorAction SilentlyConti
 $script:StartupStreamBound = ($PSBoundParameters.Keys -contains 'Stream')
 $script:StartupStreamValue = [bool]$Stream
 Remove-Variable -Name Stream -Scope Script -ErrorAction SilentlyContinue
+$script:StartupAuthHeaderSpec = $AuthHeader
+$script:StartupAuthHeaderBound = ($PSBoundParameters.Keys -contains 'AuthHeader')
+Remove-Variable -Name AuthHeader -Scope Script -ErrorAction SilentlyContinue
+$script:StartupMaxTokensSpec = $MaxTokens
+$script:StartupMaxTokensBound = ($PSBoundParameters.Keys -contains 'MaxTokens')
+Remove-Variable -Name MaxTokens -Scope Script -ErrorAction SilentlyContinue
+$script:StartupTemperatureSpec = $Temperature
+$script:StartupTemperatureBound = ($PSBoundParameters.Keys -contains 'Temperature')
+Remove-Variable -Name Temperature -Scope Script -ErrorAction SilentlyContinue
 
 # Windows PowerShell 5.1 compatible. No downloaded executables or modules.
 # Auto-generated from src/*.ps1 by build.ps1. Edit files in src/ and run .\build.ps1.

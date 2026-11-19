@@ -9,6 +9,9 @@ param(
     [string]$CompactThreshold = $env:SHELLOSSUS_COMPACT_THRESHOLD,
     [string]$RequestTimeoutSec = $env:SHELLOSSUS_REQUEST_TIMEOUT_SEC,
     [switch]$Stream,
+    [string]$AuthHeader = $env:SHELLOSSUS_AUTH_HEADER,
+    [string]$MaxTokens = $env:SHELLOSSUS_MAX_TOKENS,
+    [string]$Temperature = $env:SHELLOSSUS_TEMPERATURE,
     [string]$Permission = 'Ask',
     [string]$Theme = $env:SHELLOSSUS_THEME,
     [string]$ReasoningEffort = '',
@@ -49,6 +52,15 @@ Remove-Variable -Name RequestTimeoutSec -Scope Script -ErrorAction SilentlyConti
 $script:StartupStreamBound = ($PSBoundParameters.Keys -contains 'Stream')
 $script:StartupStreamValue = [bool]$Stream
 Remove-Variable -Name Stream -Scope Script -ErrorAction SilentlyContinue
+$script:StartupAuthHeaderSpec = $AuthHeader
+$script:StartupAuthHeaderBound = ($PSBoundParameters.Keys -contains 'AuthHeader')
+Remove-Variable -Name AuthHeader -Scope Script -ErrorAction SilentlyContinue
+$script:StartupMaxTokensSpec = $MaxTokens
+$script:StartupMaxTokensBound = ($PSBoundParameters.Keys -contains 'MaxTokens')
+Remove-Variable -Name MaxTokens -Scope Script -ErrorAction SilentlyContinue
+$script:StartupTemperatureSpec = $Temperature
+$script:StartupTemperatureBound = ($PSBoundParameters.Keys -contains 'Temperature')
+Remove-Variable -Name Temperature -Scope Script -ErrorAction SilentlyContinue
 
 # Windows PowerShell 5.1 compatible. No downloaded executables or modules.
 # Auto-generated from src/*.ps1 by build.ps1. Edit files in src/ and run .\build.ps1.
@@ -69,7 +81,7 @@ function Read-AgentConfig {
         $lineNumber++
         $trimmed = $line.Trim()
         if (-not $trimmed -or $trimmed.StartsWith('#')) { continue }
-        if ($trimmed -notmatch '^(SHELLOSSUS_(?:BASE_URL|MODEL|API_KEY|WORKSPACE|CONTEXT_WINDOW|COMPACT_THRESHOLD|REQUEST_TIMEOUT_SEC|STREAM|THEME|SEARCH_URL))\s*=(.*)$') {
+        if ($trimmed -notmatch '^(SHELLOSSUS_(?:BASE_URL|MODEL|API_KEY|WORKSPACE|CONTEXT_WINDOW|COMPACT_THRESHOLD|REQUEST_TIMEOUT_SEC|STREAM|THEME|SEARCH_URL|AUTH_HEADER|MAX_TOKENS|TEMPERATURE|EXTRA_HEADERS))\s*=(.*)$') {
             throw "Invalid config entry at line $lineNumber. Expected a supported SHELLOSSUS_* key=value."
         }
         $normalizedKey = $Matches[1].ToUpper()
@@ -181,20 +193,38 @@ function Save-AgentConfig {
         if ($value.Contains('"')) { throw 'Config values cannot contain double quotes.' }
         $lines += $key + '="' + $value + '"'
     }
-    foreach ($optKey in @('SHELLOSSUS_CONTEXT_WINDOW', 'SHELLOSSUS_COMPACT_THRESHOLD', 'SHELLOSSUS_REQUEST_TIMEOUT_SEC', 'SHELLOSSUS_STREAM', 'SHELLOSSUS_THEME', 'SHELLOSSUS_SEARCH_URL')) {
+    foreach ($optKey in @('SHELLOSSUS_CONTEXT_WINDOW', 'SHELLOSSUS_COMPACT_THRESHOLD', 'SHELLOSSUS_REQUEST_TIMEOUT_SEC', 'SHELLOSSUS_STREAM', 'SHELLOSSUS_THEME', 'SHELLOSSUS_SEARCH_URL', 'SHELLOSSUS_AUTH_HEADER', 'SHELLOSSUS_MAX_TOKENS', 'SHELLOSSUS_TEMPERATURE', 'SHELLOSSUS_EXTRA_HEADERS')) {
         if ($Config.ContainsKey($optKey) -and $null -ne $Config[$optKey] -and ([string]$Config[$optKey]).Length -gt 0) {
             $optVal = [string]$Config[$optKey]
-            if ($optVal -match "[`r`n]" -or $optVal.Contains('"')) { throw 'Invalid optional config value.' }
-            $lines += $optKey + '="' + $optVal + '"'
+            if ($optVal -match "[`r`n]") { throw 'Invalid optional config value.' }
+            if ($optKey -eq 'SHELLOSSUS_EXTRA_HEADERS' -and $optVal.StartsWith('{') -and $optVal.EndsWith('}')) {
+                $lines += $optKey + '=' + $optVal
+            }
+            elseif ($optKey -eq 'SHELLOSSUS_EXTRA_HEADERS' -and $optVal.Contains('"')) {
+                if ($optVal.Contains("'")) { throw 'Invalid optional config value.' }
+                $lines += $optKey + "='" + $optVal + "'"
+            }
+            else {
+                if ($optVal.Contains('"')) { throw 'Invalid optional config value.' }
+                $lines += $optKey + '="' + $optVal + '"'
+            }
         }
     }
+    $hasSecretExtraHeaders = $false
+    if ($Config.ContainsKey('SHELLOSSUS_EXTRA_HEADERS') -and $Config['SHELLOSSUS_EXTRA_HEADERS']) {
+        $ehStr = [string]$Config['SHELLOSSUS_EXTRA_HEADERS']
+        if ($ehStr -match '(?i)"[^"]*(?:key|token|secret|auth|pass|cookie|cred)[^"]*"\s*:\s*"[^"]{6,}"') {
+            $hasSecretExtraHeaders = $true
+        }
+    }
+    $hasSecrets = [bool]($Config.SHELLOSSUS_API_KEY -or $hasSecretExtraHeaders)
     $Path = Format-ConfigPath -Path $Path
     $parent = Split-Path $Path -Parent
-    if ($Config.SHELLOSSUS_API_KEY -and ($Path -match '^[\\/]{2}' -or (Test-PathHasReparsePoint -Path $Path))) {
+    if ($hasSecrets -and ($Path -match '^[\\/]{2}' -or (Test-PathHasReparsePoint -Path $Path))) {
         throw 'Choose a local config path without reparse points or use SHELLOSSUS_API_KEY from the environment.'
     }
     if ($parent -and -not (Test-Path -LiteralPath $parent)) { New-Item -ItemType Directory -Path $parent -ErrorAction Stop | Out-Null }
-    if (-not $Config.SHELLOSSUS_API_KEY) {
+    if (-not $hasSecrets) {
         Set-Content -LiteralPath $Path -Value $lines -Encoding UTF8 -ErrorAction Stop
         return
     }
@@ -2352,6 +2382,10 @@ $script:MaxRequestTimeoutSec = 1800
 $script:MaxStepRetryBudgetSec = 3600
 $script:StreamRequests = $false
 $script:SearchUrl = ''
+$script:AuthHeaderName = 'Authorization'
+$script:MaxOutputTokens = 0
+$script:ModelTemperature = $null
+$script:ExtraHttpHeaders = @{}
 
 function ConvertTo-AgentRequestTimeout {
     param([AllowEmptyString()][string]$TimeoutSpec)
@@ -2388,6 +2422,194 @@ function Set-AgentStreamSetting {
     $val = ConvertTo-AgentStreamSetting -StreamSpec $StreamSpec
     $script:StreamRequests = [bool]$val
     return $script:StreamRequests
+}
+
+function ConvertTo-AgentAuthHeaderName {
+    param([AllowEmptyString()][string]$HeaderSpec)
+    if ($null -eq $HeaderSpec) { return 'Authorization' }
+    if ($HeaderSpec -match '[\r\n]') {
+        throw 'AuthHeader must be a valid HTTP header name (letters, digits, hyphens).'
+    }
+    $trimmed = $HeaderSpec.Trim()
+    if (-not $trimmed) { return 'Authorization' }
+    if ($trimmed -notmatch '\A[A-Za-z][A-Za-z0-9-]{0,63}\z') {
+        throw 'AuthHeader must be a valid HTTP header name (letters, digits, hyphens).'
+    }
+    if ($trimmed -in @('Content-Type', 'Content-Length', 'Host', 'Accept', 'Transfer-Encoding', 'Connection', 'User-Agent')) {
+        throw "AuthHeader cannot use reserved HTTP header '$trimmed'."
+    }
+    return $trimmed
+}
+
+function Set-AgentAuthHeader {
+    param([AllowEmptyString()][string]$HeaderSpec)
+    $val = ConvertTo-AgentAuthHeaderName -HeaderSpec $HeaderSpec
+    $script:AuthHeaderName = $val
+    return $script:AuthHeaderName
+}
+
+function ConvertTo-AgentMaxTokens {
+    param([AllowEmptyString()][string]$MaxTokensSpec)
+    $err = 'MaxTokens must be an integer between 1 and 1000000.'
+    if ($null -eq $MaxTokensSpec) { return 0 }
+    if ($MaxTokensSpec -match '[\r\n]') { throw $err }
+    $trimmed = $MaxTokensSpec.Trim()
+    if (-not $trimmed) { return 0 }
+    if ($trimmed -notmatch '\A[0-9]{1,7}\z') { throw $err }
+    $val = [int]$trimmed
+    if ($val -lt 1 -or $val -gt 1000000) { throw $err }
+    return $val
+}
+
+function Set-AgentMaxTokens {
+    param([AllowEmptyString()][string]$MaxTokensSpec)
+    $val = ConvertTo-AgentMaxTokens -MaxTokensSpec $MaxTokensSpec
+    $script:MaxOutputTokens = $val
+    return $script:MaxOutputTokens
+}
+
+function ConvertTo-AgentTemperature {
+    param([AllowEmptyString()][string]$TemperatureSpec)
+    $err = 'Temperature must be a decimal number between 0 and 2 (using dot decimal).'
+    if ($null -eq $TemperatureSpec) { return $null }
+    if ($TemperatureSpec -match '[\r\n]') { throw $err }
+    $trimmed = $TemperatureSpec.Trim()
+    if (-not $trimmed) { return $null }
+    if ($trimmed -notmatch '\A(?:[01](?:\.[0-9]{1,4})?|2(?:\.0{1,4})?)\z') { throw $err }
+    return [double]$trimmed
+}
+
+function Set-AgentTemperature {
+    param([AllowEmptyString()][string]$TemperatureSpec)
+    $val = ConvertTo-AgentTemperature -TemperatureSpec $TemperatureSpec
+    $script:ModelTemperature = $val
+    return $script:ModelTemperature
+}
+
+function ConvertFrom-AgentExtraHeaders {
+    param([AllowEmptyString()][string]$HeadersSpec, [string]$AuthHeaderName = $script:AuthHeaderName)
+    if ($null -eq $HeadersSpec) { return @{} }
+    $trimmed = $HeadersSpec.Trim()
+    if (-not $trimmed) { return @{} }
+    if ($trimmed.Length -gt 4096) {
+        throw 'SHELLOSSUS_EXTRA_HEADERS exceeds the 4096-character limit.'
+    }
+    if (-not $trimmed.StartsWith('{')) {
+        throw 'SHELLOSSUS_EXTRA_HEADERS must be a JSON object of string header names and values.'
+    }
+    $parsed = $null
+    try {
+        $parsed = $trimmed | ConvertFrom-Json -ErrorAction Stop
+    }
+    catch {
+        throw 'SHELLOSSUS_EXTRA_HEADERS is not valid JSON.'
+    }
+    if ($null -eq $parsed -or $parsed -is [string] -or $parsed -is [ValueType] -or $parsed -is [array]) {
+        throw 'SHELLOSSUS_EXTRA_HEADERS must be a JSON object.'
+    }
+    $propNames = if ($parsed -is [hashtable]) { @($parsed.Keys) } else { @(Get-Member -InputObject $parsed -MemberType NoteProperty | ForEach-Object { $_.Name }) }
+    if ($propNames.Count -gt 16) {
+        throw 'SHELLOSSUS_EXTRA_HEADERS may contain at most 16 headers.'
+    }
+    $effAuth = if ($AuthHeaderName) { $AuthHeaderName } else { 'Authorization' }
+    $reserved = @('Authorization', 'Content-Type', 'Content-Length', 'Host', 'Accept', 'Transfer-Encoding', 'Connection', 'User-Agent', $effAuth)
+    $result = @{}
+    foreach ($k in $propNames) {
+        $name = [string]$k
+        if ($name -notmatch '\A[A-Za-z][A-Za-z0-9-]{0,63}\z') {
+            throw 'SHELLOSSUS_EXTRA_HEADERS contains an invalid HTTP header name.'
+        }
+        foreach ($r in $reserved) {
+            if ($name -ieq $r) {
+                throw "SHELLOSSUS_EXTRA_HEADERS cannot override reserved or auth header '$name'."
+            }
+        }
+        $val = $parsed.$k
+        if ($null -eq $val -or $val -isnot [string]) {
+            throw "Header '$name' in SHELLOSSUS_EXTRA_HEADERS must have a string value."
+        }
+        if ($val.Length -gt 1024 -or ($val -match '[^\x20-\x7E]')) {
+            throw "Header '$name' in SHELLOSSUS_EXTRA_HEADERS contains invalid characters or exceeds length limit."
+        }
+        $result[$name] = $val
+    }
+    return $result
+}
+
+function Set-AgentExtraHeaders {
+    param([AllowEmptyString()][string]$HeadersSpec)
+    $val = ConvertFrom-AgentExtraHeaders -HeadersSpec $HeadersSpec -AuthHeaderName $script:AuthHeaderName
+    $script:ExtraHttpHeaders = $val
+    return $script:ExtraHttpHeaders
+}
+
+function New-AgentApiHeaders {
+    param(
+        [string]$ApiKey,
+        [string]$AuthHeaderName = $script:AuthHeaderName,
+        [hashtable]$ExtraHeaders = $script:ExtraHttpHeaders,
+        [switch]$AcceptSse
+    )
+    $effAuth = if ($AuthHeaderName) { $AuthHeaderName } else { 'Authorization' }
+    $headers = @{}
+    if ($ExtraHeaders) {
+        foreach ($k in $ExtraHeaders.Keys) {
+            $name = [string]$k
+            if ($name -ieq $effAuth -or $name -in @('Authorization', 'Content-Type', 'Content-Length', 'Host', 'Accept', 'Transfer-Encoding', 'Connection', 'User-Agent')) {
+                continue
+            }
+            $headers[$name] = [string]$ExtraHeaders[$k]
+        }
+    }
+    if ($effAuth -ieq 'Authorization') {
+        $headers['Authorization'] = ('Bearer ' + $ApiKey)
+    }
+    else {
+        $headers[$effAuth] = [string]$ApiKey
+    }
+    if ($AcceptSse) {
+        $headers['Accept'] = 'text/event-stream, application/json'
+    }
+    return $headers
+}
+
+function Protect-AgentHeaderSecrets {
+    param(
+        [AllowEmptyString()][string]$Text,
+        [string]$ApiKey = '',
+        [hashtable]$ExtraHeaders = $script:ExtraHttpHeaders
+    )
+    if (-not $Text) { return $Text }
+    $out = [string]$Text
+    if ($ApiKey) {
+        $out = $out.Replace($ApiKey, '[redacted]')
+        $trimKey = $ApiKey.Trim()
+        if ($trimKey -and $trimKey -ne $ApiKey) {
+            $out = $out.Replace($trimKey, '[redacted]')
+        }
+    }
+    if ($ExtraHeaders) {
+        foreach ($k in $ExtraHeaders.Keys) {
+            $name = [string]$k
+            if ($name -match '(?i)(key|token|secret|auth|pass|cookie|cred)') {
+                $rawVal = [string]$ExtraHeaders[$k]
+                if ($rawVal -and $rawVal.Length -ge 6) {
+                    $out = $out.Replace($rawVal, '[redacted]')
+                }
+                $trimVal = $rawVal.Trim()
+                if ($trimVal -and $trimVal.Length -ge 6 -and $trimVal -cne $rawVal) {
+                    $out = $out.Replace($trimVal, '[redacted]')
+                }
+                if ($trimVal -match '^(?i)(?:Bearer|Basic|Token)\s+(.+)$') {
+                    $bareSecret = $Matches[1].Trim()
+                    if ($bareSecret.Length -ge 6) {
+                        $out = $out.Replace($bareSecret, '[redacted]')
+                    }
+                }
+            }
+        }
+    }
+    return $out
 }
 
 function Get-CurrentTurnWritePathsSince {
@@ -6088,6 +6310,7 @@ function Invoke-ShellCommand {
             $proc = Invoke-WithProcessEnvironment -Values @{
                 SHELLOSSUS_API_KEY = $null
                 OPENAI_API_KEY = $null
+                SHELLOSSUS_EXTRA_HEADERS = $null
             } -Action {
                 Start-Process -FilePath $shellExe -ArgumentList $argList -WorkingDirectory $rootFull -RedirectStandardOutput $outTemp.FullName -RedirectStandardError $errTemp.FullName -NoNewWindow -PassThru -ErrorAction Stop
             }
@@ -8249,6 +8472,11 @@ function Invoke-InternalSubagentWorker {
     if ($env:SHELLOSSUS_SUB_REQUEST_TIMEOUT) { $workerArgs.RequestTimeoutSec = $env:SHELLOSSUS_SUB_REQUEST_TIMEOUT }
     if ($env:SHELLOSSUS_SUB_STREAM -eq '1') { $workerArgs.Stream = $true }
     elseif ($env:SHELLOSSUS_SUB_STREAM -eq '0') { $workerArgs.Stream = $false }
+    if ($env:SHELLOSSUS_SUB_AUTH_HEADER) { $workerArgs.AuthHeader = $env:SHELLOSSUS_SUB_AUTH_HEADER }
+    if ($env:SHELLOSSUS_SUB_MAX_TOKENS -eq '__CLEAR__') { $workerArgs.MaxTokens = '' }
+    elseif ($env:SHELLOSSUS_SUB_MAX_TOKENS) { $workerArgs.MaxTokens = $env:SHELLOSSUS_SUB_MAX_TOKENS }
+    if ($env:SHELLOSSUS_SUB_TEMPERATURE -eq '__CLEAR__') { $workerArgs.Temperature = '' }
+    elseif ($env:SHELLOSSUS_SUB_TEMPERATURE) { $workerArgs.Temperature = $env:SHELLOSSUS_SUB_TEMPERATURE }
     if ($env:SHELLOSSUS_SUB_CONFIG) { $workerArgs.ConfigPath = $env:SHELLOSSUS_SUB_CONFIG }
     if ($env:SHELLOSSUS_SUB_NO_SKILLS -eq '1') { $workerArgs.NoSkills = $true }
     if ($env:SHELLOSSUS_SUB_NO_TEMPLATES -eq '1') { $workerArgs.NoPromptTemplates = $true }
@@ -8367,6 +8595,10 @@ function Invoke-ParallelSubagentProcesses {
                 if ($script:OutputMode -ne 'json') {
                     Write-Host ($script:Gm.Aqua + ("  [run_agent:{0}] (parallel ReadOnly) " -f (Format-TuiText $roleObj.name)) + $script:Gm.Grey1 + (Invoke-TruncateLine -Line (Format-TuiText $t.prompt) -MaxChars 90).text + $script:Gm.Reset)
                 }
+                $subExtraHdrJson = if ($script:ExtraHttpHeaders -and $script:ExtraHttpHeaders.Count -gt 0) {
+                    ConvertTo-AsciiJson -Json ($script:ExtraHttpHeaders | ConvertTo-Json -Compress)
+                }
+                else { '{}' }
                 $proc = Invoke-WithProcessEnvironment -Values @{
                     SHELLOSSUS_API_KEY = $effKey
                     OPENAI_API_KEY = $null
@@ -8380,6 +8612,13 @@ function Invoke-ParallelSubagentProcesses {
                     SHELLOSSUS_SUB_REQUEST_TIMEOUT = [string]$script:RequestTimeoutSec
                     SHELLOSSUS_STREAM = $null
                     SHELLOSSUS_SUB_STREAM = $(if ($script:StreamRequests) { '1' } else { '0' })
+                    SHELLOSSUS_AUTH_HEADER = $null
+                    SHELLOSSUS_SUB_AUTH_HEADER = $(if ($script:AuthHeaderName) { [string]$script:AuthHeaderName } else { 'Authorization' })
+                    SHELLOSSUS_MAX_TOKENS = $null
+                    SHELLOSSUS_SUB_MAX_TOKENS = $(if ($script:MaxOutputTokens -gt 0) { [string]$script:MaxOutputTokens } else { '__CLEAR__' })
+                    SHELLOSSUS_TEMPERATURE = $null
+                    SHELLOSSUS_SUB_TEMPERATURE = $(if ($null -ne $script:ModelTemperature) { ([string]$script:ModelTemperature).Replace(',', '.') } else { '__CLEAR__' })
+                    SHELLOSSUS_EXTRA_HEADERS = $subExtraHdrJson
                     SHELLOSSUS_SUB_PROMPT = $promptTemp.FullName
                     SHELLOSSUS_SUB_TOOLS = ($childTools -join ',')
                     SHELLOSSUS_SUB_NO_TOOLS = $(if ($childTools.Count -eq 0) { '1' } else { '0' })
@@ -8497,7 +8736,7 @@ function Invoke-ParallelSubagentProcesses {
                 }
                 if (-not $w.timed_out -and (Test-Path -LiteralPath $w.err_file)) {
                     $errRaw = Get-Content -LiteralPath $w.err_file -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
-                    $errText = Get-AgentWorkerErrorText -Raw $errRaw
+                    $errText = Protect-AgentHeaderSecrets -Text (Get-AgentWorkerErrorText -Raw $errRaw) -ApiKey $effKey -ExtraHeaders $script:ExtraHttpHeaders
                     if ($errText -and (-not $sawTurnEnd -or -not $replyText)) {
                         $wStatus = 'error'
                         $replyText = if ($replyText) { $replyText + "`nSubagent error: " + $errText } else { 'Subagent error: ' + $errText }
@@ -11501,7 +11740,12 @@ function Test-DoctorSessionDirectory {
 }
 
 function Invoke-DoctorModelsRequest {
-    param([string]$Uri, [string]$ApiKey)
+    param(
+        [string]$Uri,
+        [string]$ApiKey,
+        [string]$AuthHeaderName = $script:AuthHeaderName,
+        [hashtable]$ExtraHeaders = $script:ExtraHttpHeaders
+    )
     $responseFile = $null
     try {
         $responseFile = New-AgentTempFile
@@ -11509,7 +11753,8 @@ function Invoke-DoctorModelsRequest {
         # Do not follow redirects with the user's credentials.
         # Avoid -PassThru: older PowerShell versions leave -OutFile empty with it.
         # A successful response has no pipeline value; HTTP failures enter catch.
-        $null = Invoke-WebRequest -Uri $Uri -Method Get -Headers @{ Authorization = ('Bearer ' + $ApiKey) } -UseBasicParsing -OutFile $responseFile.FullName -MaximumRedirection 0 -TimeoutSec 10 -ErrorAction Stop
+        $docHeaders = New-AgentApiHeaders -ApiKey $ApiKey -AuthHeaderName $AuthHeaderName -ExtraHeaders $ExtraHeaders
+        $null = Invoke-WebRequest -Uri $Uri -Method Get -Headers $docHeaders -UseBasicParsing -OutFile $responseFile.FullName -MaximumRedirection 0 -TimeoutSec 10 -ErrorAction Stop
         if ((Get-Item -LiteralPath $responseFile.FullName).Length -gt 1MB) {
             return @{ code = 200; valid_catalog = $false; ids = @() }
         }
@@ -11554,7 +11799,11 @@ function Get-AgentDoctorReport {
         [string]$ConfigState = 'loaded',
         [string]$KeyStorageWarning,
         [string]$RequestTimeoutSpec = '',
-        [string]$StreamSpec = ''
+        [string]$StreamSpec = '',
+        [string]$AuthHeaderSpec = '',
+        [string]$MaxTokensSpec = '',
+        [string]$TemperatureSpec = '',
+        [string]$ExtraHeadersSpec = ''
     )
     $checks = @()
     $version = $PSVersionTable.PSVersion
@@ -11605,6 +11854,40 @@ function Get-AgentDoctorReport {
     else {
         $checks += @{ name = 'stream'; status = 'fail'; message = 'Stream setting must be true, false, 1, or 0.' }
     }
+    $resolvedAuthHeader = if ($script:AuthHeaderName) { [string]$script:AuthHeaderName } else { 'Authorization' }
+    $authHeaderValid = $true
+    if ($null -ne $AuthHeaderSpec -and $AuthHeaderSpec.Trim().Length -gt 0) {
+        try { $resolvedAuthHeader = ConvertTo-AgentAuthHeaderName -HeaderSpec $AuthHeaderSpec }
+        catch { $authHeaderValid = $false }
+    }
+    if (-not $authHeaderValid) {
+        $checks += @{ name = 'auth_header'; status = 'fail'; message = 'AuthHeader must be a valid non-reserved HTTP header name (letters, digits, hyphens).' }
+    }
+    $maxTokensValid = $true
+    if ($null -ne $MaxTokensSpec -and $MaxTokensSpec.Trim().Length -gt 0) {
+        try { $null = ConvertTo-AgentMaxTokens -MaxTokensSpec $MaxTokensSpec }
+        catch { $maxTokensValid = $false }
+    }
+    if (-not $maxTokensValid) {
+        $checks += @{ name = 'max_tokens'; status = 'fail'; message = 'MaxTokens must be an integer between 1 and 1000000.' }
+    }
+    $tempValid = $true
+    if ($null -ne $TemperatureSpec -and $TemperatureSpec.Trim().Length -gt 0) {
+        try { $null = ConvertTo-AgentTemperature -TemperatureSpec $TemperatureSpec }
+        catch { $tempValid = $false }
+    }
+    if (-not $tempValid) {
+        $checks += @{ name = 'temperature'; status = 'fail'; message = 'Temperature must be a decimal number between 0 and 2 (using dot decimal).' }
+    }
+    $resolvedExtraHeaders = if ($script:ExtraHttpHeaders) { $script:ExtraHttpHeaders } else { @{} }
+    $extraHeadersValid = $true
+    if ($null -ne $ExtraHeadersSpec -and $ExtraHeadersSpec.Trim().Length -gt 0) {
+        try { $resolvedExtraHeaders = ConvertFrom-AgentExtraHeaders -HeadersSpec $ExtraHeadersSpec -AuthHeaderName $resolvedAuthHeader }
+        catch { $extraHeadersValid = $false }
+    }
+    if (-not $extraHeadersValid) {
+        $checks += @{ name = 'extra_headers'; status = 'fail'; message = 'SHELLOSSUS_EXTRA_HEADERS must be a valid JSON object of safe HTTP header names and single-line string values.' }
+    }
     try {
         $root = Get-Item -LiteralPath $Workspace -Force -ErrorAction Stop
         if (-not $root.PSIsContainer) { throw 'Expected a directory.' }
@@ -11651,8 +11934,11 @@ function Get-AgentDoctorReport {
         }
         $checks += @{ name = 'endpoint'; status = 'info'; message = $endpointMessage }
     }
+    elseif (-not $authHeaderValid -or -not $extraHeadersValid) {
+        $checks += @{ name = 'endpoint'; status = 'fail'; message = "Network check skipped due to invalid gateway header settings. Base URL: $BaseUrl" }
+    }
     else {
-        $probe = Invoke-DoctorModelsRequest -Uri ($BaseUrl.TrimEnd('/') + '/models') -ApiKey $ApiKey
+        $probe = Invoke-DoctorModelsRequest -Uri ($BaseUrl.TrimEnd('/') + '/models') -ApiKey $ApiKey -AuthHeaderName $resolvedAuthHeader -ExtraHeaders $resolvedExtraHeaders
         $status = 'fail'
         $message = 'Endpoint check failed. Check DNS, proxy/VPN, TLS trust, firewall rules, and the API base URL. The request has a 10-second timeout (DNS resolution may take longer).'
         if ($probe.code -eq 200) {
@@ -11685,14 +11971,8 @@ function Get-AgentDoctorReport {
         $checks += @{ name = 'endpoint'; status = $status; message = ($message + " Base URL: $BaseUrl") }
     }
     # Never include server bodies, headers, or raw exceptions in a shareable report.
-    $trimmedKey = if ($hasKey) { $ApiKey.Trim() } else { '' }
     foreach ($check in $checks) {
-        if ($hasKey) {
-            $check.message = $check.message.Replace($ApiKey, '[redacted]')
-            if ($trimmedKey -and $trimmedKey -ne $ApiKey) {
-                $check.message = $check.message.Replace($trimmedKey, '[redacted]')
-            }
-        }
+        $check.message = Protect-AgentHeaderSecrets -Text $check.message -ApiKey $(if ($hasKey) { $ApiKey } else { '' }) -ExtraHeaders $resolvedExtraHeaders
         $check.message = Format-TuiText $check.message
     }
     $failed = @($checks | Where-Object { $_.status -eq 'fail' }).Count
@@ -12581,15 +12861,20 @@ function Wait-AgentProcessWithSpinner {
 
 function Invoke-InternalHttpWorker {
     $script:InternalWorkerFailed = $false
+    $workerAuthHdr = 'Authorization'
+    $workerExtraHdrs = @{}
     try {
         if (-not $env:SHELLOSSUS_HTTP_URI) { throw 'HTTP worker URI is required.' }
         if (-not $env:SHELLOSSUS_HTTP_IN) { throw 'HTTP worker input file is required.' }
         if (-not $env:SHELLOSSUS_HTTP_OUT) { throw 'HTTP worker output file is required.' }
         $timeoutVal = if ($env:SHELLOSSUS_HTTP_TIMEOUT) { [int]$env:SHELLOSSUS_HTTP_TIMEOUT } else { 180 }
-        $workerHeaders = @{ Authorization = ('Bearer ' + $env:SHELLOSSUS_API_KEY) }
-        if ($env:SHELLOSSUS_HTTP_STREAM -eq '1') {
-            $workerHeaders['Accept'] = 'text/event-stream, application/json'
+        if ($env:SHELLOSSUS_HTTP_AUTH_HEADER) {
+            $workerAuthHdr = ConvertTo-AgentAuthHeaderName -HeaderSpec $env:SHELLOSSUS_HTTP_AUTH_HEADER
         }
+        if ($env:SHELLOSSUS_HTTP_EXTRA_HEADERS) {
+            $workerExtraHdrs = ConvertFrom-AgentExtraHeaders -HeadersSpec $env:SHELLOSSUS_HTTP_EXTRA_HEADERS -AuthHeaderName $workerAuthHdr
+        }
+        $workerHeaders = New-AgentApiHeaders -ApiKey $env:SHELLOSSUS_API_KEY -AuthHeaderName $workerAuthHdr -ExtraHeaders $workerExtraHdrs -AcceptSse:($env:SHELLOSSUS_HTTP_STREAM -eq '1')
         $null = Microsoft.PowerShell.Utility\Invoke-WebRequest -Uri $env:SHELLOSSUS_HTTP_URI -Method 'Post' -Headers $workerHeaders -ContentType 'application/json; charset=utf-8' -InFile $env:SHELLOSSUS_HTTP_IN -OutFile $env:SHELLOSSUS_HTTP_OUT -MaximumRedirection 0 -TimeoutSec $timeoutVal -UseBasicParsing -ErrorAction Stop
     }
     catch {
@@ -12621,7 +12906,7 @@ function Invoke-InternalHttpWorker {
             catch {}
         }
         if ($env:SHELLOSSUS_HTTP_ERR) {
-            if ($env:SHELLOSSUS_API_KEY) { $msg = $msg.Replace($env:SHELLOSSUS_API_KEY, '[redacted]') }
+            $msg = Protect-AgentHeaderSecrets -Text $msg -ApiKey $env:SHELLOSSUS_API_KEY -ExtraHeaders $workerExtraHdrs
             Set-AgentUtf8Content -LiteralPath $env:SHELLOSSUS_HTTP_ERR -Value $msg
         }
         $script:InternalWorkerFailed = $true
@@ -12642,10 +12927,7 @@ function Invoke-AgentHttpRequest {
     $asciiBody = ConvertTo-AsciiJson -Json $Body
     $iwrCmd = Get-Command -Name 'Invoke-WebRequest' -ErrorAction SilentlyContinue
     if ((-not $ForceBackgroundWorker) -and (($iwrCmd -and $iwrCmd.CommandType -eq 'Function') -or $script:DisableAsyncHttp)) {
-        $reqHeaders = @{ Authorization = "Bearer $ApiKey" }
-        if ($script:StreamRequests) {
-            $reqHeaders['Accept'] = 'text/event-stream, application/json'
-        }
+        $reqHeaders = New-AgentApiHeaders -ApiKey $ApiKey -AuthHeaderName $script:AuthHeaderName -ExtraHeaders $script:ExtraHttpHeaders -AcceptSse:([bool]$script:StreamRequests)
         $request = @{
             Uri = $Uri
             Method = 'Post'
@@ -12662,7 +12944,7 @@ function Invoke-AgentHttpRequest {
         catch {
             $script:LastHttpRetryAfterSec = Get-AgentRetryAfterSeconds -ErrorRecord $_
             $message = Format-AgentError -ErrorRecord $_
-            if ($ApiKey) { $message = $message.Replace($ApiKey, '[redacted]') }
+            $message = Protect-AgentHeaderSecrets -Text $message -ApiKey $ApiKey -ExtraHeaders $script:ExtraHttpHeaders
             throw (Format-TuiText $message)
         }
         Assert-AgentApiResponseSize -Path $OutFile
@@ -12678,6 +12960,10 @@ function Invoke-AgentHttpRequest {
     try {
         Set-Content -LiteralPath $reqTemp.FullName -Value $asciiBody -Encoding Ascii -NoNewline -ErrorAction Stop
         $argList = Get-AgentWorkerArguments -ScriptPath $workerScript -WorkerMode 'http'
+        $extraHdrJson = if ($script:ExtraHttpHeaders -and $script:ExtraHttpHeaders.Count -gt 0) {
+            ConvertTo-AsciiJson -Json ($script:ExtraHttpHeaders | ConvertTo-Json -Compress)
+        }
+        else { $null }
         $proc = Invoke-WithProcessEnvironment -Values @{
             SHELLOSSUS_HTTP_URI = $Uri
             SHELLOSSUS_API_KEY = $ApiKey
@@ -12688,6 +12974,8 @@ function Invoke-AgentHttpRequest {
             SHELLOSSUS_HTTP_META = $metaTemp.FullName
             SHELLOSSUS_HTTP_TIMEOUT = [string]$TimeoutSec
             SHELLOSSUS_HTTP_STREAM = $(if ($script:StreamRequests) { '1' } else { '0' })
+            SHELLOSSUS_HTTP_AUTH_HEADER = $(if ($script:AuthHeaderName) { $script:AuthHeaderName } else { 'Authorization' })
+            SHELLOSSUS_HTTP_EXTRA_HEADERS = $extraHdrJson
         } -Action {
             Start-Process -FilePath $shellExe -ArgumentList $argList -RedirectStandardOutput $stdoutTemp.FullName -RedirectStandardError $stderrTemp.FullName -NoNewWindow -PassThru -ErrorAction Stop
         }
@@ -12708,14 +12996,14 @@ function Invoke-AgentHttpRequest {
         if ($errItem -and $errItem.Length -gt 0) {
             $errText = Get-Content -LiteralPath $errTemp.FullName -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
             if ($errText) {
-                if ($ApiKey) { $errText = $errText.Replace($ApiKey, '[redacted]') }
+                $errText = Protect-AgentHeaderSecrets -Text $errText -ApiKey $ApiKey -ExtraHeaders $script:ExtraHttpHeaders
                 throw (Format-TuiText $errText.Trim())
             }
         }
         if ($null -ne $proc.ExitCode -and [int]$proc.ExitCode -ne 0) {
             $stdErrText = Get-Content -LiteralPath $stderrTemp.FullName -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
             if ($stdErrText -and $stdErrText.Trim()) {
-                if ($ApiKey) { $stdErrText = $stdErrText.Replace($ApiKey, '[redacted]') }
+                $stdErrText = Protect-AgentHeaderSecrets -Text $stdErrText -ApiKey $ApiKey -ExtraHeaders $script:ExtraHttpHeaders
                 throw (Format-TuiText $stdErrText.Trim())
             }
             throw "HTTP worker exited with code $($proc.ExitCode)."
@@ -12942,6 +13230,8 @@ function New-AgentTurnRequest {
         stream = [bool]$script:StreamRequests
     }
     if ($script:ReasoningEffort) { $request.reasoning_effort = $script:ReasoningEffort }
+    if ($script:MaxOutputTokens -gt 0) { $request.max_tokens = [int]$script:MaxOutputTokens }
+    if ($null -ne $script:ModelTemperature) { $request.temperature = [double]$script:ModelTemperature }
     $body = $request | ConvertTo-Json -Depth 40 -Compress
     $estimated = Get-AgentRequestEstimatedTokens -Body $body -MessageCount $request.messages.Count
     if ($State.last_prompt_tokens -gt 0) {
@@ -14599,7 +14889,7 @@ if (-not $LibraryOnly) {
             SHELLOSSUS_API_KEY = $inputKey
             SHELLOSSUS_WORKSPACE = $inputWorkspace
         }
-        foreach ($optK in @('SHELLOSSUS_CONTEXT_WINDOW', 'SHELLOSSUS_COMPACT_THRESHOLD', 'SHELLOSSUS_REQUEST_TIMEOUT_SEC', 'SHELLOSSUS_STREAM', 'SHELLOSSUS_THEME', 'SHELLOSSUS_SEARCH_URL')) {
+        foreach ($optK in @('SHELLOSSUS_CONTEXT_WINDOW', 'SHELLOSSUS_COMPACT_THRESHOLD', 'SHELLOSSUS_REQUEST_TIMEOUT_SEC', 'SHELLOSSUS_STREAM', 'SHELLOSSUS_THEME', 'SHELLOSSUS_SEARCH_URL', 'SHELLOSSUS_AUTH_HEADER', 'SHELLOSSUS_MAX_TOKENS', 'SHELLOSSUS_TEMPERATURE', 'SHELLOSSUS_EXTRA_HEADERS')) {
             if ($config.ContainsKey($optK) -and $null -ne $config[$optK] -and ([string]$config[$optK]).Length -gt 0) { $newCfg[$optK] = $config[$optK] }
         }
         if (($PSBoundParameters.Keys -contains 'ContextWindow') -and $ContextWindow) { $newCfg['SHELLOSSUS_CONTEXT_WINDOW'] = $ContextWindow }
@@ -14611,6 +14901,32 @@ if (-not $LibraryOnly) {
         if ($script:StartupStreamBound) {
             $null = Set-AgentStreamSetting -StreamSpec ($(if ($script:StartupStreamValue) { 'true' } else { 'false' }))
             $newCfg['SHELLOSSUS_STREAM'] = if ($script:StreamRequests) { 'true' } else { 'false' }
+        }
+        if ($script:StartupAuthHeaderBound) {
+            if ($script:StartupAuthHeaderSpec -and $script:StartupAuthHeaderSpec.Trim()) {
+                $newCfg['SHELLOSSUS_AUTH_HEADER'] = Set-AgentAuthHeader -HeaderSpec $script:StartupAuthHeaderSpec
+            }
+            else {
+                $null = $newCfg.Remove('SHELLOSSUS_AUTH_HEADER')
+            }
+        }
+        if ($script:StartupMaxTokensBound) {
+            $mtVal = Set-AgentMaxTokens -MaxTokensSpec $script:StartupMaxTokensSpec
+            if ($mtVal -gt 0) {
+                $newCfg['SHELLOSSUS_MAX_TOKENS'] = [string]$mtVal
+            }
+            else {
+                $null = $newCfg.Remove('SHELLOSSUS_MAX_TOKENS')
+            }
+        }
+        if ($script:StartupTemperatureBound) {
+            $tempVal = Set-AgentTemperature -TemperatureSpec $script:StartupTemperatureSpec
+            if ($null -ne $tempVal) {
+                $newCfg['SHELLOSSUS_TEMPERATURE'] = $script:StartupTemperatureSpec.Trim()
+            }
+            else {
+                $null = $newCfg.Remove('SHELLOSSUS_TEMPERATURE')
+            }
         }
         if (($PSBoundParameters.Keys -contains 'Theme') -and $Theme -and $script:ActiveTheme) { $newCfg['SHELLOSSUS_THEME'] = $script:ActiveTheme }
         try { Save-AgentConfig -Path $ConfigPath -Config $newCfg }
@@ -14655,10 +14971,47 @@ if (-not $LibraryOnly) {
     else {
         ''
     }
+    $effectiveAuthHeaderSpec = if ($script:StartupAuthHeaderBound) {
+        [string]$script:StartupAuthHeaderSpec
+    }
+    elseif ($null -ne $script:StartupAuthHeaderSpec -and ([string]$script:StartupAuthHeaderSpec).Trim().Length -gt 0) {
+        [string]$script:StartupAuthHeaderSpec
+    }
+    elseif ($config.ContainsKey('SHELLOSSUS_AUTH_HEADER') -and $null -ne $config['SHELLOSSUS_AUTH_HEADER'] -and ([string]$config['SHELLOSSUS_AUTH_HEADER']).Trim().Length -gt 0) {
+        [string]$config['SHELLOSSUS_AUTH_HEADER']
+    }
+    else { '' }
+    $effectiveMaxTokensSpec = if ($script:StartupMaxTokensBound) {
+        [string]$script:StartupMaxTokensSpec
+    }
+    elseif ($null -ne $script:StartupMaxTokensSpec -and ([string]$script:StartupMaxTokensSpec).Trim().Length -gt 0) {
+        [string]$script:StartupMaxTokensSpec
+    }
+    elseif ($config.ContainsKey('SHELLOSSUS_MAX_TOKENS') -and $null -ne $config['SHELLOSSUS_MAX_TOKENS'] -and ([string]$config['SHELLOSSUS_MAX_TOKENS']).Trim().Length -gt 0) {
+        [string]$config['SHELLOSSUS_MAX_TOKENS']
+    }
+    else { '' }
+    $effectiveTemperatureSpec = if ($script:StartupTemperatureBound) {
+        [string]$script:StartupTemperatureSpec
+    }
+    elseif ($null -ne $script:StartupTemperatureSpec -and ([string]$script:StartupTemperatureSpec).Trim().Length -gt 0) {
+        [string]$script:StartupTemperatureSpec
+    }
+    elseif ($config.ContainsKey('SHELLOSSUS_TEMPERATURE') -and $null -ne $config['SHELLOSSUS_TEMPERATURE'] -and ([string]$config['SHELLOSSUS_TEMPERATURE']).Trim().Length -gt 0) {
+        [string]$config['SHELLOSSUS_TEMPERATURE']
+    }
+    else { '' }
+    $effectiveExtraHeadersSpec = if ($null -ne $env:SHELLOSSUS_EXTRA_HEADERS -and ([string]$env:SHELLOSSUS_EXTRA_HEADERS).Trim().Length -gt 0) {
+        [string]$env:SHELLOSSUS_EXTRA_HEADERS
+    }
+    elseif ($config.ContainsKey('SHELLOSSUS_EXTRA_HEADERS') -and $null -ne $config['SHELLOSSUS_EXTRA_HEADERS'] -and ([string]$config['SHELLOSSUS_EXTRA_HEADERS']).Trim().Length -gt 0) {
+        [string]$config['SHELLOSSUS_EXTRA_HEADERS']
+    }
+    else { '' }
     if ($Doctor) {
         $doctorKey = Get-AgentConfiguredApiKey -Config $config
         try {
-            $report = Get-AgentDoctorReport -BaseUrl $BaseUrl -ModelId $Model -ApiKey $doctorKey -Workspace $Workspace -SessionDir $sessionDir -NoSession:$NoSession -ConfigState $doctorConfigState -KeyStorageWarning $keyStorageWarning -RequestTimeoutSpec $effectiveTimeoutSpec -StreamSpec $effectiveStreamSpec
+            $report = Get-AgentDoctorReport -BaseUrl $BaseUrl -ModelId $Model -ApiKey $doctorKey -Workspace $Workspace -SessionDir $sessionDir -NoSession:$NoSession -ConfigState $doctorConfigState -KeyStorageWarning $keyStorageWarning -RequestTimeoutSpec $effectiveTimeoutSpec -StreamSpec $effectiveStreamSpec -AuthHeaderSpec $effectiveAuthHeaderSpec -MaxTokensSpec $effectiveMaxTokensSpec -TemperatureSpec $effectiveTemperatureSpec -ExtraHeadersSpec $effectiveExtraHeadersSpec
             Write-AgentDoctorReport -Report $report -Mode $Mode
         }
         finally { Remove-Variable doctorKey -ErrorAction SilentlyContinue; $config.Clear() }
@@ -14694,6 +15047,10 @@ if (-not $LibraryOnly) {
     }
     try {
         $null = Set-AgentSearchUrl -UrlSpec $effectiveSearchUrl
+        $null = Set-AgentAuthHeader -HeaderSpec $effectiveAuthHeaderSpec
+        $null = Set-AgentMaxTokens -MaxTokensSpec $effectiveMaxTokensSpec
+        $null = Set-AgentTemperature -TemperatureSpec $effectiveTemperatureSpec
+        $null = Set-AgentExtraHeaders -HeadersSpec $effectiveExtraHeadersSpec
     }
     catch {
         Write-AgentJsonEvent -EventType 'turn_end' -Payload @{ status = 'error'; error = $_.Exception.Message }

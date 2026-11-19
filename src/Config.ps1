@@ -13,7 +13,7 @@ function Read-AgentConfig {
         $lineNumber++
         $trimmed = $line.Trim()
         if (-not $trimmed -or $trimmed.StartsWith('#')) { continue }
-        if ($trimmed -notmatch '^(SHELLOSSUS_(?:BASE_URL|MODEL|API_KEY|WORKSPACE|CONTEXT_WINDOW|COMPACT_THRESHOLD|REQUEST_TIMEOUT_SEC|STREAM|THEME|SEARCH_URL))\s*=(.*)$') {
+        if ($trimmed -notmatch '^(SHELLOSSUS_(?:BASE_URL|MODEL|API_KEY|WORKSPACE|CONTEXT_WINDOW|COMPACT_THRESHOLD|REQUEST_TIMEOUT_SEC|STREAM|THEME|SEARCH_URL|AUTH_HEADER|MAX_TOKENS|TEMPERATURE|EXTRA_HEADERS))\s*=(.*)$') {
             throw "Invalid config entry at line $lineNumber. Expected a supported SHELLOSSUS_* key=value."
         }
         $normalizedKey = $Matches[1].ToUpper()
@@ -125,20 +125,38 @@ function Save-AgentConfig {
         if ($value.Contains('"')) { throw 'Config values cannot contain double quotes.' }
         $lines += $key + '="' + $value + '"'
     }
-    foreach ($optKey in @('SHELLOSSUS_CONTEXT_WINDOW', 'SHELLOSSUS_COMPACT_THRESHOLD', 'SHELLOSSUS_REQUEST_TIMEOUT_SEC', 'SHELLOSSUS_STREAM', 'SHELLOSSUS_THEME', 'SHELLOSSUS_SEARCH_URL')) {
+    foreach ($optKey in @('SHELLOSSUS_CONTEXT_WINDOW', 'SHELLOSSUS_COMPACT_THRESHOLD', 'SHELLOSSUS_REQUEST_TIMEOUT_SEC', 'SHELLOSSUS_STREAM', 'SHELLOSSUS_THEME', 'SHELLOSSUS_SEARCH_URL', 'SHELLOSSUS_AUTH_HEADER', 'SHELLOSSUS_MAX_TOKENS', 'SHELLOSSUS_TEMPERATURE', 'SHELLOSSUS_EXTRA_HEADERS')) {
         if ($Config.ContainsKey($optKey) -and $null -ne $Config[$optKey] -and ([string]$Config[$optKey]).Length -gt 0) {
             $optVal = [string]$Config[$optKey]
-            if ($optVal -match "[`r`n]" -or $optVal.Contains('"')) { throw 'Invalid optional config value.' }
-            $lines += $optKey + '="' + $optVal + '"'
+            if ($optVal -match "[`r`n]") { throw 'Invalid optional config value.' }
+            if ($optKey -eq 'SHELLOSSUS_EXTRA_HEADERS' -and $optVal.StartsWith('{') -and $optVal.EndsWith('}')) {
+                $lines += $optKey + '=' + $optVal
+            }
+            elseif ($optKey -eq 'SHELLOSSUS_EXTRA_HEADERS' -and $optVal.Contains('"')) {
+                if ($optVal.Contains("'")) { throw 'Invalid optional config value.' }
+                $lines += $optKey + "='" + $optVal + "'"
+            }
+            else {
+                if ($optVal.Contains('"')) { throw 'Invalid optional config value.' }
+                $lines += $optKey + '="' + $optVal + '"'
+            }
         }
     }
+    $hasSecretExtraHeaders = $false
+    if ($Config.ContainsKey('SHELLOSSUS_EXTRA_HEADERS') -and $Config['SHELLOSSUS_EXTRA_HEADERS']) {
+        $ehStr = [string]$Config['SHELLOSSUS_EXTRA_HEADERS']
+        if ($ehStr -match '(?i)"[^"]*(?:key|token|secret|auth|pass|cookie|cred)[^"]*"\s*:\s*"[^"]{6,}"') {
+            $hasSecretExtraHeaders = $true
+        }
+    }
+    $hasSecrets = [bool]($Config.SHELLOSSUS_API_KEY -or $hasSecretExtraHeaders)
     $Path = Format-ConfigPath -Path $Path
     $parent = Split-Path $Path -Parent
-    if ($Config.SHELLOSSUS_API_KEY -and ($Path -match '^[\\/]{2}' -or (Test-PathHasReparsePoint -Path $Path))) {
+    if ($hasSecrets -and ($Path -match '^[\\/]{2}' -or (Test-PathHasReparsePoint -Path $Path))) {
         throw 'Choose a local config path without reparse points or use SHELLOSSUS_API_KEY from the environment.'
     }
     if ($parent -and -not (Test-Path -LiteralPath $parent)) { New-Item -ItemType Directory -Path $parent -ErrorAction Stop | Out-Null }
-    if (-not $Config.SHELLOSSUS_API_KEY) {
+    if (-not $hasSecrets) {
         Set-Content -LiteralPath $Path -Value $lines -Encoding UTF8 -ErrorAction Stop
         return
     }

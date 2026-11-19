@@ -155,6 +155,7 @@ function Invoke-ShellCommand {
             $proc = Invoke-WithProcessEnvironment -Values @{
                 SHELLOSSUS_API_KEY = $null
                 OPENAI_API_KEY = $null
+                SHELLOSSUS_EXTRA_HEADERS = $null
             } -Action {
                 Start-Process -FilePath $shellExe -ArgumentList $argList -WorkingDirectory $rootFull -RedirectStandardOutput $outTemp.FullName -RedirectStandardError $errTemp.FullName -NoNewWindow -PassThru -ErrorAction Stop
             }

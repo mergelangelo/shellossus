@@ -209,6 +209,8 @@ function New-AgentTurnRequest {
         stream = [bool]$script:StreamRequests
     }
     if ($script:ReasoningEffort) { $request.reasoning_effort = $script:ReasoningEffort }
+    if ($script:MaxOutputTokens -gt 0) { $request.max_tokens = [int]$script:MaxOutputTokens }
+    if ($null -ne $script:ModelTemperature) { $request.temperature = [double]$script:ModelTemperature }
     $body = $request | ConvertTo-Json -Depth 40 -Compress
     $estimated = Get-AgentRequestEstimatedTokens -Body $body -MessageCount $request.messages.Count
     if ($State.last_prompt_tokens -gt 0) {

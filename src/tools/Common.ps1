@@ -47,6 +47,10 @@ $script:MaxRequestTimeoutSec = 1800
 $script:MaxStepRetryBudgetSec = 3600
 $script:StreamRequests = $false
 $script:SearchUrl = ''
+$script:AuthHeaderName = 'Authorization'
+$script:MaxOutputTokens = 0
+$script:ModelTemperature = $null
+$script:ExtraHttpHeaders = @{}
 
 function ConvertTo-AgentRequestTimeout {
     param([AllowEmptyString()][string]$TimeoutSpec)
@@ -83,6 +87,194 @@ function Set-AgentStreamSetting {
     $val = ConvertTo-AgentStreamSetting -StreamSpec $StreamSpec
     $script:StreamRequests = [bool]$val
     return $script:StreamRequests
+}
+
+function ConvertTo-AgentAuthHeaderName {
+    param([AllowEmptyString()][string]$HeaderSpec)
+    if ($null -eq $HeaderSpec) { return 'Authorization' }
+    if ($HeaderSpec -match '[\r\n]') {
+        throw 'AuthHeader must be a valid HTTP header name (letters, digits, hyphens).'
+    }
+    $trimmed = $HeaderSpec.Trim()
+    if (-not $trimmed) { return 'Authorization' }
+    if ($trimmed -notmatch '\A[A-Za-z][A-Za-z0-9-]{0,63}\z') {
+        throw 'AuthHeader must be a valid HTTP header name (letters, digits, hyphens).'
+    }
+    if ($trimmed -in @('Content-Type', 'Content-Length', 'Host', 'Accept', 'Transfer-Encoding', 'Connection', 'User-Agent')) {
+        throw "AuthHeader cannot use reserved HTTP header '$trimmed'."
+    }
+    return $trimmed
+}
+
+function Set-AgentAuthHeader {
+    param([AllowEmptyString()][string]$HeaderSpec)
+    $val = ConvertTo-AgentAuthHeaderName -HeaderSpec $HeaderSpec
+    $script:AuthHeaderName = $val
+    return $script:AuthHeaderName
+}
+
+function ConvertTo-AgentMaxTokens {
+    param([AllowEmptyString()][string]$MaxTokensSpec)
+    $err = 'MaxTokens must be an integer between 1 and 1000000.'
+    if ($null -eq $MaxTokensSpec) { return 0 }
+    if ($MaxTokensSpec -match '[\r\n]') { throw $err }
+    $trimmed = $MaxTokensSpec.Trim()
+    if (-not $trimmed) { return 0 }
+    if ($trimmed -notmatch '\A[0-9]{1,7}\z') { throw $err }
+    $val = [int]$trimmed
+    if ($val -lt 1 -or $val -gt 1000000) { throw $err }
+    return $val
+}
+
+function Set-AgentMaxTokens {
+    param([AllowEmptyString()][string]$MaxTokensSpec)
+    $val = ConvertTo-AgentMaxTokens -MaxTokensSpec $MaxTokensSpec
+    $script:MaxOutputTokens = $val
+    return $script:MaxOutputTokens
+}
+
+function ConvertTo-AgentTemperature {
+    param([AllowEmptyString()][string]$TemperatureSpec)
+    $err = 'Temperature must be a decimal number between 0 and 2 (using dot decimal).'
+    if ($null -eq $TemperatureSpec) { return $null }
+    if ($TemperatureSpec -match '[\r\n]') { throw $err }
+    $trimmed = $TemperatureSpec.Trim()
+    if (-not $trimmed) { return $null }
+    if ($trimmed -notmatch '\A(?:[01](?:\.[0-9]{1,4})?|2(?:\.0{1,4})?)\z') { throw $err }
+    return [double]$trimmed
+}
+
+function Set-AgentTemperature {
+    param([AllowEmptyString()][string]$TemperatureSpec)
+    $val = ConvertTo-AgentTemperature -TemperatureSpec $TemperatureSpec
+    $script:ModelTemperature = $val
+    return $script:ModelTemperature
+}
+
+function ConvertFrom-AgentExtraHeaders {
+    param([AllowEmptyString()][string]$HeadersSpec, [string]$AuthHeaderName = $script:AuthHeaderName)
+    if ($null -eq $HeadersSpec) { return @{} }
+    $trimmed = $HeadersSpec.Trim()
+    if (-not $trimmed) { return @{} }
+    if ($trimmed.Length -gt 4096) {
+        throw 'SHELLOSSUS_EXTRA_HEADERS exceeds the 4096-character limit.'
+    }
+    if (-not $trimmed.StartsWith('{')) {
+        throw 'SHELLOSSUS_EXTRA_HEADERS must be a JSON object of string header names and values.'
+    }
+    $parsed = $null
+    try {
+        $parsed = $trimmed | ConvertFrom-Json -ErrorAction Stop
+    }
+    catch {
+        throw 'SHELLOSSUS_EXTRA_HEADERS is not valid JSON.'
+    }
+    if ($null -eq $parsed -or $parsed -is [string] -or $parsed -is [ValueType] -or $parsed -is [array]) {
+        throw 'SHELLOSSUS_EXTRA_HEADERS must be a JSON object.'
+    }
+    $propNames = if ($parsed -is [hashtable]) { @($parsed.Keys) } else { @(Get-Member -InputObject $parsed -MemberType NoteProperty | ForEach-Object { $_.Name }) }
+    if ($propNames.Count -gt 16) {
+        throw 'SHELLOSSUS_EXTRA_HEADERS may contain at most 16 headers.'
+    }
+    $effAuth = if ($AuthHeaderName) { $AuthHeaderName } else { 'Authorization' }
+    $reserved = @('Authorization', 'Content-Type', 'Content-Length', 'Host', 'Accept', 'Transfer-Encoding', 'Connection', 'User-Agent', $effAuth)
+    $result = @{}
+    foreach ($k in $propNames) {
+        $name = [string]$k
+        if ($name -notmatch '\A[A-Za-z][A-Za-z0-9-]{0,63}\z') {
+            throw 'SHELLOSSUS_EXTRA_HEADERS contains an invalid HTTP header name.'
+        }
+        foreach ($r in $reserved) {
+            if ($name -ieq $r) {
+                throw "SHELLOSSUS_EXTRA_HEADERS cannot override reserved or auth header '$name'."
+            }
+        }
+        $val = $parsed.$k
+        if ($null -eq $val -or $val -isnot [string]) {
+            throw "Header '$name' in SHELLOSSUS_EXTRA_HEADERS must have a string value."
+        }
+        if ($val.Length -gt 1024 -or ($val -match '[^\x20-\x7E]')) {
+            throw "Header '$name' in SHELLOSSUS_EXTRA_HEADERS contains invalid characters or exceeds length limit."
+        }
+        $result[$name] = $val
+    }
+    return $result
+}
+
+function Set-AgentExtraHeaders {
+    param([AllowEmptyString()][string]$HeadersSpec)
+    $val = ConvertFrom-AgentExtraHeaders -HeadersSpec $HeadersSpec -AuthHeaderName $script:AuthHeaderName
+    $script:ExtraHttpHeaders = $val
+    return $script:ExtraHttpHeaders
+}
+
+function New-AgentApiHeaders {
+    param(
+        [string]$ApiKey,
+        [string]$AuthHeaderName = $script:AuthHeaderName,
+        [hashtable]$ExtraHeaders = $script:ExtraHttpHeaders,
+        [switch]$AcceptSse
+    )
+    $effAuth = if ($AuthHeaderName) { $AuthHeaderName } else { 'Authorization' }
+    $headers = @{}
+    if ($ExtraHeaders) {
+        foreach ($k in $ExtraHeaders.Keys) {
+            $name = [string]$k
+            if ($name -ieq $effAuth -or $name -in @('Authorization', 'Content-Type', 'Content-Length', 'Host', 'Accept', 'Transfer-Encoding', 'Connection', 'User-Agent')) {
+                continue
+            }
+            $headers[$name] = [string]$ExtraHeaders[$k]
+        }
+    }
+    if ($effAuth -ieq 'Authorization') {
+        $headers['Authorization'] = ('Bearer ' + $ApiKey)
+    }
+    else {
+        $headers[$effAuth] = [string]$ApiKey
+    }
+    if ($AcceptSse) {
+        $headers['Accept'] = 'text/event-stream, application/json'
+    }
+    return $headers
+}
+
+function Protect-AgentHeaderSecrets {
+    param(
+        [AllowEmptyString()][string]$Text,
+        [string]$ApiKey = '',
+        [hashtable]$ExtraHeaders = $script:ExtraHttpHeaders
+    )
+    if (-not $Text) { return $Text }
+    $out = [string]$Text
+    if ($ApiKey) {
+        $out = $out.Replace($ApiKey, '[redacted]')
+        $trimKey = $ApiKey.Trim()
+        if ($trimKey -and $trimKey -ne $ApiKey) {
+            $out = $out.Replace($trimKey, '[redacted]')
+        }
+    }
+    if ($ExtraHeaders) {
+        foreach ($k in $ExtraHeaders.Keys) {
+            $name = [string]$k
+            if ($name -match '(?i)(key|token|secret|auth|pass|cookie|cred)') {
+                $rawVal = [string]$ExtraHeaders[$k]
+                if ($rawVal -and $rawVal.Length -ge 6) {
+                    $out = $out.Replace($rawVal, '[redacted]')
+                }
+                $trimVal = $rawVal.Trim()
+                if ($trimVal -and $trimVal.Length -ge 6 -and $trimVal -cne $rawVal) {
+                    $out = $out.Replace($trimVal, '[redacted]')
+                }
+                if ($trimVal -match '^(?i)(?:Bearer|Basic|Token)\s+(.+)$') {
+                    $bareSecret = $Matches[1].Trim()
+                    if ($bareSecret.Length -ge 6) {
+                        $out = $out.Replace($bareSecret, '[redacted]')
+                    }
+                }
+            }
+        }
+    }
+    return $out
 }
 
 function Get-CurrentTurnWritePathsSince {

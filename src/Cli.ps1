@@ -101,7 +101,7 @@ if (-not $LibraryOnly) {
             SHELLOSSUS_API_KEY = $inputKey
             SHELLOSSUS_WORKSPACE = $inputWorkspace
         }
-        foreach ($optK in @('SHELLOSSUS_CONTEXT_WINDOW', 'SHELLOSSUS_COMPACT_THRESHOLD', 'SHELLOSSUS_REQUEST_TIMEOUT_SEC', 'SHELLOSSUS_STREAM', 'SHELLOSSUS_THEME', 'SHELLOSSUS_SEARCH_URL')) {
+        foreach ($optK in @('SHELLOSSUS_CONTEXT_WINDOW', 'SHELLOSSUS_COMPACT_THRESHOLD', 'SHELLOSSUS_REQUEST_TIMEOUT_SEC', 'SHELLOSSUS_STREAM', 'SHELLOSSUS_THEME', 'SHELLOSSUS_SEARCH_URL', 'SHELLOSSUS_AUTH_HEADER', 'SHELLOSSUS_MAX_TOKENS', 'SHELLOSSUS_TEMPERATURE', 'SHELLOSSUS_EXTRA_HEADERS')) {
             if ($config.ContainsKey($optK) -and $null -ne $config[$optK] -and ([string]$config[$optK]).Length -gt 0) { $newCfg[$optK] = $config[$optK] }
         }
         if (($PSBoundParameters.Keys -contains 'ContextWindow') -and $ContextWindow) { $newCfg['SHELLOSSUS_CONTEXT_WINDOW'] = $ContextWindow }
@@ -113,6 +113,32 @@ if (-not $LibraryOnly) {
         if ($script:StartupStreamBound) {
             $null = Set-AgentStreamSetting -StreamSpec ($(if ($script:StartupStreamValue) { 'true' } else { 'false' }))
             $newCfg['SHELLOSSUS_STREAM'] = if ($script:StreamRequests) { 'true' } else { 'false' }
+        }
+        if ($script:StartupAuthHeaderBound) {
+            if ($script:StartupAuthHeaderSpec -and $script:StartupAuthHeaderSpec.Trim()) {
+                $newCfg['SHELLOSSUS_AUTH_HEADER'] = Set-AgentAuthHeader -HeaderSpec $script:StartupAuthHeaderSpec
+            }
+            else {
+                $null = $newCfg.Remove('SHELLOSSUS_AUTH_HEADER')
+            }
+        }
+        if ($script:StartupMaxTokensBound) {
+            $mtVal = Set-AgentMaxTokens -MaxTokensSpec $script:StartupMaxTokensSpec
+            if ($mtVal -gt 0) {
+                $newCfg['SHELLOSSUS_MAX_TOKENS'] = [string]$mtVal
+            }
+            else {
+                $null = $newCfg.Remove('SHELLOSSUS_MAX_TOKENS')
+            }
+        }
+        if ($script:StartupTemperatureBound) {
+            $tempVal = Set-AgentTemperature -TemperatureSpec $script:StartupTemperatureSpec
+            if ($null -ne $tempVal) {
+                $newCfg['SHELLOSSUS_TEMPERATURE'] = $script:StartupTemperatureSpec.Trim()
+            }
+            else {
+                $null = $newCfg.Remove('SHELLOSSUS_TEMPERATURE')
+            }
         }
         if (($PSBoundParameters.Keys -contains 'Theme') -and $Theme -and $script:ActiveTheme) { $newCfg['SHELLOSSUS_THEME'] = $script:ActiveTheme }
         try { Save-AgentConfig -Path $ConfigPath -Config $newCfg }
@@ -157,10 +183,47 @@ if (-not $LibraryOnly) {
     else {
         ''
     }
+    $effectiveAuthHeaderSpec = if ($script:StartupAuthHeaderBound) {
+        [string]$script:StartupAuthHeaderSpec
+    }
+    elseif ($null -ne $script:StartupAuthHeaderSpec -and ([string]$script:StartupAuthHeaderSpec).Trim().Length -gt 0) {
+        [string]$script:StartupAuthHeaderSpec
+    }
+    elseif ($config.ContainsKey('SHELLOSSUS_AUTH_HEADER') -and $null -ne $config['SHELLOSSUS_AUTH_HEADER'] -and ([string]$config['SHELLOSSUS_AUTH_HEADER']).Trim().Length -gt 0) {
+        [string]$config['SHELLOSSUS_AUTH_HEADER']
+    }
+    else { '' }
+    $effectiveMaxTokensSpec = if ($script:StartupMaxTokensBound) {
+        [string]$script:StartupMaxTokensSpec
+    }
+    elseif ($null -ne $script:StartupMaxTokensSpec -and ([string]$script:StartupMaxTokensSpec).Trim().Length -gt 0) {
+        [string]$script:StartupMaxTokensSpec
+    }
+    elseif ($config.ContainsKey('SHELLOSSUS_MAX_TOKENS') -and $null -ne $config['SHELLOSSUS_MAX_TOKENS'] -and ([string]$config['SHELLOSSUS_MAX_TOKENS']).Trim().Length -gt 0) {
+        [string]$config['SHELLOSSUS_MAX_TOKENS']
+    }
+    else { '' }
+    $effectiveTemperatureSpec = if ($script:StartupTemperatureBound) {
+        [string]$script:StartupTemperatureSpec
+    }
+    elseif ($null -ne $script:StartupTemperatureSpec -and ([string]$script:StartupTemperatureSpec).Trim().Length -gt 0) {
+        [string]$script:StartupTemperatureSpec
+    }
+    elseif ($config.ContainsKey('SHELLOSSUS_TEMPERATURE') -and $null -ne $config['SHELLOSSUS_TEMPERATURE'] -and ([string]$config['SHELLOSSUS_TEMPERATURE']).Trim().Length -gt 0) {
+        [string]$config['SHELLOSSUS_TEMPERATURE']
+    }
+    else { '' }
+    $effectiveExtraHeadersSpec = if ($null -ne $env:SHELLOSSUS_EXTRA_HEADERS -and ([string]$env:SHELLOSSUS_EXTRA_HEADERS).Trim().Length -gt 0) {
+        [string]$env:SHELLOSSUS_EXTRA_HEADERS
+    }
+    elseif ($config.ContainsKey('SHELLOSSUS_EXTRA_HEADERS') -and $null -ne $config['SHELLOSSUS_EXTRA_HEADERS'] -and ([string]$config['SHELLOSSUS_EXTRA_HEADERS']).Trim().Length -gt 0) {
+        [string]$config['SHELLOSSUS_EXTRA_HEADERS']
+    }
+    else { '' }
     if ($Doctor) {
         $doctorKey = Get-AgentConfiguredApiKey -Config $config
         try {
-            $report = Get-AgentDoctorReport -BaseUrl $BaseUrl -ModelId $Model -ApiKey $doctorKey -Workspace $Workspace -SessionDir $sessionDir -NoSession:$NoSession -ConfigState $doctorConfigState -KeyStorageWarning $keyStorageWarning -RequestTimeoutSpec $effectiveTimeoutSpec -StreamSpec $effectiveStreamSpec
+            $report = Get-AgentDoctorReport -BaseUrl $BaseUrl -ModelId $Model -ApiKey $doctorKey -Workspace $Workspace -SessionDir $sessionDir -NoSession:$NoSession -ConfigState $doctorConfigState -KeyStorageWarning $keyStorageWarning -RequestTimeoutSpec $effectiveTimeoutSpec -StreamSpec $effectiveStreamSpec -AuthHeaderSpec $effectiveAuthHeaderSpec -MaxTokensSpec $effectiveMaxTokensSpec -TemperatureSpec $effectiveTemperatureSpec -ExtraHeadersSpec $effectiveExtraHeadersSpec
             Write-AgentDoctorReport -Report $report -Mode $Mode
         }
         finally { Remove-Variable doctorKey -ErrorAction SilentlyContinue; $config.Clear() }
@@ -196,6 +259,10 @@ if (-not $LibraryOnly) {
     }
     try {
         $null = Set-AgentSearchUrl -UrlSpec $effectiveSearchUrl
+        $null = Set-AgentAuthHeader -HeaderSpec $effectiveAuthHeaderSpec
+        $null = Set-AgentMaxTokens -MaxTokensSpec $effectiveMaxTokensSpec
+        $null = Set-AgentTemperature -TemperatureSpec $effectiveTemperatureSpec
+        $null = Set-AgentExtraHeaders -HeadersSpec $effectiveExtraHeadersSpec
     }
     catch {
         Write-AgentJsonEvent -EventType 'turn_end' -Payload @{ status = 'error'; error = $_.Exception.Message }

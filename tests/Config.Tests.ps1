@@ -680,6 +680,103 @@ try {
     finally {
         $script:SearchUrl = $savedSearchUrl
     }
+
+    # Task 11 (Stage C): corporate gateway settings (-AuthHeader, -MaxTokens, -Temperature, SHELLOSSUS_EXTRA_HEADERS).
+    $savedAuthHdr11 = $script:AuthHeaderName
+    $savedMaxTok11 = $script:MaxOutputTokens
+    $savedTemp11 = $script:ModelTemperature
+    $savedExtraHdr11 = $script:ExtraHttpHeaders
+    try {
+        Assert-True ((Set-AgentAuthHeader -HeaderSpec '') -ceq 'Authorization') 'Default AuthHeader must be Authorization.'
+        Assert-True ((Set-AgentAuthHeader -HeaderSpec 'api-key') -ceq 'api-key') 'Set-AgentAuthHeader failed for api-key.'
+        Assert-True ((Set-AgentAuthHeader -HeaderSpec 'X-API-Key') -ceq 'X-API-Key') 'Set-AgentAuthHeader failed for X-API-Key.'
+        foreach ($badHdr in @('Host', 'Content-Type', 'User-Agent', 'Bad Header', "X-Key`r`nInjected: 1", "Authorization`n", "X-Key`n", 'X:Colon', '123-Start')) {
+            $badHdrThrew = $false
+            try { $null = ConvertTo-AgentAuthHeaderName -HeaderSpec $badHdr } catch { $badHdrThrew = $true }
+            Assert-True $badHdrThrew "ConvertTo-AgentAuthHeaderName accepted invalid header '$badHdr'."
+        }
+
+        Assert-True ((Set-AgentMaxTokens -MaxTokensSpec '') -eq 0) 'Empty MaxTokens must reset to 0.'
+        Assert-True ((Set-AgentMaxTokens -MaxTokensSpec '4096') -eq 4096) 'Set-AgentMaxTokens failed for 4096.'
+        foreach ($badMt in @('0', '-10', '1000001', 'abc', '4.5', "100`n", ([string][char]0x0665))) {
+            $badMtThrew = $false
+            try { $null = ConvertTo-AgentMaxTokens -MaxTokensSpec $badMt } catch { $badMtThrew = $true }
+            Assert-True $badMtThrew "ConvertTo-AgentMaxTokens accepted invalid value '$badMt'."
+        }
+
+        Assert-True ($null -eq (Set-AgentTemperature -TemperatureSpec '')) 'Empty Temperature must reset to $null.'
+        Assert-True ((Set-AgentTemperature -TemperatureSpec '0') -eq 0.0) 'Set-AgentTemperature failed for 0.'
+        Assert-True ((Set-AgentTemperature -TemperatureSpec '0.7') -eq 0.7) 'Set-AgentTemperature failed for 0.7.'
+        Assert-True ((Set-AgentTemperature -TemperatureSpec '2.0') -eq 2.0) 'Set-AgentTemperature failed for 2.0.'
+        foreach ($badTemp in @('-0.1', '2.1', '2.01', '0,7', 'abc', '1.12345', "0.5`n")) {
+            $badTempThrew = $false
+            try { $null = ConvertTo-AgentTemperature -TemperatureSpec $badTemp } catch { $badTempThrew = $true }
+            Assert-True $badTempThrew "ConvertTo-AgentTemperature accepted invalid value '$badTemp'."
+        }
+
+        $null = Set-AgentAuthHeader -HeaderSpec 'api-key'
+        $parsedExtra = Set-AgentExtraHeaders -HeadersSpec '{"X-Title":"shellossus","HTTP-Referer":"https://docs.example.com","X-Proxy-Token":"proxy-secret-999","X-Proxy-Auth":"Bearer bearer-secret-777"}'
+        Assert-True ($parsedExtra['X-Title'] -ceq 'shellossus' -and $parsedExtra['HTTP-Referer'] -ceq 'https://docs.example.com') 'Set-AgentExtraHeaders failed to parse valid JSON object.'
+        foreach ($badExtra in @(
+            'not-json',
+            '["a"]',
+            '{"Authorization":"Bearer evil"}',
+            '{"Authorization\n":"Bearer evil"}',
+            '{"api-key":"override-active-auth"}',
+            '{"Host":"evil.example"}',
+            '{"Content-Type":"text/plain"}',
+            '{"Bad Header":"x"}',
+            '{"X-Title":"line1\r\nX-Evil: 1"}',
+            '{"X-Title":"line1\nX-Evil: 1"}',
+            '{"X-NonAscii":"\u0442\u0435\u0441\u0442"}',
+            '{"X-Count":42}'
+        )) {
+            $badExtraThrew = $false
+            try { $null = ConvertFrom-AgentExtraHeaders -HeadersSpec $badExtra -AuthHeaderName 'api-key' } catch { $badExtraThrew = $true }
+            Assert-True $badExtraThrew "ConvertFrom-AgentExtraHeaders accepted unsafe input '$badExtra'."
+        }
+
+        $hdrDefault = New-AgentApiHeaders -ApiKey 'sk-test-12345' -AuthHeaderName 'Authorization' -ExtraHeaders @{ 'X-Title' = 'shellossus' }
+        Assert-True ($hdrDefault['Authorization'] -ceq 'Bearer sk-test-12345' -and $hdrDefault['X-Title'] -ceq 'shellossus') 'New-AgentApiHeaders default Authorization header failed.'
+        $hdrAzure = New-AgentApiHeaders -ApiKey 'az-key-98765' -AuthHeaderName 'api-key' -ExtraHeaders $parsedExtra -AcceptSse
+        Assert-True ((-not $hdrAzure.ContainsKey('Authorization')) -and $hdrAzure['api-key'] -ceq 'az-key-98765' -and $hdrAzure['X-Title'] -ceq 'shellossus' -and $hdrAzure['Accept'] -ceq 'text/event-stream, application/json') 'New-AgentApiHeaders custom api-key header failed.'
+
+        $redactedMsg = Protect-AgentHeaderSecrets -Text 'Err az-key-98765 proxy-secret-999 bearer-secret-777 shellossus' -ApiKey 'az-key-98765' -ExtraHeaders $parsedExtra
+        Assert-True (($redactedMsg -notlike '*az-key-98765*') -and ($redactedMsg -notlike '*proxy-secret-999*') -and ($redactedMsg -notlike '*bearer-secret-777*') -and $redactedMsg.Contains('shellossus')) "Protect-AgentHeaderSecrets did not redact secrets properly: $redactedMsg"
+
+        $gwCfgPath = Join-Path $testRoot 'gateway-roundtrip.env'
+        Save-AgentConfig -Path $gwCfgPath -Config @{
+            SHELLOSSUS_BASE_URL = 'https://example.invalid/v1'
+            SHELLOSSUS_MODEL = 'test-model'
+            SHELLOSSUS_AUTH_HEADER = 'api-key'
+            SHELLOSSUS_MAX_TOKENS = '2048'
+            SHELLOSSUS_TEMPERATURE = '0.3'
+            SHELLOSSUS_EXTRA_HEADERS = '{"X-Title":"O''Brien","HTTP-Referer":"https://example.com"}'
+        }
+        $gwLoaded = Read-AgentConfig -Path $gwCfgPath
+        Assert-True ($gwLoaded.SHELLOSSUS_AUTH_HEADER -ceq 'api-key' -and $gwLoaded.SHELLOSSUS_MAX_TOKENS -ceq '2048' -and $gwLoaded.SHELLOSSUS_TEMPERATURE -ceq '0.3' -and $gwLoaded.SHELLOSSUS_EXTRA_HEADERS -ceq '{"X-Title":"O''Brien","HTTP-Referer":"https://example.com"}') "Save/Read-AgentConfig roundtrip failed for gateway/generation keys with apostrophe: $($gwLoaded | ConvertTo-Json -Compress)"
+
+        # Regression (I13): secret-bearing SHELLOSSUS_EXTRA_HEADERS enforces private config storage even when SHELLOSSUS_API_KEY is empty.
+        $secretExtraUncBlocked = $false
+        try {
+            Save-AgentConfig -Path '\\server\share\gw.env' -Config @{
+                SHELLOSSUS_BASE_URL = 'https://example.invalid/v1'
+                SHELLOSSUS_MODEL = 'test-model'
+                SHELLOSSUS_API_KEY = ''
+                SHELLOSSUS_EXTRA_HEADERS = '{"X-Proxy-Token":"super-secret-value"}'
+            }
+        }
+        catch {
+            if ($_.Exception.Message -like '*local config path*') { $secretExtraUncBlocked = $true }
+        }
+        Assert-True $secretExtraUncBlocked 'Save-AgentConfig allowed UNC path for secret-bearing SHELLOSSUS_EXTRA_HEADERS without API key.'
+    }
+    finally {
+        $script:AuthHeaderName = $savedAuthHdr11
+        $script:MaxOutputTokens = $savedMaxTok11
+        $script:ModelTemperature = $savedTemp11
+        $script:ExtraHttpHeaders = $savedExtraHdr11
+    }
 }
 finally {
     Remove-TestEnvironment -Env $envData

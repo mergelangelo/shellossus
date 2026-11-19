@@ -1130,6 +1130,28 @@ try {
             $script:OutputMode = $savedClMode10
             $script:CurrentTurnWrites = @($savedClWrites10)
         }
+
+        # Verify Task 11 gateway/generation helpers work under ConstrainedLanguage.
+        $savedClAuth11 = $script:AuthHeaderName
+        $savedClMax11 = $script:MaxOutputTokens
+        $savedClTemp11 = $script:ModelTemperature
+        $savedClExtra11 = $script:ExtraHttpHeaders
+        try {
+            Assert-True ((Set-AgentAuthHeader -HeaderSpec 'api-key') -ceq 'api-key') 'CLM Set-AgentAuthHeader failed.'
+            Assert-True ((Set-AgentMaxTokens -MaxTokensSpec '1024') -eq 1024) 'CLM Set-AgentMaxTokens failed.'
+            Assert-True ((Set-AgentTemperature -TemperatureSpec '0.25') -eq 0.25) 'CLM Set-AgentTemperature failed.'
+            $clExtra = Set-AgentExtraHeaders -HeadersSpec '{"X-Title":"shellossus","X-Proxy-Token":"clm-secret-42"}'
+            $clHdrs = New-AgentApiHeaders -ApiKey 'clm-key-999' -AuthHeaderName 'api-key' -ExtraHeaders $clExtra
+            Assert-True ($clHdrs['api-key'] -ceq 'clm-key-999' -and $clHdrs['X-Title'] -ceq 'shellossus') 'CLM New-AgentApiHeaders failed.'
+            $clRedacted = Protect-AgentHeaderSecrets -Text 'Err clm-key-999 clm-secret-42' -ApiKey 'clm-key-999' -ExtraHeaders $clExtra
+            Assert-True (($clRedacted -notlike '*clm-key-999*') -and ($clRedacted -notlike '*clm-secret-42*')) 'CLM Protect-AgentHeaderSecrets failed.'
+        }
+        finally {
+            $script:AuthHeaderName = $savedClAuth11
+            $script:MaxOutputTokens = $savedClMax11
+            $script:ModelTemperature = $savedClTemp11
+            $script:ExtraHttpHeaders = $savedClExtra11
+        }
     }
     finally {
         $script:SearchUrl = $savedClSearchUrl

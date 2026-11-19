@@ -32,6 +32,11 @@ function Invoke-InternalSubagentWorker {
     if ($env:SHELLOSSUS_SUB_REQUEST_TIMEOUT) { $workerArgs.RequestTimeoutSec = $env:SHELLOSSUS_SUB_REQUEST_TIMEOUT }
     if ($env:SHELLOSSUS_SUB_STREAM -eq '1') { $workerArgs.Stream = $true }
     elseif ($env:SHELLOSSUS_SUB_STREAM -eq '0') { $workerArgs.Stream = $false }
+    if ($env:SHELLOSSUS_SUB_AUTH_HEADER) { $workerArgs.AuthHeader = $env:SHELLOSSUS_SUB_AUTH_HEADER }
+    if ($env:SHELLOSSUS_SUB_MAX_TOKENS -eq '__CLEAR__') { $workerArgs.MaxTokens = '' }
+    elseif ($env:SHELLOSSUS_SUB_MAX_TOKENS) { $workerArgs.MaxTokens = $env:SHELLOSSUS_SUB_MAX_TOKENS }
+    if ($env:SHELLOSSUS_SUB_TEMPERATURE -eq '__CLEAR__') { $workerArgs.Temperature = '' }
+    elseif ($env:SHELLOSSUS_SUB_TEMPERATURE) { $workerArgs.Temperature = $env:SHELLOSSUS_SUB_TEMPERATURE }
     if ($env:SHELLOSSUS_SUB_CONFIG) { $workerArgs.ConfigPath = $env:SHELLOSSUS_SUB_CONFIG }
     if ($env:SHELLOSSUS_SUB_NO_SKILLS -eq '1') { $workerArgs.NoSkills = $true }
     if ($env:SHELLOSSUS_SUB_NO_TEMPLATES -eq '1') { $workerArgs.NoPromptTemplates = $true }
@@ -150,6 +155,10 @@ function Invoke-ParallelSubagentProcesses {
                 if ($script:OutputMode -ne 'json') {
                     Write-Host ($script:Gm.Aqua + ("  [run_agent:{0}] (parallel ReadOnly) " -f (Format-TuiText $roleObj.name)) + $script:Gm.Grey1 + (Invoke-TruncateLine -Line (Format-TuiText $t.prompt) -MaxChars 90).text + $script:Gm.Reset)
                 }
+                $subExtraHdrJson = if ($script:ExtraHttpHeaders -and $script:ExtraHttpHeaders.Count -gt 0) {
+                    ConvertTo-AsciiJson -Json ($script:ExtraHttpHeaders | ConvertTo-Json -Compress)
+                }
+                else { '{}' }
                 $proc = Invoke-WithProcessEnvironment -Values @{
                     SHELLOSSUS_API_KEY = $effKey
                     OPENAI_API_KEY = $null
@@ -163,6 +172,13 @@ function Invoke-ParallelSubagentProcesses {
                     SHELLOSSUS_SUB_REQUEST_TIMEOUT = [string]$script:RequestTimeoutSec
                     SHELLOSSUS_STREAM = $null
                     SHELLOSSUS_SUB_STREAM = $(if ($script:StreamRequests) { '1' } else { '0' })
+                    SHELLOSSUS_AUTH_HEADER = $null
+                    SHELLOSSUS_SUB_AUTH_HEADER = $(if ($script:AuthHeaderName) { [string]$script:AuthHeaderName } else { 'Authorization' })
+                    SHELLOSSUS_MAX_TOKENS = $null
+                    SHELLOSSUS_SUB_MAX_TOKENS = $(if ($script:MaxOutputTokens -gt 0) { [string]$script:MaxOutputTokens } else { '__CLEAR__' })
+                    SHELLOSSUS_TEMPERATURE = $null
+                    SHELLOSSUS_SUB_TEMPERATURE = $(if ($null -ne $script:ModelTemperature) { ([string]$script:ModelTemperature).Replace(',', '.') } else { '__CLEAR__' })
+                    SHELLOSSUS_EXTRA_HEADERS = $subExtraHdrJson
                     SHELLOSSUS_SUB_PROMPT = $promptTemp.FullName
                     SHELLOSSUS_SUB_TOOLS = ($childTools -join ',')
                     SHELLOSSUS_SUB_NO_TOOLS = $(if ($childTools.Count -eq 0) { '1' } else { '0' })
@@ -280,7 +296,7 @@ function Invoke-ParallelSubagentProcesses {
                 }
                 if (-not $w.timed_out -and (Test-Path -LiteralPath $w.err_file)) {
                     $errRaw = Get-Content -LiteralPath $w.err_file -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
-                    $errText = Get-AgentWorkerErrorText -Raw $errRaw
+                    $errText = Protect-AgentHeaderSecrets -Text (Get-AgentWorkerErrorText -Raw $errRaw) -ApiKey $effKey -ExtraHeaders $script:ExtraHttpHeaders
                     if ($errText -and (-not $sawTurnEnd -or -not $replyText)) {
                         $wStatus = 'error'
                         $replyText = if ($replyText) { $replyText + "`nSubagent error: " + $errText } else { 'Subagent error: ' + $errText }

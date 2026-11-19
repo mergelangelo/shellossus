@@ -33,7 +33,7 @@ Set the permission mode at launch (`-Permission <Mode>`) or switch at any time d
 | `list_files`, `find_files`, `grep_files`, `write_file`, `edit_file`, `delete_file`, `move_file`, `@file` | Active workspace root only | Target + all ancestors (`Attributes -band 1024`) | Enforced |
 | `read_file` | Workspace root + registered global `SKILL.md` files | Target + all ancestors | Enforced |
 | `memory` (`MEMORY.md`) | Fixed paths: workspace (`MEMORY.md` or `.shellossus/MEMORY.md`) or global (`<ConfigDir>/MEMORY.md`) | Target + ancestors up to scope root | Blocks `$ConfigPath` |
-| `run_command`, `!cmd`, `!!cmd` | Starts in workspace; **retains full user OS permissions** | Governed by OS / AppLocker / WDAC | Scrubs `SHELLOSSUS_API_KEY` & `OPENAI_API_KEY` env vars |
+| `run_command`, `!cmd`, `!!cmd` | Starts in workspace; **retains full user OS permissions** | Governed by OS / AppLocker / WDAC | Scrubs `SHELLOSSUS_API_KEY`, `OPENAI_API_KEY` & `SHELLOSSUS_EXTRA_HEADERS` env vars |
 | Sessions, imports/exports, config, recovery, temp files | `<ConfigDir>/sessions`, explicit paths, `<ConfigDir>/recovery`, OS temp | Config & subagent prompt paths reject reparse points | Config parsed as plain data |
 
 ### Key Isolation Details
@@ -74,7 +74,7 @@ Child PowerShell workers launch the host binary by absolute path from `$PSHOME` 
 - **Download Cap:** The parent process polls the download file and terminates the worker if output exceeds **2 MiB**, re-verifying size after completion.
 
 ### Shell Execution (`run_command`)
-- **API Key Scrubbing:** `SHELLOSSUS_API_KEY` and `OPENAI_API_KEY` are removed from the child process environment before spawning `run_command` (commands still retain OS-allowed access to disk and other environment variables).
+- **API Key Scrubbing:** `SHELLOSSUS_API_KEY`, `OPENAI_API_KEY`, and `SHELLOSSUS_EXTRA_HEADERS` are removed from the child process environment before spawning `run_command` (commands still retain OS-allowed access to disk and other environment variables).
 - **Disk-Backed Output:** `stdout` and `stderr` stream directly to temporary files on disk. Up to 300 tail lines / 20,000 UTF-8 bytes are returned to the model; truncated runs preserve the complete log under `.shellossus/output/cmd-*.log`.
 - **Timeout & Descendant Cleanup:** Commands default to a 60-second timeout (`1`..`600`s). Periodic PID/start-time snapshots (`Win32_Process` on Windows PowerShell 5.1, `Get-Process` on Unix) track child trees so timed-out or interrupted commands terminate tracked descendants without hitting recycled PIDs.
 

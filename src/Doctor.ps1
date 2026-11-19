@@ -33,7 +33,12 @@ function Test-DoctorSessionDirectory {
 }
 
 function Invoke-DoctorModelsRequest {
-    param([string]$Uri, [string]$ApiKey)
+    param(
+        [string]$Uri,
+        [string]$ApiKey,
+        [string]$AuthHeaderName = $script:AuthHeaderName,
+        [hashtable]$ExtraHeaders = $script:ExtraHttpHeaders
+    )
     $responseFile = $null
     try {
         $responseFile = New-AgentTempFile
@@ -41,7 +46,8 @@ function Invoke-DoctorModelsRequest {
         # Do not follow redirects with the user's credentials.
         # Avoid -PassThru: older PowerShell versions leave -OutFile empty with it.
         # A successful response has no pipeline value; HTTP failures enter catch.
-        $null = Invoke-WebRequest -Uri $Uri -Method Get -Headers @{ Authorization = ('Bearer ' + $ApiKey) } -UseBasicParsing -OutFile $responseFile.FullName -MaximumRedirection 0 -TimeoutSec 10 -ErrorAction Stop
+        $docHeaders = New-AgentApiHeaders -ApiKey $ApiKey -AuthHeaderName $AuthHeaderName -ExtraHeaders $ExtraHeaders
+        $null = Invoke-WebRequest -Uri $Uri -Method Get -Headers $docHeaders -UseBasicParsing -OutFile $responseFile.FullName -MaximumRedirection 0 -TimeoutSec 10 -ErrorAction Stop
         if ((Get-Item -LiteralPath $responseFile.FullName).Length -gt 1MB) {
             return @{ code = 200; valid_catalog = $false; ids = @() }
         }
@@ -86,7 +92,11 @@ function Get-AgentDoctorReport {
         [string]$ConfigState = 'loaded',
         [string]$KeyStorageWarning,
         [string]$RequestTimeoutSpec = '',
-        [string]$StreamSpec = ''
+        [string]$StreamSpec = '',
+        [string]$AuthHeaderSpec = '',
+        [string]$MaxTokensSpec = '',
+        [string]$TemperatureSpec = '',
+        [string]$ExtraHeadersSpec = ''
     )
     $checks = @()
     $version = $PSVersionTable.PSVersion
@@ -137,6 +147,40 @@ function Get-AgentDoctorReport {
     else {
         $checks += @{ name = 'stream'; status = 'fail'; message = 'Stream setting must be true, false, 1, or 0.' }
     }
+    $resolvedAuthHeader = if ($script:AuthHeaderName) { [string]$script:AuthHeaderName } else { 'Authorization' }
+    $authHeaderValid = $true
+    if ($null -ne $AuthHeaderSpec -and $AuthHeaderSpec.Trim().Length -gt 0) {
+        try { $resolvedAuthHeader = ConvertTo-AgentAuthHeaderName -HeaderSpec $AuthHeaderSpec }
+        catch { $authHeaderValid = $false }
+    }
+    if (-not $authHeaderValid) {
+        $checks += @{ name = 'auth_header'; status = 'fail'; message = 'AuthHeader must be a valid non-reserved HTTP header name (letters, digits, hyphens).' }
+    }
+    $maxTokensValid = $true
+    if ($null -ne $MaxTokensSpec -and $MaxTokensSpec.Trim().Length -gt 0) {
+        try { $null = ConvertTo-AgentMaxTokens -MaxTokensSpec $MaxTokensSpec }
+        catch { $maxTokensValid = $false }
+    }
+    if (-not $maxTokensValid) {
+        $checks += @{ name = 'max_tokens'; status = 'fail'; message = 'MaxTokens must be an integer between 1 and 1000000.' }
+    }
+    $tempValid = $true
+    if ($null -ne $TemperatureSpec -and $TemperatureSpec.Trim().Length -gt 0) {
+        try { $null = ConvertTo-AgentTemperature -TemperatureSpec $TemperatureSpec }
+        catch { $tempValid = $false }
+    }
+    if (-not $tempValid) {
+        $checks += @{ name = 'temperature'; status = 'fail'; message = 'Temperature must be a decimal number between 0 and 2 (using dot decimal).' }
+    }
+    $resolvedExtraHeaders = if ($script:ExtraHttpHeaders) { $script:ExtraHttpHeaders } else { @{} }
+    $extraHeadersValid = $true
+    if ($null -ne $ExtraHeadersSpec -and $ExtraHeadersSpec.Trim().Length -gt 0) {
+        try { $resolvedExtraHeaders = ConvertFrom-AgentExtraHeaders -HeadersSpec $ExtraHeadersSpec -AuthHeaderName $resolvedAuthHeader }
+        catch { $extraHeadersValid = $false }
+    }
+    if (-not $extraHeadersValid) {
+        $checks += @{ name = 'extra_headers'; status = 'fail'; message = 'SHELLOSSUS_EXTRA_HEADERS must be a valid JSON object of safe HTTP header names and single-line string values.' }
+    }
     try {
         $root = Get-Item -LiteralPath $Workspace -Force -ErrorAction Stop
         if (-not $root.PSIsContainer) { throw 'Expected a directory.' }
@@ -183,8 +227,11 @@ function Get-AgentDoctorReport {
         }
         $checks += @{ name = 'endpoint'; status = 'info'; message = $endpointMessage }
     }
+    elseif (-not $authHeaderValid -or -not $extraHeadersValid) {
+        $checks += @{ name = 'endpoint'; status = 'fail'; message = "Network check skipped due to invalid gateway header settings. Base URL: $BaseUrl" }
+    }
     else {
-        $probe = Invoke-DoctorModelsRequest -Uri ($BaseUrl.TrimEnd('/') + '/models') -ApiKey $ApiKey
+        $probe = Invoke-DoctorModelsRequest -Uri ($BaseUrl.TrimEnd('/') + '/models') -ApiKey $ApiKey -AuthHeaderName $resolvedAuthHeader -ExtraHeaders $resolvedExtraHeaders
         $status = 'fail'
         $message = 'Endpoint check failed. Check DNS, proxy/VPN, TLS trust, firewall rules, and the API base URL. The request has a 10-second timeout (DNS resolution may take longer).'
         if ($probe.code -eq 200) {
@@ -217,14 +264,8 @@ function Get-AgentDoctorReport {
         $checks += @{ name = 'endpoint'; status = $status; message = ($message + " Base URL: $BaseUrl") }
     }
     # Never include server bodies, headers, or raw exceptions in a shareable report.
-    $trimmedKey = if ($hasKey) { $ApiKey.Trim() } else { '' }
     foreach ($check in $checks) {
-        if ($hasKey) {
-            $check.message = $check.message.Replace($ApiKey, '[redacted]')
-            if ($trimmedKey -and $trimmedKey -ne $ApiKey) {
-                $check.message = $check.message.Replace($trimmedKey, '[redacted]')
-            }
-        }
+        $check.message = Protect-AgentHeaderSecrets -Text $check.message -ApiKey $(if ($hasKey) { $ApiKey } else { '' }) -ExtraHeaders $resolvedExtraHeaders
         $check.message = Format-TuiText $check.message
     }
     $failed = @($checks | Where-Object { $_.status -eq 'fail' }).Count

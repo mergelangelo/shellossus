@@ -7,6 +7,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 ## [Unreleased]
 
 ### Added
+- Corporate gateway & generation settings: `-AuthHeader` / `SHELLOSSUS_AUTH_HEADER` (e.g. `api-key` without `Bearer ` prefix), `-MaxTokens` / `SHELLOSSUS_MAX_TOKENS`, `-Temperature` / `SHELLOSSUS_TEMPERATURE`, and `SHELLOSSUS_EXTRA_HEADERS` (CRLF-safe JSON static headers with secret redaction and child-shell scrubbing); auth and extra headers propagate across chat turns, `-Doctor`, `/compact`, and `http`/`subagent` workers, while `max_tokens`/`temperature` apply to chat and subagent turns.
 - `delete_file` and `move_file` workspace file tools with reparse-point/secret guards, `ReadOnly` blocking, verified backups, and conflict-aware `/undo` support.
 - `Retry-After` header support (delta seconds and HTTP-date) with up to 3 transient HTTP retries and exponential backoff + jitter in `Invoke-AgentTurn` and the isolated `http` worker.
 - Safe SSRF-validated redirect following (up to 3 hops, relative `Location` resolution, `https -> http` downgrade blocking, and per-hop `Test-SafeWebUrl` + `Assert-SafeWebResolution` checks with `-MaximumRedirection 0`) for `fetch_url`.

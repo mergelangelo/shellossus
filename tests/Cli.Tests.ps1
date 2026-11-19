@@ -3117,6 +3117,111 @@ $subRes = @(Invoke-ParallelSubagentProcesses -Root $WorkspacePath -Tasks @(@{ ro
         if ($null -eq $savedEnvKeyForStream) { Remove-Item Env:SHELLOSSUS_API_KEY -ErrorAction SilentlyContinue }
         else { $env:SHELLOSSUS_API_KEY = $savedEnvKeyForStream }
     }
+
+    # Task 11 (Stage C): -AuthHeader, -MaxTokens, -Temperature, and SHELLOSSUS_EXTRA_HEADERS propagate across turns and background workers.
+    $savedGwAuth = $script:AuthHeaderName
+    $savedGwMax = $script:MaxOutputTokens
+    $savedGwTemp = $script:ModelTemperature
+    $savedGwExtra = $script:ExtraHttpHeaders
+    $savedGwMode = $script:OutputMode
+    $script:gwSeenHeaders = $null
+    $script:gwSeenPayload = $null
+    $script:gwWorkerAuthEnv = ''
+    $script:gwWorkerExtraEnv = ''
+    try {
+        $script:OutputMode = 'json'
+        $null = Set-AgentAuthHeader -HeaderSpec 'api-key'
+        $null = Set-AgentMaxTokens -MaxTokensSpec '2048'
+        $null = Set-AgentTemperature -TemperatureSpec '0.35'
+        $null = Set-AgentExtraHeaders -HeadersSpec '{"X-Title":"shellossus","HTTP-Referer":"https://docs.example.com","X-Proxy-Token":"gw-secret-token-77"}'
+        & {
+            function Invoke-WebRequest {
+                param($Uri, $Method, $Headers, $ContentType, $Body, $TimeoutSec, $ErrorAction, [switch]$UseBasicParsing, $OutFile)
+                $script:gwSeenHeaders = $Headers
+                $script:gwSeenPayload = $Body | ConvertFrom-Json
+                $ok = @{ choices = @(@{ finish_reason = 'stop'; message = @{ content = 'gw-ok' } }) } | ConvertTo-Json -Depth 8 -Compress
+                Set-Content -LiteralPath $OutFile -Value $ok -Encoding UTF8 -NoNewline
+            }
+            $gwState = @{
+                session_id = 't11-gw-turn'
+                workspace = $workspacePath
+                model = 'azure-deploy'
+                messages = @(
+                    @{ role = 'system'; content = 'sys' },
+                    @{ role = 'user'; content = 'ping' }
+                )
+            }
+            Invoke-AgentTurn -State $gwState -Endpoint 'https://example.invalid/v1/chat/completions' -ModelId 'azure-deploy' -ApiKey 'az-secret-123' -Root $workspacePath -Steps 2
+            Assert-True ($gwState.messages[-1].content -ceq 'gw-ok') 'Gateway turn did not complete.'
+            Assert-True ((-not $script:gwSeenHeaders.ContainsKey('Authorization')) -and ($script:gwSeenHeaders['api-key'] -ceq 'az-secret-123') -and ($script:gwSeenHeaders['X-Title'] -ceq 'shellossus') -and ($script:gwSeenHeaders['HTTP-Referer'] -ceq 'https://docs.example.com')) 'Invoke-AgentTurn did not send custom AuthHeader and ExtraHeaders.'
+            Assert-True ([int]$script:gwSeenPayload.max_tokens -eq 2048 -and [double]$script:gwSeenPayload.temperature -eq 0.35) "Invoke-AgentTurn did not send max_tokens/temperature: $($script:gwSeenPayload | ConvertTo-Json -Compress)"
+
+            # Unset max_tokens/temperature must be omitted from JSON request body.
+            $null = Set-AgentMaxTokens -MaxTokensSpec ''
+            $null = Set-AgentTemperature -TemperatureSpec ''
+            $gwState2 = @{
+                session_id = 't11-gw-default'
+                workspace = $workspacePath
+                model = 'azure-deploy'
+                messages = @(
+                    @{ role = 'system'; content = 'sys' },
+                    @{ role = 'user'; content = 'ping2' }
+                )
+            }
+            Invoke-AgentTurn -State $gwState2 -Endpoint 'https://example.invalid/v1/chat/completions' -ModelId 'azure-deploy' -ApiKey 'az-secret-123' -Root $workspacePath -Steps 2
+            $pNames2 = @(Get-ObjectPropertyNames -InputObject $script:gwSeenPayload)
+            Assert-True (($pNames2 -notcontains 'max_tokens') -and ($pNames2 -notcontains 'temperature')) 'Unset max_tokens/temperature were still emitted in request payload.'
+        }
+
+        # Background HTTP worker receives SHELLOSSUS_HTTP_AUTH_HEADER and SHELLOSSUS_HTTP_EXTRA_HEADERS and redacts proxy secret on error.
+        & {
+            function Start-Process {
+                param($FilePath, $ArgumentList, $RedirectStandardOutput, $RedirectStandardError, [switch]$NoNewWindow, [switch]$PassThru, $ErrorAction)
+                $script:gwWorkerAuthEnv = [string]$env:SHELLOSSUS_HTTP_AUTH_HEADER
+                $script:gwWorkerExtraEnv = [string]$env:SHELLOSSUS_HTTP_EXTRA_HEADERS
+                Set-AgentUtf8Content -LiteralPath $env:SHELLOSSUS_HTTP_ERR -Value 'Gateway error echoing gw-secret-token-77 and az-secret-123'
+                return @{ HasExited = $true; Id = 0; ExitCode = 1 }
+            }
+            $gwTmpOut = New-AgentTempFile
+            $gwErrMsg = ''
+            try {
+                Invoke-AgentHttpRequest -Uri 'https://example.invalid/v1/chat/completions' -ApiKey 'az-secret-123' -Body '{}' -OutFile $gwTmpOut.FullName -ForceBackgroundWorker
+            }
+            catch { $gwErrMsg = [string]$_.Exception.Message }
+            finally { Remove-Item -LiteralPath $gwTmpOut.FullName -Force -ErrorAction SilentlyContinue }
+            Assert-True ($script:gwWorkerAuthEnv -ceq 'api-key' -and $script:gwWorkerExtraEnv.Contains('X-Title')) "HTTP worker did not receive gateway header env vars: auth='$($script:gwWorkerAuthEnv)' extra='$($script:gwWorkerExtraEnv)'"
+            Assert-True (($gwErrMsg -notlike '*gw-secret-token-77*') -and ($gwErrMsg -notlike '*az-secret-123*') -and $gwErrMsg.Contains('[redacted]')) "HTTP worker error leaked API key or proxy secret: $gwErrMsg"
+        }
+
+        # Regression (I12): parallel subagent passes explicit clear sentinels when parent cleared MaxTokens/Temperature/ExtraHeaders and redacts stderr secrets.
+        & {
+            $null = Set-AgentMaxTokens -MaxTokensSpec ''
+            $null = Set-AgentTemperature -TemperatureSpec ''
+            $null = Set-AgentExtraHeaders -HeadersSpec ''
+            $script:gwSubClearMax = ''
+            $script:gwSubClearTemp = ''
+            $script:gwSubClearExtra = ''
+            function Start-Process {
+                param($FilePath, $ArgumentList, $WorkingDirectory, $RedirectStandardOutput, $RedirectStandardError, [switch]$NoNewWindow, [switch]$PassThru, $ErrorAction)
+                $script:gwSubClearMax = [string]$env:SHELLOSSUS_SUB_MAX_TOKENS
+                $script:gwSubClearTemp = [string]$env:SHELLOSSUS_SUB_TEMPERATURE
+                $script:gwSubClearExtra = [string]$env:SHELLOSSUS_EXTRA_HEADERS
+                Set-AgentUtf8Content -LiteralPath $RedirectStandardError -Value 'Subagent stderr leaked az-secret-123'
+                return @{ HasExited = $true; Id = 0; ExitCode = 1 }
+            }
+            $subClearRes = @(Invoke-ParallelSubagentProcesses -Root $workspacePath -Tasks @(@{ role = 'recon'; prompt = 'check' }) -MaxSteps 2 -ApiKey 'az-secret-123')
+            Assert-True ($script:gwSubClearMax -ceq '__CLEAR__' -and $script:gwSubClearTemp -ceq '__CLEAR__' -and $script:gwSubClearExtra -ceq '{}') "Parallel subagent did not propagate cleared gateway/gen overrides: max='$($script:gwSubClearMax)' temp='$($script:gwSubClearTemp)' extra='$($script:gwSubClearExtra)'"
+            Assert-True ($subClearRes.Count -eq 1 -and ([string]$subClearRes[0].output -notlike '*az-secret-123*') -and ([string]$subClearRes[0].output).Contains('[redacted]')) "Parallel subagent stderr leaked API key: $($subClearRes[0].output)"
+        }
+    }
+    finally {
+        $script:AuthHeaderName = $savedGwAuth
+        $script:MaxOutputTokens = $savedGwMax
+        $script:ModelTemperature = $savedGwTemp
+        $script:ExtraHttpHeaders = $savedGwExtra
+        $script:OutputMode = $savedGwMode
+        Remove-Variable -Name gwSeenHeaders, gwSeenPayload, gwWorkerAuthEnv, gwWorkerExtraEnv, gwSubClearMax, gwSubClearTemp, gwSubClearExtra -Scope Script -ErrorAction SilentlyContinue
+    }
 }
 finally {
     Remove-TestEnvironment -Env $envData

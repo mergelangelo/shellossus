@@ -583,15 +583,20 @@ function Wait-AgentProcessWithSpinner {
 
 function Invoke-InternalHttpWorker {
     $script:InternalWorkerFailed = $false
+    $workerAuthHdr = 'Authorization'
+    $workerExtraHdrs = @{}
     try {
         if (-not $env:SHELLOSSUS_HTTP_URI) { throw 'HTTP worker URI is required.' }
         if (-not $env:SHELLOSSUS_HTTP_IN) { throw 'HTTP worker input file is required.' }
         if (-not $env:SHELLOSSUS_HTTP_OUT) { throw 'HTTP worker output file is required.' }
         $timeoutVal = if ($env:SHELLOSSUS_HTTP_TIMEOUT) { [int]$env:SHELLOSSUS_HTTP_TIMEOUT } else { 180 }
-        $workerHeaders = @{ Authorization = ('Bearer ' + $env:SHELLOSSUS_API_KEY) }
-        if ($env:SHELLOSSUS_HTTP_STREAM -eq '1') {
-            $workerHeaders['Accept'] = 'text/event-stream, application/json'
+        if ($env:SHELLOSSUS_HTTP_AUTH_HEADER) {
+            $workerAuthHdr = ConvertTo-AgentAuthHeaderName -HeaderSpec $env:SHELLOSSUS_HTTP_AUTH_HEADER
         }
+        if ($env:SHELLOSSUS_HTTP_EXTRA_HEADERS) {
+            $workerExtraHdrs = ConvertFrom-AgentExtraHeaders -HeadersSpec $env:SHELLOSSUS_HTTP_EXTRA_HEADERS -AuthHeaderName $workerAuthHdr
+        }
+        $workerHeaders = New-AgentApiHeaders -ApiKey $env:SHELLOSSUS_API_KEY -AuthHeaderName $workerAuthHdr -ExtraHeaders $workerExtraHdrs -AcceptSse:($env:SHELLOSSUS_HTTP_STREAM -eq '1')
         $null = Microsoft.PowerShell.Utility\Invoke-WebRequest -Uri $env:SHELLOSSUS_HTTP_URI -Method 'Post' -Headers $workerHeaders -ContentType 'application/json; charset=utf-8' -InFile $env:SHELLOSSUS_HTTP_IN -OutFile $env:SHELLOSSUS_HTTP_OUT -MaximumRedirection 0 -TimeoutSec $timeoutVal -UseBasicParsing -ErrorAction Stop
     }
     catch {
@@ -623,7 +628,7 @@ function Invoke-InternalHttpWorker {
             catch {}
         }
         if ($env:SHELLOSSUS_HTTP_ERR) {
-            if ($env:SHELLOSSUS_API_KEY) { $msg = $msg.Replace($env:SHELLOSSUS_API_KEY, '[redacted]') }
+            $msg = Protect-AgentHeaderSecrets -Text $msg -ApiKey $env:SHELLOSSUS_API_KEY -ExtraHeaders $workerExtraHdrs
             Set-AgentUtf8Content -LiteralPath $env:SHELLOSSUS_HTTP_ERR -Value $msg
         }
         $script:InternalWorkerFailed = $true
@@ -644,10 +649,7 @@ function Invoke-AgentHttpRequest {
     $asciiBody = ConvertTo-AsciiJson -Json $Body
     $iwrCmd = Get-Command -Name 'Invoke-WebRequest' -ErrorAction SilentlyContinue
     if ((-not $ForceBackgroundWorker) -and (($iwrCmd -and $iwrCmd.CommandType -eq 'Function') -or $script:DisableAsyncHttp)) {
-        $reqHeaders = @{ Authorization = "Bearer $ApiKey" }
-        if ($script:StreamRequests) {
-            $reqHeaders['Accept'] = 'text/event-stream, application/json'
-        }
+        $reqHeaders = New-AgentApiHeaders -ApiKey $ApiKey -AuthHeaderName $script:AuthHeaderName -ExtraHeaders $script:ExtraHttpHeaders -AcceptSse:([bool]$script:StreamRequests)
         $request = @{
             Uri = $Uri
             Method = 'Post'
@@ -664,7 +666,7 @@ function Invoke-AgentHttpRequest {
         catch {
             $script:LastHttpRetryAfterSec = Get-AgentRetryAfterSeconds -ErrorRecord $_
             $message = Format-AgentError -ErrorRecord $_
-            if ($ApiKey) { $message = $message.Replace($ApiKey, '[redacted]') }
+            $message = Protect-AgentHeaderSecrets -Text $message -ApiKey $ApiKey -ExtraHeaders $script:ExtraHttpHeaders
             throw (Format-TuiText $message)
         }
         Assert-AgentApiResponseSize -Path $OutFile
@@ -680,6 +682,10 @@ function Invoke-AgentHttpRequest {
     try {
         Set-Content -LiteralPath $reqTemp.FullName -Value $asciiBody -Encoding Ascii -NoNewline -ErrorAction Stop
         $argList = Get-AgentWorkerArguments -ScriptPath $workerScript -WorkerMode 'http'
+        $extraHdrJson = if ($script:ExtraHttpHeaders -and $script:ExtraHttpHeaders.Count -gt 0) {
+            ConvertTo-AsciiJson -Json ($script:ExtraHttpHeaders | ConvertTo-Json -Compress)
+        }
+        else { $null }
         $proc = Invoke-WithProcessEnvironment -Values @{
             SHELLOSSUS_HTTP_URI = $Uri
             SHELLOSSUS_API_KEY = $ApiKey
@@ -690,6 +696,8 @@ function Invoke-AgentHttpRequest {
             SHELLOSSUS_HTTP_META = $metaTemp.FullName
             SHELLOSSUS_HTTP_TIMEOUT = [string]$TimeoutSec
             SHELLOSSUS_HTTP_STREAM = $(if ($script:StreamRequests) { '1' } else { '0' })
+            SHELLOSSUS_HTTP_AUTH_HEADER = $(if ($script:AuthHeaderName) { $script:AuthHeaderName } else { 'Authorization' })
+            SHELLOSSUS_HTTP_EXTRA_HEADERS = $extraHdrJson
         } -Action {
             Start-Process -FilePath $shellExe -ArgumentList $argList -RedirectStandardOutput $stdoutTemp.FullName -RedirectStandardError $stderrTemp.FullName -NoNewWindow -PassThru -ErrorAction Stop
         }
@@ -710,14 +718,14 @@ function Invoke-AgentHttpRequest {
         if ($errItem -and $errItem.Length -gt 0) {
             $errText = Get-Content -LiteralPath $errTemp.FullName -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
             if ($errText) {
-                if ($ApiKey) { $errText = $errText.Replace($ApiKey, '[redacted]') }
+                $errText = Protect-AgentHeaderSecrets -Text $errText -ApiKey $ApiKey -ExtraHeaders $script:ExtraHttpHeaders
                 throw (Format-TuiText $errText.Trim())
             }
         }
         if ($null -ne $proc.ExitCode -and [int]$proc.ExitCode -ne 0) {
             $stdErrText = Get-Content -LiteralPath $stderrTemp.FullName -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
             if ($stdErrText -and $stdErrText.Trim()) {
-                if ($ApiKey) { $stdErrText = $stdErrText.Replace($ApiKey, '[redacted]') }
+                $stdErrText = Protect-AgentHeaderSecrets -Text $stdErrText -ApiKey $ApiKey -ExtraHeaders $script:ExtraHttpHeaders
                 throw (Format-TuiText $stdErrText.Trim())
             }
             throw "HTTP worker exited with code $($proc.ExitCode)."

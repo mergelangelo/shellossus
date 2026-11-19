@@ -28,6 +28,10 @@ The configuration file is parsed strictly as plain `KEY=VALUE` data (never evalu
 | `SHELLOSSUS_STREAM` | `-Stream` | `false` | Set `true` or `1` to assemble responses over SSE (`stream = true`) on gateways with strict idle read timeouts (`-Stream:$false` overrides). |
 | `SHELLOSSUS_THEME` | `-Theme` | `gruvbox-material` | Active 24-bit TrueColor theme ID. |
 | `SHELLOSSUS_SEARCH_URL` | *(env / `.env` only)* | DuckDuckGo HTML | Custom public `http(s)` search endpoint for `web_search`. Supports `{query}` placeholder (or appends the URL-encoded query) and auto-detects JSON (`results`, `web.results`, `items`, `data`, or top-level arrays, e.g. SearXNG `?format=json`) as well as HTML. |
+| `SHELLOSSUS_AUTH_HEADER` | `-AuthHeader` | `Authorization` | Authentication header name. Default `Authorization` sends `Bearer <key>`; custom headers (e.g. `api-key` for Azure OpenAI) send the raw key without a `Bearer ` prefix. |
+| `SHELLOSSUS_MAX_TOKENS` | `-MaxTokens` | *(unset)* | Optional `max_tokens` integer limit (`1`..`1000000`) sent on chat requests. |
+| `SHELLOSSUS_TEMPERATURE` | `-Temperature` | *(unset)* | Optional sampling `temperature` (`0`..`2`, dot decimal) sent on chat requests. |
+| `SHELLOSSUS_EXTRA_HEADERS` | *(env / `.env` only)* | *(unset)* | Optional JSON object of static extra HTTP headers (up to 16 single-line string headers, e.g. `'{"X-Title":"shellossus","HTTP-Referer":"https://example.com"}'`). Rejects CRLF/control chars and reserved/auth header overrides; values of secret-named headers (`*key*`, `*token*`, `*secret*`, `*auth*`) are redacted from errors and `-Doctor`. |
 
 ---
 
@@ -63,6 +67,9 @@ The configuration file is parsed strictly as plain `KEY=VALUE` data (never evalu
 | `-MaxSteps <n>` | `50` | Maximum model-tool loop iterations per turn (`1`..`500`). |
 | `-MaxRepeatCalls <n>` | `3` | Loop-guard threshold (`1`..`50`) for identical tool calls without an intervening state change. For `N >= 2`, attempt `N` returns a warning (`N = 1` warns on the first repeat) and the next identical attempt stops the turn. |
 | `-ReasoningEffort <lvl>` | provider default | Pass `reasoning_effort` (`low`, `medium`, `high`) to reasoning-capable models. |
+| `-AuthHeader <name>` | `Authorization` | Override authentication header name (`Authorization` uses `Bearer <key>`; other headers like `api-key` send raw key). |
+| `-MaxTokens <n>` | provider default | Optional `max_tokens` generation cap (`1`..`1000000`). |
+| `-Temperature <num>` | provider default | Optional sampling `temperature` (`0`..`2`, dot decimal). |
 
 ### Sessions, Context & Tool Filtering
 

@@ -195,7 +195,7 @@ try {
 
     # Exercise real startup and REPL routing with isolated config and mocked I/O.
     $savedEnvironment = @{}
-    $envNames = @('SHELLOSSUS_BASE_URL', 'SHELLOSSUS_MODEL', 'SHELLOSSUS_API_KEY', 'SHELLOSSUS_WORKSPACE', 'SHELLOSSUS_CONTEXT_WINDOW', 'SHELLOSSUS_COMPACT_THRESHOLD', 'SHELLOSSUS_REQUEST_TIMEOUT_SEC', 'SHELLOSSUS_STREAM', 'SHELLOSSUS_SEARCH_URL')
+    $envNames = @('SHELLOSSUS_BASE_URL', 'SHELLOSSUS_MODEL', 'SHELLOSSUS_API_KEY', 'SHELLOSSUS_WORKSPACE', 'SHELLOSSUS_CONTEXT_WINDOW', 'SHELLOSSUS_COMPACT_THRESHOLD', 'SHELLOSSUS_REQUEST_TIMEOUT_SEC', 'SHELLOSSUS_STREAM', 'SHELLOSSUS_SEARCH_URL', 'SHELLOSSUS_AUTH_HEADER', 'SHELLOSSUS_MAX_TOKENS', 'SHELLOSSUS_TEMPERATURE', 'SHELLOSSUS_EXTRA_HEADERS')
     foreach ($envName in $envNames) {
         $savedEnvironment[$envName] = (Get-Item -LiteralPath ('Env:' + $envName) -ErrorAction SilentlyContinue).Value
         Remove-Item -LiteralPath ('Env:' + $envName) -ErrorAction SilentlyContinue
@@ -310,6 +310,33 @@ try {
         $verJsonObj = $verJsonRaw | ConvertFrom-Json
         Assert-True ($verJsonObj.type -ceq 'version' -and $verJsonObj.version -ceq $script:AgentVersion) "Unexpected -Version JSON output: '$verJsonRaw'"
         Assert-True ($global:ShellossusDoctorFixture.requests -eq $reqBeforeVersion) '-Version triggered an unexpected network request.'
+
+        # Task 11 (Stage C): -Doctor respects -AuthHeader / SHELLOSSUS_EXTRA_HEADERS and fails closed on invalid gateway/generation settings without leaking secrets.
+        $savedDocAuth = $script:AuthHeaderName
+        $savedDocExtra = $script:ExtraHttpHeaders
+        $origIwr = ${function:Invoke-WebRequest}
+        $global:ShellossusDoctorFixture.seenCustomHeaders = $null
+        try {
+            function Invoke-WebRequest {
+                param($Uri, $Method, $Headers, $OutFile, $MaximumRedirection, $TimeoutSec, $ErrorAction, [switch]$UseBasicParsing, [switch]$PassThru)
+                $global:ShellossusDoctorFixture.seenCustomHeaders = $Headers
+                Set-Content -LiteralPath $OutFile -Value '{"data":[{"id":"test-model"}]}' -Encoding UTF8 -NoNewline
+            }
+            $customDocRep = Get-AgentDoctorReport -BaseUrl 'https://example.invalid/v1' -ModelId 'test-model' -ApiKey 'doctor-secret-key' -Workspace $workspacePath -NoSession -AuthHeaderSpec 'api-key' -MaxTokensSpec '2048' -TemperatureSpec '0.4' -ExtraHeadersSpec '{"X-Title":"shellossus","X-Proxy-Token":"proxy-secret-777"}'
+            Assert-True ($customDocRep.failures -eq 0 -and $customDocRep.exit_code -eq 0) ("Doctor failed with valid custom gateway settings: " + ($customDocRep | ConvertTo-Json -Depth 6 -Compress))
+            Assert-True (($global:ShellossusDoctorFixture.seenCustomHeaders['api-key'] -ceq 'doctor-secret-key') -and (-not $global:ShellossusDoctorFixture.seenCustomHeaders.ContainsKey('Authorization')) -and ($global:ShellossusDoctorFixture.seenCustomHeaders['X-Title'] -ceq 'shellossus')) 'Doctor GET /models did not forward custom AuthHeader and ExtraHeaders.'
+            $customDocJson = Write-AgentDoctorReport -Report $customDocRep -Mode json
+            Assert-True (($customDocJson -notlike '*doctor-secret-key*') -and ($customDocJson -notlike '*proxy-secret-777*')) 'Doctor JSON leaked API key or extra header secret.'
+
+            $badGwRep = Get-AgentDoctorReport -BaseUrl 'https://example.invalid/v1' -ModelId 'test-model' -ApiKey 'doctor-secret-key' -Workspace $workspacePath -NoSession -AuthHeaderSpec 'Bad Header' -MaxTokensSpec '-5' -TemperatureSpec '9.9' -ExtraHeadersSpec '{"X-Token":"leaked-secret-888\r\nBad: 1"}'
+            $badGwJson = Write-AgentDoctorReport -Report $badGwRep -Mode json
+            Assert-True ($badGwRep.failures -ge 4 -and $badGwRep.exit_code -eq 1 -and ($badGwJson -notlike '*leaked-secret-888*')) 'Doctor did not fail invalid gateway/generation settings or leaked raw header value.'
+        }
+        finally {
+            Set-Item Function:\Invoke-WebRequest -Value $origIwr
+            $script:AuthHeaderName = $savedDocAuth
+            $script:ExtraHttpHeaders = $savedDocExtra
+        }
     }
     finally {
         Remove-Item Function:\Read-Host -ErrorAction SilentlyContinue

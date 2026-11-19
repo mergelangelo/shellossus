@@ -3966,6 +3966,29 @@ description: Optional subagent role: recon (ReadOnly search), audit (ReadOnly re
             Remove-Item -LiteralPath (Join-Path $workspacePath '.env'), (Join-Path $workspacePath 't10-ask.txt'), (Join-Path $workspacePath 't10-move-src.txt'), (Join-Path $workspacePath 't10-existing-dst.txt'), (Join-Path $workspacePath 't10-conf-dst.txt'), (Join-Path $workspacePath 't10-dir') -Recurse -Force -ErrorAction SilentlyContinue
         }
     }
+
+    # Regression (Task 11 / C5): run_command scrubs SHELLOSSUS_EXTRA_HEADERS alongside API keys from child processes.
+    & {
+        $savedPermSh11 = $script:AgentPermission
+        $savedModeSh11 = $script:OutputMode
+        $savedExtraEnv11 = $env:SHELLOSSUS_EXTRA_HEADERS
+        try {
+            $script:AgentPermission = 'Auto'
+            $script:OutputMode = 'json'
+            $env:SHELLOSSUS_EXTRA_HEADERS = '{"X-Proxy-Token":"scrub-me-secret-999"}'
+            $scrubRes = Invoke-AgentTool -Root $workspacePath -Call @{
+                id = 't11-scrub'
+                function = @{ name = 'run_command'; arguments = '{"command":"Write-Output (''HDR=['' + $env:SHELLOSSUS_EXTRA_HEADERS + '']'')"}' }
+            } | ConvertFrom-Json
+            Assert-True ($scrubRes.status -ceq 'executed' -and ([string]$scrubRes.output).Contains('HDR=[]') -and (-not ([string]$scrubRes.output).Contains('scrub-me-secret-999'))) "run_command leaked SHELLOSSUS_EXTRA_HEADERS: $($scrubRes | ConvertTo-Json -Compress)"
+        }
+        finally {
+            $script:AgentPermission = $savedPermSh11
+            $script:OutputMode = $savedModeSh11
+            if ($null -eq $savedExtraEnv11) { Remove-Item Env:SHELLOSSUS_EXTRA_HEADERS -ErrorAction SilentlyContinue }
+            else { $env:SHELLOSSUS_EXTRA_HEADERS = $savedExtraEnv11 }
+        }
+    }
 }
 finally {
     Remove-TestEnvironment -Env $envData
