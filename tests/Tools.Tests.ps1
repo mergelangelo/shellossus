@@ -1060,6 +1060,56 @@ Start-Sleep -Seconds 30
         }
         $utf8SearchRes = Invoke-AgentTool -Root $workspacePath -Call @{ id = 'w-search-utf8'; function = @{ name = 'web_search'; arguments = '{"query":"utf8 test","limit":5}' } } | ConvertFrom-Json
         Assert-True ($utf8SearchRes.count -eq 1 -and $utf8SearchRes.results[0].url -eq ('https://ru.wikipedia.org/wiki/' + $expectedCyrillicWord)) 'web_search corrupted multi-byte UTF-8 URL in DuckDuckGo redirect.'
+
+        # SHELLOSSUS_SEARCH_URL precedence (env > script:SearchUrl > DuckDuckGo), {query} placeholder, and JSON search formats.
+        $savedToolSearchUrl = $script:SearchUrl
+        $savedEnvSearchUrl = $env:SHELLOSSUS_SEARCH_URL
+        $script:capturedSearchUris = @()
+        $script:mockSearchBody = ''
+        function Invoke-WebRequest {
+            param($Uri, $Method, $Headers, $ContentType, $Body, $TimeoutSec, $ErrorAction, [switch]$UseBasicParsing, $OutFile)
+            $script:capturedSearchUris += [string]$Uri
+            Set-Content -LiteralPath $OutFile -Value $script:mockSearchBody -Encoding UTF8 -NoNewline
+        }
+        try {
+            Remove-Item -LiteralPath 'Env:SHELLOSSUS_SEARCH_URL' -ErrorAction SilentlyContinue
+            $script:SearchUrl = 'https://searx.example.com/search?q={query}&format=json'
+            $script:mockSearchBody = '{"results":[{"title":"<b>PS 5.1</b> Ref","url":"https://docs.example.com/ps51","content":"Official <i>PowerShell</i> reference."},{"title":"Second","url":"https://docs.example.com/2","content":"Second item."}]}'
+            $searxRes = Invoke-AgentTool -Root $workspacePath -Call @{ id = 'w-searx'; function = @{ name = 'web_search'; arguments = '{"query":"powershell 5.1","limit":1}' } } | ConvertFrom-Json
+            Assert-True ($script:capturedSearchUris[-1] -ceq 'https://searx.example.com/search?q=powershell+5.1&format=json') "web_search did not expand {query} from script:SearchUrl: $($script:capturedSearchUris[-1])"
+            Assert-True ($searxRes.count -eq 1 -and $searxRes.results[0].title -ceq 'PS 5.1 Ref' -and $searxRes.results[0].url -ceq 'https://docs.example.com/ps51' -and $searxRes.results[0].snippet -ceq 'Official PowerShell reference.') 'web_search failed to parse SearXNG JSON results or respect limit.'
+
+            # Env SHELLOSSUS_SEARCH_URL overrides script:SearchUrl; Brave-style nested web.results works.
+            $env:SHELLOSSUS_SEARCH_URL = 'https://brave.example.com/res/v1/web/search?q='
+            $script:mockSearchBody = '{"web":{"results":[{"title":"Brave Hit","url":"https://brave.example.com/hit","description":"Brave snippet text."}]}}'
+            $braveRes = Invoke-AgentTool -Root $workspacePath -Call @{ id = 'w-brave'; function = @{ name = 'web_search'; arguments = '{"query":"clm test","limit":5}' } } | ConvertFrom-Json
+            Assert-True ($script:capturedSearchUris[-1] -ceq 'https://brave.example.com/res/v1/web/search?q=clm+test') "Env SHELLOSSUS_SEARCH_URL did not override script:SearchUrl: $($script:capturedSearchUris[-1])"
+            Assert-True ($braveRes.count -eq 1 -and $braveRes.results[0].title -ceq 'Brave Hit' -and $braveRes.results[0].snippet -ceq 'Brave snippet text.') 'web_search failed to parse Brave-style JSON web.results.'
+
+            # Top-level JSON array with link/snippet works, and code-like angle brackets in snippets are preserved.
+            $script:mockSearchBody = '[{"title":"Array Hit","link":"https://array.example.com/1","snippet":"Check if (a < b && c > d) and vector<int> &amp; <b>bold</b>."}]'
+            $arrRes = Invoke-AgentTool -Root $workspacePath -Call @{ id = 'w-json-arr'; function = @{ name = 'web_search'; arguments = '{"query":"arr","limit":5}' } } | ConvertFrom-Json
+            Assert-True ($arrRes.count -eq 1 -and $arrRes.results[0].url -ceq 'https://array.example.com/1' -and $arrRes.results[0].snippet -ceq 'Check if (a < b && c > d) and vector<int> & bold.') "web_search corrupted code angle brackets or HTML in JSON snippet: $($arrRes.results[0].snippet)"
+
+            # Runtime env SHELLOSSUS_SEARCH_URL rejects authority hijack (missing path/query or {query} in host).
+            foreach ($hijackSearchEnv in @('https://search.example.com', 'https://{query}.example.com/search')) {
+                $env:SHELLOSSUS_SEARCH_URL = $hijackSearchEnv
+                $hijackRes = Invoke-AgentTool -Root $workspacePath -Call @{ id = 'w-hijack'; function = @{ name = 'web_search'; arguments = '{"query":".attacker.com","limit":5}' } } | ConvertFrom-Json
+                Assert-True ([bool]$hijackRes.error) "Invoke-AgentWebSearch allowed unsafe runtime SHELLOSSUS_SEARCH_URL: $hijackSearchEnv"
+            }
+            $env:SHELLOSSUS_SEARCH_URL = 'https://brave.example.com/res/v1/web/search?q='
+
+            # Malformed JSON response fails closed with a clear error.
+            $script:mockSearchBody = '{"results":[{"title":"broken"'
+            $badJsonRes = Invoke-AgentTool -Root $workspacePath -Call @{ id = 'w-bad-json'; function = @{ name = 'web_search'; arguments = '{"query":"broken","limit":5}' } } | ConvertFrom-Json
+            Assert-True ($badJsonRes.error -like '*invalid JSON*') "Malformed JSON search response did not fail closed: $($badJsonRes | ConvertTo-Json -Compress)"
+        }
+        finally {
+            $script:SearchUrl = $savedToolSearchUrl
+            if ($null -eq $savedEnvSearchUrl) { Remove-Item -LiteralPath 'Env:SHELLOSSUS_SEARCH_URL' -ErrorAction SilentlyContinue }
+            else { $env:SHELLOSSUS_SEARCH_URL = $savedEnvSearchUrl }
+            Remove-Variable -Name capturedSearchUris, mockSearchBody -Scope Script -ErrorAction SilentlyContinue
+        }
     }
     finally {
         $script:AutoApproveWeb = $savedWebDownloadApproval

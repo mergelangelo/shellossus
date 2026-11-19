@@ -67,7 +67,7 @@ function Read-AgentConfig {
         $lineNumber++
         $trimmed = $line.Trim()
         if (-not $trimmed -or $trimmed.StartsWith('#')) { continue }
-        if ($trimmed -notmatch '^(SHELLOSSUS_(?:BASE_URL|MODEL|API_KEY|WORKSPACE|CONTEXT_WINDOW|COMPACT_THRESHOLD|REQUEST_TIMEOUT_SEC|STREAM|THEME))\s*=(.*)$') {
+        if ($trimmed -notmatch '^(SHELLOSSUS_(?:BASE_URL|MODEL|API_KEY|WORKSPACE|CONTEXT_WINDOW|COMPACT_THRESHOLD|REQUEST_TIMEOUT_SEC|STREAM|THEME|SEARCH_URL))\s*=(.*)$') {
             throw "Invalid config entry at line $lineNumber. Expected a supported SHELLOSSUS_* key=value."
         }
         $normalizedKey = $Matches[1].ToUpper()
@@ -179,7 +179,7 @@ function Save-AgentConfig {
         if ($value.Contains('"')) { throw 'Config values cannot contain double quotes.' }
         $lines += $key + '="' + $value + '"'
     }
-    foreach ($optKey in @('SHELLOSSUS_CONTEXT_WINDOW', 'SHELLOSSUS_COMPACT_THRESHOLD', 'SHELLOSSUS_REQUEST_TIMEOUT_SEC', 'SHELLOSSUS_STREAM', 'SHELLOSSUS_THEME')) {
+    foreach ($optKey in @('SHELLOSSUS_CONTEXT_WINDOW', 'SHELLOSSUS_COMPACT_THRESHOLD', 'SHELLOSSUS_REQUEST_TIMEOUT_SEC', 'SHELLOSSUS_STREAM', 'SHELLOSSUS_THEME', 'SHELLOSSUS_SEARCH_URL')) {
         if ($Config.ContainsKey($optKey) -and $null -ne $Config[$optKey] -and ([string]$Config[$optKey]).Length -gt 0) {
             $optVal = [string]$Config[$optKey]
             if ($optVal -match "[`r`n]" -or $optVal.Contains('"')) { throw 'Invalid optional config value.' }
@@ -2353,6 +2353,7 @@ $script:MinRequestTimeoutSec = 10
 $script:MaxRequestTimeoutSec = 1800
 $script:MaxStepRetryBudgetSec = 3600
 $script:StreamRequests = $false
+$script:SearchUrl = ''
 
 function ConvertTo-AgentRequestTimeout {
     param([AllowEmptyString()][string]$TimeoutSpec)
@@ -6813,6 +6814,176 @@ function ConvertFrom-UrlEncodedString {
     return ($out -join '')
 }
 
+function ConvertTo-AgentSearchUrl {
+    param([AllowEmptyString()][string]$UrlSpec)
+    if ($null -eq $UrlSpec) { return '' }
+    $trimmed = $UrlSpec.Trim()
+    if (-not $trimmed) { return '' }
+    if ($trimmed -notmatch '^(https?://)([^/?#\\]+)([/?].*)$') {
+        throw 'Search URL must be an http:// or https:// URL with an explicit path or query delimiter.'
+    }
+    $schemePrefix = $Matches[1]
+    $authority = $Matches[2]
+    if ($authority.Contains('{') -or $authority.Contains('}')) {
+        throw 'Search URL cannot contain placeholders in the host or authority.'
+    }
+    $baseProbe = $schemePrefix + $authority + '/'
+    $null = Test-SafeWebUrl -Url $baseProbe
+    $probe = if ($trimmed.Contains('{query}')) {
+        $trimmed.Replace('{query}', 'test')
+    }
+    else {
+        $trimmed + 'test'
+    }
+    $null = Test-SafeWebUrl -Url $probe
+    $baseUri = [uri]$baseProbe
+    $probeUri = [uri]$probe
+    if (($probeUri.Scheme -ine $baseUri.Scheme) -or ($probeUri.IdnHost -ine $baseUri.IdnHost) -or ($probeUri.Port -ne $baseUri.Port)) {
+        throw 'Search URL query expansion must not alter scheme, host, or port.'
+    }
+    return $trimmed
+}
+
+function Set-AgentSearchUrl {
+    param([AllowEmptyString()][string]$UrlSpec)
+    $val = ConvertTo-AgentSearchUrl -UrlSpec $UrlSpec
+    $script:SearchUrl = $val
+    return $script:SearchUrl
+}
+
+function Format-SearchFieldText {
+    param($Value)
+    if ($null -eq $Value -or $Value -isnot [string]) { return '' }
+    $text = $Value
+    if ($text.Contains('<')) {
+        $text = $text -replace '(?is)</?(?:b|strong|i|em|u|mark|span|a|br|code|pre|p|div|small|sub|sup|wbr|h[1-6]|li|ul|ol|blockquote)\b[^>]*>', ''
+    }
+    if ($text.Contains('&')) {
+        $text = $text.Replace('&nbsp;', ' ').Replace('&lt;', '<').Replace('&gt;', '>').Replace('&quot;', '"').Replace('&#39;', "'").Replace('&apos;', "'").Replace('&mdash;', '--').Replace('&ndash;', '-').Replace('&amp;', '&')
+    }
+    return (($text -replace '\s+', ' ').Trim())
+}
+
+function ConvertFrom-AgentSearchResponse {
+    param([AllowEmptyString()][string]$RawText, [int]$Limit = 8)
+    if ($null -eq $RawText) { return @() }
+    $text = [string]$RawText
+    if ($text.Length -gt 0 -and [int][char]$text[0] -eq 0xFEFF) {
+        $text = $text.Substring(1)
+    }
+    $trimmed = $text.TrimStart()
+    if (-not $trimmed) { return @() }
+
+    if ($trimmed.StartsWith('{') -or $trimmed.StartsWith('[')) {
+        $entries = @()
+        $jsonOpts = @{ ErrorAction = 'Stop' }
+        if ((Get-Command ConvertFrom-Json).Parameters.Keys -contains 'DateKind') { $jsonOpts.DateKind = 'String' }
+        try {
+            if ($trimmed.StartsWith('[')) {
+                # Assign before wrapping so Windows PowerShell 5.1 does not double-wrap top-level JSON arrays.
+                $parsedArr = $trimmed | ConvertFrom-Json @jsonOpts
+                $entries = if ($null -eq $parsedArr) { @() } elseif ($parsedArr -is [array]) { $parsedArr } else { @($parsedArr) }
+            }
+            else {
+                $parsed = $trimmed | ConvertFrom-Json @jsonOpts
+                if (-not (Test-IsJsonObject -Value $parsed)) {
+                    throw 'Invalid JSON object.'
+                }
+                if ($null -ne $parsed.results -and $parsed.results -is [array]) {
+                    $entries = @($parsed.results)
+                }
+                elseif ((Test-IsJsonObject -Value $parsed.web) -and $null -ne $parsed.web.results -and $parsed.web.results -is [array]) {
+                    $entries = @($parsed.web.results)
+                }
+                elseif ($null -ne $parsed.items -and $parsed.items -is [array]) {
+                    $entries = @($parsed.items)
+                }
+                elseif ($null -ne $parsed.data -and $parsed.data -is [array]) {
+                    $entries = @($parsed.data)
+                }
+            }
+        }
+        catch {
+            throw 'Search endpoint returned invalid JSON.'
+        }
+        $jsonResults = @()
+        foreach ($entry in $entries) {
+            if ($jsonResults.Count -ge $Limit) { break }
+            if (-not (Test-IsJsonObject -Value $entry)) { continue }
+            $urlVal = ''
+            foreach ($uField in @('url', 'link', 'href')) {
+                if ($entry.$uField -is [string] -and $entry.$uField.Trim()) {
+                    $urlVal = $entry.$uField.Trim()
+                    break
+                }
+            }
+            if (-not $urlVal) { continue }
+            $titleVal = ''
+            foreach ($tField in @('title', 'name')) {
+                if ($entry.$tField -is [string] -and $entry.$tField.Trim()) {
+                    $titleVal = Format-SearchFieldText -Value $entry.$tField
+                    break
+                }
+            }
+            if (-not $titleVal) { $titleVal = $urlVal }
+            $snippetVal = ''
+            foreach ($sField in @('snippet', 'content', 'description', 'summary')) {
+                if ($entry.$sField -is [string] -and $entry.$sField.Trim()) {
+                    $snippetVal = Format-SearchFieldText -Value $entry.$sField
+                    break
+                }
+            }
+            $jsonResults += @{
+                title = $titleVal
+                url = $urlVal
+                snippet = $snippetVal
+            }
+        }
+        return @($jsonResults)
+    }
+
+    $results = @()
+    $blocks = @($text -split '(?i)<div[^>]+class="[^"]*\bresult\b[^"]*"[^>]*>')
+    if ($blocks.Count -gt 1) {
+        for ($b = 1; $b -lt $blocks.Count; $b++) {
+            if ($results.Count -ge $Limit) { break }
+            $blk = $blocks[$b]
+            $href = ''
+            $titleRaw = ''
+            if ($blk -match '(?is)<a[^>]+class="[^"]*result__a[^"]*"[^>]+href="([^"]+)"[^>]*>(.*?)</a>') {
+                $href = $Matches[1]
+                $titleRaw = $Matches[2]
+            }
+            elseif ($blk -match '(?is)<a[^>]+href="([^"]+)"[^>]+class="[^"]*result__a[^"]*"[^>]*>(.*?)</a>') {
+                $href = $Matches[1]
+                $titleRaw = $Matches[2]
+            }
+            if (-not $href) { continue }
+            $hrefClean = $href.Replace('&amp;', '&')
+            if ($hrefClean -match '[?&]uddg=([^&"]+)') {
+                $href = ConvertFrom-UrlEncodedString -Text $Matches[1]
+            }
+            elseif ($hrefClean.StartsWith('//')) {
+                $href = 'https:' + $hrefClean
+            }
+            else {
+                $href = $hrefClean
+            }
+            $title = (ConvertFrom-HtmlToText -Html $titleRaw) -replace '\s+', ' '
+            $snippet = ''
+            if ($blk -match '(?is)<(?:a|td|div|span)[^>]+class="[^"]*result__snippet[^"]*"[^>]*>(.*?)</(?:a|td|div|span)>') {
+                $snippet = (ConvertFrom-HtmlToText -Html $Matches[1]) -replace '\s+', ' '
+            }
+            $results += @{
+                title = $title.Trim()
+                url = $href.Trim()
+                snippet = $snippet.Trim()
+            }
+        }
+    }
+    return @($results)
+}
+
 function Invoke-AgentWebSearch {
     param($Arguments)
     $toolStart = Get-Date
@@ -6824,55 +6995,31 @@ function Invoke-AgentWebSearch {
         if ($limit -lt 1 -or $limit -gt 20) { throw 'limit must be between 1 and 20.' }
     }
     $encodedQ = ConvertTo-UrlEncodedString -Text $query
-    $baseSearchUrl = if ($env:SHELLOSSUS_SEARCH_URL) { $env:SHELLOSSUS_SEARCH_URL } else { 'https://html.duckduckgo.com/html/?q=' }
-    $searchUri = $baseSearchUrl + $encodedQ
+    $baseSearchUrl = if ($env:SHELLOSSUS_SEARCH_URL -and $env:SHELLOSSUS_SEARCH_URL.Trim()) {
+        $env:SHELLOSSUS_SEARCH_URL.Trim()
+    }
+    elseif ($script:SearchUrl -and $script:SearchUrl.Trim()) {
+        $script:SearchUrl.Trim()
+    }
+    else {
+        'https://html.duckduckgo.com/html/?q='
+    }
+    $baseSearchUrl = ConvertTo-AgentSearchUrl -UrlSpec $baseSearchUrl
+    $searchUri = if ($baseSearchUrl.Contains('{query}')) {
+        $baseSearchUrl.Replace('{query}', $encodedQ)
+    }
+    else {
+        $baseSearchUrl + $encodedQ
+    }
     $null = Test-SafeWebUrl -Url $searchUri
     $conf = Request-AgentWebConfirmation -ToolName 'web_search' -Target $query
     if (-not $conf.approved) { return $conf.response }
     $tempOut = New-AgentTempFile
     try {
         Invoke-AgentWebDownload -Uri $searchUri -OutFile $tempOut.FullName
-        $html = Get-Content -LiteralPath $tempOut.FullName -Raw -Encoding UTF8 -ErrorAction Stop
-        if ($null -eq $html) { $html = '' }
-        $results = @()
-        $blocks = @($html -split '(?i)<div[^>]+class="[^"]*\bresult\b[^"]*"[^>]*>')
-        if ($blocks.Count -gt 1) {
-            for ($b = 1; $b -lt $blocks.Count; $b++) {
-                if ($results.Count -ge $limit) { break }
-                $blk = $blocks[$b]
-                $href = ''
-                $titleRaw = ''
-                if ($blk -match '(?is)<a[^>]+class="[^"]*result__a[^"]*"[^>]+href="([^"]+)"[^>]*>(.*?)</a>') {
-                    $href = $Matches[1]
-                    $titleRaw = $Matches[2]
-                }
-                elseif ($blk -match '(?is)<a[^>]+href="([^"]+)"[^>]+class="[^"]*result__a[^"]*"[^>]*>(.*?)</a>') {
-                    $href = $Matches[1]
-                    $titleRaw = $Matches[2]
-                }
-                if (-not $href) { continue }
-                $hrefClean = $href.Replace('&amp;', '&')
-                if ($hrefClean -match '[?&]uddg=([^&"]+)') {
-                    $href = ConvertFrom-UrlEncodedString -Text $Matches[1]
-                }
-                elseif ($hrefClean.StartsWith('//')) {
-                    $href = 'https:' + $hrefClean
-                }
-                else {
-                    $href = $hrefClean
-                }
-                $title = (ConvertFrom-HtmlToText -Html $titleRaw) -replace '\s+', ' '
-                $snippet = ''
-                if ($blk -match '(?is)<(?:a|td|div|span)[^>]+class="[^"]*result__snippet[^"]*"[^>]*>(.*?)</(?:a|td|div|span)>') {
-                    $snippet = (ConvertFrom-HtmlToText -Html $Matches[1]) -replace '\s+', ' '
-                }
-                $results += @{
-                    title = $title.Trim()
-                    url = $href.Trim()
-                    snippet = $snippet.Trim()
-                }
-            }
-        }
+        $rawBody = Get-Content -LiteralPath $tempOut.FullName -Raw -Encoding UTF8 -ErrorAction Stop
+        if ($null -eq $rawBody) { $rawBody = '' }
+        $results = @(ConvertFrom-AgentSearchResponse -RawText $rawBody -Limit $limit)
         $elapsedMs = [int](((Get-Date) - $toolStart).TotalMilliseconds)
         Write-ToolCallCard -Name 'web_search' -Target $query -Status 'ok' -Summary "$($results.Count) results" -ElapsedMs $elapsedMs
         return (@{
@@ -7489,6 +7636,7 @@ function Invoke-ParallelSubagentProcesses {
                     SHELLOSSUS_SUB_NO_CONTEXT = $(if ($script:NoContextFiles) { '1' } else { '0' })
                     SHELLOSSUS_SUB_REASONING_EFFORT = $(if ($script:ReasoningEffort) { [string]$script:ReasoningEffort } else { '' })
                     SHELLOSSUS_SUB_AUTO_WEB = $(if ($script:AutoApproveWeb) { '1' } else { '0' })
+                    SHELLOSSUS_SEARCH_URL = $(if ($env:SHELLOSSUS_SEARCH_URL -and ([string]$env:SHELLOSSUS_SEARCH_URL).Trim()) { ([string]$env:SHELLOSSUS_SEARCH_URL).Trim() } elseif ($script:SearchUrl -and ([string]$script:SearchUrl).Trim()) { ([string]$script:SearchUrl).Trim() } else { $null })
                     SHELLOSSUS_SUB_ROLE = [string]$roleObj.name
                     SHELLOSSUS_SUB_ROLE_PROMPT = [string]$roleObj.system_prompt
                 } -Action {
@@ -13486,7 +13634,7 @@ if (-not $LibraryOnly) {
             SHELLOSSUS_API_KEY = $inputKey
             SHELLOSSUS_WORKSPACE = $inputWorkspace
         }
-        foreach ($optK in @('SHELLOSSUS_CONTEXT_WINDOW', 'SHELLOSSUS_COMPACT_THRESHOLD', 'SHELLOSSUS_REQUEST_TIMEOUT_SEC', 'SHELLOSSUS_STREAM', 'SHELLOSSUS_THEME')) {
+        foreach ($optK in @('SHELLOSSUS_CONTEXT_WINDOW', 'SHELLOSSUS_COMPACT_THRESHOLD', 'SHELLOSSUS_REQUEST_TIMEOUT_SEC', 'SHELLOSSUS_STREAM', 'SHELLOSSUS_THEME', 'SHELLOSSUS_SEARCH_URL')) {
             if ($config.ContainsKey($optK) -and $null -ne $config[$optK] -and ([string]$config[$optK]).Length -gt 0) { $newCfg[$optK] = $config[$optK] }
         }
         if (($PSBoundParameters.Keys -contains 'ContextWindow') -and $ContextWindow) { $newCfg['SHELLOSSUS_CONTEXT_WINDOW'] = $ContextWindow }
@@ -13565,6 +13713,22 @@ if (-not $LibraryOnly) {
     }
     try {
         $null = Set-AgentStreamSetting -StreamSpec $effectiveStreamSpec
+    }
+    catch {
+        Write-AgentJsonEvent -EventType 'turn_end' -Payload @{ status = 'error'; error = $_.Exception.Message }
+        throw
+    }
+    $effectiveSearchUrl = if ($null -ne $env:SHELLOSSUS_SEARCH_URL -and ([string]$env:SHELLOSSUS_SEARCH_URL).Trim().Length -gt 0) {
+        [string]$env:SHELLOSSUS_SEARCH_URL
+    }
+    elseif ($config.ContainsKey('SHELLOSSUS_SEARCH_URL') -and $null -ne $config['SHELLOSSUS_SEARCH_URL'] -and ([string]$config['SHELLOSSUS_SEARCH_URL']).Trim().Length -gt 0) {
+        [string]$config['SHELLOSSUS_SEARCH_URL']
+    }
+    else {
+        ''
+    }
+    try {
+        $null = Set-AgentSearchUrl -UrlSpec $effectiveSearchUrl
     }
     catch {
         Write-AgentJsonEvent -EventType 'turn_end' -Payload @{ status = 'error'; error = $_.Exception.Message }

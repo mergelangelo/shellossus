@@ -172,6 +172,7 @@ function Invoke-ParallelSubagentProcesses {
                     SHELLOSSUS_SUB_NO_CONTEXT = $(if ($script:NoContextFiles) { '1' } else { '0' })
                     SHELLOSSUS_SUB_REASONING_EFFORT = $(if ($script:ReasoningEffort) { [string]$script:ReasoningEffort } else { '' })
                     SHELLOSSUS_SUB_AUTO_WEB = $(if ($script:AutoApproveWeb) { '1' } else { '0' })
+                    SHELLOSSUS_SEARCH_URL = $(if ($env:SHELLOSSUS_SEARCH_URL -and ([string]$env:SHELLOSSUS_SEARCH_URL).Trim()) { ([string]$env:SHELLOSSUS_SEARCH_URL).Trim() } elseif ($script:SearchUrl -and ([string]$script:SearchUrl).Trim()) { ([string]$script:SearchUrl).Trim() } else { $null })
                     SHELLOSSUS_SUB_ROLE = [string]$roleObj.name
                     SHELLOSSUS_SUB_ROLE_PROMPT = [string]$roleObj.system_prompt
                 } -Action {

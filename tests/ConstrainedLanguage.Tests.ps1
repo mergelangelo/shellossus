@@ -1067,6 +1067,17 @@ try {
         $script:AgentPermission = $savedClPerm7
         $script:OutputMode = $savedClMode7
     }
+
+    # Verify SHELLOSSUS_SEARCH_URL helpers and JSON search response parsing work under ConstrainedLanguage.
+    $savedClSearchUrl = $script:SearchUrl
+    try {
+        Assert-True ((Set-AgentSearchUrl -UrlSpec 'https://searx.example.com/search?q={query}&format=json') -ceq 'https://searx.example.com/search?q={query}&format=json') 'Set-AgentSearchUrl failed in ConstrainedLanguage.'
+        $clJsonHits = @(ConvertFrom-AgentSearchResponse -RawText '{"results":[{"title":"CLM Hit","url":"https://docs.example.com/clm","content":"Safe JSON parsing."}]}' -Limit 5)
+        Assert-True ($clJsonHits.Count -eq 1 -and $clJsonHits[0].title -ceq 'CLM Hit' -and $clJsonHits[0].snippet -ceq 'Safe JSON parsing.') 'ConvertFrom-AgentSearchResponse JSON parsing failed in ConstrainedLanguage.'
+    }
+    finally {
+        $script:SearchUrl = $savedClSearchUrl
+    }
 }
 finally {
     Remove-TestEnvironment -Env $envData

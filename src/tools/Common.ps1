@@ -46,6 +46,7 @@ $script:MinRequestTimeoutSec = 10
 $script:MaxRequestTimeoutSec = 1800
 $script:MaxStepRetryBudgetSec = 3600
 $script:StreamRequests = $false
+$script:SearchUrl = ''
 
 function ConvertTo-AgentRequestTimeout {
     param([AllowEmptyString()][string]$TimeoutSpec)

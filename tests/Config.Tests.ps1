@@ -587,6 +587,99 @@ try {
     finally {
         $script:StreamRequests = $savedStreamReq
     }
+
+    # Optional SHELLOSSUS_SEARCH_URL setting: ConvertTo-AgentSearchUrl / Set-AgentSearchUrl validation and config round-trip.
+    $savedSearchUrl = $script:SearchUrl
+    try {
+        Assert-True ((ConvertTo-AgentSearchUrl -UrlSpec '') -ceq '') 'Empty search URL should normalize to empty string.'
+        Assert-True ((ConvertTo-AgentSearchUrl -UrlSpec '  https://search.example.com/search?q={query}&format=json  ') -ceq 'https://search.example.com/search?q={query}&format=json') 'ConvertTo-AgentSearchUrl did not accept valid {query} HTTPS URL.'
+        Assert-True ((Set-AgentSearchUrl -UrlSpec 'https://search.example.com/html/?q=') -ceq 'https://search.example.com/html/?q=' -and $script:SearchUrl -ceq 'https://search.example.com/html/?q=') 'Set-AgentSearchUrl did not update script:SearchUrl.'
+        foreach ($badSearchSpec in @(
+            'http://127.0.0.1:8080/search?q=',
+            'http://localhost/search?q={query}',
+            'file:///etc/passwd',
+            'https://user:secret@search.example.com/search?q=',
+            'https://search.example.com',
+            'https://{query}.example.com/search',
+            'https://example.com.{query}/search',
+            'https://127.0.0.{query}/search',
+            'https://{query}',
+            'not-a-url'
+        )) {
+            $badSearchThrew = $false
+            try {
+                $null = Set-AgentSearchUrl -UrlSpec $badSearchSpec
+            }
+            catch {
+                $badSearchThrew = $true
+            }
+            Assert-True $badSearchThrew "Set-AgentSearchUrl accepted invalid or unsafe URL: $badSearchSpec"
+            Assert-True ($script:SearchUrl -ceq 'https://search.example.com/html/?q=') "Failed Set-AgentSearchUrl mutated script:SearchUrl on '$badSearchSpec'."
+        }
+
+        $searchCfgPath = Join-Path $testRoot 'search-roundtrip.env'
+        Save-AgentConfig -Path $searchCfgPath -Config @{
+            SHELLOSSUS_BASE_URL = 'https://example.invalid/v1'
+            SHELLOSSUS_MODEL = 'test-model'
+            SHELLOSSUS_SEARCH_URL = 'https://search.example.com/search?q={query}&format=json'
+        }
+        $loadedSearchCfg = Read-AgentConfig -Path $searchCfgPath
+        Assert-True ($loadedSearchCfg.SHELLOSSUS_SEARCH_URL -ceq 'https://search.example.com/search?q={query}&format=json') "Save/Read-AgentConfig did not round-trip SHELLOSSUS_SEARCH_URL: $($loadedSearchCfg.SHELLOSSUS_SEARCH_URL)"
+        Assert-True (Update-AgentConfigOptionalKey -Path $searchCfgPath -Key 'SHELLOSSUS_SEARCH_URL' -Value 'https://search.example.com/api?q=') 'Update-AgentConfigOptionalKey failed for SHELLOSSUS_SEARCH_URL.'
+        $updatedSearchCfg = Read-AgentConfig -Path $searchCfgPath
+        Assert-True ($updatedSearchCfg.SHELLOSSUS_SEARCH_URL -ceq 'https://search.example.com/api?q=') 'Update-AgentConfigOptionalKey did not persist SHELLOSSUS_SEARCH_URL.'
+
+        # -Setup preserves existing SHELLOSSUS_SEARCH_URL, and invalid SHELLOSSUS_SEARCH_URL fails closed at launch in -Mode json.
+        $savedSearchEnvTest = $env:SHELLOSSUS_SEARCH_URL
+        Remove-Item -LiteralPath 'Env:SHELLOSSUS_SEARCH_URL' -ErrorAction SilentlyContinue
+        $global:setupSearchInputs = @('', '', '')
+        $global:setupSearchIdx = 0
+        function Read-Host {
+            param([string]$Prompt, [switch]$AsSecureString)
+            if ($AsSecureString) { return $null }
+            $v = $global:setupSearchInputs[$global:setupSearchIdx]
+            $global:setupSearchIdx++
+            return $v
+        }
+        try {
+            & "$PSScriptRoot\..\shellossus.ps1" -Setup -ConfigPath $searchCfgPath | Out-Null
+            Assert-True ((Read-AgentConfig -Path $searchCfgPath).SHELLOSSUS_SEARCH_URL -ceq 'https://search.example.com/api?q=') '-Setup did not preserve SHELLOSSUS_SEARCH_URL.'
+
+            $badSearchEnvCfg = Join-Path $testRoot 'bad-search-launch.env'
+            Save-AgentConfig -Path $badSearchEnvCfg -Config @{
+                SHELLOSSUS_BASE_URL = 'https://example.invalid/v1'
+                SHELLOSSUS_MODEL = 'test-model'
+                SHELLOSSUS_API_KEY = 'fake-key'
+                SHELLOSSUS_SEARCH_URL = 'http://127.0.0.1:8080/search?q='
+            }
+            $global:badSearchLaunchEvents = @()
+            $badLaunchThrew = $false
+            function Write-Host {
+                param([Parameter(Position = 0, ValueFromRemainingArguments = $true)]$Object, [switch]$NoNewline)
+                $global:badSearchLaunchEvents += (($Object | ForEach-Object { [string]$_ }) -join ' ')
+            }
+            try {
+                & "$PSScriptRoot\..\shellossus.ps1" -ConfigPath $badSearchEnvCfg -Workspace $workspacePath -Mode json -NoSession -Prompt 'hello' | Out-Null
+            }
+            catch {
+                $badLaunchThrew = $true
+            }
+            finally {
+                Remove-Item Function:\Write-Host -ErrorAction SilentlyContinue
+            }
+            $sawBadSearchJsonErr = [bool]($global:badSearchLaunchEvents | Where-Object { $_ -like '*"type":"turn_end"*' -and $_ -like '*"status":"error"*' })
+            Assert-True ($badLaunchThrew -and $sawBadSearchJsonErr) 'Invalid SHELLOSSUS_SEARCH_URL at launch did not emit JSON turn_end error and throw.'
+        }
+        finally {
+            Remove-Item Function:\Read-Host -ErrorAction SilentlyContinue
+            Remove-Variable -Name setupSearchInputs, setupSearchIdx, badSearchLaunchEvents -Scope Global -ErrorAction SilentlyContinue
+            if ($null -eq $savedSearchEnvTest) { Remove-Item -LiteralPath 'Env:SHELLOSSUS_SEARCH_URL' -ErrorAction SilentlyContinue }
+            else { $env:SHELLOSSUS_SEARCH_URL = $savedSearchEnvTest }
+        }
+    }
+    finally {
+        $script:SearchUrl = $savedSearchUrl
+    }
 }
 finally {
     Remove-TestEnvironment -Env $envData

@@ -31,7 +31,7 @@ This design gives maintainers clean separation of concerns and fast unit testing
 - **[`src/tools/Shell.ps1`](../src/tools/Shell.ps1):** Sanitized child PowerShell execution, disk-backed stdout/stderr logs, and PID/start-time descendant tree termination (`Invoke-ShellCommand`, `Invoke-AgentCommand`).
 - **[`src/tools/Undo.ps1`](../src/tools/Undo.ps1):** Verified backup creation, reverse-chain preflight validation, manual-edit conflict detection, turn transaction rollback, and recovery manifests (`Invoke-AgentUndo`, `Undo-AgentTurnTransaction`).
 - **[`src/tools/Web.ps1`](../src/tools/Web.ps1):** SSRF IP/DNS preflight (`Assert-SafeWebResolution`), web confirmation prompts, isolated `web` download worker, HTML-to-text extraction, and `Invoke-AgentFetchUrl`.
-- **[`src/tools/WebSearch.ps1`](../src/tools/WebSearch.ps1):** Pure-PowerShell UTF-8 percent-encoding/decoding and HTML search result extraction (`Invoke-AgentWebSearch`).
+- **[`src/tools/WebSearch.ps1`](../src/tools/WebSearch.ps1):** Pure-PowerShell UTF-8 percent-encoding/decoding, `SHELLOSSUS_SEARCH_URL` validation, and JSON/HTML search result extraction (`Invoke-AgentWebSearch`).
 - **[`src/tools/Todo.ps1`](../src/tools/Todo.ps1):** Session task board tool (`Invoke-AgentTodo`).
 - **[`src/tools/AskUser.ps1`](../src/tools/AskUser.ps1):** Interactive user question and strict plan-approval tool (`Invoke-AgentAskUser`).
 - **[`src/tools/Memory.ps1`](../src/tools/Memory.ps1):** Workspace and global `MEMORY.md` tool with staged writes, backups, and live system-prompt sync (`Invoke-AgentMemory`).

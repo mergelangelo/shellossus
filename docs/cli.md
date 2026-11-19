@@ -27,6 +27,7 @@ The configuration file is parsed strictly as plain `KEY=VALUE` data (never evalu
 | `SHELLOSSUS_REQUEST_TIMEOUT_SEC` | `-RequestTimeoutSec` | `180` | Per-request model HTTP timeout in seconds (`10`..`1800`). |
 | `SHELLOSSUS_STREAM` | `-Stream` | `false` | Set `true` or `1` to assemble responses over SSE (`stream = true`) on gateways with strict idle read timeouts (`-Stream:$false` overrides). |
 | `SHELLOSSUS_THEME` | `-Theme` | `gruvbox-material` | Active 24-bit TrueColor theme ID. |
+| `SHELLOSSUS_SEARCH_URL` | *(env / `.env` only)* | DuckDuckGo HTML | Custom public `http(s)` search endpoint for `web_search`. Supports `{query}` placeholder (or appends the URL-encoded query) and auto-detects JSON (`results`, `web.results`, `items`, `data`, or top-level arrays, e.g. SearXNG `?format=json`) as well as HTML. |
 
 ---
 

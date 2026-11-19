@@ -92,7 +92,7 @@ if (-not $LibraryOnly) {
             SHELLOSSUS_API_KEY = $inputKey
             SHELLOSSUS_WORKSPACE = $inputWorkspace
         }
-        foreach ($optK in @('SHELLOSSUS_CONTEXT_WINDOW', 'SHELLOSSUS_COMPACT_THRESHOLD', 'SHELLOSSUS_REQUEST_TIMEOUT_SEC', 'SHELLOSSUS_STREAM', 'SHELLOSSUS_THEME')) {
+        foreach ($optK in @('SHELLOSSUS_CONTEXT_WINDOW', 'SHELLOSSUS_COMPACT_THRESHOLD', 'SHELLOSSUS_REQUEST_TIMEOUT_SEC', 'SHELLOSSUS_STREAM', 'SHELLOSSUS_THEME', 'SHELLOSSUS_SEARCH_URL')) {
             if ($config.ContainsKey($optK) -and $null -ne $config[$optK] -and ([string]$config[$optK]).Length -gt 0) { $newCfg[$optK] = $config[$optK] }
         }
         if (($PSBoundParameters.Keys -contains 'ContextWindow') -and $ContextWindow) { $newCfg['SHELLOSSUS_CONTEXT_WINDOW'] = $ContextWindow }
@@ -171,6 +171,22 @@ if (-not $LibraryOnly) {
     }
     try {
         $null = Set-AgentStreamSetting -StreamSpec $effectiveStreamSpec
+    }
+    catch {
+        Write-AgentJsonEvent -EventType 'turn_end' -Payload @{ status = 'error'; error = $_.Exception.Message }
+        throw
+    }
+    $effectiveSearchUrl = if ($null -ne $env:SHELLOSSUS_SEARCH_URL -and ([string]$env:SHELLOSSUS_SEARCH_URL).Trim().Length -gt 0) {
+        [string]$env:SHELLOSSUS_SEARCH_URL
+    }
+    elseif ($config.ContainsKey('SHELLOSSUS_SEARCH_URL') -and $null -ne $config['SHELLOSSUS_SEARCH_URL'] -and ([string]$config['SHELLOSSUS_SEARCH_URL']).Trim().Length -gt 0) {
+        [string]$config['SHELLOSSUS_SEARCH_URL']
+    }
+    else {
+        ''
+    }
+    try {
+        $null = Set-AgentSearchUrl -UrlSpec $effectiveSearchUrl
     }
     catch {
         Write-AgentJsonEvent -EventType 'turn_end' -Payload @{ status = 'error'; error = $_.Exception.Message }
