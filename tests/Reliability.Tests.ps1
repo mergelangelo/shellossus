@@ -2970,6 +2970,220 @@ Start-Sleep -Seconds 30
             $script:StreamRequests = $savedT7Stream
         }
     }
+
+    # Stale session .lock metadata, dead-PID / PID-reuse / aged recovery, and fail-closed active/directory locks.
+    & {
+        $lockDir = Join-Path $envData.TestRoot 'stale-lock-tests'
+        New-Item -ItemType Directory -Path $lockDir -Force | Out-Null
+        $lockSess = Join-Path $lockDir 'session-lock.jsonl'
+        $lockFile = $lockSess + '.lock'
+        $lockState = @{
+            session_id = 'sess-lock-test'
+            workspace = $workspacePath
+            model = 'test-model'
+            messages = @(
+                @{ role = 'system'; content = 'sys' },
+                @{ role = 'user'; content = 'initial' }
+            )
+        }
+        Save-AgentSession -SessionFile $lockSess -State $lockState -Workspace $workspacePath -Model 'test-model'
+
+        # 1. Active save writes lock metadata (pid, start_ticks, host, created_utc) and concurrent save reports owner PID.
+        $lockState.messages += @{ role = 'assistant'; content = 'with-lock-meta' }
+        $script:observedLockJson = $null
+        $script:concurrentLockErr = ''
+        $concurrentState = @{ messages = @(@{ role = 'system'; content = 'sys' }, @{ role = 'user'; content = 'other' }) }
+        & {
+            function Move-Item {
+                param($LiteralPath, $Destination, [switch]$Force, $ErrorAction)
+                if (Test-Path -LiteralPath $lockFile) {
+                    $rawLock = Get-Content -LiteralPath $lockFile -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
+                    if ($rawLock) {
+                        $script:observedLockJson = $rawLock | ConvertFrom-Json
+                    }
+                }
+                try {
+                    Save-AgentSession -SessionFile $lockSess -State $concurrentState -Workspace $workspacePath -Model 'test-model'
+                }
+                catch {
+                    $script:concurrentLockErr = [string]$_.Exception.Message
+                }
+                Microsoft.PowerShell.Management\Move-Item -LiteralPath $LiteralPath -Destination $Destination -Force:$Force -ErrorAction $ErrorAction
+            }
+            Save-AgentSession -SessionFile $lockSess -State $lockState -Workspace $workspacePath -Model 'test-model'
+        }
+        Assert-True ($null -ne $script:observedLockJson -and [int]$script:observedLockJson.pid -eq $PID -and ([string]$script:observedLockJson.created_utc).Length -gt 0 -and [long]$script:observedLockJson.start_ticks -gt 0 -and ([string]$script:observedLockJson.token).Length -gt 0) 'Active session .lock did not contain valid pid/start_ticks/created_utc/token metadata.'
+        Assert-True ($script:concurrentLockErr -like '*save is locked*' -and $script:concurrentLockErr -like "*pid=$PID*") "Concurrent save error did not include lock owner PID: $($script:concurrentLockErr)"
+        Assert-True (-not (Test-Path -LiteralPath $lockFile)) 'Lock file remained after normal save.'
+        $observedHost = [string]$script:observedLockJson.host
+        $observedTicks = [long]$script:observedLockJson.start_ticks
+        Remove-Variable -Name observedLockJson, concurrentLockErr -Scope Script -ErrorAction SilentlyContinue
+
+        # Find a guaranteed-dead PID for local stale-PID tests.
+        $deadPid = 0
+        for ($candPid = 999983; $candPid -gt 50000; $candPid -= 7) {
+            if (-not (Get-Process -Id $candPid -ErrorAction SilentlyContinue)) {
+                $deadPid = $candPid
+                break
+            }
+        }
+        Assert-True ($deadPid -gt 0) 'Could not find an unused PID for stale lock test.'
+
+        # 2. Dead PID lock on same host is reclaimed automatically.
+        $deadMeta = @{ pid = $deadPid; start_ticks = 123456; host = $observedHost; created_utc = [datetime]::UtcNow.ToString('o') } | ConvertTo-Json -Compress
+        Set-AgentUtf8Content -LiteralPath $lockFile -Value $deadMeta
+        $lockState.messages += @{ role = 'user'; content = 'after-dead-pid' }
+        Save-AgentSession -SessionFile $lockSess -State $lockState -Workspace $workspacePath -Model 'test-model'
+        Assert-True (-not (Test-Path -LiteralPath $lockFile)) 'Dead-PID lock was not cleaned up.'
+        Assert-True (@(Get-ChildItem -LiteralPath $lockDir -Filter '*.stale-*' -Force).Count -eq 0) 'Temporary stale-lock rename artifact leaked.'
+        Assert-True ((@(Read-AgentSession -SessionFile $lockSess))[-1].content -ceq 'after-dead-pid') 'Session did not save after reclaiming dead-PID lock.'
+
+        # 3. PID reuse (live PID with mismatched 64-bit start_ticks) is reclaimed automatically, including PS 5.1 [decimal] ticks.
+        $reusedTicks = $observedTicks - 1
+        $reusedMeta = @{ pid = $PID; start_ticks = $reusedTicks; host = $observedHost; created_utc = [datetime]::UtcNow.ToString('o') } | ConvertTo-Json -Compress
+        Set-AgentUtf8Content -LiteralPath $lockFile -Value $reusedMeta
+        Assert-True (Test-AgentIntegralLong -Value ([decimal]$reusedTicks)) 'Test-AgentIntegralLong rejected PS 5.1 [decimal] 64-bit ticks.'
+        $lockState.messages += @{ role = 'assistant'; content = 'after-pid-reuse' }
+        Save-AgentSession -SessionFile $lockSess -State $lockState -Workspace $workspacePath -Model 'test-model'
+        Assert-True (-not (Test-Path -LiteralPath $lockFile)) 'PID-reuse lock was not cleaned up.'
+        Assert-True ((@(Read-AgentSession -SessionFile $lockSess))[-1].content -ceq 'after-pid-reuse') 'Session did not save after reclaiming PID-reuse lock.'
+
+        # 3b. Ownership token & snapshot verification prevent deleting another writer's live lock.
+        $otherOwnerMeta = @{ pid = $PID; start_ticks = $observedTicks; host = $observedHost; token = 'other-writer-token'; created_utc = [datetime]::UtcNow.ToString('o') } | ConvertTo-Json -Compress
+        Set-AgentUtf8Content -LiteralPath $lockFile -Value $otherOwnerMeta
+        Exit-AgentSessionLock -LockPath $lockFile -Token 'stale-writer-token'
+        Assert-True (Test-Path -LiteralPath $lockFile) 'Exit-AgentSessionLock removed a lock owned by another token.'
+        $staleSnap = @{ raw = '{"pid":1}'; length = 9; last_write_ticks = [long]1 }
+        Assert-True (-not (Clear-StaleAgentSessionLock -LockPath $lockFile -ExpectedSnapshot $staleSnap)) 'Clear-StaleAgentSessionLock removed a lock that no longer matched its stale snapshot.'
+        Assert-True (Test-Path -LiteralPath $lockFile) 'Live lock disappeared after mismatched snapshot reclaim attempt.'
+        Exit-AgentSessionLock -LockPath $lockFile -Token 'other-writer-token'
+        Assert-True (-not (Test-Path -LiteralPath $lockFile)) 'Exit-AgentSessionLock did not remove its own lock.'
+
+        # 3c. Unknown host identity fails closed (fresh lock with empty host is NOT stolen, aged one IS).
+        $unknownHostMeta = @{ pid = $deadPid; start_ticks = 123456; host = ''; created_utc = [datetime]::UtcNow.ToString('o') } | ConvertTo-Json -Compress
+        Set-AgentUtf8Content -LiteralPath $lockFile -Value $unknownHostMeta
+        $unkFreshState = Get-AgentSessionLockState -LockPath $lockFile
+        Assert-True (-not $unkFreshState.stale) 'Fresh lock with unknown/empty host was treated as stale.'
+        Set-ItemProperty -LiteralPath $lockFile -Name LastWriteTimeUtc -Value ([datetime]::UtcNow.AddMinutes(-5))
+        $unkAgedState = Get-AgentSessionLockState -LockPath $lockFile
+        Assert-True ($unkAgedState.stale) 'Aged lock with unknown/empty host was not treated as stale.'
+        Remove-Item -LiteralPath $lockFile -Force -ErrorAction SilentlyContinue
+
+        # 3d. Live PID with unreadable StartTime (e.g. elevated/SYSTEM PID reuse) stays blocked when fresh and ages out when old.
+        $unreadableMeta = @{ pid = $PID; start_ticks = $observedTicks; host = $observedHost; created_utc = [datetime]::UtcNow.ToString('o') } | ConvertTo-Json -Compress
+        Set-AgentUtf8Content -LiteralPath $lockFile -Value $unreadableMeta
+        & {
+            function Get-AgentProcessStartTicks { param([int]$ProcessId) return [long]0 }
+            $freshUnreadable = Get-AgentSessionLockState -LockPath $lockFile
+            Assert-True (-not $freshUnreadable.stale) 'Fresh lock with unreadable StartTime was prematurely marked stale.'
+            Set-ItemProperty -LiteralPath $lockFile -Name LastWriteTimeUtc -Value ([datetime]::UtcNow.AddMinutes(-5))
+            $agedUnreadable = Get-AgentSessionLockState -LockPath $lockFile
+            Assert-True ($agedUnreadable.stale) 'Aged lock with unreadable StartTime remained wedged forever.'
+        }
+        Remove-Item -LiteralPath $lockFile -Force -ErrorAction SilentlyContinue
+
+        # 3e. Dangling symlink at .lock path fails closed and never creates the target file.
+        if ($env:OS -ne 'Windows_NT' -and $ExecutionContext.SessionState.LanguageMode -eq 'FullLanguage') {
+            $dangleTarget = Join-Path $envData.TestRoot 'never-created-lock-target.txt'
+            Remove-Item -LiteralPath $dangleTarget -Force -ErrorAction SilentlyContinue
+            $symCreated = $false
+            try {
+                $null = New-Item -ItemType SymbolicLink -Path $lockFile -Target $dangleTarget -ErrorAction Stop
+                $symCreated = $true
+            }
+            catch { $symCreated = $false }
+            if ($symCreated) {
+                $symBlocked = $false
+                try {
+                    Save-AgentSession -SessionFile $lockSess -State $lockState -Workspace $workspacePath -Model 'test-model'
+                }
+                catch {
+                    if ($_.Exception.Message -like '*save is locked*') { $symBlocked = $true }
+                }
+                finally {
+                    $targetCreated = Test-Path -LiteralPath $dangleTarget
+                    Remove-Item -LiteralPath $lockFile -Force -ErrorAction SilentlyContinue
+                }
+                Assert-True ($symBlocked -and (-not $targetCreated)) 'Dangling symlink at .lock path was followed or not blocked.'
+            }
+        }
+
+        # 4. Active live-PID lock is NOT stolen even if older than stale timeout.
+        $liveMeta = @{ pid = $PID; start_ticks = $observedTicks; host = $observedHost; created_utc = [datetime]::UtcNow.AddMinutes(-10).ToString('o') } | ConvertTo-Json -Compress
+        Set-AgentUtf8Content -LiteralPath $lockFile -Value $liveMeta
+        Set-ItemProperty -LiteralPath $lockFile -Name LastWriteTimeUtc -Value ([datetime]::UtcNow.AddMinutes(-10))
+        $liveBlocked = $false
+        $liveErr = ''
+        try {
+            Save-AgentSession -SessionFile $lockSess -State $lockState -Workspace $workspacePath -Model 'test-model'
+        }
+        catch {
+            $liveErr = [string]$_.Exception.Message
+            if ($liveErr -like '*save is locked*' -and $liveErr -like "*pid=$PID*") { $liveBlocked = $true }
+        }
+        finally {
+            $liveStillThere = Test-Path -LiteralPath $lockFile
+            Remove-Item -LiteralPath $lockFile -Force -ErrorAction SilentlyContinue
+        }
+        Assert-True ($liveBlocked -and $liveStillThere) "Old lock owned by live PID was stolen or had wrong error: $liveErr"
+
+        # 5. Fresh empty lock is NOT stolen.
+        $null = New-Item -ItemType File -Path $lockFile -Force
+        $freshEmptyBlocked = $false
+        try {
+            Save-AgentSession -SessionFile $lockSess -State $lockState -Workspace $workspacePath -Model 'test-model'
+        }
+        catch {
+            if ($_.Exception.Message -like '*save is locked*') { $freshEmptyBlocked = $true }
+        }
+        finally {
+            $freshEmptyKept = Test-Path -LiteralPath $lockFile
+            Remove-Item -LiteralPath $lockFile -Force -ErrorAction SilentlyContinue
+        }
+        Assert-True ($freshEmptyBlocked -and $freshEmptyKept) 'Fresh empty lock file was stolen.'
+
+        # 6. Aged empty and corrupt lock files ARE reclaimed.
+        foreach ($staleBody in @('', '{not-valid-json')) {
+            if ($staleBody) { Set-AgentUtf8Content -LiteralPath $lockFile -Value $staleBody }
+            else { $null = New-Item -ItemType File -Path $lockFile -Force }
+            Set-ItemProperty -LiteralPath $lockFile -Name LastWriteTimeUtc -Value ([datetime]::UtcNow.AddMinutes(-5))
+            $lockState.messages += @{ role = 'user'; content = ('aged-' + $staleBody.Length) }
+            Save-AgentSession -SessionFile $lockSess -State $lockState -Workspace $workspacePath -Model 'test-model'
+            Assert-True (-not (Test-Path -LiteralPath $lockFile)) 'Aged unreadable/empty lock file was not reclaimed.'
+        }
+
+        # 7. Foreign-host lock with locally-dead PID is NOT stolen while fresh, but IS reclaimed once aged.
+        $foreignMeta = @{ pid = $deadPid; start_ticks = 999; host = 'foreign-host-never-matches.invalid'; created_utc = [datetime]::UtcNow.ToString('o') } | ConvertTo-Json -Compress
+        Set-AgentUtf8Content -LiteralPath $lockFile -Value $foreignMeta
+        $foreignFreshBlocked = $false
+        try {
+            Save-AgentSession -SessionFile $lockSess -State $lockState -Workspace $workspacePath -Model 'test-model'
+        }
+        catch {
+            if ($_.Exception.Message -like '*save is locked*') { $foreignFreshBlocked = $true }
+        }
+        Assert-True ($foreignFreshBlocked -and (Test-Path -LiteralPath $lockFile)) 'Fresh foreign-host lock was prematurely stolen.'
+        Set-ItemProperty -LiteralPath $lockFile -Name LastWriteTimeUtc -Value ([datetime]::UtcNow.AddMinutes(-5))
+        $lockState.messages += @{ role = 'assistant'; content = 'after-aged-foreign' }
+        Save-AgentSession -SessionFile $lockSess -State $lockState -Workspace $workspacePath -Model 'test-model'
+        Assert-True (-not (Test-Path -LiteralPath $lockFile)) 'Aged foreign-host lock was not reclaimed.'
+
+        # 8. Directory at .lock path fails closed and is never deleted.
+        $null = New-Item -ItemType Directory -Path $lockFile -Force
+        Set-ItemProperty -LiteralPath $lockFile -Name LastWriteTimeUtc -Value ([datetime]::UtcNow.AddMinutes(-10))
+        $dirBlocked = $false
+        try {
+            Save-AgentSession -SessionFile $lockSess -State $lockState -Workspace $workspacePath -Model 'test-model'
+        }
+        catch {
+            if ($_.Exception.Message -like '*save is locked*') { $dirBlocked = $true }
+        }
+        finally {
+            $dirStillExists = Test-Path -LiteralPath $lockFile -PathType Container
+            Remove-Item -LiteralPath $lockFile -Force -ErrorAction SilentlyContinue
+        }
+        Assert-True ($dirBlocked -and $dirStillExists) 'Directory at .lock path was removed or not rejected.'
+    }
 }
 finally {
     Remove-Item Function:\Invoke-WebRequest -ErrorAction SilentlyContinue

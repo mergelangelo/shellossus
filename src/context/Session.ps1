@@ -37,6 +37,206 @@ function Assert-AgentSessionRevision {
     }
 }
 
+$script:SessionLockStaleSeconds = 60
+
+function Test-AgentIntegralLong {
+    param($Value)
+    if ($null -eq $Value -or $Value -is [bool]) { return $false }
+    if ($Value -is [int] -or $Value -is [long]) { return $true }
+    if ($Value -is [decimal]) {
+        return (($Value % 1) -eq 0 -and $Value -ge -9223372036854775808 -and $Value -le 9223372036854775807)
+    }
+    return $false
+}
+
+function Get-AgentLockHostName {
+    if ($env:COMPUTERNAME) { return [string]$env:COMPUTERNAME }
+    if ($env:HOSTNAME) { return [string]$env:HOSTNAME }
+    try {
+        $machine = [string][System.Environment]::MachineName
+        if ($machine) { return $machine }
+    }
+    catch {}
+    return ''
+}
+
+function Get-AgentProcessStartTicks {
+    param([int]$ProcessId)
+    try {
+        $proc = Get-Process -Id $ProcessId -ErrorAction SilentlyContinue
+        if ($proc -and $proc.StartTime) { return [long]$proc.StartTime.ToUniversalTime().Ticks }
+    }
+    catch {}
+    return [long]0
+}
+
+function Read-AgentLockRawSnapshot {
+    param([string]$LockPath)
+    $item = Get-Item -LiteralPath $LockPath -Force -ErrorAction SilentlyContinue
+    if ($null -eq $item) { return $null }
+    if ($item.PSIsContainer -or (($item.Attributes -band 1024) -ne 0)) {
+        return @{ item = $item; restricted = $true; raw = ''; length = [long]0; last_write_ticks = [long]0 }
+    }
+    $raw = ''
+    if ($item.Length -gt 0 -and $item.Length -le 4096) {
+        try {
+            $content = Get-Content -LiteralPath $LockPath -Raw -Encoding UTF8 -ErrorAction Stop
+            if ($null -ne $content) { $raw = [string]$content }
+        }
+        catch { $raw = '' }
+    }
+    return @{
+        item = $item
+        restricted = $false
+        raw = $raw
+        length = [long]$item.Length
+        last_write_ticks = [long]$item.LastWriteTimeUtc.Ticks
+    }
+}
+
+function Get-AgentSessionLockState {
+    param([string]$LockPath, [int]$StaleSeconds = $script:SessionLockStaleSeconds)
+    $snap = Read-AgentLockRawSnapshot -LockPath $LockPath
+    if ($null -eq $snap) { return @{ exists = $false; stale = $false; detail = ''; raw = ''; length = [long]0; last_write_ticks = [long]0 } }
+    if ($snap.restricted) {
+        return @{ exists = $true; stale = $false; detail = ''; raw = ''; length = [long]0; last_write_ticks = [long]0 }
+    }
+    $item = $snap.item
+    $ageSec = ([datetime]::UtcNow - $item.LastWriteTimeUtc).TotalSeconds
+    $meta = $null
+    if ($snap.raw -and $snap.raw.Trim().StartsWith('{')) {
+        try {
+            $jsonOpts = @{ ErrorAction = 'Stop' }
+            if ((Get-Command ConvertFrom-Json).Parameters.Keys -contains 'DateKind') { $jsonOpts.DateKind = 'String' }
+            $parsed = $snap.raw | ConvertFrom-Json @jsonOpts
+            if (Test-IsJsonObject $parsed) { $meta = $parsed }
+        }
+        catch { $meta = $null }
+    }
+    if ($null -ne $meta -and (Test-AgentIntegralLong -Value $meta.pid) -and [long]$meta.pid -gt 0 -and [long]$meta.pid -le 2147483647) {
+        $lockPid = [int]$meta.pid
+        $detailParts = @("pid=$lockPid")
+        if ($meta.created_utc -is [string] -and $meta.created_utc.Trim()) {
+            $detailParts += ("created=$($meta.created_utc.Trim())")
+        }
+        elseif ($meta.created_utc -is [datetime]) {
+            $detailParts += ("created=$($meta.created_utc.ToString('o'))")
+        }
+        $detail = ' (' + ($detailParts -join ', ') + ')'
+        $localHost = Get-AgentLockHostName
+        $lockHost = if ($meta.host -is [string]) { $meta.host.Trim() } else { '' }
+        $sameHost = [bool]($lockHost -and $localHost -and ($lockHost -ieq $localHost))
+        if ($sameHost) {
+            $owner = Get-Process -Id $lockPid -ErrorAction SilentlyContinue
+            if ($null -eq $owner) {
+                return @{ exists = $true; stale = $true; detail = $detail; raw = $snap.raw; length = $snap.length; last_write_ticks = $snap.last_write_ticks }
+            }
+            if ((Test-AgentIntegralLong -Value $meta.start_ticks) -and [long]$meta.start_ticks -gt 0) {
+                $liveTicks = Get-AgentProcessStartTicks -ProcessId $lockPid
+                if ($liveTicks -gt 0) {
+                    if ($liveTicks -ne [long]$meta.start_ticks) {
+                        return @{ exists = $true; stale = $true; detail = $detail; raw = $snap.raw; length = $snap.length; last_write_ticks = $snap.last_write_ticks }
+                    }
+                    return @{ exists = $true; stale = $false; detail = $detail; raw = $snap.raw; length = $snap.length; last_write_ticks = $snap.last_write_ticks }
+                }
+                return @{ exists = $true; stale = ($ageSec -ge $StaleSeconds); detail = $detail; raw = $snap.raw; length = $snap.length; last_write_ticks = $snap.last_write_ticks }
+            }
+            return @{ exists = $true; stale = $false; detail = $detail; raw = $snap.raw; length = $snap.length; last_write_ticks = $snap.last_write_ticks }
+        }
+        return @{ exists = $true; stale = ($ageSec -ge $StaleSeconds); detail = $detail; raw = $snap.raw; length = $snap.length; last_write_ticks = $snap.last_write_ticks }
+    }
+    return @{ exists = $true; stale = ($ageSec -ge $StaleSeconds); detail = ''; raw = $snap.raw; length = $snap.length; last_write_ticks = $snap.last_write_ticks }
+}
+
+function Clear-StaleAgentSessionLock {
+    param([string]$LockPath, [hashtable]$ExpectedSnapshot)
+    if ($null -eq $ExpectedSnapshot) { return $false }
+    $current = Read-AgentLockRawSnapshot -LockPath $LockPath
+    if ($null -eq $current -or $current.restricted) { return $false }
+    if ($current.length -ne [long]$ExpectedSnapshot.length -or $current.last_write_ticks -ne [long]$ExpectedSnapshot.last_write_ticks -or ($current.raw -cne [string]$ExpectedSnapshot.raw)) {
+        return $false
+    }
+    $claimed = $LockPath + '.stale-' + $PID + '-' + (Get-Random -Minimum 100000 -Maximum 999999)
+    try {
+        Microsoft.PowerShell.Management\Move-Item -LiteralPath $LockPath -Destination $claimed -ErrorAction Stop
+    }
+    catch {
+        return $false
+    }
+    $movedSnap = Read-AgentLockRawSnapshot -LockPath $claimed
+    if ($null -ne $movedSnap -and (-not $movedSnap.restricted) -and
+        ($movedSnap.length -ne [long]$ExpectedSnapshot.length -or ($movedSnap.raw -cne [string]$ExpectedSnapshot.raw))) {
+        if (-not (Get-Item -LiteralPath $LockPath -Force -ErrorAction SilentlyContinue)) {
+            try { Microsoft.PowerShell.Management\Move-Item -LiteralPath $claimed -Destination $LockPath -ErrorAction Stop }
+            catch {}
+        }
+        return $false
+    }
+    Remove-Item -LiteralPath $claimed -Force -ErrorAction SilentlyContinue
+    return $true
+}
+
+function Exit-AgentSessionLock {
+    param([string]$LockPath, [string]$Token)
+    if (-not $LockPath -or -not $Token) { return }
+    $snap = Read-AgentLockRawSnapshot -LockPath $LockPath
+    if ($null -eq $snap -or $snap.restricted -or (-not $snap.raw)) { return }
+    try {
+        $parsed = $snap.raw | ConvertFrom-Json -ErrorAction Stop
+        if ((Test-IsJsonObject $parsed) -and $parsed.token -is [string] -and $parsed.token -ceq $Token) {
+            Remove-Item -LiteralPath $LockPath -Force -ErrorAction SilentlyContinue
+        }
+    }
+    catch {}
+}
+
+function Enter-AgentSessionLock {
+    param([string]$LockPath)
+    $token = "$PID-$(Get-Random -Minimum 100000 -Maximum 999999)-$(Get-Random -Minimum 100000 -Maximum 999999)"
+    $lockMeta = @{
+        pid = [int]$PID
+        start_ticks = (Get-AgentProcessStartTicks -ProcessId $PID)
+        host = (Get-AgentLockHostName)
+        token = $token
+        created_utc = [datetime]::UtcNow.ToString('o')
+    }
+    $lockJson = ConvertTo-AsciiJson -Json ($lockMeta | ConvertTo-Json -Compress)
+    for ($attempt = 0; $attempt -lt 2; $attempt++) {
+        $preItem = Get-Item -LiteralPath $LockPath -Force -ErrorAction SilentlyContinue
+        if ($null -ne $preItem -and ($preItem.PSIsContainer -or (($preItem.Attributes -band 1024) -ne 0))) {
+            throw "Session save is locked by '$LockPath'. Retry after the writer finishes."
+        }
+        $lockItem = $null
+        try {
+            # Without -Force the file is created exclusively with metadata in one step.
+            $lockItem = New-Item -ItemType File -Path $LockPath -Value $lockJson -ErrorAction Stop
+            if (-not $lockItem) { throw "Could not acquire session save lock '$LockPath'." }
+        }
+        catch {
+            if (-not (Get-Item -LiteralPath $LockPath -Force -ErrorAction SilentlyContinue)) {
+                if ($attempt -eq 0) { continue }
+                throw
+            }
+            $lockState = Get-AgentSessionLockState -LockPath $LockPath
+            if ($attempt -eq 0 -and (-not $lockState.exists)) {
+                continue
+            }
+            if ($attempt -eq 0 -and $lockState.stale) {
+                if (Clear-StaleAgentSessionLock -LockPath $LockPath -ExpectedSnapshot $lockState) {
+                    continue
+                }
+            }
+            $detail = [string]$lockState.detail
+            throw "Session save is locked by '$LockPath'$detail. Retry after the writer finishes."
+        }
+        if (($lockItem.Attributes -band 1024) -ne 0) {
+            throw "Session save is locked by '$LockPath'. Retry after the writer finishes."
+        }
+        return $token
+    }
+    throw "Session save is locked by '$LockPath'. Retry after the writer finishes."
+}
+
 function Save-AgentSession {
     param([string]$SessionFile, $State, [string]$Workspace = '', [string]$Model = '', [string]$SessionId = '', [switch]$AsExport)
     if (-not $SessionFile) {
@@ -52,17 +252,7 @@ function Save-AgentSession {
     $parent = Convert-Path -LiteralPath $parent -ErrorAction Stop
     $target = Join-Path $parent (Split-Path $SessionFile -Leaf)
     $lock = $target + '.lock'
-    try {
-        # Without -Force the file is created exclusively by the filesystem provider.
-        $lockItem = New-Item -ItemType File -Path $lock -ErrorAction Stop
-        if (-not $lockItem) { throw "Could not acquire session save lock '$lock'." }
-    }
-    catch {
-        if (Test-Path -LiteralPath $lock) {
-            throw "Session save is locked by '$lock'. Retry after the writer finishes."
-        }
-        throw
-    }
+    $lockToken = Enter-AgentSessionLock -LockPath $lock
     try {
         $expected = if ($State.session_revision_path -ieq $target) { $State.session_revision_hash }
         elseif ($AsExport) { Read-AgentUndoContent -Path $target -Hash }
@@ -71,7 +261,7 @@ function Save-AgentSession {
         if (-not $AsExport) { $script:ActiveSessionFile = $SessionFile }
     }
     finally {
-        Remove-Item -LiteralPath $lock -Force -ErrorAction SilentlyContinue
+        Exit-AgentSessionLock -LockPath $lock -Token $lockToken
     }
 }
 
