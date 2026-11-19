@@ -109,6 +109,7 @@ See [`docs/security.md`](docs/security.md) for the complete boundary matrix, wor
 .
 ├── CONSTITUTION.md       # Non-negotiable architectural principles & invariants
 ├── AGENTS.md             # Repository rules for coding agents
+├── CHANGELOG.md          # Release history
 ├── SECURITY.md           # Vulnerability reporting policy & security summary
 ├── shellossus.ps1        # Standalone pure-ASCII artifact (built from src/*.ps1)
 ├── build.ps1             # Bundler & ASCII/LF sync verifier (.\build.ps1 [-Check])
@@ -148,8 +149,9 @@ Edit modular files under [`src/`](src/), regenerate [`shellossus.ps1`](shellossu
 | :--- | :--- |
 | **[CLI, Configuration & Automation](docs/cli.md)** | All launch flags, `SHELLOSSUS_*` `.env` settings, REPL commands & aliases, `-Doctor`, `-Stream`, and `-Mode json` events |
 | **[Customization & Extensibility](docs/customization.md)** | System prompt stack, `AGENTS.md`, `SOUL.md`, `MEMORY.md`, `SKILL.md`, subagent roles, prompt templates, `@file`, and `!cmd` |
-| **[Security, Boundaries & Enterprise](docs/security.md)** | Permission modes, workspace vs. OS scope, staged writes & `/undo`, internal workers, resource limits, and Citrix/VDI/CLM notes |
-| **[Architecture & Build Pipeline](docs/architecture.md)** | Dual-distribution design, 36-module map, turn lifecycle, 13-tool reference, and `smoke.ps1` verification |
+| **[Security, Boundaries & Enterprise](docs/security.md)** | Permission modes, workspace vs. OS scope, staged writes & `/undo`, internal workers, resource limits, SHA-256/Authenticode signing, and Citrix/VDI/CLM notes |
+| **[Architecture & Build Pipeline](docs/architecture.md)** | Dual-distribution design, 36-module map, turn lifecycle, 13-tool reference, `smoke.ps1`, and opt-in `live-e2e.ps1` |
+| **[Changelog](CHANGELOG.md)** | Version history and notable changes |
 | **[Project Constitution](CONSTITUTION.md)** | Core engineering invariants and non-negotiable design guarantees |
 | **[Security Policy](SECURITY.md)** | Vulnerability disclosure process and response targets |
 

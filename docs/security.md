@@ -112,3 +112,23 @@ In-process and worker-process subagents receive the **strict intersection** of t
 - **Zero System Mutation:** `shellossus` never alters `ExecutionPolicy`, `LanguageMode`, registry keys, or system security policies.
 - **Verified `ConstrainedLanguage` Support:** Tested in CI on Windows PowerShell 5.1 and cross-platform PowerShell 7 (`pwsh`), including dedicated child processes that lock `$ExecutionContext.SessionState.LanguageMode = 'ConstrainedLanguage'` on line 1 prior to loading `shellossus.ps1`.
 - **Pre-Flight Health Checks:** Run `shellossus -Doctor` (or `/doctor`) to validate runtime compatibility, endpoint connectivity, model visibility, and session directory ACLs without generating completions. Review local paths, base URLs, and model IDs in the output before sharing diagnostic logs externally.
+
+### Integrity Verification & Authenticode Signing (WDAC / AppLocker)
+
+1. **Verify Release Checksum Before Deployment:** Tagged releases attach `shellossus.ps1` and `SHA256SUMS.txt`. Verify the downloaded artifact with built-in PowerShell before distributing or signing it:
+
+   ```powershell
+   $expected = ((Get-Content .\SHA256SUMS.txt -Raw).Trim() -split '\s+')[0]
+   $actual = (Get-FileHash .\shellossus.ps1 -Algorithm SHA256).Hash
+   if ($actual -ine $expected) { throw "SHA-256 mismatch: expected $expected, got $actual" }
+   ```
+
+2. **Sign with a Corporate Code-Signing Certificate:** In environments enforcing `AllSigned`, AppLocker script rules, or Windows Defender Application Control (WDAC), sign the verified standalone `shellossus.ps1` with your organization's internal PKI code-signing certificate:
+
+   ```powershell
+   $cert = Get-ChildItem Cert:\CurrentUser\My -CodeSigningCert | Select-Object -First 1
+   Set-AuthenticodeSignature -FilePath .\shellossus.ps1 -Certificate $cert -HashAlgorithm SHA256 -TimestampServer http://timestamp.digicert.com
+   Get-AuthenticodeSignature -FilePath .\shellossus.ps1
+   ```
+
+   *(Authenticode signing appends a `# SIG # Begin signature block` footer to `shellossus.ps1`, so verify `SHA256SUMS.txt` on the unsigned release artifact before applying your corporate signature.)*

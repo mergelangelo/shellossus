@@ -1,0 +1,84 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+jobs:
+  verify-windows-powershell-5_1:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify Windows PowerShell 5.1
+        shell: powershell
+        run: .\tests\smoke.ps1
+
+  verify-pwsh-cross-platform:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify PowerShell 7 (${{ matrix.os }})
+        shell: pwsh
+        run: ./tests/smoke.ps1
+
+  publish-release:
+    needs: [verify-windows-powershell-5_1, verify-pwsh-cross-platform]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify tag matches shellossus.ps1 -Version and generate SHA256SUMS.txt
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          ./build.ps1 -Check
+          $tag = [string]$env:GITHUB_REF_NAME
+          if ($tag -cnotmatch '^v(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)$') {
+            throw "Release tag '$tag' must match v<major>.<minor>.<patch> (with optional prerelease suffix)."
+          }
+          $expectedVersion = $Matches[1]
+          $verRaw = & pwsh -NoProfile -File ./shellossus.ps1 -Version -Mode json
+          if ($LASTEXITCODE -ne 0) {
+            throw "shellossus.ps1 -Version exited with code $LASTEXITCODE."
+          }
+          $verObj = ($verRaw -join "`n").Trim() | ConvertFrom-Json -ErrorAction Stop
+          if ($verObj.type -cne 'version' -or $verObj.version -cne $expectedVersion) {
+            throw "Tag version '$expectedVersion' does not match shellossus.ps1 -Version '$($verObj.version)'."
+          }
+          $hash = (Get-FileHash -LiteralPath ./shellossus.ps1 -Algorithm SHA256).Hash.ToLowerInvariant()
+          $checksumLine = "$hash  shellossus.ps1`n"
+          Set-Content -LiteralPath ./SHA256SUMS.txt -Value $checksumLine -Encoding Ascii -NoNewline
+          Write-Host "Verified v$expectedVersion | SHA256: $hash"
+      - name: Verify SHA256SUMS.txt with sha256sum
+        shell: bash
+        run: sha256sum -c SHA256SUMS.txt
+      - name: Publish GitHub Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $tag = [string]$env:GITHUB_REF_NAME
+          $ghArgs = @(
+            'release', 'create', $tag,
+            'shellossus.ps1', 'SHA256SUMS.txt',
+            '--title', "shellossus $tag",
+            '--verify-tag',
+            '--generate-notes'
+          )
+          if ($tag -match '-') {
+            $ghArgs += '--prerelease'
+          }
+          & gh @ghArgs
+          if ($LASTEXITCODE -ne 0) {
+            throw "gh release create failed with exit code $LASTEXITCODE."
+          }
