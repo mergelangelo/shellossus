@@ -11236,6 +11236,128 @@ function Invoke-AgentProfileInstall {
 # --- src/cli/Http.ps1 ---
 # Pure-ASCII JSON payload escaping, JSONL event output, spinner wait loop, and async HTTP worker.
 
+$script:LastHttpRetryAfterSec = $null
+
+function ConvertFrom-AgentRetryAfterValue {
+    param($Value)
+    if ($null -eq $Value -or $Value -is [bool]) { return $null }
+    if ($Value -is [timespan]) {
+        $totalSec = $Value.TotalSeconds
+        if ($totalSec -le 1) { return 1 }
+        if ($totalSec -ge 86400) { return 86400 }
+        $intSec = [int]$totalSec
+        if ($totalSec -gt $intSec) { $intSec++ }
+        return $intSec
+    }
+    if ($Value -is [datetime]) {
+        $diffSec = ($Value.ToUniversalTime() - [datetime]::UtcNow).TotalSeconds
+        if ($diffSec -le 1) { return 1 }
+        if ($diffSec -ge 86400) { return 86400 }
+        $intSec = [int]$diffSec
+        if ($diffSec -gt $intSec) { $intSec++ }
+        return $intSec
+    }
+    if ($Value -is [int] -or $Value -is [long]) {
+        if ([long]$Value -lt 0) { return $null }
+        if ([long]$Value -lt 1) { return 1 }
+        if ([long]$Value -ge 86400) { return 86400 }
+        return [int]$Value
+    }
+    $s = ([string]$Value).Trim()
+    if (-not $s) { return $null }
+    if ($s -match '^[0-9]+\s*,') {
+        $s = ($s -split ',')[0].Trim()
+    }
+    if ($s -match '^[0-9]+$') {
+        if ($s.Length -gt 5) {
+            $trimmedZeros = $s.TrimStart('0')
+            if (-not $trimmedZeros) { return 1 }
+            if ($trimmedZeros.Length -gt 5) { return 86400 }
+            $s = $trimmedZeros
+        }
+        $n = [int]$s
+        if ($n -lt 1) { return 1 }
+        if ($n -ge 86400) { return 86400 }
+        return $n
+    }
+    if ($s -match '^-') { return $null }
+    if ($s -match '[A-Za-z]') {
+        try {
+            $dtUtc = ([datetime]$s).ToUniversalTime()
+            $diffSec = ($dtUtc - [datetime]::UtcNow).TotalSeconds
+            if ($diffSec -le 1) { return 1 }
+            if ($diffSec -ge 86400) { return 86400 }
+            $intSec = [int]$diffSec
+            if ($diffSec -gt $intSec) { $intSec++ }
+            return $intSec
+        }
+        catch { return $null }
+    }
+    return $null
+}
+
+function Get-AgentRetryAfterSeconds {
+    param($ErrorRecord)
+    if ($null -eq $ErrorRecord) { return $null }
+    $resp = $null
+    try {
+        if ($ErrorRecord.Exception -and $ErrorRecord.Exception.Response) {
+            $resp = $ErrorRecord.Exception.Response
+        }
+        elseif ($ErrorRecord.Exception -and $ErrorRecord.Exception.InnerException -and $ErrorRecord.Exception.InnerException.Response) {
+            $resp = $ErrorRecord.Exception.InnerException.Response
+        }
+    }
+    catch { return $null }
+    if ($null -eq $resp) { return $null }
+    $headers = $null
+    try { $headers = $resp.Headers } catch { return $null }
+    if ($null -eq $headers) { return $null }
+    try {
+        if ($headers -is [hashtable]) {
+            foreach ($k in $headers.Keys) {
+                if ([string]$k -ieq 'Retry-After') {
+                    return (ConvertFrom-AgentRetryAfterValue -Value $headers[$k])
+                }
+            }
+            return $null
+        }
+        try {
+            if ($null -ne $headers.RetryAfter) {
+                if ($null -ne $headers.RetryAfter.Delta) {
+                    return (ConvertFrom-AgentRetryAfterValue -Value $headers.RetryAfter.Delta)
+                }
+                if ($null -ne $headers.RetryAfter.Date) {
+                    return (ConvertFrom-AgentRetryAfterValue -Value $headers.RetryAfter.Date.UtcDateTime)
+                }
+            }
+        }
+        catch {}
+        try {
+            $directVal = $headers['Retry-After']
+            if ($null -ne $directVal) {
+                if ($directVal -isnot [string] -and $directVal -isnot [timespan] -and $directVal -isnot [datetime] -and $directVal -isnot [int] -and $directVal -isnot [long]) {
+                    $directVal = @($directVal) | Select-Object -First 1
+                }
+                if ($null -ne $directVal) {
+                    return (ConvertFrom-AgentRetryAfterValue -Value $directVal)
+                }
+            }
+        }
+        catch {}
+        foreach ($entry in $headers) {
+            if ($null -ne $entry -and $entry.Key -is [string] -and $entry.Key -ieq 'Retry-After') {
+                $firstVal = @($entry.Value) | Select-Object -First 1
+                if ($null -ne $firstVal) {
+                    return (ConvertFrom-AgentRetryAfterValue -Value $firstVal)
+                }
+            }
+        }
+    }
+    catch {}
+    return $null
+}
+
 function ConvertTo-AgentApiMessages {
     param([array]$Messages)
     foreach ($message in $Messages) {
@@ -11709,10 +11831,11 @@ function Invoke-InternalHttpWorker {
         $null = Microsoft.PowerShell.Utility\Invoke-WebRequest -Uri $env:SHELLOSSUS_HTTP_URI -Method 'Post' -Headers $workerHeaders -ContentType 'application/json; charset=utf-8' -InFile $env:SHELLOSSUS_HTTP_IN -OutFile $env:SHELLOSSUS_HTTP_OUT -MaximumRedirection 0 -TimeoutSec $timeoutVal -UseBasicParsing -ErrorAction Stop
     }
     catch {
-        $msg = [string]$_.Exception.Message
+        $errRec = $_
+        $msg = [string]$errRec.Exception.Message
         $details = $null
-        if ($_.ErrorDetails -and $_.ErrorDetails.Message) {
-            $details = ([string]$_.ErrorDetails.Message).Trim()
+        if ($errRec.ErrorDetails -and $errRec.ErrorDetails.Message) {
+            $details = ([string]$errRec.ErrorDetails.Message).Trim()
         }
         if ($details) {
             # Four bytes per code unit is a safe UTF-8 upper bound.
@@ -11726,7 +11849,17 @@ function Invoke-InternalHttpWorker {
             if ($details.Length -gt 300) { $details = $details.Substring(0, 300) + '...' }
             $msg = $msg + ' (' + $details + ')'
         }
+        if ($env:SHELLOSSUS_HTTP_META) {
+            try {
+                $retryAfterSec = Get-AgentRetryAfterSeconds -ErrorRecord $errRec
+                if ($null -ne $retryAfterSec) {
+                    Set-AgentUtf8Content -LiteralPath $env:SHELLOSSUS_HTTP_META -Value (@{ retry_after_sec = [int]$retryAfterSec } | ConvertTo-Json -Compress)
+                }
+            }
+            catch {}
+        }
         if ($env:SHELLOSSUS_HTTP_ERR) {
+            if ($env:SHELLOSSUS_API_KEY) { $msg = $msg.Replace($env:SHELLOSSUS_API_KEY, '[redacted]') }
             Set-AgentUtf8Content -LiteralPath $env:SHELLOSSUS_HTTP_ERR -Value $msg
         }
         $script:InternalWorkerFailed = $true
@@ -11743,6 +11876,7 @@ function Invoke-AgentHttpRequest {
         [string]$StatusLabel = 'Waiting for model',
         [switch]$ForceBackgroundWorker
     )
+    $script:LastHttpRetryAfterSec = $null
     $asciiBody = ConvertTo-AsciiJson -Json $Body
     $iwrCmd = Get-Command -Name 'Invoke-WebRequest' -ErrorAction SilentlyContinue
     if ((-not $ForceBackgroundWorker) -and (($iwrCmd -and $iwrCmd.CommandType -eq 'Function') -or $script:DisableAsyncHttp)) {
@@ -11764,6 +11898,7 @@ function Invoke-AgentHttpRequest {
         }
         try { Invoke-WebRequest @request -UseBasicParsing -OutFile $OutFile }
         catch {
+            $script:LastHttpRetryAfterSec = Get-AgentRetryAfterSeconds -ErrorRecord $_
             $message = Format-AgentError -ErrorRecord $_
             if ($ApiKey) { $message = $message.Replace($ApiKey, '[redacted]') }
             throw (Format-TuiText $message)
@@ -11775,6 +11910,7 @@ function Invoke-AgentHttpRequest {
     $workerScript = Resolve-StandaloneScriptPath -Required
     $reqTemp = New-AgentTempFile
     $errTemp = New-AgentTempFile
+    $metaTemp = New-AgentTempFile
     $stdoutTemp = New-AgentTempFile
     $stderrTemp = New-AgentTempFile
     try {
@@ -11787,12 +11923,24 @@ function Invoke-AgentHttpRequest {
             SHELLOSSUS_HTTP_IN = $reqTemp.FullName
             SHELLOSSUS_HTTP_OUT = $OutFile
             SHELLOSSUS_HTTP_ERR = $errTemp.FullName
+            SHELLOSSUS_HTTP_META = $metaTemp.FullName
             SHELLOSSUS_HTTP_TIMEOUT = [string]$TimeoutSec
             SHELLOSSUS_HTTP_STREAM = $(if ($script:StreamRequests) { '1' } else { '0' })
         } -Action {
             Start-Process -FilePath $shellExe -ArgumentList $argList -RedirectStandardOutput $stdoutTemp.FullName -RedirectStandardError $stderrTemp.FullName -NoNewWindow -PassThru -ErrorAction Stop
         }
         Wait-AgentProcessWithSpinner -Process $proc -StatusLabel $StatusLabel -TimeoutSec $TimeoutSec -ResponsePath $OutFile
+        $metaItem = Get-Item -LiteralPath $metaTemp.FullName -Force -ErrorAction SilentlyContinue
+        if ($metaItem -and $metaItem.Length -gt 0 -and $metaItem.Length -le 1024) {
+            try {
+                $metaRaw = Get-Content -LiteralPath $metaTemp.FullName -Raw -Encoding UTF8 -ErrorAction Stop
+                $metaObj = $metaRaw | ConvertFrom-Json -ErrorAction Stop
+                if ((Test-IsJsonObject -Value $metaObj) -and $null -ne $metaObj.retry_after_sec) {
+                    $script:LastHttpRetryAfterSec = ConvertFrom-AgentRetryAfterValue -Value $metaObj.retry_after_sec
+                }
+            }
+            catch {}
+        }
         Assert-AgentApiResponseSize -Path $OutFile
         $errItem = Get-Item -LiteralPath $errTemp.FullName -Force -ErrorAction SilentlyContinue
         if ($errItem -and $errItem.Length -gt 0) {
@@ -11814,6 +11962,7 @@ function Invoke-AgentHttpRequest {
     finally {
         Remove-Item -LiteralPath $reqTemp.FullName -Force -ErrorAction SilentlyContinue
         Remove-Item -LiteralPath $errTemp.FullName -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $metaTemp.FullName -Force -ErrorAction SilentlyContinue
         Remove-Item -LiteralPath $stdoutTemp.FullName -Force -ErrorAction SilentlyContinue
         Remove-Item -LiteralPath $stderrTemp.FullName -Force -ErrorAction SilentlyContinue
     }
@@ -12102,6 +12251,21 @@ function New-AgentTurnRequest {
     return @{ body = $body; compacted = $false }
 }
 
+$script:MaxHttpRetryDelaySec = 60
+
+function Get-AgentHttpRetryDelay {
+    param([int]$Attempt = 0, $RetryAfterSec = $null)
+    if ($null -ne $RetryAfterSec -and ($RetryAfterSec -is [int] -or $RetryAfterSec -is [long]) -and [long]$RetryAfterSec -gt 0 -and [long]$RetryAfterSec -le 86400) {
+        return [int]$RetryAfterSec
+    }
+    $clampedAttempt = if ($Attempt -lt 0) { 0 } elseif ($Attempt -gt 4) { 4 } else { $Attempt }
+    $base = 2 * (1 -shl $clampedAttempt)
+    if ($base -gt 30) { $base = 30 }
+    $jitterMax = [int]($base / 2) + 1
+    $jitter = Get-Random -Minimum 0 -Maximum $jitterMax
+    return ($base + $jitter)
+}
+
 function Invoke-AgentTurn {
     param($State, [string]$Endpoint, [string]$ModelId, [string]$ApiKey, [string]$Root, [int]$Steps = 50, [int]$MaxRepeatCalls = 0)
     if (-not (Test-ValidConversationBoundary -Messages $State.messages)) {
@@ -12167,7 +12331,7 @@ function Invoke-AgentTurn {
         $tempResponse = New-AgentTempFile
         $reply = $null
         try {
-            $maxRetries = 2
+            $maxRetries = 3
             $stepStart = Get-Date
             $attemptTimeoutSec = [int]$script:RequestTimeoutSec
             for ($attempt = 0; $attempt -le $maxRetries; $attempt++) {
@@ -12183,12 +12347,18 @@ function Invoke-AgentTurn {
                     break
                 }
                 catch {
+                    $retryAfterSec = $script:LastHttpRetryAfterSec
+                    $script:LastHttpRetryAfterSec = $null
+                    if ($null -eq $retryAfterSec) {
+                        $retryAfterSec = Get-AgentRetryAfterSeconds -ErrorRecord $_
+                    }
                     $errFormatted = Format-AgentError -ErrorRecord $_
                     $contextError = $errFormatted -match '(?i)(context_length|maximum context|context window)'
                     if (-not $contextError -and ($attempt -lt $maxRetries) -and ($errFormatted -match '(?i)\b(408|429|500|502|503|504|timeout|timed out)\b')) {
-                        $delay = ($attempt + 1) * 2
+                        $delay = Get-AgentHttpRetryDelay -Attempt $attempt -RetryAfterSec $retryAfterSec
                         $remainingStepBudget = $script:MaxStepRetryBudgetSec - [int](((Get-Date) - $stepStart).TotalSeconds)
-                        if ($remainingStepBudget -gt ($delay + $script:MinRequestTimeoutSec)) {
+                        $maxRetryDelay = if ($script:MaxHttpRetryDelaySec -gt 0) { [int]$script:MaxHttpRetryDelaySec } else { 60 }
+                        if (($delay -le $maxRetryDelay) -and ($remainingStepBudget -gt ($delay + $script:MinRequestTimeoutSec))) {
                             $maxRetryTimeout = $remainingStepBudget - $delay
                             $attemptTimeoutSec = if ($script:RequestTimeoutSec -lt $maxRetryTimeout) { [int]$script:RequestTimeoutSec } else { [int]$maxRetryTimeout }
                             if ($script:OutputMode -ne 'json') {

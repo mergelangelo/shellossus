@@ -1442,7 +1442,7 @@ try {
         $serverRs = [powershell]::Create().AddScript({
             param($l)
             $seen = @()
-            for ($reqIdx = 0; $reqIdx -lt 3; $reqIdx++) {
+            for ($reqIdx = 0; $reqIdx -lt 4; $reqIdx++) {
                 $client = $l.AcceptTcpClient()
                 try {
                     $stream = $client.GetStream()
@@ -1476,6 +1476,7 @@ try {
                     $finalBytes = $ms.ToArray()
                     $reqBody = if ($contentLen -gt 0) { [System.Text.Encoding]::UTF8.GetString($finalBytes, $hdrEnd, $contentLen) } else { '' }
                     $seen += @{ headers = $hdrText; body = $reqBody }
+                    $extraHdr = ''
                     if ($reqIdx -eq 0) {
                         $statusLine = 'HTTP/1.1 200 OK'
                         $respJson = @{ ok = $true; worker = 'file-http' } | ConvertTo-Json -Compress
@@ -1485,6 +1486,12 @@ try {
                         $statusLine = 'HTTP/1.1 401 Unauthorized secret-key-xyz'
                         $respJson = @{ error = @{ message = 'Denied token secret-key-xyz' } } | ConvertTo-Json -Compress
                     }
+                    elseif ($reqIdx -eq 2) {
+                        # Non-JSON HTML 429 with Retry-After tests inner catch preservation and worker meta propagation.
+                        $statusLine = 'HTTP/1.1 429 Too Many Requests'
+                        $extraHdr = "Retry-After: 9`r`n"
+                        $respJson = '<html>Rate limited for secret-key-xyz</html>'
+                    }
                     else {
                         $statusLine = 'HTTP/1.1 200 OK'
                         $respJson = @{
@@ -1493,7 +1500,7 @@ try {
                         } | ConvertTo-Json -Depth 8 -Compress
                     }
                     $respBytes = [System.Text.Encoding]::UTF8.GetBytes($respJson)
-                    $respHdr = [System.Text.Encoding]::ASCII.GetBytes("$statusLine`r`nContent-Type: application/json`r`nContent-Length: $($respBytes.Length)`r`nConnection: close`r`n`r`n")
+                    $respHdr = [System.Text.Encoding]::ASCII.GetBytes("$statusLine`r`n$($extraHdr)Content-Type: application/json`r`nContent-Length: $($respBytes.Length)`r`nConnection: close`r`n`r`n")
                     $stream.Write($respHdr, 0, $respHdr.Length)
                     $stream.Write($respBytes, 0, $respBytes.Length)
                     $stream.Flush()
@@ -1531,6 +1538,15 @@ try {
 catch {
     $err401 = [string]$_.Exception.Message
 }
+$err429 = ''
+$retryAfter429 = $null
+try {
+    Invoke-AgentHttpRequest -Uri "http://127.0.0.1:$Port/v1/chat/completions" -ApiKey 'secret-key-xyz' -Body '{"ping":3}' -OutFile $HttpOut -TimeoutSec 10 -ForceBackgroundWorker
+}
+catch {
+    $err429 = [string]$_.Exception.Message
+    $retryAfter429 = $script:LastHttpRetryAfterSec
+}
 $errScheme = ''
 try {
     Invoke-AgentHttpRequest -Uri 'badkeyscheme://example.invalid/v1' -ApiKey 'badkeyscheme' -Body '{}' -OutFile $HttpOut -TimeoutSec 5 -ForceBackgroundWorker
@@ -1553,6 +1569,8 @@ $subRes = @(Invoke-ParallelSubagentProcesses -Root $WorkspacePath -Tasks @(@{ ro
     # Strip provider metadata so Windows PowerShell 5.1 serializes a JSON string.
     http_body = [string](Get-Content -LiteralPath $HttpOut -Raw -Encoding UTF8)
     err_401 = $err401
+    err_429 = $err429
+    retry_after_429 = $retryAfter429
     err_scheme = $errScheme
     web_err = $webErr
     sub_status = [string]$subRes[0].status
@@ -1570,12 +1588,13 @@ $subRes = @(Invoke-ParallelSubagentProcesses -Root $WorkspacePath -Tasks @(@{ ro
             $parsedOk = $driverRes.http_body | ConvertFrom-Json
             Assert-True ($parsedOk.ok -eq $true -and $parsedOk.worker -ceq 'file-http') "Background HTTP worker via -File did not return expected 200 payload: $($driverRes.http_body)"
             Assert-True ($driverRes.err_401 -like '*401*' -and $driverRes.err_401.Contains('[redacted]') -and $driverRes.err_401 -notlike '*secret-key-xyz*') "Background HTTP 401 error failed to redact ApiKey: $($driverRes.err_401)"
+            Assert-True ($driverRes.err_429 -like '*429*' -and $driverRes.err_429 -notlike '*secret-key-xyz*' -and [int]$driverRes.retry_after_429 -eq 9) "Background HTTP 429 worker did not propagate Retry-After=9 or leaked ApiKey: err='$($driverRes.err_429)' ra='$($driverRes.retry_after_429)'"
             Assert-True ([bool]$driverRes.err_scheme -and (-not $driverRes.err_scheme.Contains('badkeyscheme'))) "Unsupported URI did not fail or leaked ApiKey: $($driverRes.err_scheme)"
             Assert-True ($driverRes.web_err -like '*Blocked request*') "Renamed script -InternalWorker web did not block loopback SSRF: $($driverRes.web_err)"
             Assert-True ($driverRes.sub_status -ceq 'completed' -and $driverRes.sub_output -ceq 'renamed subagent ok') "Renamed script -InternalWorker subagent failed: status=$($driverRes.sub_status) output=$($driverRes.sub_output)"
 
             $seenReqs = @($serverRs.EndInvoke($serverHandle))
-            Assert-True ($seenReqs.Count -eq 3) "Expected 3 loopback HTTP requests (200, 401, subagent), got $($seenReqs.Count)."
+            Assert-True ($seenReqs.Count -eq 4) "Expected 4 loopback HTTP requests (200, 401, 429, subagent), got $($seenReqs.Count)."
             Assert-True ($seenReqs[0].headers -match '(?im)^Authorization:\s*Bearer secret-key-xyz\r?$' -and $seenReqs[0].body -ceq '{"ping":1}') 'First background HTTP request did not send expected Bearer header or body.'
         }
         finally {

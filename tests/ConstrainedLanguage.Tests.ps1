@@ -79,6 +79,14 @@ try {
         SHELLOSSUS_WORKSPACE = 'C:\folder with spaces'
     }
 
+    $clWhc = New-Object System.Net.WebHeaderCollection
+    $clWhc.Add('Retry-After', '17')
+    $clHttpMsg429 = $null
+    if ($PSVersionTable.PSVersion.Major -ge 6) {
+        $clHttpMsg429 = [System.Net.Http.HttpResponseMessage]::new([System.Net.HttpStatusCode]::TooManyRequests)
+        $clHttpMsg429.Headers.Add('Retry-After', '11')
+    }
+
     $script:approval = 'WRITE'
     function Read-Host {
         param($Prompt)
@@ -1076,6 +1084,12 @@ try {
         Assert-True ($clJsonHits.Count -eq 1 -and $clJsonHits[0].title -ceq 'CLM Hit' -and $clJsonHits[0].snippet -ceq 'Safe JSON parsing.') 'ConvertFrom-AgentSearchResponse JSON parsing failed in ConstrainedLanguage.'
         $clVerObj = (& "$PSScriptRoot\..\shellossus.ps1" -Version -Mode json) | ConvertFrom-Json
         Assert-True ($clVerObj.type -ceq 'version' -and $clVerObj.version -ceq $script:AgentVersion) 'Standalone -Version -Mode json failed in ConstrainedLanguage.'
+
+        # Verify Retry-After header extraction works under ConstrainedLanguage with real .NET header collections.
+        Assert-True ((Get-AgentRetryAfterSeconds -ErrorRecord @{ Exception = @{ Response = @{ Headers = $clWhc } } }) -eq 17) 'Get-AgentRetryAfterSeconds failed on real WebHeaderCollection in ConstrainedLanguage.'
+        if ($null -ne $clHttpMsg429) {
+            Assert-True ((Get-AgentRetryAfterSeconds -ErrorRecord @{ Exception = @{ Response = $clHttpMsg429 } }) -eq 11) 'Get-AgentRetryAfterSeconds failed on real HttpResponseMessage in ConstrainedLanguage.'
+        }
     }
     finally {
         $script:SearchUrl = $savedClSearchUrl

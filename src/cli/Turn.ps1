@@ -280,6 +280,21 @@ function New-AgentTurnRequest {
     return @{ body = $body; compacted = $false }
 }
 
+$script:MaxHttpRetryDelaySec = 60
+
+function Get-AgentHttpRetryDelay {
+    param([int]$Attempt = 0, $RetryAfterSec = $null)
+    if ($null -ne $RetryAfterSec -and ($RetryAfterSec -is [int] -or $RetryAfterSec -is [long]) -and [long]$RetryAfterSec -gt 0 -and [long]$RetryAfterSec -le 86400) {
+        return [int]$RetryAfterSec
+    }
+    $clampedAttempt = if ($Attempt -lt 0) { 0 } elseif ($Attempt -gt 4) { 4 } else { $Attempt }
+    $base = 2 * (1 -shl $clampedAttempt)
+    if ($base -gt 30) { $base = 30 }
+    $jitterMax = [int]($base / 2) + 1
+    $jitter = Get-Random -Minimum 0 -Maximum $jitterMax
+    return ($base + $jitter)
+}
+
 function Invoke-AgentTurn {
     param($State, [string]$Endpoint, [string]$ModelId, [string]$ApiKey, [string]$Root, [int]$Steps = 50, [int]$MaxRepeatCalls = 0)
     if (-not (Test-ValidConversationBoundary -Messages $State.messages)) {
@@ -345,7 +360,7 @@ function Invoke-AgentTurn {
         $tempResponse = New-AgentTempFile
         $reply = $null
         try {
-            $maxRetries = 2
+            $maxRetries = 3
             $stepStart = Get-Date
             $attemptTimeoutSec = [int]$script:RequestTimeoutSec
             for ($attempt = 0; $attempt -le $maxRetries; $attempt++) {
@@ -361,12 +376,18 @@ function Invoke-AgentTurn {
                     break
                 }
                 catch {
+                    $retryAfterSec = $script:LastHttpRetryAfterSec
+                    $script:LastHttpRetryAfterSec = $null
+                    if ($null -eq $retryAfterSec) {
+                        $retryAfterSec = Get-AgentRetryAfterSeconds -ErrorRecord $_
+                    }
                     $errFormatted = Format-AgentError -ErrorRecord $_
                     $contextError = $errFormatted -match '(?i)(context_length|maximum context|context window)'
                     if (-not $contextError -and ($attempt -lt $maxRetries) -and ($errFormatted -match '(?i)\b(408|429|500|502|503|504|timeout|timed out)\b')) {
-                        $delay = ($attempt + 1) * 2
+                        $delay = Get-AgentHttpRetryDelay -Attempt $attempt -RetryAfterSec $retryAfterSec
                         $remainingStepBudget = $script:MaxStepRetryBudgetSec - [int](((Get-Date) - $stepStart).TotalSeconds)
-                        if ($remainingStepBudget -gt ($delay + $script:MinRequestTimeoutSec)) {
+                        $maxRetryDelay = if ($script:MaxHttpRetryDelaySec -gt 0) { [int]$script:MaxHttpRetryDelaySec } else { 60 }
+                        if (($delay -le $maxRetryDelay) -and ($remainingStepBudget -gt ($delay + $script:MinRequestTimeoutSec))) {
                             $maxRetryTimeout = $remainingStepBudget - $delay
                             $attemptTimeoutSec = if ($script:RequestTimeoutSec -lt $maxRetryTimeout) { [int]$script:RequestTimeoutSec } else { [int]$maxRetryTimeout }
                             if ($script:OutputMode -ne 'json') {

@@ -3184,6 +3184,211 @@ Start-Sleep -Seconds 30
         }
         Assert-True ($dirBlocked -and $dirStillExists) 'Directory at .lock path was removed or not rejected.'
     }
+
+    # Task 5: Retry-After parsing, exponential backoff with jitter, 3 transient retries, budget cap, non-retryable 400/401/403, and worker meta propagation.
+    & {
+        Assert-True ((ConvertFrom-AgentRetryAfterValue -Value '15') -eq 15) 'ConvertFrom-AgentRetryAfterValue failed for integer seconds.'
+        Assert-True ((ConvertFrom-AgentRetryAfterValue -Value ' 0 ') -eq 1) 'ConvertFrom-AgentRetryAfterValue did not clamp 0 to 1.'
+        Assert-True ((ConvertFrom-AgentRetryAfterValue -Value ' 7 ') -eq 7) 'ConvertFrom-AgentRetryAfterValue failed for trimmed integer.'
+        $futureHttpDate = [datetime]::UtcNow.AddSeconds(30).ToString('r')
+        $parsedFuture = ConvertFrom-AgentRetryAfterValue -Value $futureHttpDate
+        Assert-True ($null -ne $parsedFuture -and $parsedFuture -ge 28 -and $parsedFuture -le 32) "ConvertFrom-AgentRetryAfterValue failed for future HTTP-date '$futureHttpDate': got $parsedFuture"
+        $pastHttpDate = [datetime]::UtcNow.AddSeconds(-30).ToString('r')
+        Assert-True ((ConvertFrom-AgentRetryAfterValue -Value $pastHttpDate) -eq 1) 'ConvertFrom-AgentRetryAfterValue did not clamp past HTTP-date to 1.'
+        Assert-True ((ConvertFrom-AgentRetryAfterValue -Value '9999999999') -eq 86400) 'ConvertFrom-AgentRetryAfterValue did not cap huge positive Retry-After at 86400.'
+        Assert-True ((ConvertFrom-AgentRetryAfterValue -Value '00000012') -eq 12) 'ConvertFrom-AgentRetryAfterValue failed for leading-zero integer.'
+        Assert-True ((ConvertFrom-AgentRetryAfterValue -Value '15, 30') -eq 15) 'ConvertFrom-AgentRetryAfterValue failed for comma-joined duplicate Retry-After.'
+        $arabicFive = [string][char]0x0665
+        foreach ($badRa in @('', '   ', 'abc', '-5', '12abc', '1.5', $arabicFive)) {
+            Assert-True ($null -eq (ConvertFrom-AgentRetryAfterValue -Value $badRa)) "ConvertFrom-AgentRetryAfterValue accepted invalid value '$badRa'."
+        }
+
+        Assert-True ((Get-AgentHttpRetryDelay -Attempt 0 -RetryAfterSec 17) -eq 17) 'Get-AgentHttpRetryDelay did not honor RetryAfterSec.'
+        for ($sample = 0; $sample -lt 10; $sample++) {
+            $d0 = Get-AgentHttpRetryDelay -Attempt 0
+            $d1 = Get-AgentHttpRetryDelay -Attempt 1
+            $d2 = Get-AgentHttpRetryDelay -Attempt 2
+            Assert-True ($d0 -ge 2 -and $d0 -le 3) "Attempt 0 backoff+jitter out of range [2..3]: $d0"
+            Assert-True ($d1 -ge 4 -and $d1 -le 6) "Attempt 1 backoff+jitter out of range [4..6]: $d1"
+            Assert-True ($d2 -ge 8 -and $d2 -le 12) "Attempt 2 backoff+jitter out of range [8..12]: $d2"
+        }
+
+        $savedRetryMode = $script:OutputMode
+        $savedRetryBudget = $script:MaxStepRetryBudgetSec
+        $savedRetryReqTimeout = $script:RequestTimeoutSec
+        $script:OutputMode = 'json'
+        $script:MaxStepRetryBudgetSec = 3600
+        $script:RequestTimeoutSec = 60
+        $script:t5Sleeps = @()
+        $script:t5Calls = 0
+        $script:t5Scenario = ''
+        try {
+            & {
+                function Start-Sleep {
+                    param($Seconds, $Milliseconds)
+                    if ($null -ne $Seconds) { $script:t5Sleeps += [int]$Seconds }
+                }
+                function Invoke-WebRequest {
+                    param($Uri, $Method, $Headers, $ContentType, $Body, $TimeoutSec, $ErrorAction, [switch]$UseBasicParsing, $OutFile)
+                    $script:t5Calls++
+                    if ($script:t5Scenario -eq '429_retry_after') {
+                        if ($script:t5Calls -eq 1) {
+                            $script:LastHttpRetryAfterSec = 7
+                            throw 'Response status code does not indicate success: 429 (Too Many Requests).'
+                        }
+                    }
+                    elseif ($script:t5Scenario -eq '503_three_retries') {
+                        if ($script:t5Calls -le 3) {
+                            throw 'Response status code does not indicate success: 503 (Service Unavailable).'
+                        }
+                    }
+                    elseif ($script:t5Scenario -eq '429_over_budget') {
+                        $script:LastHttpRetryAfterSec = 500
+                        throw 'Response status code does not indicate success: 429 (Too Many Requests).'
+                    }
+                    elseif ($script:t5Scenario -eq '429_over_single_cap') {
+                        $script:LastHttpRetryAfterSec = 3500
+                        throw 'Response status code does not indicate success: 429 (Too Many Requests).'
+                    }
+                    elseif ($script:t5Scenario -eq 'non_transient_401') {
+                        $script:LastHttpRetryAfterSec = 2
+                        throw 'Response status code does not indicate success: 401 (Unauthorized).'
+                    }
+                    elseif ($script:t5Scenario -eq 'non_transient_400') {
+                        throw 'Response status code does not indicate success: 400 (Bad Request).'
+                    }
+                    elseif ($script:t5Scenario -eq 'non_transient_403') {
+                        throw 'Response status code does not indicate success: 403 (Forbidden).'
+                    }
+                    $okReply = @{ choices = @(@{ finish_reason = 'stop'; message = @{ content = 'retry-ok' } }) } | ConvertTo-Json -Depth 8 -Compress
+                    Set-Content -LiteralPath $OutFile -Value $okReply -Encoding UTF8 -NoNewline
+                }
+
+                # Override Get-AgentRetryAfterSeconds only for simulating header extraction on mocked errors where ErrorRecord has no HttpResponseMessage in CLM.
+                $origGetRa = ${function:Get-AgentRetryAfterSeconds}
+                function Get-AgentRetryAfterSeconds {
+                    param($ErrorRecord)
+                    if ($null -ne $script:LastHttpRetryAfterSec) { return $script:LastHttpRetryAfterSec }
+                    return (& $origGetRa -ErrorRecord $ErrorRecord)
+                }
+                try {
+                    # 1. 429 with Retry-After: 7 sleeps 7s and recovers.
+                    $script:t5Scenario = '429_retry_after'
+                    $script:t5Calls = 0
+                    $script:t5Sleeps = @()
+                    $st429 = @{ session_id = 't5-429'; workspace = $workspacePath; model = 'test-model'; messages = @(@{ role = 'system'; content = 'sys' }, @{ role = 'user'; content = 'hi' }) }
+                    Invoke-AgentTurn -State $st429 -Endpoint 'https://example.invalid/v1/chat/completions' -ModelId 'test-model' -ApiKey 'k' -Root $workspacePath -Steps 2
+                    Assert-True ($script:t5Calls -eq 2 -and $script:t5Sleeps.Count -eq 1 -and $script:t5Sleeps[0] -eq 7 -and $st429.messages[-1].content -ceq 'retry-ok') "429 Retry-After did not sleep 7s and recover: calls=$($script:t5Calls) sleeps=$($script:t5Sleeps -join ',')"
+
+                    # 2. Up to 3 transient 503 retries succeed on 4th attempt with exponential backoff+jitter.
+                    $script:t5Scenario = '503_three_retries'
+                    $script:t5Calls = 0
+                    $script:t5Sleeps = @()
+                    $st503 = @{ session_id = 't5-503'; workspace = $workspacePath; model = 'test-model'; messages = @(@{ role = 'system'; content = 'sys' }, @{ role = 'user'; content = 'hi' }) }
+                    Invoke-AgentTurn -State $st503 -Endpoint 'https://example.invalid/v1/chat/completions' -ModelId 'test-model' -ApiKey 'k' -Root $workspacePath -Steps 2
+                    Assert-True ($script:t5Calls -eq 4 -and $script:t5Sleeps.Count -eq 3 -and $st503.messages[-1].content -ceq 'retry-ok') "3 transient 503 retries did not recover on 4th attempt: calls=$($script:t5Calls) sleeps=$($script:t5Sleeps -join ',')"
+                    Assert-True ($script:t5Sleeps[0] -ge 2 -and $script:t5Sleeps[0] -le 3 -and $script:t5Sleeps[1] -ge 4 -and $script:t5Sleeps[1] -le 6 -and $script:t5Sleeps[2] -ge 8 -and $script:t5Sleeps[2] -le 12) "Unexpected backoff delays: $($script:t5Sleeps -join ',')"
+
+                    # 3. Retry-After exceeding remaining step budget stops retrying without sleeping.
+                    $script:MaxStepRetryBudgetSec = 30
+                    $script:t5Scenario = '429_over_budget'
+                    $script:t5Calls = 0
+                    $script:t5Sleeps = @()
+                    $stOver = @{ session_id = 't5-over'; workspace = $workspacePath; model = 'test-model'; messages = @(@{ role = 'system'; content = 'sys' }, @{ role = 'user'; content = 'hi' }) }
+                    $overThrew = $false
+                    try {
+                        Invoke-AgentTurn -State $stOver -Endpoint 'https://example.invalid/v1/chat/completions' -ModelId 'test-model' -ApiKey 'k' -Root $workspacePath -Steps 2
+                    }
+                    catch {
+                        if ($_.Exception.Message -like '*429*') { $overThrew = $true }
+                    }
+                    Assert-True ($overThrew -and $script:t5Calls -eq 1 -and $script:t5Sleeps.Count -eq 0) "Over-budget Retry-After did not cut off immediately: calls=$($script:t5Calls) sleeps=$($script:t5Sleeps -join ',')"
+                    $script:MaxStepRetryBudgetSec = 3600
+
+                    # 3b. Huge Retry-After (3500s) within 3600s step budget fails fast instead of sleeping ~1 hour (exceeds MaxHttpRetryDelaySec).
+                    $script:t5Scenario = '429_over_single_cap'
+                    $script:t5Calls = 0
+                    $script:t5Sleeps = @()
+                    $stCap = @{ session_id = 't5-cap'; workspace = $workspacePath; model = 'test-model'; messages = @(@{ role = 'system'; content = 'sys' }, @{ role = 'user'; content = 'hi' }) }
+                    $capThrew = $false
+                    try {
+                        Invoke-AgentTurn -State $stCap -Endpoint 'https://example.invalid/v1/chat/completions' -ModelId 'test-model' -ApiKey 'k' -Root $workspacePath -Steps 2
+                    }
+                    catch {
+                        if ($_.Exception.Message -like '*429*') { $capThrew = $true }
+                    }
+                    Assert-True ($capThrew -and $script:t5Calls -eq 1 -and $script:t5Sleeps.Count -eq 0) "Retry-After exceeding MaxHttpRetryDelaySec was not rejected fast: calls=$($script:t5Calls) sleeps=$($script:t5Sleeps -join ',')"
+
+                    # 4. Non-transient 400, 401, 403 are never retried (even if Retry-After is present).
+                    foreach ($nonTrans in @('non_transient_400', 'non_transient_401', 'non_transient_403')) {
+                        $script:t5Scenario = $nonTrans
+                        $script:t5Calls = 0
+                        $script:t5Sleeps = @()
+                        $stNt = @{ session_id = "t5-$nonTrans"; workspace = $workspacePath; model = 'test-model'; messages = @(@{ role = 'system'; content = 'sys' }, @{ role = 'user'; content = 'hi' }) }
+                        $ntThrew = $false
+                        try {
+                            Invoke-AgentTurn -State $stNt -Endpoint 'https://example.invalid/v1/chat/completions' -ModelId 'test-model' -ApiKey 'k' -Root $workspacePath -Steps 2
+                        }
+                        catch { $ntThrew = $true }
+                        Assert-True ($ntThrew -and $script:t5Calls -eq 1 -and $script:t5Sleeps.Count -eq 0) "Non-transient case '$nonTrans' was retried: calls=$($script:t5Calls) sleeps=$($script:t5Sleeps -join ',')"
+                    }
+                }
+                finally {
+                    Set-Item Function:\Get-AgentRetryAfterSeconds -Value $origGetRa
+                }
+
+                # 5. Get-AgentRetryAfterSeconds extracts Retry-After from hashtable, WebHeaderCollection, Dictionary<string,string[]>, and HttpResponseMessage.
+                $hdrErrObj = @{ Exception = @{ Response = @{ Headers = @{ 'Retry-After' = '19' } } } }
+                Assert-True ((Get-AgentRetryAfterSeconds -ErrorRecord $hdrErrObj) -eq 19) 'Get-AgentRetryAfterSeconds did not extract Retry-After from Response.Headers hashtable.'
+                if ($ExecutionContext.SessionState.LanguageMode -eq 'FullLanguage') {
+                    $whcRa = New-Object System.Net.WebHeaderCollection
+                    $whcRa.Add('Retry-After', '13')
+                    Assert-True ((Get-AgentRetryAfterSeconds -ErrorRecord @{ Exception = @{ Response = @{ Headers = $whcRa } } }) -eq 13) 'Get-AgentRetryAfterSeconds failed for WebHeaderCollection.'
+                    $dictRa = New-Object 'System.Collections.Generic.Dictionary[string,string[]]'
+                    $dictRa.Add('Retry-After', [string[]]@('21', '42'))
+                    Assert-True ((Get-AgentRetryAfterSeconds -ErrorRecord @{ Exception = @{ Response = @{ Headers = $dictRa } } }) -eq 21) 'Get-AgentRetryAfterSeconds failed for multi-valued Dictionary header.'
+                    if ($PSVersionTable.PSVersion.Major -ge 6) {
+                        $httpMsgRa = [System.Net.Http.HttpResponseMessage]::new([System.Net.HttpStatusCode]::TooManyRequests)
+                        $httpMsgRa.Headers.Add('Retry-After', '8')
+                        Assert-True ((Get-AgentRetryAfterSeconds -ErrorRecord @{ Exception = @{ Response = $httpMsgRa } }) -eq 8) 'Get-AgentRetryAfterSeconds failed for HttpResponseMessage Delta.'
+                    }
+                }
+
+                # 6. Background HTTP worker propagates retry_after_sec via SHELLOSSUS_HTTP_META and cleans up temp file.
+                $script:capturedMetaPath = ''
+                function Start-Process {
+                    param($FilePath, $ArgumentList, $RedirectStandardOutput, $RedirectStandardError, [switch]$NoNewWindow, [switch]$PassThru, $ErrorAction)
+                    $script:capturedMetaPath = [string]$env:SHELLOSSUS_HTTP_META
+                    Set-AgentUtf8Content -LiteralPath $env:SHELLOSSUS_HTTP_ERR -Value 'HTTP 429 Too Many Requests'
+                    if ($env:SHELLOSSUS_HTTP_META) {
+                        Set-AgentUtf8Content -LiteralPath $env:SHELLOSSUS_HTTP_META -Value '{"retry_after_sec":11}'
+                    }
+                    return @{ HasExited = $true; Id = 999995; ExitCode = 1 }
+                }
+                $bgRaTmp = New-AgentTempFile
+                $bgRaThrew = $false
+                try {
+                    Invoke-AgentHttpRequest -Uri 'https://example.invalid/v1/chat/completions' -ApiKey 'k' -Body '{}' -OutFile $bgRaTmp.FullName -ForceBackgroundWorker
+                }
+                catch {
+                    if ($_.Exception.Message -like '*429*') { $bgRaThrew = $true }
+                }
+                finally {
+                    Remove-Item -LiteralPath $bgRaTmp.FullName -Force -ErrorAction SilentlyContinue
+                }
+                Assert-True ($bgRaThrew -and $script:LastHttpRetryAfterSec -eq 11) "Background HTTP worker did not propagate retry_after_sec=11 (got '$($script:LastHttpRetryAfterSec)')."
+                Assert-True ($script:capturedMetaPath -and (-not (Test-Path -LiteralPath $script:capturedMetaPath))) 'Background HTTP worker leaked SHELLOSSUS_HTTP_META temp file.'
+                $script:LastHttpRetryAfterSec = $null
+            }
+        }
+        finally {
+            $script:OutputMode = $savedRetryMode
+            $script:MaxStepRetryBudgetSec = $savedRetryBudget
+            $script:RequestTimeoutSec = $savedRetryReqTimeout
+            $script:LastHttpRetryAfterSec = $null
+            Remove-Variable -Name t5Sleeps, t5Calls, t5Scenario, capturedMetaPath -Scope Script -ErrorAction SilentlyContinue
+        }
+    }
 }
 finally {
     Remove-Item Function:\Invoke-WebRequest -ErrorAction SilentlyContinue

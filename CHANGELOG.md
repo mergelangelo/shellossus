@@ -6,6 +6,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Added
+- `Retry-After` header support (delta seconds and HTTP-date) with up to 3 transient HTTP retries and exponential backoff + jitter in `Invoke-AgentTurn` and the isolated `http` worker.
+
 ## [0.9.0] - 2026-11-19
 
 ### Added
