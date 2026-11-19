@@ -336,7 +336,7 @@ function Resolve-ExistingPathAncestor {
     $currRel = $RelativePath
     while ($currRel) {
         $probeCand = if ($currRel -match '^([a-zA-Z]:[/\\]|[/\\])') { $currRel } else { Join-Path $Root $currRel }
-        if (Test-Path -LiteralPath $probeCand) { break }
+        if ($null -ne (Get-Item -LiteralPath $probeCand -Force -ErrorAction SilentlyContinue)) { break }
         $seg = Split-Path $currRel -Leaf
         Test-ValidPathSegment -Segment $seg -Kind Directory
         $missingNames = @($seg) + @($missingNames)
@@ -377,7 +377,7 @@ function Resolve-AgentWriteTarget {
         throw 'Agent tools cannot write credential configuration files.'
     }
     $exists = $false
-    if (Test-Path -LiteralPath $fullPath) {
+    if ($null -ne (Get-Item -LiteralPath $fullPath -Force -ErrorAction SilentlyContinue)) {
         $fullPath = Resolve-AgentPath -Root $Root -RelativePath $RelativePath
         $exists = $true
     }
@@ -437,10 +437,8 @@ function Test-PathHasReparsePoint {
     if (-not $Path) { return $false }
     $stopNorm = ''
     if ($StopAt) {
-        if (Test-Path -LiteralPath $StopAt) {
-            $stopItem = Get-Item -LiteralPath $StopAt -Force -ErrorAction SilentlyContinue
-            if ($stopItem) { $stopNorm = $stopItem.FullName.Replace('\', '/').TrimEnd('/') }
-        }
+        $stopItem = Get-Item -LiteralPath $StopAt -Force -ErrorAction SilentlyContinue
+        if ($null -ne $stopItem) { $stopNorm = $stopItem.FullName.Replace('\', '/').TrimEnd('/') }
         if (-not $stopNorm) {
             $stopNorm = $StopAt.Replace('\', '/').TrimEnd('/')
         }
@@ -448,12 +446,10 @@ function Test-PathHasReparsePoint {
     $curr = $Path
     while ($curr) {
         $currNorm = $curr.Replace('\', '/').TrimEnd('/')
-        if (Test-Path -LiteralPath $curr) {
-            $item = Get-Item -LiteralPath $curr -Force -ErrorAction SilentlyContinue
-            if ($item) {
-                if (($item.Attributes -band 1024) -ne 0) { return $true }
-                if ($stopNorm -and ($item.FullName.Replace('\', '/').TrimEnd('/') -ieq $stopNorm)) { break }
-            }
+        $item = Get-Item -LiteralPath $curr -Force -ErrorAction SilentlyContinue
+        if ($null -ne $item) {
+            if (($item.Attributes -band 1024) -ne 0) { return $true }
+            if ($stopNorm -and ($item.FullName.Replace('\', '/').TrimEnd('/') -ieq $stopNorm)) { break }
         }
         if ($stopNorm -and ($currNorm -ieq $stopNorm)) { break }
         $parent = Split-Path $curr -Parent

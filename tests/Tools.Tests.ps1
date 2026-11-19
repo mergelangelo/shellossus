@@ -2105,6 +2105,20 @@ description: Single edit: nonempty text occurring once in the file.
 property: path
 description: Workspace-relative path to an existing text file.
 
+tool: delete_file
+description: Delete an existing regular file inside the workspace (up to 1 MiB; saves a verified backup for /undo).
+property: path
+description: Workspace-relative path to an existing regular file to delete.
+
+tool: move_file
+description: Move or rename an existing regular file inside the workspace (creates missing destination parent directories; saves verified backups for /undo).
+property: destination
+description: Workspace-relative destination file path. Missing parent directories inside the workspace are created automatically.
+property: overwrite
+description: Set true to overwrite an existing destination file (saves a backup).
+property: source
+description: Workspace-relative path to an existing regular file.
+
 tool: run_command
 description: Execute PowerShell with the user's OS permissions, starting in the workspace directory.
 property: command
@@ -3757,6 +3771,199 @@ description: Optional subagent role: recon (ReadOnly search), audit (ReadOnly re
             $script:OutputMode = $savedModeR
             $script:WebDownloadUseHostCommand = $savedHostCmdR
             Remove-Variable -Name redirVisited, redirSeenMax, redirMode, seenWebMaxRedirEnv, seenWebMetaPath -Scope Script -ErrorAction SilentlyContinue
+        }
+    }
+
+    # Task 10 (Stage C): delete_file and move_file tools with security guards and conflict-aware /undo.
+    & {
+        $savedPerm10 = $script:AgentPermission
+        $savedMode10 = $script:OutputMode
+        $savedAppr10 = $script:approval
+        $savedWrites10 = @($script:CurrentTurnWrites)
+        try {
+            # 1. Canonical aliases, normalizers, and schema registration.
+            Assert-True ((Resolve-ToolCanonicalName -Name 'rm') -ceq 'delete_file') 'rm alias did not resolve to delete_file.'
+            Assert-True ((Resolve-ToolCanonicalName -Name 'delete') -ceq 'delete_file') 'delete alias did not resolve to delete_file.'
+            Assert-True ((Resolve-ToolCanonicalName -Name 'mv') -ceq 'move_file') 'mv alias did not resolve to move_file.'
+            Assert-True ((Resolve-ToolCanonicalName -Name 'rename') -ceq 'move_file') 'rename alias did not resolve to move_file.'
+            $normDel = Format-AgentToolArguments -Name 'delete_file' -Arguments (@{ file_path = 'a.txt' })
+            Assert-True ($normDel.path -ceq 'a.txt') 'delete_file normalizer did not map file_path to path.'
+            $normMov = Format-AgentToolArguments -Name 'move_file' -Arguments (@{ from = 'a.txt'; to = 'b.txt'; overwrite = $true })
+            Assert-True ($normMov.source -ceq 'a.txt' -and $normMov.destination -ceq 'b.txt' -and $normMov.overwrite -eq $true) 'move_file normalizer did not map from/to to source/destination.'
+
+            # 2. ReadOnly hides and blocks delete_file and move_file (and ReadOnly subagent excludes them).
+            $script:AgentPermission = 'ReadOnly'
+            $script:OutputMode = 'json'
+            $roCap10 = Get-AgentCapabilities -Root $workspacePath
+            Assert-True (($roCap10.tool_names -notcontains 'delete_file') -and ($roCap10.tool_names -notcontains 'move_file')) 'ReadOnly capabilities exposed delete_file or move_file.'
+            $roDelRes = Invoke-AgentTool -Root $workspacePath -Call @{ id = 't10-ro-d'; function = @{ name = 'delete_file'; arguments = '{"path":"hello.txt"}' } } | ConvertFrom-Json
+            Assert-True ($roDelRes.error -like '*ReadOnly*') "ReadOnly did not block delete_file: $($roDelRes.error)"
+            $roMovRes = Invoke-AgentTool -Root $workspacePath -Call @{ id = 't10-ro-m'; function = @{ name = 'move_file'; arguments = '{"source":"hello.txt","destination":"hello2.txt"}' } } | ConvertFrom-Json
+            Assert-True ($roMovRes.error -like '*ReadOnly*') "ReadOnly did not block move_file: $($roMovRes.error)"
+
+            # 3. Ask mode: JSON cancels without touching disk; interactive 'n' cancels; 'y' executes.
+            $script:AgentPermission = 'Ask'
+            $t10AskFile = Join-Path $workspacePath 't10-ask.txt'
+            Set-Content -LiteralPath $t10AskFile -Value 'ask-content' -Encoding UTF8 -NoNewline
+            $askJsonDel = Invoke-AgentTool -Root $workspacePath -Call @{ id = 't10-aj'; function = @{ name = 'delete_file'; arguments = '{"path":"t10-ask.txt"}' } } | ConvertFrom-Json
+            Assert-True ($askJsonDel.status -ceq 'cancelled' -and (Test-Path -LiteralPath $t10AskFile)) 'Ask+JSON delete_file did not cancel cleanly.'
+
+            $script:OutputMode = 'text'
+            $script:approval = 'n'
+            $askNoDel = Invoke-AgentTool -Root $workspacePath -Call @{ id = 't10-an'; function = @{ name = 'delete_file'; arguments = '{"path":"t10-ask.txt"}' } } | ConvertFrom-Json
+            Assert-True ($askNoDel.status -ceq 'cancelled' -and (Test-Path -LiteralPath $t10AskFile)) 'Ask+no delete_file did not cancel cleanly.'
+
+            $script:approval = 'y'
+            $script:CurrentTurnWrites = @()
+            $askYesDel = Invoke-AgentTool -Root $workspacePath -Call @{ id = 't10-ay'; function = @{ name = 'delete_file'; arguments = '{"path":"t10-ask.txt"}' } } | ConvertFrom-Json
+            Assert-True ($askYesDel.status -ceq 'deleted' -and (-not (Test-Path -LiteralPath $t10AskFile)) -and (Test-Path -LiteralPath $askYesDel.backup)) "Ask+yes delete_file failed: $($askYesDel | ConvertTo-Json -Compress)"
+            $undoState10 = @{ messages = @(@{ role = 'user'; content = 'del' }) }
+            Invoke-AgentUndo -State $undoState10 -UndoEntry @{ messages = @(); writes = @($script:CurrentTurnWrites) }
+            Assert-True ((Test-Path -LiteralPath $t10AskFile) -and (Get-Content -LiteralPath $t10AskFile -Raw -Encoding UTF8) -ceq 'ask-content') 'Invoke-AgentUndo did not restore deleted file.'
+
+            # 4. AutoEdit: delete_file conflict detection on /undo + multi-step write->edit->delete /undo.
+            $script:AgentPermission = 'AutoEdit'
+            $script:OutputMode = 'json'
+            $script:CurrentTurnWrites = @()
+            $delConfRes = Invoke-AgentTool -Root $workspacePath -Call @{ id = 't10-dc'; function = @{ name = 'delete_file'; arguments = '{"path":"t10-ask.txt"}' } } | ConvertFrom-Json
+            Assert-True ($delConfRes.status -ceq 'deleted' -and (-not (Test-Path -LiteralPath $t10AskFile))) 'AutoEdit delete_file failed.'
+            Set-Content -LiteralPath $t10AskFile -Value 'manual-recreated' -Encoding UTF8 -NoNewline
+            $delConflictThrew = $false
+            $delUndoEntry = @{ messages = @(); writes = @($script:CurrentTurnWrites) }
+            try { Invoke-AgentUndo -State @{ messages = @() } -UndoEntry $delUndoEntry }
+            catch { if ($_.Exception.Message -like '*changed after*') { $delConflictThrew = $true } }
+            Assert-True ($delConflictThrew -and (Get-Content -LiteralPath $t10AskFile -Raw -Encoding UTF8) -ceq 'manual-recreated') 'delete_file /undo overwrote manually recreated file.'
+            $delUndoEntry.preserve_backups = $false
+            foreach ($dw in @($delUndoEntry.writes)) { if ($dw) { $dw.preserve_backup = $false } }
+            Clear-AgentUndoBackups -Writes $delUndoEntry.writes
+
+            # Chain: write_file -> edit_file -> delete_file in one turn, then /undo removes file cleanly.
+            $script:CurrentTurnWrites = @()
+            $null = Invoke-AgentTool -Root $workspacePath -Call @{ id = 't10-c1'; function = @{ name = 'write_file'; arguments = '{"path":"t10-chain.txt","content":"v1"}' } } | ConvertFrom-Json
+            $null = Invoke-AgentTool -Root $workspacePath -Call @{ id = 't10-c2'; function = @{ name = 'edit_file'; arguments = '{"path":"t10-chain.txt","old_text":"v1","new_text":"v2"}' } } | ConvertFrom-Json
+            $c3 = Invoke-AgentTool -Root $workspacePath -Call @{ id = 't10-c3'; function = @{ name = 'delete_file'; arguments = '{"path":"t10-chain.txt"}' } } | ConvertFrom-Json
+            Assert-True ($c3.status -ceq 'deleted') 'Chained delete_file failed.'
+            Invoke-AgentUndo -State @{ messages = @() } -UndoEntry @{ messages = @(); writes = @($script:CurrentTurnWrites) }
+            Assert-True (-not (Test-Path -LiteralPath (Join-Path $workspacePath 't10-chain.txt'))) 'Undo of write->edit->delete chain left file behind.'
+
+            # 5. Security guards: reject directory, outside workspace, and .env secret file.
+            $t10Dir = Join-Path $workspacePath 't10-dir'
+            New-Item -ItemType Directory -Path $t10Dir -Force | Out-Null
+            $t10Env = Join-Path $workspacePath '.env'
+            Set-Content -LiteralPath $t10Env -Value 'SECRET=1' -Encoding UTF8 -NoNewline
+            $delDirErr = Invoke-AgentTool -Root $workspacePath -Call @{ id = 't10-sd'; function = @{ name = 'delete_file'; arguments = '{"path":"t10-dir"}' } } | ConvertFrom-Json
+            Assert-True ($delDirErr.error -like '*directory*' -or $delDirErr.error -like '*directories*') "delete_file did not reject directory: $($delDirErr.error)"
+            $delOutErr = Invoke-AgentTool -Root $workspacePath -Call @{ id = 't10-so'; function = @{ name = 'delete_file'; arguments = '{"path":"../outside.txt"}' } } | ConvertFrom-Json
+            Assert-True ([bool]$delOutErr.error) 'delete_file did not reject outside workspace path.'
+            $delEnvErr = Invoke-AgentTool -Root $workspacePath -Call @{ id = 't10-se'; function = @{ name = 'delete_file'; arguments = '{"path":".env"}' } } | ConvertFrom-Json
+            Assert-True ($delEnvErr.error -like '*credential*' -and (Test-Path -LiteralPath $t10Env)) "delete_file did not reject .env: $($delEnvErr.error)"
+
+            # 6. move_file into new nested directory + /undo cleans up destination and created dirs and restores source.
+            $t10Src = Join-Path $workspacePath 't10-move-src.txt'
+            Set-Content -LiteralPath $t10Src -Value 'move-payload-1' -Encoding UTF8 -NoNewline
+            $script:CurrentTurnWrites = @()
+            $movRes = Invoke-AgentTool -Root $workspacePath -Call @{ id = 't10-m1'; function = @{ name = 'move_file'; arguments = '{"source":"t10-move-src.txt","destination":"t10-nested/sub/moved.txt"}' } } | ConvertFrom-Json
+            $t10Dst = Join-Path $workspacePath 't10-nested/sub/moved.txt'
+            Assert-True ($movRes.status -ceq 'moved' -and (-not (Test-Path -LiteralPath $t10Src)) -and (Test-Path -LiteralPath $t10Dst) -and (Get-Content -LiteralPath $t10Dst -Raw -Encoding UTF8) -ceq 'move-payload-1') "move_file into nested dir failed: $($movRes | ConvertTo-Json -Compress)"
+            Invoke-AgentUndo -State @{ messages = @() } -UndoEntry @{ messages = @(); writes = @($script:CurrentTurnWrites) }
+            Assert-True ((Test-Path -LiteralPath $t10Src) -and (Get-Content -LiteralPath $t10Src -Raw -Encoding UTF8) -ceq 'move-payload-1' -and (-not (Test-Path -LiteralPath (Join-Path $workspacePath 't10-nested')))) 'Invoke-AgentUndo on move_file did not restore source and remove created nested dirs.'
+
+            # 7. move_file refuses overwrite by default, succeeds with overwrite=true, and /undo restores BOTH files.
+            $t10ExistingDst = Join-Path $workspacePath 't10-existing-dst.txt'
+            Set-Content -LiteralPath $t10ExistingDst -Value 'original-dst-body' -Encoding UTF8 -NoNewline
+            $movNoOv = Invoke-AgentTool -Root $workspacePath -Call @{ id = 't10-m2'; function = @{ name = 'move_file'; arguments = '{"source":"t10-move-src.txt","destination":"t10-existing-dst.txt"}' } } | ConvertFrom-Json
+            Assert-True ($movNoOv.error -like '*already exists*' -and (Test-Path -LiteralPath $t10Src) -and (Get-Content -LiteralPath $t10ExistingDst -Raw -Encoding UTF8) -ceq 'original-dst-body') "move_file overwrote without overwrite=true: $($movNoOv.error)"
+
+            $script:CurrentTurnWrites = @()
+            $movOv = Invoke-AgentTool -Root $workspacePath -Call @{ id = 't10-m3'; function = @{ name = 'move_file'; arguments = '{"source":"t10-move-src.txt","destination":"t10-existing-dst.txt","overwrite":true}' } } | ConvertFrom-Json
+            Assert-True ($movOv.status -ceq 'moved' -and (-not (Test-Path -LiteralPath $t10Src)) -and (Get-Content -LiteralPath $t10ExistingDst -Raw -Encoding UTF8) -ceq 'move-payload-1') "move_file overwrite=true failed: $($movOv | ConvertTo-Json -Compress)"
+            Invoke-AgentUndo -State @{ messages = @() } -UndoEntry @{ messages = @(); writes = @($script:CurrentTurnWrites) }
+            Assert-True ((Test-Path -LiteralPath $t10Src) -and (Get-Content -LiteralPath $t10Src -Raw -Encoding UTF8) -ceq 'move-payload-1' -and (Get-Content -LiteralPath $t10ExistingDst -Raw -Encoding UTF8) -ceq 'original-dst-body') 'Invoke-AgentUndo on move_file overwrite=true did not restore both source and destination.'
+
+            # 8. move_file conflict detection on /undo if destination was edited externally.
+            $script:CurrentTurnWrites = @()
+            $movConf = Invoke-AgentTool -Root $workspacePath -Call @{ id = 't10-m4'; function = @{ name = 'move_file'; arguments = '{"source":"t10-move-src.txt","destination":"t10-conf-dst.txt"}' } } | ConvertFrom-Json
+            Assert-True ($movConf.status -ceq 'moved') 'move_file for conflict test failed.'
+            $t10ConfDst = Join-Path $workspacePath 't10-conf-dst.txt'
+            Set-Content -LiteralPath $t10ConfDst -Value 'manual-edit-after-move' -Encoding UTF8 -NoNewline
+            $movUndoEntry = @{ messages = @(); writes = @($script:CurrentTurnWrites) }
+            $movConfThrew = $false
+            try { Invoke-AgentUndo -State @{ messages = @() } -UndoEntry $movUndoEntry }
+            catch { if ($_.Exception.Message -like '*changed after*') { $movConfThrew = $true } }
+            Assert-True ($movConfThrew -and (-not (Test-Path -LiteralPath $t10Src)) -and (Get-Content -LiteralPath $t10ConfDst -Raw -Encoding UTF8) -ceq 'manual-edit-after-move') 'move_file /undo did not abort cleanly on manual destination edit.'
+            $movUndoEntry.preserve_backups = $false
+            foreach ($mw in @($movUndoEntry.writes)) { if ($mw) { $mw.preserve_backup = $false } }
+            Clear-AgentUndoBackups -Writes $movUndoEntry.writes
+
+            # 9. move_file security guards: rejects .env destination, outside workspace, directory source.
+            $movEnvErr = Invoke-AgentTool -Root $workspacePath -Call @{ id = 't10-me'; function = @{ name = 'move_file'; arguments = '{"source":"t10-conf-dst.txt","destination":".env","overwrite":true}' } } | ConvertFrom-Json
+            Assert-True ($movEnvErr.error -like '*credential*') "move_file did not block .env destination: $($movEnvErr.error)"
+            $movOutErr = Invoke-AgentTool -Root $workspacePath -Call @{ id = 't10-mo'; function = @{ name = 'move_file'; arguments = '{"source":"t10-conf-dst.txt","destination":"../escape-move.txt"}' } } | ConvertFrom-Json
+            Assert-True ($movOutErr.error -like '*outside*') "move_file did not block outside workspace destination: $($movOutErr.error)"
+            $movDirErr = Invoke-AgentTool -Root $workspacePath -Call @{ id = 't10-md'; function = @{ name = 'move_file'; arguments = '{"source":"t10-dir","destination":"t10-dir2"}' } } | ConvertFrom-Json
+            Assert-True ($movDirErr.error -like '*directories*' -or $movDirErr.error -like '*directory*') "move_file did not block directory source: $($movDirErr.error)"
+
+            # 10. Regression (C2): case-only rename on case-insensitive FS (macOS/Windows) fails safely without deleting source.
+            $t10CaseSrc = Join-Path $workspacePath 'T10CaseFile.txt'
+            Set-Content -LiteralPath $t10CaseSrc -Value 'keep-case-data' -Encoding UTF8 -NoNewline
+            $t10CaseProbe = Get-Item -LiteralPath (Join-Path $workspacePath 't10casefile.txt') -Force -ErrorAction SilentlyContinue
+            if ($null -ne $t10CaseProbe) {
+                $movCaseErr = Invoke-AgentTool -Root $workspacePath -Call @{ id = 't10-case'; function = @{ name = 'move_file'; arguments = '{"source":"T10CaseFile.txt","destination":"t10casefile.txt","overwrite":true}' } } | ConvertFrom-Json
+                Assert-True ($movCaseErr.error -like '*two-step*' -and (Test-Path -LiteralPath $t10CaseSrc) -and (Get-Content -LiteralPath $t10CaseSrc -Raw -Encoding UTF8) -ceq 'keep-case-data') "Case-only move_file did not protect source on case-insensitive FS: $($movCaseErr | ConvertTo-Json -Compress)"
+            }
+            Remove-Item -LiteralPath $t10CaseSrc -Force -ErrorAction SilentlyContinue
+
+            # 11. Regression (I8): mixing memory tool and delete_file on MEMORY.md in same turn undoes cleanly.
+            $t10MemPath = Join-Path $workspacePath '.shellossus/MEMORY.md'
+            $hadMemBefore = Test-Path -LiteralPath $t10MemPath
+            if ($hadMemBefore) { Remove-Item -LiteralPath $t10MemPath -Force }
+            $script:CurrentTurnWrites = @()
+            $memSet10 = Invoke-AgentTool -Root $workspacePath -Call @{ id = 't10-mem1'; function = @{ name = 'memory'; arguments = '{"action":"set","scope":"workspace","content":"Remember invariant 10"}' } } | ConvertFrom-Json
+            Assert-True ($memSet10.status -ceq 'written' -and (Test-Path -LiteralPath $t10MemPath)) 'memory set before delete_file failed.'
+            $memDel10 = Invoke-AgentTool -Root $workspacePath -Call @{ id = 't10-mem2'; function = @{ name = 'delete_file'; arguments = '{"path":".shellossus/MEMORY.md"}' } } | ConvertFrom-Json
+            Assert-True ($memDel10.status -ceq 'deleted' -and (-not (Test-Path -LiteralPath $t10MemPath))) 'delete_file on MEMORY.md failed.'
+            Invoke-AgentUndo -State @{ messages = @() } -UndoEntry @{ messages = @(); writes = @($script:CurrentTurnWrites) }
+            Assert-True (-not (Test-Path -LiteralPath $t10MemPath)) 'Undo of memory set -> delete_file left MEMORY.md behind.'
+
+            # 12. Regression (I9): Assert-AgentUndoPath rejects non-directory parent and dangling symlinks.
+            $t10ParentFile = Join-Path $workspacePath 't10-not-a-dir'
+            Set-Content -LiteralPath $t10ParentFile -Value 'file-blocker' -Encoding UTF8 -NoNewline
+            $nonDirBlocked = $false
+            try {
+                Assert-AgentUndoPath -Write @{ root = $workspacePath; full_path = (Join-Path $t10ParentFile 'child.txt'); rel_path = 't10-not-a-dir/child.txt' }
+            }
+            catch {
+                if ($_.Exception.Message -like '*not a directory*') { $nonDirBlocked = $true }
+            }
+            Assert-True $nonDirBlocked 'Assert-AgentUndoPath did not reject a file posing as a parent directory.'
+            Remove-Item -LiteralPath $t10ParentFile -Force -ErrorAction SilentlyContinue
+
+            $t10Dangling = Join-Path $workspacePath 't10-dangling-link'
+            $createdDangling = $false
+            try {
+                $null = New-Item -ItemType SymbolicLink -Path $t10Dangling -Target (Join-Path $workspacePath 't10-missing-target') -ErrorAction Stop
+                $createdDangling = $true
+            }
+            catch { $createdDangling = $false }
+            if ($createdDangling) {
+                try {
+                    Assert-True (Test-PathHasReparsePoint -Path $t10Dangling -StopAt $workspacePath) 'Test-PathHasReparsePoint missed dangling symlink.'
+                    $danglingBlocked = $false
+                    try { $null = Resolve-AgentWriteTarget -Root $workspacePath -RelativePath 't10-dangling-link' }
+                    catch { if ($_.Exception.Message -like '*Reparse*') { $danglingBlocked = $true } }
+                    Assert-True $danglingBlocked 'Resolve-AgentWriteTarget did not reject dangling symlink target.'
+                }
+                finally {
+                    (Get-Item -LiteralPath $t10Dangling -Force -ErrorAction SilentlyContinue).Delete()
+                }
+            }
+        }
+        finally {
+            $script:AgentPermission = $savedPerm10
+            $script:OutputMode = $savedMode10
+            $script:approval = $savedAppr10
+            $script:CurrentTurnWrites = @($savedWrites10)
+            Remove-Item -LiteralPath (Join-Path $workspacePath '.env'), (Join-Path $workspacePath 't10-ask.txt'), (Join-Path $workspacePath 't10-move-src.txt'), (Join-Path $workspacePath 't10-existing-dst.txt'), (Join-Path $workspacePath 't10-conf-dst.txt'), (Join-Path $workspacePath 't10-dir') -Recurse -Force -ErrorAction SilentlyContinue
         }
     }
 }

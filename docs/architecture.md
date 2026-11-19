@@ -78,7 +78,7 @@ flowchart TD
 
 ## Built-in Tool Reference
 
-All 13 canonical tools defined in [`src/tools/Schemas.ps1`](../src/tools/Schemas.ps1) (subject to active `-Permission` and `-Tools` / `-ExcludeTools` / `-NoTools`):
+All 15 canonical tools defined in [`src/tools/Schemas.ps1`](../src/tools/Schemas.ps1) (subject to active `-Permission` and `-Tools` / `-ExcludeTools` / `-NoTools`):
 
 | Tool | Purpose | Filesystem & Undo Scope |
 | :--- | :--- | :--- |
@@ -88,6 +88,8 @@ All 13 canonical tools defined in [`src/tools/Schemas.ps1`](../src/tools/Schemas
 | `grep_files` | Regex/literal search with context & `file_offset` + `start_line` continuation | Workspace; read-only |
 | `write_file` | Create or overwrite a text file (staged, encoding-preserving) | Workspace; tracked by `/undo` |
 | `edit_file` | Exact, CRLF, or fuzzy replacement + bottom-to-top batch `edits[]` | Workspace; tracked by `/undo` |
+| `delete_file` | Delete a regular file up to 1 MiB with verified backup | Workspace; tracked by `/undo` |
+| `move_file` | Move/rename a regular file (creates missing parents, optional `overwrite`) | Workspace; tracked by `/undo` |
 | `run_command` | Execute PowerShell with timeout, tree cleanup, and `.shellossus/output/` logs | User OS permissions; outside `/undo` |
 | `run_agent` | Single, `parallel[]` (`ReadOnly`), or `pipeline[]` subagent delegation | Clamped to parent permissions; in-process edits join `/undo` |
 | `fetch_url` | Fetch HTTP(S) page text with SSRF preflight and 2 MiB cap | Outbound network; outside `/undo` |

@@ -212,13 +212,13 @@ function Format-CapabilitiesPromptBlock {
     }
     else {
         if (-not $cap.can_write) {
-            $lines += 'File modification tools (write_file, edit_file) are unavailable.'
+            $lines += 'File modification tools (write_file, edit_file, delete_file, move_file) are unavailable.'
         }
         elseif ($cap.write_requires_confirmation) {
-            $lines += 'File modifications (write_file, edit_file) show a diff preview and require explicit user confirmation (WRITE).'
+            $lines += 'File modifications (write_file, edit_file, delete_file, move_file) preview changes and require explicit user confirmation (WRITE).'
         }
         else {
-            $lines += 'File modifications (write_file, edit_file) are automatically approved without confirmation.'
+            $lines += 'File modifications (write_file, edit_file, delete_file, move_file) are automatically approved without confirmation.'
         }
         if (-not $cap.can_exec) {
             $lines += 'Shell execution (run_command) is unavailable.'
@@ -242,7 +242,7 @@ function Format-CapabilitiesPromptBlock {
     $lines += '- Judge tool availability strictly by this current <capabilities> block and active tool definitions, never by your own earlier replies in conversation history.'
     $lines += '- If an action is disallowed, explain the restriction immediately without searching for workarounds.'
     $lines += '- If a task combines allowed and disallowed actions, complete the allowed parts and clearly state which parts are blocked by the current mode.'
-    $lines += '- When write_file or edit_file is available and requested, call the tool so the user receives the diff preview; never claim a file was written or a command was executed until the tool result reports status=written or status=executed.'
+    $lines += '- When write_file, edit_file, delete_file, or move_file is available and requested, call the tool so the user receives the preview; never claim a file was modified, deleted, moved, or a command was executed until the tool result reports status=written, status=deleted, status=moved, or status=executed.'
     $lines += '- Never retry a cancelled write or command unless the user asks again.'
     if (-not $script:NoContextFiles) {
         $lines += '- Project AGENTS.md instructions in parent directories apply to files below them. If a file tool returns instructions_required, follow those instructions and retry the tool call.'
@@ -305,22 +305,22 @@ function Sync-AgentCapabilities {
             }
             elseif ($cap.permission -eq 'Ask') {
                 if ($script:AutoApproveCommands) {
-                    'write_file and edit_file require WRITE confirmation after a diff preview. run_command is auto-approved for this session. Call write_file or edit_file directly when asked to modify files.'
+                    'write_file, edit_file, delete_file, and move_file require WRITE confirmation after a preview. run_command is auto-approved for this session. Call file modification tools directly when asked to modify files.'
                 }
                 else {
-                    'write_file, edit_file (requires WRITE confirmation after diff preview), and run_command (requires RUN confirmation) are now available. Call write_file or edit_file directly when asked to modify files.'
+                    'write_file, edit_file, delete_file, move_file (require WRITE confirmation after preview), and run_command (requires RUN confirmation) are now available. Call file modification tools directly when asked to modify files.'
                 }
             }
             elseif ($cap.permission -eq 'AutoEdit') {
                 if ($script:AutoApproveCommands) {
-                    'write_file and edit_file are now auto-approved. run_command is auto-approved for this session.'
+                    'write_file, edit_file, delete_file, and move_file are now auto-approved. run_command is auto-approved for this session.'
                 }
                 else {
-                    'write_file and edit_file are now auto-approved; run_command requires RUN confirmation.'
+                    'write_file, edit_file, delete_file, and move_file are now auto-approved; run_command requires RUN confirmation.'
                 }
             }
             else {
-                'write_file, edit_file, and run_command are now auto-approved.'
+                'write_file, edit_file, delete_file, move_file, and run_command are now auto-approved.'
             }
             $noticeText = "[Capability State Change]`nPermission mode is now $($cap.permission). Available tools: $availStr.`n$modeNote`nDisregard any earlier assistant claims about previous mode restrictions."
             $cleaned = @()

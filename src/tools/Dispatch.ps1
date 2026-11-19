@@ -10,8 +10,8 @@ function Invoke-AgentTool {
         if ($rawName) { $cardName = $rawName }
         $name = Resolve-ToolCanonicalName -Name $rawName
         if ($name) { $cardName = $name }
-        if ($name -notin @('list_files', 'read_file', 'find_files', 'grep_files', 'fetch_url', 'web_search', 'write_file', 'edit_file', 'run_command', 'run_agent', 'todo', 'ask_user', 'memory')) { throw 'Unknown tool.' }
-        if ($script:AgentPermission -eq 'ReadOnly' -and $name -in @('write_file', 'edit_file', 'run_command')) {
+        if ($name -notin @('list_files', 'read_file', 'find_files', 'grep_files', 'fetch_url', 'web_search', 'write_file', 'edit_file', 'delete_file', 'move_file', 'run_command', 'run_agent', 'todo', 'ask_user', 'memory')) { throw 'Unknown tool.' }
+        if ($script:AgentPermission -eq 'ReadOnly' -and $name -in @('write_file', 'edit_file', 'delete_file', 'move_file', 'run_command')) {
             throw 'Permission mode ReadOnly does not allow file modifications or commands.'
         }
         if (-not (Test-IsToolEnabled -Name $name)) {
@@ -22,7 +22,7 @@ function Invoke-AgentTool {
         $arguments = Format-AgentToolArguments -Name $name -Arguments $arguments
         if ($null -ne $arguments -and $arguments -isnot [string] -and $arguments -isnot [ValueType] -and $arguments -isnot [array]) {
             $argProps = @(Get-ObjectPropertyNames -InputObject $arguments)
-            foreach ($tk in @('path', 'command', 'url', 'query', 'question', 'action', 'role')) {
+            foreach ($tk in @('path', 'source', 'command', 'url', 'query', 'question', 'action', 'role')) {
                 if ($argProps -contains $tk -and $arguments.$tk -is [string] -and $arguments.$tk) {
                     $cardTarget = [string]$arguments.$tk
                     break
@@ -37,6 +37,8 @@ function Invoke-AgentTool {
         if ($name -eq 'web_search') { return (Invoke-AgentWebSearch -Arguments $arguments) }
         if ($name -eq 'run_agent') { return (Invoke-AgentSubagent -Root $Root -Arguments $arguments -ApiKey $ApiKey) }
         if ($name -eq 'run_command') { return (Invoke-AgentCommand -Root $Root -Arguments $arguments) }
+        if ($name -eq 'delete_file') { return (Invoke-AgentDeleteFile -Root $Root -Arguments $arguments) }
+        if ($name -eq 'move_file') { return (Invoke-AgentMoveFile -Root $Root -Arguments $arguments) }
         if ($name -in @('write_file', 'edit_file')) { return (Invoke-AgentWrite -Root $Root -Name $name -Arguments $arguments) }
         $toolStart = Get-Date
         $allowSkill = ($name -eq 'read_file')

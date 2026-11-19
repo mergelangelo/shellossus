@@ -179,12 +179,15 @@ function Assert-AgentUndoPath {
     }
     $parent = Split-Path -Path $Write.full_path -Parent
     $anc = $parent
-    while ($anc -and -not (Test-Path -LiteralPath $anc)) {
+    while ($anc -and $null -eq (Get-Item -LiteralPath $anc -Force -ErrorAction SilentlyContinue)) {
         $nextAnc = Split-Path -Path $anc -Parent
         if ($nextAnc -eq $anc) { break }
         $anc = $nextAnc
     }
-    $null = Resolve-AgentPath -Root $Write.root -RelativePath $anc
+    $resolvedAnc = Resolve-AgentPath -Root $Write.root -RelativePath $anc
+    if (-not (Get-Item -LiteralPath $resolvedAnc -Force -ErrorAction Stop).PSIsContainer) {
+        throw 'Parent path is not a directory.'
+    }
     $target = Get-Item -LiteralPath $Write.full_path -Force -ErrorAction SilentlyContinue
     if ($null -ne $target) {
         $null = Resolve-AgentPath -Root $Write.root -RelativePath $Write.full_path
@@ -243,7 +246,8 @@ function Invoke-AgentUndo {
     param($State, $UndoEntry)
     if (-not $UndoEntry) { return }
     $writes = @($UndoEntry.writes)
-    $expectedByPath = @{}
+    $isCaseInsensitiveFs = ($env:OS -eq 'Windows_NT') -or ($PSVersionTable.PSVersion.Major -ge 6 -and $IsMacOS)
+    $expectedByPath = if ($isCaseInsensitiveFs) { @{} } else { [hashtable]::new([StringComparer]::Ordinal) }
     for ($i = $writes.Count - 1; $i -ge 0; $i--) {
         $w = $writes[$i]
         if (-not $w -or $w.undone) { continue }
@@ -256,8 +260,14 @@ function Invoke-AgentUndo {
             $fullKey = [string]$w.full_path
             if ($expectedByPath.ContainsKey($fullKey)) {
                 $nextWrite = $expectedByPath[$fullKey]
-                if ($w.after_content -cne $nextWrite.before_content -or
-                    ($w.after_hash -and $nextWrite.before_hash -and $w.after_hash -cne $nextWrite.before_hash)) {
+                $wUsesHash = [bool]($w.after_hash -or $w.before_hash)
+                $nextUsesHash = [bool]($nextWrite.after_hash -or $nextWrite.before_hash)
+                if ($wUsesHash -and $nextUsesHash) {
+                    if ($w.after_hash -cne $nextWrite.before_hash) {
+                        throw "Undo chain mismatch for $($w.rel_path)."
+                    }
+                }
+                elseif ($w.after_content -cne $nextWrite.before_content) {
                     throw "Undo chain mismatch for $($w.rel_path)."
                 }
             }
@@ -278,6 +288,10 @@ function Invoke-AgentUndo {
             Assert-AgentUndoContent -Write $w
             if ($w.action -in @('modified', 'deleted')) {
                 Assert-AgentUndoBackup -Write $w
+                $restoreParent = Split-Path -Path $w.full_path -Parent
+                if ($restoreParent -and -not (Test-Path -LiteralPath $restoreParent)) {
+                    New-Item -ItemType Directory -Path $restoreParent -Force -ErrorAction Stop | Out-Null
+                }
                 Copy-Item -LiteralPath $w.backup -Destination $w.full_path -Force -ErrorAction Stop
                 $expected = if ($w.before_hash) { $w.before_hash } else { $w.before_content }
                 if ((Read-AgentUndoContent -Path $w.full_path -Hash:([bool]$w.before_hash)) -cne $expected) {

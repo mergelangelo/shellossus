@@ -179,6 +179,14 @@ function Resolve-ToolCanonicalName {
         'grep' { return 'grep_files' }
         'write' { return 'write_file' }
         'edit' { return 'edit_file' }
+        'delete' { return 'delete_file' }
+        'rm' { return 'delete_file' }
+        'remove_file' { return 'delete_file' }
+        'unlink' { return 'delete_file' }
+        'move' { return 'move_file' }
+        'mv' { return 'move_file' }
+        'rename' { return 'move_file' }
+        'rename_file' { return 'move_file' }
         'bash' { return 'run_command' }
         'powershell' { return 'run_command' }
         'subagent' { return 'run_agent' }
@@ -219,7 +227,7 @@ function Test-IsToolEnabled {
     if ($canon -eq 'run_agent' -and $script:SubagentDepth -ge $script:MaxSubagentDepth) {
         return $false
     }
-    if ($script:AgentPermission -eq 'ReadOnly' -and $canon -in @('write_file', 'edit_file', 'run_command')) {
+    if ($script:AgentPermission -eq 'ReadOnly' -and $canon -in @('write_file', 'edit_file', 'delete_file', 'move_file', 'run_command')) {
         return $false
     }
     if ($script:EnabledTools -and $script:EnabledTools.Count -gt 0) {

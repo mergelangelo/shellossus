@@ -8,7 +8,7 @@
 
 Set the permission mode at launch (`-Permission <Mode>`) or switch at any time during a session (`/permission <Mode>`):
 
-| Mode | Read & Search Tools | File & Memory Writes (`write_file`, `edit_file`, `memory`) | Shell Execution (`run_command`) | Outbound Web (`fetch_url`, `web_search`) | Typical Use Case |
+| Mode | Read & Search Tools | File & Memory Writes (`write_file`, `edit_file`, `delete_file`, `move_file`, `memory`) | Shell Execution (`run_command`) | Outbound Web (`fetch_url`, `web_search`) | Typical Use Case |
 | :--- | :--- | :--- | :--- | :--- | :--- |
 | **`ReadOnly`** | Allowed | Hidden & blocked (`memory view` allowed) | Hidden & blocked | Confirm per call (or `[a]ll`) | Code review, SQL/log analysis, architecture Q&A |
 | **`Ask`** *(default)* | Allowed | Confirm (`y` / `a` / `WRITE`; `Enter` cancels) | Confirm (`y` / `a` / `RUN`; `Enter` cancels) | Confirm (`y` / `a` / `WEB`; `Enter` cancels) | Safe everyday pair programming |
@@ -30,7 +30,7 @@ Set the permission mode at launch (`-Permission <Mode>`) or switch at any time d
 
 | Subsystem | Filesystem Boundary | Reparse-Point Check | Secret (`.env` / Config) Block |
 | :--- | :--- | :--- | :--- |
-| `list_files`, `find_files`, `grep_files`, `write_file`, `edit_file`, `@file` | Active workspace root only | Target + all ancestors (`Attributes -band 1024`) | Enforced |
+| `list_files`, `find_files`, `grep_files`, `write_file`, `edit_file`, `delete_file`, `move_file`, `@file` | Active workspace root only | Target + all ancestors (`Attributes -band 1024`) | Enforced |
 | `read_file` | Workspace root + registered global `SKILL.md` files | Target + all ancestors | Enforced |
 | `memory` (`MEMORY.md`) | Fixed paths: workspace (`MEMORY.md` or `.shellossus/MEMORY.md`) or global (`<ConfigDir>/MEMORY.md`) | Target + ancestors up to scope root | Blocks `$ConfigPath` |
 | `run_command`, `!cmd`, `!!cmd` | Starts in workspace; **retains full user OS permissions** | Governed by OS / AppLocker / WDAC | Scrubs `SHELLOSSUS_API_KEY` & `OPENAI_API_KEY` env vars |
@@ -56,7 +56,7 @@ Set the permission mode at launch (`-Permission <Mode>`) or switch at any time d
 - **Atomic Session Locking & Stale-Lock Recovery:** `Save-AgentSession` acquires an exclusive `.lock` file recording writer PID, process start ticks, host, and UTC timestamp. Stale locks from crashed processes (dead local PID, PID reuse, or aged unreadable/foreign locks) are reclaimed via atomic rename without touching active locks, directories, or reparse points.
 
 ### Conflict-Aware `/undo` & Automatic Rollback
-- **Turn Journal Scope:** Every turn records `write_file`, `edit_file`, and `memory` tool operations (including in-process subagent writes) alongside conversation and `todo` task-board snapshots. Shell commands, manual `/memory` commands, settings changes, session exports, and network calls are outside the journal.
+- **Turn Journal Scope:** Every turn records `write_file`, `edit_file`, `delete_file`, `move_file`, and `memory` tool operations (including in-process subagent writes) alongside conversation and `todo` task-board snapshots. Shell commands, manual `/memory` commands, settings changes, session exports, and network calls are outside the journal.
 - **Reverse-Chain Preflight:** Before `/undo` or turn-failure rollback modifies any file, `shellossus` validates the entire reverse sequence of operations and byte-hash backups (including repeated edits to the same file within one turn) and re-verifies workspace/reparse boundaries.
 - **Manual-Edit Conflict Detection:** If a file on disk was modified externally after the agent's write, `/undo` aborts before overwriting user changes and preserves all backup files so conflicts can be inspected and retried.
 - **Retention & Recovery Manifests:** Undo history is process-local (retaining the 20 newest frames). If an I/O error or conflict interrupts restoration mid-flight, `shellossus` keeps the backups, reports pending operations, and (on failed turn rollbacks) writes a JSON recovery manifest under `recovery/` beside the config/session directory (falling back to OS temporary storage).
@@ -83,7 +83,7 @@ Child PowerShell workers launch the host binary by absolute path from `$PSHOME` 
 ## Subagent Tool Restrictions
 
 In-process and worker-process subagents receive the **strict intersection** of the parent session's active tool permissions and the subagent role's `tools` filter (an empty intersection disables all tools).
-- `ReadOnly` subagents (`recon`, `audit`, `parallel[]` workers, or any subagent in a `ReadOnly` session) exclude `write_file`, `edit_file`, `run_command`, `memory`, `todo`, and `ask_user` (plus `fetch_url` and `web_search` in non-interactive JSON mode when web access is not auto-approved).
+- `ReadOnly` subagents (`recon`, `audit`, `parallel[]` workers, or any subagent in a `ReadOnly` session) exclude `write_file`, `edit_file`, `delete_file`, `move_file`, `run_command`, `memory`, `todo`, and `ask_user` (plus `fetch_url` and `web_search` in non-interactive JSON mode when web access is not auto-approved).
 - Recursive delegation is blocked (`run_agent` depth is capped at `1`).
 
 ---

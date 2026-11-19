@@ -38,7 +38,7 @@ function Get-SubagentToolNames {
         $name = [string]$tool.function.name
         if ($name -eq 'run_agent') { continue }
         if ($isReadOnly) {
-            if ($name -in @('write_file', 'edit_file', 'run_command', 'memory', 'todo', 'ask_user')) { continue }
+            if ($name -in @('write_file', 'edit_file', 'delete_file', 'move_file', 'run_command', 'memory', 'todo', 'ask_user')) { continue }
             if ($isNonInteractive -and (-not $script:AutoApproveWeb) -and $name -in @('fetch_url', 'web_search')) { continue }
         }
         if ($Role -and $Role.tools -and $Role.tools.Count -gt 0) {

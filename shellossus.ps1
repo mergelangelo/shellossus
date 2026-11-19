@@ -392,7 +392,7 @@ function Resolve-ExistingPathAncestor {
     $currRel = $RelativePath
     while ($currRel) {
         $probeCand = if ($currRel -match '^([a-zA-Z]:[/\\]|[/\\])') { $currRel } else { Join-Path $Root $currRel }
-        if (Test-Path -LiteralPath $probeCand) { break }
+        if ($null -ne (Get-Item -LiteralPath $probeCand -Force -ErrorAction SilentlyContinue)) { break }
         $seg = Split-Path $currRel -Leaf
         Test-ValidPathSegment -Segment $seg -Kind Directory
         $missingNames = @($seg) + @($missingNames)
@@ -433,7 +433,7 @@ function Resolve-AgentWriteTarget {
         throw 'Agent tools cannot write credential configuration files.'
     }
     $exists = $false
-    if (Test-Path -LiteralPath $fullPath) {
+    if ($null -ne (Get-Item -LiteralPath $fullPath -Force -ErrorAction SilentlyContinue)) {
         $fullPath = Resolve-AgentPath -Root $Root -RelativePath $RelativePath
         $exists = $true
     }
@@ -493,10 +493,8 @@ function Test-PathHasReparsePoint {
     if (-not $Path) { return $false }
     $stopNorm = ''
     if ($StopAt) {
-        if (Test-Path -LiteralPath $StopAt) {
-            $stopItem = Get-Item -LiteralPath $StopAt -Force -ErrorAction SilentlyContinue
-            if ($stopItem) { $stopNorm = $stopItem.FullName.Replace('\', '/').TrimEnd('/') }
-        }
+        $stopItem = Get-Item -LiteralPath $StopAt -Force -ErrorAction SilentlyContinue
+        if ($null -ne $stopItem) { $stopNorm = $stopItem.FullName.Replace('\', '/').TrimEnd('/') }
         if (-not $stopNorm) {
             $stopNorm = $StopAt.Replace('\', '/').TrimEnd('/')
         }
@@ -504,12 +502,10 @@ function Test-PathHasReparsePoint {
     $curr = $Path
     while ($curr) {
         $currNorm = $curr.Replace('\', '/').TrimEnd('/')
-        if (Test-Path -LiteralPath $curr) {
-            $item = Get-Item -LiteralPath $curr -Force -ErrorAction SilentlyContinue
-            if ($item) {
-                if (($item.Attributes -band 1024) -ne 0) { return $true }
-                if ($stopNorm -and ($item.FullName.Replace('\', '/').TrimEnd('/') -ieq $stopNorm)) { break }
-            }
+        $item = Get-Item -LiteralPath $curr -Force -ErrorAction SilentlyContinue
+        if ($null -ne $item) {
+            if (($item.Attributes -band 1024) -ne 0) { return $true }
+            if ($stopNorm -and ($item.FullName.Replace('\', '/').TrimEnd('/') -ieq $stopNorm)) { break }
         }
         if ($stopNorm -and ($currNorm -ieq $stopNorm)) { break }
         $parent = Split-Path $curr -Parent
@@ -2488,6 +2484,14 @@ function Resolve-ToolCanonicalName {
         'grep' { return 'grep_files' }
         'write' { return 'write_file' }
         'edit' { return 'edit_file' }
+        'delete' { return 'delete_file' }
+        'rm' { return 'delete_file' }
+        'remove_file' { return 'delete_file' }
+        'unlink' { return 'delete_file' }
+        'move' { return 'move_file' }
+        'mv' { return 'move_file' }
+        'rename' { return 'move_file' }
+        'rename_file' { return 'move_file' }
         'bash' { return 'run_command' }
         'powershell' { return 'run_command' }
         'subagent' { return 'run_agent' }
@@ -2528,7 +2532,7 @@ function Test-IsToolEnabled {
     if ($canon -eq 'run_agent' -and $script:SubagentDepth -ge $script:MaxSubagentDepth) {
         return $false
     }
-    if ($script:AgentPermission -eq 'ReadOnly' -and $canon -in @('write_file', 'edit_file', 'run_command')) {
+    if ($script:AgentPermission -eq 'ReadOnly' -and $canon -in @('write_file', 'edit_file', 'delete_file', 'move_file', 'run_command')) {
         return $false
     }
     if ($script:EnabledTools -and $script:EnabledTools.Count -gt 0) {
@@ -3181,6 +3185,26 @@ function Get-AgentToolSpecifications {
             }
         },
         @{
+            name = 'delete_file'
+            description = 'Delete an existing regular file inside the workspace (up to 1 MiB; saves a verified backup for /undo).'
+            required = @('path')
+            extra = 'Test-AgentDeleteFileArguments'
+            properties = @{
+                path = @{ type = 'string'; description = 'Workspace-relative path to an existing regular file to delete.' }
+            }
+        },
+        @{
+            name = 'move_file'
+            description = 'Move or rename an existing regular file inside the workspace (creates missing destination parent directories; saves verified backups for /undo).'
+            required = @('source', 'destination')
+            extra = 'Test-AgentMoveFileArguments'
+            properties = @{
+                source = @{ type = 'string'; description = 'Workspace-relative path to an existing regular file.' }
+                destination = @{ type = 'string'; description = 'Workspace-relative destination file path. Missing parent directories inside the workspace are created automatically.' }
+                overwrite = @{ type = 'boolean'; description = 'Set true to overwrite an existing destination file (saves a backup).' }
+            }
+        },
+        @{
             name = 'run_command'
             description = 'Execute PowerShell with the user''s OS permissions, starting in the workspace directory.'
             required = @('command')
@@ -3236,7 +3260,7 @@ function Get-AgentCapabilities {
     $perm = if ($script:AgentPermission -in @('ReadOnly', 'Ask', 'AutoEdit', 'Auto')) { $script:AgentPermission } else { 'Ask' }
     $tools = @()
     $toolNames = @()
-    $readOnlyBlocked = @('write_file', 'edit_file', 'run_command')
+    $readOnlyBlocked = @('write_file', 'edit_file', 'delete_file', 'move_file', 'run_command')
     foreach ($spec in @(Get-AgentToolSpecifications)) {
         $name = [string]$spec.name
         if ($perm -eq 'ReadOnly' -and ($readOnlyBlocked -contains $name)) { continue }
@@ -3260,7 +3284,7 @@ function Get-AgentCapabilities {
         }
     }
     $canRead = [bool]($toolNames | Where-Object { $_ -in @('list_files', 'read_file', 'find_files', 'grep_files') })
-    $canWrite = [bool]($toolNames | Where-Object { $_ -in @('write_file', 'edit_file') })
+    $canWrite = [bool]($toolNames | Where-Object { $_ -in @('write_file', 'edit_file', 'delete_file', 'move_file') })
     $canExec = ($toolNames -contains 'run_command')
     return @{
         permission = $perm
@@ -3699,6 +3723,33 @@ function Format-MemoryArguments {
     return $out
 }
 
+function Format-MoveFileArguments {
+    param($Arguments, $ArgsObj = $null)
+    if ($null -eq $Arguments -and $null -ne $ArgsObj) { $Arguments = $ArgsObj }
+    if ($null -eq $Arguments -or $Arguments -is [string] -or $Arguments -is [ValueType] -or $Arguments -is [array]) {
+        return $Arguments
+    }
+    $props = @(Get-ObjectPropertyNames -InputObject $Arguments)
+    $srcAliases = @('from', 'src', 'source_path', 'sourcePath', 'old_path', 'oldPath')
+    $dstAliases = @('to', 'dst', 'dest', 'destination_path', 'destinationPath', 'new_path', 'newPath', 'target')
+    $out = @{}
+    foreach ($p in $props) {
+        if (($p -in $srcAliases) -and ($props -notcontains 'source') -and (-not $out.ContainsKey('source'))) {
+            $out['source'] = $Arguments.$p
+        }
+        elseif (($p -in $dstAliases) -and ($props -notcontains 'destination') -and (-not $out.ContainsKey('destination'))) {
+            $out['destination'] = $Arguments.$p
+        }
+        elseif (($p -in $srcAliases) -or ($p -in $dstAliases)) {
+            # Canonical name is already present. Drop the alias so validation does not see it.
+        }
+        else {
+            $out[$p] = $Arguments.$p
+        }
+    }
+    return $out
+}
+
 function Format-AgentToolArguments {
     param([string]$Name, $Arguments, $ArgsObj = $null)
     if ($null -eq $Arguments -and $null -ne $ArgsObj) { $Arguments = $ArgsObj }
@@ -3707,6 +3758,9 @@ function Format-AgentToolArguments {
     }
     if ($Name -eq 'edit_file') {
         return (Format-EditArguments -Arguments $Arguments)
+    }
+    if ($Name -eq 'move_file') {
+        return (Format-MoveFileArguments -Arguments $Arguments)
     }
     if ($Name -eq 'run_agent') {
         return (Format-RunAgentArguments -Arguments $Arguments)
@@ -3720,7 +3774,7 @@ function Format-AgentToolArguments {
     if ($Name -eq 'memory') {
         return (Format-MemoryArguments -Arguments $Arguments)
     }
-    if ($Name -in @('list_files', 'read_file', 'find_files', 'grep_files', 'write_file')) {
+    if ($Name -in @('list_files', 'read_file', 'find_files', 'grep_files', 'write_file', 'delete_file')) {
         $props = @(Get-ObjectPropertyNames -InputObject $Arguments)
         if ($props -contains 'file_path' -or $props -contains 'filepath' -or $props -contains 'filePath') {
             $out = @{}
@@ -3968,6 +4022,23 @@ function Test-AgentMemoryArguments {
     }
     if (($act -eq 'append' -or $act -eq 'set') -and (-not $Arguments.content -or -not [string]$Arguments.content.Trim())) {
         throw "content must be a nonempty string for action '$act'."
+    }
+}
+
+function Test-AgentDeleteFileArguments {
+    param($Arguments, $PropNames)
+    if (-not $Arguments.path -or -not ([string]$Arguments.path).Trim()) {
+        throw 'path must be a nonempty string.'
+    }
+}
+
+function Test-AgentMoveFileArguments {
+    param($Arguments, $PropNames)
+    if (-not $Arguments.source -or -not ([string]$Arguments.source).Trim()) {
+        throw 'source must be a nonempty string.'
+    }
+    if (-not $Arguments.destination -or -not ([string]$Arguments.destination).Trim()) {
+        throw 'destination must be a nonempty string.'
     }
 }
 
@@ -4503,7 +4574,7 @@ function Get-CachedWorkspaceFileEntries {
 }
 
 # --- src/tools/Files.ps1 ---
-# Fuzzy text matching, diff preview helpers, and transactional file writes (write_file, edit_file).
+# Fuzzy text matching, diff preview helpers, and transactional file writes (write_file, edit_file, delete_file, move_file).
 
 function Format-FuzzyLine {
     param([string]$Line)
@@ -4873,6 +4944,333 @@ function Invoke-AgentWrite {
         return (Invoke-AgentCreateOrOverwrite -Root $Root -Arguments $Arguments)
     }
     return (Invoke-AgentEditFile -Root $Root -Arguments $Arguments)
+}
+
+function Request-AgentFileOpConfirmation {
+    param([string]$ToolName, [string]$SummaryLine)
+    if ($script:OutputMode -ne 'json') {
+        Write-Host ("`n  " + $script:Gm.Grey0 + $script:Box.TL + $script:Box.H + ' ' + $script:Gm.BoldYellow + $script:Box.Arrow + " $(Format-TuiText $ToolName) " + $script:Gm.Fg1 + (Format-TuiText $SummaryLine) + $script:Gm.Reset)
+    }
+    if ($script:AgentPermission -in @('AutoEdit', 'Auto')) {
+        if ($script:OutputMode -ne 'json') {
+            Write-Host ('  ' + $script:Gm.Grey0 + $script:Box.BL + $script:Box.H + ' ' + $script:Gm.Aqua + $script:Box.Check + ' [auto-approved by ' + $script:AgentPermission + ' mode]' + $script:Gm.Reset)
+        }
+        return @{ approved = $true; response = $null }
+    }
+    if ($script:OutputMode -eq 'json') {
+        return @{
+            approved = $false
+            response = (@{
+                status = 'cancelled'
+                message = 'Interactive confirmation is disabled in JSON mode. Use -Permission AutoEdit or Auto to allow file modifications.'
+            } | ConvertTo-Json -Compress)
+        }
+    }
+    $promptStr = '  ' + $script:Gm.Grey0 + $script:Box.V + ' ' + $script:Gm.BoldYellow + 'Confirm [y]es, [n]o, [a]ll edits: ' + $script:Gm.Fg
+    $choice = Read-TuiConfirmation -PromptText $promptStr -ActionType 'write'
+    if ($choice -eq 'a') {
+        $script:AgentPermission = 'AutoEdit'
+        Write-Host ('  ' + $script:Gm.Grey0 + $script:Box.BL + $script:Box.H + ' ' + $script:Gm.Aqua + $script:Box.Check + ' [switched permission to AutoEdit for this session]' + $script:Gm.Reset)
+        return @{ approved = $true; response = $null }
+    }
+    if ($choice -eq 'y') {
+        Write-Host ('  ' + $script:Gm.Grey0 + $script:Box.BL + $script:Box.H + ' ' + $script:Gm.Green + $script:Box.Check + ' confirmed' + $script:Gm.Reset)
+        return @{ approved = $true; response = $null }
+    }
+    Write-Host ('  ' + $script:Gm.Grey0 + $script:Box.BL + $script:Box.H + ' ' + $script:Gm.Red + $script:Box.Cross + ' cancelled' + $script:Gm.Reset)
+    return @{
+        approved = $false
+        response = (@{
+            status = 'cancelled'
+            message = 'User declined. Do not retry without a new user request.'
+        } | ConvertTo-Json -Compress)
+    }
+}
+
+function Get-SameFilesystemEntryInfo {
+    param([string]$PathA, [string]$PathB)
+    if ($PathA -ceq $PathB) {
+        return @{ is_same = $true; differs_from_disk_case = $false }
+    }
+    if ($PathA -ine $PathB) {
+        return @{ is_same = $false; differs_from_disk_case = $false }
+    }
+    $itemB = Get-Item -LiteralPath $PathB -Force -ErrorAction SilentlyContinue
+    if ($null -eq $itemB) {
+        return @{ is_same = $false; differs_from_disk_case = $false }
+    }
+    $normA = $PathA.Replace('\', '/').TrimEnd('/')
+    $normB = $PathB.Replace('\', '/').TrimEnd('/')
+    $partsA = @($normA -split '/')
+    $partsB = @($normB -split '/')
+    if ($partsA.Count -ne $partsB.Count) {
+        $isCiOs = ($env:OS -eq 'Windows_NT') -or ($PSVersionTable.PSVersion.Major -ge 6 -and $IsMacOS)
+        return @{ is_same = $isCiOs; differs_from_disk_case = $isCiOs }
+    }
+    $differsFromDisk = $false
+    $anyChecked = $false
+    for ($i = 0; $i -lt $partsA.Count; $i++) {
+        if ($partsA[$i] -ceq $partsB[$i]) { continue }
+        $parentParts = if ($i -gt 0) { @($partsA[0..($i - 1)]) } else { @() }
+        $parentPath = ($parentParts -join '/')
+        if (-not $parentPath) { $parentPath = '/' }
+        elseif ($parentPath -match '^[a-zA-Z]:$') { $parentPath += '/' }
+        $matches = @(Get-ChildItem -LiteralPath $parentPath -Force -ErrorAction SilentlyContinue | Where-Object { $_.Name -ieq $partsA[$i] })
+        if ($matches.Count -gt 1) {
+            return @{ is_same = $false; differs_from_disk_case = $false }
+        }
+        if ($matches.Count -eq 1) {
+            $anyChecked = $true
+            if ($matches[0].Name -cne $partsB[$i]) {
+                $differsFromDisk = $true
+            }
+        }
+    }
+    if ($anyChecked) {
+        return @{ is_same = $true; differs_from_disk_case = $differsFromDisk }
+    }
+    $isCiFallback = ($env:OS -eq 'Windows_NT') -or ($PSVersionTable.PSVersion.Major -ge 6 -and $IsMacOS)
+    return @{ is_same = $isCiFallback; differs_from_disk_case = $isCiFallback }
+}
+
+function Invoke-AgentDeleteFile {
+    param([string]$Root, $Arguments)
+    $toolStart = Get-Date
+    $relPath = [string]$Arguments.path
+    $path = Resolve-AgentPath -Root $Root -RelativePath $relPath
+    $item = Get-Item -LiteralPath $path -Force -ErrorAction Stop
+    if ($item.PSIsContainer) { throw 'delete_file only supports files, not directories.' }
+    if ($item.Length -gt 1MB) { throw 'File exceeds 1 MiB limit for safe undoable deletion.' }
+    $beforeHash = Read-AgentUndoContent -Path $path -Hash
+    $conf = Request-AgentFileOpConfirmation -ToolName 'delete_file' -SummaryLine ("$relPath ($($item.Length) bytes)")
+    if (-not $conf.approved) { return $conf.response }
+    $backup = $null
+    $backupRecorded = $false
+    try {
+        $path = Resolve-AgentPath -Root $Root -RelativePath $relPath
+        $itemNow = Get-Item -LiteralPath $path -Force -ErrorAction Stop
+        if ($itemNow.PSIsContainer) { throw 'delete_file only supports files, not directories.' }
+        if ((Read-AgentUndoContent -Path $path -Hash) -cne $beforeHash) {
+            throw 'File changed during confirmation. No deletion performed.'
+        }
+        $backup = New-AgentUndoBackup -Path $path -Before '' -BeforeHash $beforeHash
+        $path = Resolve-AgentPath -Root $Root -RelativePath $relPath
+        if ((Read-AgentUndoContent -Path $path -Hash) -cne $beforeHash) {
+            throw 'File changed before deletion. No deletion performed.'
+        }
+        if ($script:OutputMode -ne 'json') {
+            Write-Host ($script:Gm.Grey1 + 'Backup: ' + (Format-TuiText $backup.FullName) + $script:Gm.Reset)
+        }
+        Remove-Item -LiteralPath $path -Force -ErrorAction Stop
+        $script:CurrentTurnWrites += @{
+            action = 'deleted'
+            root = $Root
+            full_path = $path
+            rel_path = $relPath
+            backup = $backup.FullName
+            before_content = ''
+            after_content = $null
+            before_hash = $beforeHash
+            after_hash = $null
+        }
+        $backupRecorded = $true
+        if ($null -ne (Get-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue)) {
+            throw ('File deletion verification failed (backup kept at ' + $backup.FullName + ').')
+        }
+    }
+    finally {
+        Clear-WorkspaceWalkCache
+        if ($backup -and (-not $backupRecorded) -and (Test-Path -LiteralPath $backup.FullName)) {
+            Remove-Item -LiteralPath $backup.FullName -Force -ErrorAction SilentlyContinue
+        }
+    }
+    $elapsedMs = [int](((Get-Date) - $toolStart).TotalMilliseconds)
+    Write-ToolCallCard -Name 'delete_file' -Target $relPath -Status 'ok' -Summary 'deleted' -ElapsedMs $elapsedMs
+    return (@{ status = 'deleted'; path = $relPath; backup = $backup.FullName } | ConvertTo-Json -Compress)
+}
+
+function Invoke-AgentMoveFile {
+    param([string]$Root, $Arguments)
+    $toolStart = Get-Date
+    $srcRel = [string]$Arguments.source
+    $dstRel = [string]$Arguments.destination
+    $allowOverwrite = ($Arguments.overwrite -eq $true)
+    $srcPath = Resolve-AgentPath -Root $Root -RelativePath $srcRel
+    $srcItem = Get-Item -LiteralPath $srcPath -Force -ErrorAction Stop
+    if ($srcItem.PSIsContainer) { throw 'move_file only supports files, not directories.' }
+    if ($srcItem.Length -gt 1MB) { throw 'Source file exceeds 1 MiB limit for safe undoable move.' }
+
+    $dstTarget = Resolve-AgentWriteTarget -Root $Root -RelativePath $dstRel
+    $dstPath = [string]$dstTarget.full_path
+    $dstLeaf = [string]$dstTarget.leaf
+    $dstParent = [string]$dstTarget.parent
+    $dstDirsToCreate = @($dstTarget.dirs_to_create)
+
+    $sameInfo = Get-SameFilesystemEntryInfo -PathA $srcPath -PathB $dstPath
+    if ($sameInfo.is_same) {
+        if ($sameInfo.differs_from_disk_case) {
+            throw 'Case-only rename on a case-insensitive filesystem requires a two-step move via a temporary name.'
+        }
+        return (@{ status = 'unchanged'; source = $srcRel; destination = $dstRel } | ConvertTo-Json -Compress)
+    }
+
+    $dstExisted = $false
+    $dstBeforeHash = $null
+    if ($null -ne (Get-Item -LiteralPath $dstPath -Force -ErrorAction SilentlyContinue)) {
+        if (-not $allowOverwrite) {
+            throw 'Destination file already exists. Set overwrite=true to replace it.'
+        }
+        $dstPath = Resolve-AgentPath -Root $Root -RelativePath $dstRel
+        $dstItem = Get-Item -LiteralPath $dstPath -Force -ErrorAction Stop
+        if ($dstItem.PSIsContainer) { throw 'Destination must be a file, not a directory.' }
+        if ($dstItem.Length -gt 1MB) { throw 'Destination file exceeds 1 MiB limit for safe undoable overwrite.' }
+        $dstExisted = $true
+        $dstBeforeHash = Read-AgentUndoContent -Path $dstPath -Hash
+    }
+    $srcBeforeHash = Read-AgentUndoContent -Path $srcPath -Hash
+
+    $summaryLine = "$srcRel -> $dstRel" + $(if ($dstExisted) { ' [overwrite]' } else { '' })
+    $conf = Request-AgentFileOpConfirmation -ToolName 'move_file' -SummaryLine $summaryLine
+    if (-not $conf.approved) { return $conf.response }
+
+    $stageFile = New-AgentTempFile
+    $srcBackup = $null
+    $dstBackup = $null
+    $srcBackupRecorded = $false
+    $dstBackupRecorded = $false
+    $createdDirs = @()
+    $dstCommitted = $false
+    try {
+        $srcPath = Resolve-AgentPath -Root $Root -RelativePath $srcRel
+        $srcItemNow = Get-Item -LiteralPath $srcPath -Force -ErrorAction Stop
+        if ($srcItemNow.PSIsContainer) { throw 'move_file only supports files, not directories.' }
+        if ((Read-AgentUndoContent -Path $srcPath -Hash) -cne $srcBeforeHash) {
+            throw 'Source file changed during confirmation. No move performed.'
+        }
+        if ($dstExisted) {
+            $dstPath = Resolve-AgentPath -Root $Root -RelativePath $dstRel
+            $dstItemNow = Get-Item -LiteralPath $dstPath -Force -ErrorAction Stop
+            if ($dstItemNow.PSIsContainer) { throw 'Destination must be a file, not a directory.' }
+            if ((Read-AgentUndoContent -Path $dstPath -Hash) -cne $dstBeforeHash) {
+                throw 'Destination file changed during confirmation. No move performed.'
+            }
+            $dstBackup = New-AgentUndoBackup -Path $dstPath -Before '' -BeforeHash $dstBeforeHash
+        }
+        $srcBackup = New-AgentUndoBackup -Path $srcPath -Before '' -BeforeHash $srcBeforeHash
+        Copy-Item -LiteralPath $srcPath -Destination $stageFile.FullName -Force -ErrorAction Stop
+        if ((Read-AgentUndoContent -Path $stageFile.FullName -Hash) -cne $srcBeforeHash) {
+            throw 'Staged move verification failed. No move performed.'
+        }
+        if ((Read-AgentUndoContent -Path $srcPath -Hash) -cne $srcBeforeHash) {
+            throw 'Source file changed before move. No move performed.'
+        }
+
+        if ($dstExisted) {
+            $dstPath = Resolve-AgentPath -Root $Root -RelativePath $dstRel
+            if ((Read-AgentUndoContent -Path $dstPath -Hash) -cne $dstBeforeHash) {
+                throw 'Destination file changed before move. No move performed.'
+            }
+            Move-Item -LiteralPath $stageFile.FullName -Destination $dstPath -Force -ErrorAction Stop
+            $dstCommitted = $true
+            $script:CurrentTurnWrites += @{
+                action = 'modified'
+                root = $Root
+                full_path = $dstPath
+                rel_path = $dstRel
+                backup = $dstBackup.FullName
+                before_content = ''
+                after_content = ''
+                before_hash = $dstBeforeHash
+                after_hash = $srcBeforeHash
+            }
+            $dstBackupRecorded = $true
+        }
+        else {
+            $existingAncestor = if ($dstDirsToCreate.Count -gt 0) { Split-Path -Path ([string]$dstDirsToCreate[0]) -Parent } else { $dstParent }
+            if (-not $existingAncestor) { $existingAncestor = '.' }
+            $existingBase = Resolve-AgentPath -Root $Root -RelativePath $existingAncestor
+            if (-not (Get-Item -LiteralPath $existingBase -Force).PSIsContainer) { throw 'Parent must be a directory.' }
+            foreach ($dirPath in $dstDirsToCreate) {
+                if (-not (Test-Path -LiteralPath $dirPath)) {
+                    New-Item -ItemType Directory -Path $dirPath -ErrorAction Stop | Out-Null
+                    $createdDirs = @($dirPath) + $createdDirs
+                }
+            }
+            $rawDstParent = Split-Path -Path $dstRel -Parent
+            $dstParentRel = if ($rawDstParent) { $rawDstParent } else { '.' }
+            $dstParentResolved = Resolve-AgentPath -Root $Root -RelativePath $dstParentRel
+            $dstPath = Join-Path $dstParentResolved $dstLeaf
+            if ($null -ne (Get-Item -LiteralPath $dstPath -Force -ErrorAction SilentlyContinue)) {
+                throw 'Destination file was created during confirmation. No move performed.'
+            }
+            Move-Item -LiteralPath $stageFile.FullName -Destination $dstPath -Force -ErrorAction Stop
+            $dstCommitted = $true
+            $script:CurrentTurnWrites += @{
+                action = 'created'
+                root = $Root
+                full_path = $dstPath
+                rel_path = $dstRel
+                after_content = ''
+                after_hash = $srcBeforeHash
+                created_dirs = $createdDirs
+            }
+        }
+        if ((Read-AgentUndoContent -Path $dstPath -Hash) -cne $srcBeforeHash) {
+            $srcBackupRecorded = $true
+            throw ('Moved file verification failed (backup kept at ' + $srcBackup.FullName + ').')
+        }
+
+        Remove-Item -LiteralPath $srcPath -Force -ErrorAction Stop
+        $script:CurrentTurnWrites += @{
+            action = 'deleted'
+            root = $Root
+            full_path = $srcPath
+            rel_path = $srcRel
+            backup = $srcBackup.FullName
+            before_content = ''
+            after_content = $null
+            before_hash = $srcBeforeHash
+            after_hash = $null
+        }
+        $srcBackupRecorded = $true
+        if ($null -ne (Get-Item -LiteralPath $srcPath -Force -ErrorAction SilentlyContinue)) {
+            throw ('Source cleanup failed after move (backup kept at ' + $srcBackup.FullName + ').')
+        }
+    }
+    finally {
+        Clear-WorkspaceWalkCache
+        if ((-not $dstCommitted) -and $createdDirs.Count -gt 0) {
+            foreach ($cd in $createdDirs) {
+                if ($cd -and (Test-Path -LiteralPath $cd)) {
+                    try {
+                        $remaining = @(Get-ChildItem -LiteralPath $cd -Force -ErrorAction SilentlyContinue)
+                        if ($remaining.Count -eq 0) {
+                            Remove-Item -LiteralPath $cd -Force -ErrorAction SilentlyContinue
+                        }
+                    } catch {}
+                }
+            }
+        }
+        if (Test-Path -LiteralPath $stageFile.FullName) {
+            Remove-Item -LiteralPath $stageFile.FullName -Force -ErrorAction SilentlyContinue
+        }
+        if ($srcBackup -and (-not $srcBackupRecorded) -and (Test-Path -LiteralPath $srcBackup.FullName)) {
+            Remove-Item -LiteralPath $srcBackup.FullName -Force -ErrorAction SilentlyContinue
+        }
+        if ($dstBackup -and (-not $dstBackupRecorded) -and (Test-Path -LiteralPath $dstBackup.FullName)) {
+            Remove-Item -LiteralPath $dstBackup.FullName -Force -ErrorAction SilentlyContinue
+        }
+    }
+    $elapsedMs = [int](((Get-Date) - $toolStart).TotalMilliseconds)
+    Write-ToolCallCard -Name 'move_file' -Target "$srcRel -> $dstRel" -Status 'ok' -Summary 'moved' -ElapsedMs $elapsedMs
+    return (@{
+        status = 'moved'
+        source = $srcRel
+        destination = $dstRel
+        overwritten = $dstExisted
+        backup = $srcBackup.FullName
+        destination_backup = $(if ($dstBackup) { $dstBackup.FullName } else { $null })
+    } | ConvertTo-Json -Compress)
 }
 
 # --- src/tools/Search.ps1 ---
@@ -6028,12 +6426,15 @@ function Assert-AgentUndoPath {
     }
     $parent = Split-Path -Path $Write.full_path -Parent
     $anc = $parent
-    while ($anc -and -not (Test-Path -LiteralPath $anc)) {
+    while ($anc -and $null -eq (Get-Item -LiteralPath $anc -Force -ErrorAction SilentlyContinue)) {
         $nextAnc = Split-Path -Path $anc -Parent
         if ($nextAnc -eq $anc) { break }
         $anc = $nextAnc
     }
-    $null = Resolve-AgentPath -Root $Write.root -RelativePath $anc
+    $resolvedAnc = Resolve-AgentPath -Root $Write.root -RelativePath $anc
+    if (-not (Get-Item -LiteralPath $resolvedAnc -Force -ErrorAction Stop).PSIsContainer) {
+        throw 'Parent path is not a directory.'
+    }
     $target = Get-Item -LiteralPath $Write.full_path -Force -ErrorAction SilentlyContinue
     if ($null -ne $target) {
         $null = Resolve-AgentPath -Root $Write.root -RelativePath $Write.full_path
@@ -6092,7 +6493,8 @@ function Invoke-AgentUndo {
     param($State, $UndoEntry)
     if (-not $UndoEntry) { return }
     $writes = @($UndoEntry.writes)
-    $expectedByPath = @{}
+    $isCaseInsensitiveFs = ($env:OS -eq 'Windows_NT') -or ($PSVersionTable.PSVersion.Major -ge 6 -and $IsMacOS)
+    $expectedByPath = if ($isCaseInsensitiveFs) { @{} } else { [hashtable]::new([StringComparer]::Ordinal) }
     for ($i = $writes.Count - 1; $i -ge 0; $i--) {
         $w = $writes[$i]
         if (-not $w -or $w.undone) { continue }
@@ -6105,8 +6507,14 @@ function Invoke-AgentUndo {
             $fullKey = [string]$w.full_path
             if ($expectedByPath.ContainsKey($fullKey)) {
                 $nextWrite = $expectedByPath[$fullKey]
-                if ($w.after_content -cne $nextWrite.before_content -or
-                    ($w.after_hash -and $nextWrite.before_hash -and $w.after_hash -cne $nextWrite.before_hash)) {
+                $wUsesHash = [bool]($w.after_hash -or $w.before_hash)
+                $nextUsesHash = [bool]($nextWrite.after_hash -or $nextWrite.before_hash)
+                if ($wUsesHash -and $nextUsesHash) {
+                    if ($w.after_hash -cne $nextWrite.before_hash) {
+                        throw "Undo chain mismatch for $($w.rel_path)."
+                    }
+                }
+                elseif ($w.after_content -cne $nextWrite.before_content) {
                     throw "Undo chain mismatch for $($w.rel_path)."
                 }
             }
@@ -6127,6 +6535,10 @@ function Invoke-AgentUndo {
             Assert-AgentUndoContent -Write $w
             if ($w.action -in @('modified', 'deleted')) {
                 Assert-AgentUndoBackup -Write $w
+                $restoreParent = Split-Path -Path $w.full_path -Parent
+                if ($restoreParent -and -not (Test-Path -LiteralPath $restoreParent)) {
+                    New-Item -ItemType Directory -Path $restoreParent -Force -ErrorAction Stop | Out-Null
+                }
                 Copy-Item -LiteralPath $w.backup -Destination $w.full_path -Force -ErrorAction Stop
                 $expected = if ($w.before_hash) { $w.before_hash } else { $w.before_content }
                 if ((Read-AgentUndoContent -Path $w.full_path -Hash:([bool]$w.before_hash)) -cne $expected) {
@@ -7706,6 +8118,8 @@ function Invoke-AgentMemory {
             $createdDirs = @()
             try {
                 $after = $null
+                $beforeHash = if ($null -ne $before) { Read-AgentUndoContent -Path $targetPath -Hash } else { $null }
+                $afterHash = $null
                 $writeAction = 'deleted'
                 if ($action -ne 'clear') {
                     $after = $updatedText
@@ -7715,6 +8129,7 @@ function Invoke-AgentMemory {
                     if ((Read-AgentUndoContent -Path $stageFile.FullName) -cne $after) {
                         throw 'Staged memory verification failed. No write performed.'
                     }
+                    $afterHash = Read-AgentUndoContent -Path $stageFile.FullName -Hash
                     if (-not (Test-Path -LiteralPath $parentDir)) {
                         New-Item -ItemType Directory -Path $parentDir -ErrorAction Stop | Out-Null
                         $createdDirs = @($parentDir)
@@ -7724,13 +8139,23 @@ function Invoke-AgentMemory {
                     throw 'Reparse points are not allowed.'
                 }
                 if ($null -ne $before) {
-                    $backup = New-AgentUndoBackup -Path $targetPath -Before $before
+                    $backup = New-AgentUndoBackup -Path $targetPath -Before $before -BeforeHash $beforeHash
                 }
                 if (Test-PathHasReparsePoint -Path $targetPath -StopAt $stopRoot) {
                     throw 'Reparse points are not allowed.'
                 }
                 if ((Read-AgentUndoContent -Path $targetPath -MaxBytes $script:AgentMaxMemoryBytes) -cne $before) {
                     throw 'Memory file changed before the operation. No write performed.'
+                }
+                if ($null -ne $beforeHash -and (Read-AgentUndoContent -Path $targetPath -Hash) -cne $beforeHash) {
+                    throw 'Memory file changed before the operation. No write performed.'
+                }
+                $keepBackup = ($null -ne $backup)
+                if ($action -eq 'clear') {
+                    Remove-Item -LiteralPath $targetPath -Force -ErrorAction Stop
+                }
+                else {
+                    Move-Item -LiteralPath $stageFile.FullName -Destination $targetPath -Force -ErrorAction Stop
                 }
                 if ($trackWrite) {
                     $script:CurrentTurnWrites += @{
@@ -7741,16 +8166,11 @@ function Invoke-AgentMemory {
                         memory_scope = $scope
                         before_content = $before
                         after_content = $after
-                        backup = $backup.FullName
+                        before_hash = $beforeHash
+                        after_hash = $afterHash
+                        backup = $(if ($backup) { $backup.FullName } else { $null })
                         created_dirs = $createdDirs
                     }
-                }
-                $keepBackup = ($null -ne $backup)
-                if ($action -eq 'clear') {
-                    Remove-Item -LiteralPath $targetPath -Force -ErrorAction Stop
-                }
-                else {
-                    Move-Item -LiteralPath $stageFile.FullName -Destination $targetPath -Force -ErrorAction Stop
                 }
                 if ((Read-AgentUndoContent -Path $targetPath -MaxBytes $script:AgentMaxMemoryBytes) -cne $after) { throw 'Written memory verification failed.' }
                 $keepBackup = $trackWrite
@@ -8172,7 +8592,7 @@ function Get-SubagentToolNames {
         $name = [string]$tool.function.name
         if ($name -eq 'run_agent') { continue }
         if ($isReadOnly) {
-            if ($name -in @('write_file', 'edit_file', 'run_command', 'memory', 'todo', 'ask_user')) { continue }
+            if ($name -in @('write_file', 'edit_file', 'delete_file', 'move_file', 'run_command', 'memory', 'todo', 'ask_user')) { continue }
             if ($isNonInteractive -and (-not $script:AutoApproveWeb) -and $name -in @('fetch_url', 'web_search')) { continue }
         }
         if ($Role -and $Role.tools -and $Role.tools.Count -gt 0) {
@@ -8477,8 +8897,8 @@ function Invoke-AgentTool {
         if ($rawName) { $cardName = $rawName }
         $name = Resolve-ToolCanonicalName -Name $rawName
         if ($name) { $cardName = $name }
-        if ($name -notin @('list_files', 'read_file', 'find_files', 'grep_files', 'fetch_url', 'web_search', 'write_file', 'edit_file', 'run_command', 'run_agent', 'todo', 'ask_user', 'memory')) { throw 'Unknown tool.' }
-        if ($script:AgentPermission -eq 'ReadOnly' -and $name -in @('write_file', 'edit_file', 'run_command')) {
+        if ($name -notin @('list_files', 'read_file', 'find_files', 'grep_files', 'fetch_url', 'web_search', 'write_file', 'edit_file', 'delete_file', 'move_file', 'run_command', 'run_agent', 'todo', 'ask_user', 'memory')) { throw 'Unknown tool.' }
+        if ($script:AgentPermission -eq 'ReadOnly' -and $name -in @('write_file', 'edit_file', 'delete_file', 'move_file', 'run_command')) {
             throw 'Permission mode ReadOnly does not allow file modifications or commands.'
         }
         if (-not (Test-IsToolEnabled -Name $name)) {
@@ -8489,7 +8909,7 @@ function Invoke-AgentTool {
         $arguments = Format-AgentToolArguments -Name $name -Arguments $arguments
         if ($null -ne $arguments -and $arguments -isnot [string] -and $arguments -isnot [ValueType] -and $arguments -isnot [array]) {
             $argProps = @(Get-ObjectPropertyNames -InputObject $arguments)
-            foreach ($tk in @('path', 'command', 'url', 'query', 'question', 'action', 'role')) {
+            foreach ($tk in @('path', 'source', 'command', 'url', 'query', 'question', 'action', 'role')) {
                 if ($argProps -contains $tk -and $arguments.$tk -is [string] -and $arguments.$tk) {
                     $cardTarget = [string]$arguments.$tk
                     break
@@ -8504,6 +8924,8 @@ function Invoke-AgentTool {
         if ($name -eq 'web_search') { return (Invoke-AgentWebSearch -Arguments $arguments) }
         if ($name -eq 'run_agent') { return (Invoke-AgentSubagent -Root $Root -Arguments $arguments -ApiKey $ApiKey) }
         if ($name -eq 'run_command') { return (Invoke-AgentCommand -Root $Root -Arguments $arguments) }
+        if ($name -eq 'delete_file') { return (Invoke-AgentDeleteFile -Root $Root -Arguments $arguments) }
+        if ($name -eq 'move_file') { return (Invoke-AgentMoveFile -Root $Root -Arguments $arguments) }
         if ($name -in @('write_file', 'edit_file')) { return (Invoke-AgentWrite -Root $Root -Name $name -Arguments $arguments) }
         $toolStart = Get-Date
         $allowSkill = ($name -eq 'read_file')
@@ -8745,13 +9167,13 @@ function Format-CapabilitiesPromptBlock {
     }
     else {
         if (-not $cap.can_write) {
-            $lines += 'File modification tools (write_file, edit_file) are unavailable.'
+            $lines += 'File modification tools (write_file, edit_file, delete_file, move_file) are unavailable.'
         }
         elseif ($cap.write_requires_confirmation) {
-            $lines += 'File modifications (write_file, edit_file) show a diff preview and require explicit user confirmation (WRITE).'
+            $lines += 'File modifications (write_file, edit_file, delete_file, move_file) preview changes and require explicit user confirmation (WRITE).'
         }
         else {
-            $lines += 'File modifications (write_file, edit_file) are automatically approved without confirmation.'
+            $lines += 'File modifications (write_file, edit_file, delete_file, move_file) are automatically approved without confirmation.'
         }
         if (-not $cap.can_exec) {
             $lines += 'Shell execution (run_command) is unavailable.'
@@ -8775,7 +9197,7 @@ function Format-CapabilitiesPromptBlock {
     $lines += '- Judge tool availability strictly by this current <capabilities> block and active tool definitions, never by your own earlier replies in conversation history.'
     $lines += '- If an action is disallowed, explain the restriction immediately without searching for workarounds.'
     $lines += '- If a task combines allowed and disallowed actions, complete the allowed parts and clearly state which parts are blocked by the current mode.'
-    $lines += '- When write_file or edit_file is available and requested, call the tool so the user receives the diff preview; never claim a file was written or a command was executed until the tool result reports status=written or status=executed.'
+    $lines += '- When write_file, edit_file, delete_file, or move_file is available and requested, call the tool so the user receives the preview; never claim a file was modified, deleted, moved, or a command was executed until the tool result reports status=written, status=deleted, status=moved, or status=executed.'
     $lines += '- Never retry a cancelled write or command unless the user asks again.'
     if (-not $script:NoContextFiles) {
         $lines += '- Project AGENTS.md instructions in parent directories apply to files below them. If a file tool returns instructions_required, follow those instructions and retry the tool call.'
@@ -8838,22 +9260,22 @@ function Sync-AgentCapabilities {
             }
             elseif ($cap.permission -eq 'Ask') {
                 if ($script:AutoApproveCommands) {
-                    'write_file and edit_file require WRITE confirmation after a diff preview. run_command is auto-approved for this session. Call write_file or edit_file directly when asked to modify files.'
+                    'write_file, edit_file, delete_file, and move_file require WRITE confirmation after a preview. run_command is auto-approved for this session. Call file modification tools directly when asked to modify files.'
                 }
                 else {
-                    'write_file, edit_file (requires WRITE confirmation after diff preview), and run_command (requires RUN confirmation) are now available. Call write_file or edit_file directly when asked to modify files.'
+                    'write_file, edit_file, delete_file, move_file (require WRITE confirmation after preview), and run_command (requires RUN confirmation) are now available. Call file modification tools directly when asked to modify files.'
                 }
             }
             elseif ($cap.permission -eq 'AutoEdit') {
                 if ($script:AutoApproveCommands) {
-                    'write_file and edit_file are now auto-approved. run_command is auto-approved for this session.'
+                    'write_file, edit_file, delete_file, and move_file are now auto-approved. run_command is auto-approved for this session.'
                 }
                 else {
-                    'write_file and edit_file are now auto-approved; run_command requires RUN confirmation.'
+                    'write_file, edit_file, delete_file, and move_file are now auto-approved; run_command requires RUN confirmation.'
                 }
             }
             else {
-                'write_file, edit_file, and run_command are now auto-approved.'
+                'write_file, edit_file, delete_file, move_file, and run_command are now auto-approved.'
             }
             $noticeText = "[Capability State Change]`nPermission mode is now $($cap.permission). Available tools: $availStr.`n$modeNote`nDisregard any earlier assistant claims about previous mode restrictions."
             $cleaned = @()
@@ -9137,7 +9559,7 @@ function Get-AgentRolesCatalog {
                     $hasWriteOrExec = $false
                     foreach ($rt in $roleTools) {
                         $cRt = Resolve-ToolCanonicalName -Name $rt
-                        if ($cRt -in @('write_file', 'edit_file', 'run_command')) { $hasWriteOrExec = $true; break }
+                        if ($cRt -in @('write_file', 'edit_file', 'delete_file', 'move_file', 'run_command')) { $hasWriteOrExec = $true; break }
                     }
                     if (-not $hasWriteOrExec) { $rolePerm = 'ReadOnly' }
                 }
@@ -10794,6 +11216,15 @@ function Get-CompactionFileOperations {
                                 $modSet[$p] = $true
                             }
                         }
+                        elseif ($fnName -in @('delete_file', 'delete', 'rm', 'remove_file', 'unlink')) {
+                            if ($parsedToolRes.status -eq 'deleted') {
+                                $modSet[$p] = $true
+                            }
+                        }
+                    }
+                    if ($fnName -in @('move_file', 'move', 'mv', 'rename', 'rename_file') -and $parsedToolRes.status -eq 'moved') {
+                        if ($parsedArgs.source) { $modSet[[string]$parsedArgs.source] = $true }
+                        if ($parsedArgs.destination) { $modSet[[string]$parsedArgs.destination] = $true }
                     }
                 }
                 catch {}
@@ -12850,37 +13281,58 @@ function Invoke-AgentTurn {
                 continue
             }
             $output = $null
-            if ($canonToolName -in @('read_file', 'write_file', 'edit_file') -and ($canonToolName -eq 'read_file' -or $script:AgentPermission -ne 'ReadOnly') -and (Test-IsToolEnabled -Name $canonToolName) -and -not $script:NoContextFiles) {
+            if ($canonToolName -in @('read_file', 'write_file', 'edit_file', 'delete_file', 'move_file') -and ($canonToolName -eq 'read_file' -or $script:AgentPermission -ne 'ReadOnly') -and (Test-IsToolEnabled -Name $canonToolName) -and -not $script:NoContextFiles) {
                 $scopeArgs = $null
-                $scopeTargetValid = $false
+                $scopeTargets = @()
                 try {
                     $rawScopeArgs = $call.function.arguments | ConvertFrom-Json -ErrorAction Stop
                     $scopeArgs = Format-AgentToolArguments -Name $canonToolName -Arguments $rawScopeArgs
                     Test-AgentToolArguments -Name $canonToolName -Arguments $scopeArgs
-                    if ($scopeArgs.path -is [string] -and $scopeArgs.path) {
-                        $rootResolved = Resolve-AgentPath -Root $Root -RelativePath '.'
+                    $rootResolved = Resolve-AgentPath -Root $Root -RelativePath '.'
+                    if ($canonToolName -eq 'move_file') {
+                        if ($scopeArgs.source -is [string] -and $scopeArgs.source) {
+                            $null = Resolve-AgentPath -Root $rootResolved -RelativePath $scopeArgs.source
+                            $scopeTargets += [string]$scopeArgs.source
+                        }
+                        if ($scopeArgs.destination -is [string] -and $scopeArgs.destination) {
+                            $null = Resolve-AgentWriteTarget -Root $rootResolved -RelativePath $scopeArgs.destination
+                            $scopeTargets += [string]$scopeArgs.destination
+                        }
+                    }
+                    elseif ($scopeArgs.path -is [string] -and $scopeArgs.path) {
                         if ($canonToolName -eq 'read_file') {
                             $resolvedTarget = Resolve-AgentPath -Root $rootResolved -RelativePath $scopeArgs.path -AllowRegisteredSkill
                             if (Test-AgentPathWithinRoot -RootPath $rootResolved -TargetPath $resolvedTarget) {
-                                $scopeTargetValid = $true
+                                $scopeTargets += [string]$scopeArgs.path
                             }
                         }
-                        elseif ($canonToolName -eq 'edit_file') {
+                        elseif ($canonToolName -in @('edit_file', 'delete_file')) {
                             $null = Resolve-AgentPath -Root $rootResolved -RelativePath $scopeArgs.path
-                            $scopeTargetValid = $true
+                            $scopeTargets += [string]$scopeArgs.path
                         }
                         else {
                             $null = Resolve-AgentWriteTarget -Root $rootResolved -RelativePath $scopeArgs.path
-                            $scopeTargetValid = $true
+                            $scopeTargets += [string]$scopeArgs.path
                         }
                     }
                 }
                 catch {
-                    $scopeTargetValid = $false
+                    $scopeTargets = @()
                 }
-                if ($scopeTargetValid) {
+                if ($scopeTargets.Count -gt 0) {
                     try {
-                        $instructions = Get-ScopedAgentInstructions -Root $Root -TargetPath $scopeArgs.path -AllowRegisteredSkill:($canonToolName -eq 'read_file')
+                        $instrBlocks = @()
+                        foreach ($st in $scopeTargets) {
+                            $stInstr = Get-ScopedAgentInstructions -Root $Root -TargetPath $st -AllowRegisteredSkill:($canonToolName -eq 'read_file')
+                            if ($stInstr) {
+                                foreach ($sec in @($stInstr -split "`n`n(?=Instructions for files under )")) {
+                                    if ($sec -and ($instrBlocks -notcontains $sec)) {
+                                        $instrBlocks += $sec
+                                    }
+                                }
+                            }
+                        }
+                        $instructions = $instrBlocks -join "`n`n"
                         if ($instructions) {
                             $notice = (@{ status = 'instructions_required'; instructions = $instructions; message = 'Apply these scoped AGENTS.md instructions, then retry the file tool call.' } | ConvertTo-Json -Compress)
                             $seen = $false
@@ -12917,7 +13369,7 @@ function Invoke-AgentTurn {
                     }
                     catch {
                         $errMsg = 'Cannot verify scoped AGENTS.md instructions: ' + $_.Exception.Message
-                        Write-ToolCallCard -Name $canonToolName -Target ([string]$scopeArgs.path) -Status 'error' -Summary $errMsg
+                        Write-ToolCallCard -Name $canonToolName -Target ([string]$scopeTargets[0]) -Status 'error' -Summary $errMsg
                         $output = (@{ error = $errMsg } | ConvertTo-Json -Compress)
                     }
                 }
@@ -12930,10 +13382,10 @@ function Invoke-AgentTurn {
             Write-AgentJsonEvent -EventType 'tool_execution_end' -Payload @{ id = [string]$call.id; name = [string]$call.function.name; result = $output }
             $State.messages += @{ role = 'tool'; tool_call_id = $call.id; content = $output }
             Ensure-SessionTree -State $State
-            if ($canonToolName -in @('write_file', 'edit_file', 'run_command')) {
+            if ($canonToolName -in @('write_file', 'edit_file', 'delete_file', 'move_file', 'run_command')) {
                 try {
                     $parsedOut = $output | ConvertFrom-Json -ErrorAction Stop
-                    if ($parsedOut.status -in @('written', 'executed', 'timed_out')) {
+                    if ($parsedOut.status -in @('written', 'deleted', 'moved', 'executed', 'timed_out')) {
                         $mutationEpoch++
                         $scopedInstrCache.Clear()
                     }

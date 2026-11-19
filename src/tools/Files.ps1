@@ -1,4 +1,4 @@
-# Fuzzy text matching, diff preview helpers, and transactional file writes (write_file, edit_file).
+# Fuzzy text matching, diff preview helpers, and transactional file writes (write_file, edit_file, delete_file, move_file).
 
 function Format-FuzzyLine {
     param([string]$Line)
@@ -368,4 +368,331 @@ function Invoke-AgentWrite {
         return (Invoke-AgentCreateOrOverwrite -Root $Root -Arguments $Arguments)
     }
     return (Invoke-AgentEditFile -Root $Root -Arguments $Arguments)
+}
+
+function Request-AgentFileOpConfirmation {
+    param([string]$ToolName, [string]$SummaryLine)
+    if ($script:OutputMode -ne 'json') {
+        Write-Host ("`n  " + $script:Gm.Grey0 + $script:Box.TL + $script:Box.H + ' ' + $script:Gm.BoldYellow + $script:Box.Arrow + " $(Format-TuiText $ToolName) " + $script:Gm.Fg1 + (Format-TuiText $SummaryLine) + $script:Gm.Reset)
+    }
+    if ($script:AgentPermission -in @('AutoEdit', 'Auto')) {
+        if ($script:OutputMode -ne 'json') {
+            Write-Host ('  ' + $script:Gm.Grey0 + $script:Box.BL + $script:Box.H + ' ' + $script:Gm.Aqua + $script:Box.Check + ' [auto-approved by ' + $script:AgentPermission + ' mode]' + $script:Gm.Reset)
+        }
+        return @{ approved = $true; response = $null }
+    }
+    if ($script:OutputMode -eq 'json') {
+        return @{
+            approved = $false
+            response = (@{
+                status = 'cancelled'
+                message = 'Interactive confirmation is disabled in JSON mode. Use -Permission AutoEdit or Auto to allow file modifications.'
+            } | ConvertTo-Json -Compress)
+        }
+    }
+    $promptStr = '  ' + $script:Gm.Grey0 + $script:Box.V + ' ' + $script:Gm.BoldYellow + 'Confirm [y]es, [n]o, [a]ll edits: ' + $script:Gm.Fg
+    $choice = Read-TuiConfirmation -PromptText $promptStr -ActionType 'write'
+    if ($choice -eq 'a') {
+        $script:AgentPermission = 'AutoEdit'
+        Write-Host ('  ' + $script:Gm.Grey0 + $script:Box.BL + $script:Box.H + ' ' + $script:Gm.Aqua + $script:Box.Check + ' [switched permission to AutoEdit for this session]' + $script:Gm.Reset)
+        return @{ approved = $true; response = $null }
+    }
+    if ($choice -eq 'y') {
+        Write-Host ('  ' + $script:Gm.Grey0 + $script:Box.BL + $script:Box.H + ' ' + $script:Gm.Green + $script:Box.Check + ' confirmed' + $script:Gm.Reset)
+        return @{ approved = $true; response = $null }
+    }
+    Write-Host ('  ' + $script:Gm.Grey0 + $script:Box.BL + $script:Box.H + ' ' + $script:Gm.Red + $script:Box.Cross + ' cancelled' + $script:Gm.Reset)
+    return @{
+        approved = $false
+        response = (@{
+            status = 'cancelled'
+            message = 'User declined. Do not retry without a new user request.'
+        } | ConvertTo-Json -Compress)
+    }
+}
+
+function Get-SameFilesystemEntryInfo {
+    param([string]$PathA, [string]$PathB)
+    if ($PathA -ceq $PathB) {
+        return @{ is_same = $true; differs_from_disk_case = $false }
+    }
+    if ($PathA -ine $PathB) {
+        return @{ is_same = $false; differs_from_disk_case = $false }
+    }
+    $itemB = Get-Item -LiteralPath $PathB -Force -ErrorAction SilentlyContinue
+    if ($null -eq $itemB) {
+        return @{ is_same = $false; differs_from_disk_case = $false }
+    }
+    $normA = $PathA.Replace('\', '/').TrimEnd('/')
+    $normB = $PathB.Replace('\', '/').TrimEnd('/')
+    $partsA = @($normA -split '/')
+    $partsB = @($normB -split '/')
+    if ($partsA.Count -ne $partsB.Count) {
+        $isCiOs = ($env:OS -eq 'Windows_NT') -or ($PSVersionTable.PSVersion.Major -ge 6 -and $IsMacOS)
+        return @{ is_same = $isCiOs; differs_from_disk_case = $isCiOs }
+    }
+    $differsFromDisk = $false
+    $anyChecked = $false
+    for ($i = 0; $i -lt $partsA.Count; $i++) {
+        if ($partsA[$i] -ceq $partsB[$i]) { continue }
+        $parentParts = if ($i -gt 0) { @($partsA[0..($i - 1)]) } else { @() }
+        $parentPath = ($parentParts -join '/')
+        if (-not $parentPath) { $parentPath = '/' }
+        elseif ($parentPath -match '^[a-zA-Z]:$') { $parentPath += '/' }
+        $matches = @(Get-ChildItem -LiteralPath $parentPath -Force -ErrorAction SilentlyContinue | Where-Object { $_.Name -ieq $partsA[$i] })
+        if ($matches.Count -gt 1) {
+            return @{ is_same = $false; differs_from_disk_case = $false }
+        }
+        if ($matches.Count -eq 1) {
+            $anyChecked = $true
+            if ($matches[0].Name -cne $partsB[$i]) {
+                $differsFromDisk = $true
+            }
+        }
+    }
+    if ($anyChecked) {
+        return @{ is_same = $true; differs_from_disk_case = $differsFromDisk }
+    }
+    $isCiFallback = ($env:OS -eq 'Windows_NT') -or ($PSVersionTable.PSVersion.Major -ge 6 -and $IsMacOS)
+    return @{ is_same = $isCiFallback; differs_from_disk_case = $isCiFallback }
+}
+
+function Invoke-AgentDeleteFile {
+    param([string]$Root, $Arguments)
+    $toolStart = Get-Date
+    $relPath = [string]$Arguments.path
+    $path = Resolve-AgentPath -Root $Root -RelativePath $relPath
+    $item = Get-Item -LiteralPath $path -Force -ErrorAction Stop
+    if ($item.PSIsContainer) { throw 'delete_file only supports files, not directories.' }
+    if ($item.Length -gt 1MB) { throw 'File exceeds 1 MiB limit for safe undoable deletion.' }
+    $beforeHash = Read-AgentUndoContent -Path $path -Hash
+    $conf = Request-AgentFileOpConfirmation -ToolName 'delete_file' -SummaryLine ("$relPath ($($item.Length) bytes)")
+    if (-not $conf.approved) { return $conf.response }
+    $backup = $null
+    $backupRecorded = $false
+    try {
+        $path = Resolve-AgentPath -Root $Root -RelativePath $relPath
+        $itemNow = Get-Item -LiteralPath $path -Force -ErrorAction Stop
+        if ($itemNow.PSIsContainer) { throw 'delete_file only supports files, not directories.' }
+        if ((Read-AgentUndoContent -Path $path -Hash) -cne $beforeHash) {
+            throw 'File changed during confirmation. No deletion performed.'
+        }
+        $backup = New-AgentUndoBackup -Path $path -Before '' -BeforeHash $beforeHash
+        $path = Resolve-AgentPath -Root $Root -RelativePath $relPath
+        if ((Read-AgentUndoContent -Path $path -Hash) -cne $beforeHash) {
+            throw 'File changed before deletion. No deletion performed.'
+        }
+        if ($script:OutputMode -ne 'json') {
+            Write-Host ($script:Gm.Grey1 + 'Backup: ' + (Format-TuiText $backup.FullName) + $script:Gm.Reset)
+        }
+        Remove-Item -LiteralPath $path -Force -ErrorAction Stop
+        $script:CurrentTurnWrites += @{
+            action = 'deleted'
+            root = $Root
+            full_path = $path
+            rel_path = $relPath
+            backup = $backup.FullName
+            before_content = ''
+            after_content = $null
+            before_hash = $beforeHash
+            after_hash = $null
+        }
+        $backupRecorded = $true
+        if ($null -ne (Get-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue)) {
+            throw ('File deletion verification failed (backup kept at ' + $backup.FullName + ').')
+        }
+    }
+    finally {
+        Clear-WorkspaceWalkCache
+        if ($backup -and (-not $backupRecorded) -and (Test-Path -LiteralPath $backup.FullName)) {
+            Remove-Item -LiteralPath $backup.FullName -Force -ErrorAction SilentlyContinue
+        }
+    }
+    $elapsedMs = [int](((Get-Date) - $toolStart).TotalMilliseconds)
+    Write-ToolCallCard -Name 'delete_file' -Target $relPath -Status 'ok' -Summary 'deleted' -ElapsedMs $elapsedMs
+    return (@{ status = 'deleted'; path = $relPath; backup = $backup.FullName } | ConvertTo-Json -Compress)
+}
+
+function Invoke-AgentMoveFile {
+    param([string]$Root, $Arguments)
+    $toolStart = Get-Date
+    $srcRel = [string]$Arguments.source
+    $dstRel = [string]$Arguments.destination
+    $allowOverwrite = ($Arguments.overwrite -eq $true)
+    $srcPath = Resolve-AgentPath -Root $Root -RelativePath $srcRel
+    $srcItem = Get-Item -LiteralPath $srcPath -Force -ErrorAction Stop
+    if ($srcItem.PSIsContainer) { throw 'move_file only supports files, not directories.' }
+    if ($srcItem.Length -gt 1MB) { throw 'Source file exceeds 1 MiB limit for safe undoable move.' }
+
+    $dstTarget = Resolve-AgentWriteTarget -Root $Root -RelativePath $dstRel
+    $dstPath = [string]$dstTarget.full_path
+    $dstLeaf = [string]$dstTarget.leaf
+    $dstParent = [string]$dstTarget.parent
+    $dstDirsToCreate = @($dstTarget.dirs_to_create)
+
+    $sameInfo = Get-SameFilesystemEntryInfo -PathA $srcPath -PathB $dstPath
+    if ($sameInfo.is_same) {
+        if ($sameInfo.differs_from_disk_case) {
+            throw 'Case-only rename on a case-insensitive filesystem requires a two-step move via a temporary name.'
+        }
+        return (@{ status = 'unchanged'; source = $srcRel; destination = $dstRel } | ConvertTo-Json -Compress)
+    }
+
+    $dstExisted = $false
+    $dstBeforeHash = $null
+    if ($null -ne (Get-Item -LiteralPath $dstPath -Force -ErrorAction SilentlyContinue)) {
+        if (-not $allowOverwrite) {
+            throw 'Destination file already exists. Set overwrite=true to replace it.'
+        }
+        $dstPath = Resolve-AgentPath -Root $Root -RelativePath $dstRel
+        $dstItem = Get-Item -LiteralPath $dstPath -Force -ErrorAction Stop
+        if ($dstItem.PSIsContainer) { throw 'Destination must be a file, not a directory.' }
+        if ($dstItem.Length -gt 1MB) { throw 'Destination file exceeds 1 MiB limit for safe undoable overwrite.' }
+        $dstExisted = $true
+        $dstBeforeHash = Read-AgentUndoContent -Path $dstPath -Hash
+    }
+    $srcBeforeHash = Read-AgentUndoContent -Path $srcPath -Hash
+
+    $summaryLine = "$srcRel -> $dstRel" + $(if ($dstExisted) { ' [overwrite]' } else { '' })
+    $conf = Request-AgentFileOpConfirmation -ToolName 'move_file' -SummaryLine $summaryLine
+    if (-not $conf.approved) { return $conf.response }
+
+    $stageFile = New-AgentTempFile
+    $srcBackup = $null
+    $dstBackup = $null
+    $srcBackupRecorded = $false
+    $dstBackupRecorded = $false
+    $createdDirs = @()
+    $dstCommitted = $false
+    try {
+        $srcPath = Resolve-AgentPath -Root $Root -RelativePath $srcRel
+        $srcItemNow = Get-Item -LiteralPath $srcPath -Force -ErrorAction Stop
+        if ($srcItemNow.PSIsContainer) { throw 'move_file only supports files, not directories.' }
+        if ((Read-AgentUndoContent -Path $srcPath -Hash) -cne $srcBeforeHash) {
+            throw 'Source file changed during confirmation. No move performed.'
+        }
+        if ($dstExisted) {
+            $dstPath = Resolve-AgentPath -Root $Root -RelativePath $dstRel
+            $dstItemNow = Get-Item -LiteralPath $dstPath -Force -ErrorAction Stop
+            if ($dstItemNow.PSIsContainer) { throw 'Destination must be a file, not a directory.' }
+            if ((Read-AgentUndoContent -Path $dstPath -Hash) -cne $dstBeforeHash) {
+                throw 'Destination file changed during confirmation. No move performed.'
+            }
+            $dstBackup = New-AgentUndoBackup -Path $dstPath -Before '' -BeforeHash $dstBeforeHash
+        }
+        $srcBackup = New-AgentUndoBackup -Path $srcPath -Before '' -BeforeHash $srcBeforeHash
+        Copy-Item -LiteralPath $srcPath -Destination $stageFile.FullName -Force -ErrorAction Stop
+        if ((Read-AgentUndoContent -Path $stageFile.FullName -Hash) -cne $srcBeforeHash) {
+            throw 'Staged move verification failed. No move performed.'
+        }
+        if ((Read-AgentUndoContent -Path $srcPath -Hash) -cne $srcBeforeHash) {
+            throw 'Source file changed before move. No move performed.'
+        }
+
+        if ($dstExisted) {
+            $dstPath = Resolve-AgentPath -Root $Root -RelativePath $dstRel
+            if ((Read-AgentUndoContent -Path $dstPath -Hash) -cne $dstBeforeHash) {
+                throw 'Destination file changed before move. No move performed.'
+            }
+            Move-Item -LiteralPath $stageFile.FullName -Destination $dstPath -Force -ErrorAction Stop
+            $dstCommitted = $true
+            $script:CurrentTurnWrites += @{
+                action = 'modified'
+                root = $Root
+                full_path = $dstPath
+                rel_path = $dstRel
+                backup = $dstBackup.FullName
+                before_content = ''
+                after_content = ''
+                before_hash = $dstBeforeHash
+                after_hash = $srcBeforeHash
+            }
+            $dstBackupRecorded = $true
+        }
+        else {
+            $existingAncestor = if ($dstDirsToCreate.Count -gt 0) { Split-Path -Path ([string]$dstDirsToCreate[0]) -Parent } else { $dstParent }
+            if (-not $existingAncestor) { $existingAncestor = '.' }
+            $existingBase = Resolve-AgentPath -Root $Root -RelativePath $existingAncestor
+            if (-not (Get-Item -LiteralPath $existingBase -Force).PSIsContainer) { throw 'Parent must be a directory.' }
+            foreach ($dirPath in $dstDirsToCreate) {
+                if (-not (Test-Path -LiteralPath $dirPath)) {
+                    New-Item -ItemType Directory -Path $dirPath -ErrorAction Stop | Out-Null
+                    $createdDirs = @($dirPath) + $createdDirs
+                }
+            }
+            $rawDstParent = Split-Path -Path $dstRel -Parent
+            $dstParentRel = if ($rawDstParent) { $rawDstParent } else { '.' }
+            $dstParentResolved = Resolve-AgentPath -Root $Root -RelativePath $dstParentRel
+            $dstPath = Join-Path $dstParentResolved $dstLeaf
+            if ($null -ne (Get-Item -LiteralPath $dstPath -Force -ErrorAction SilentlyContinue)) {
+                throw 'Destination file was created during confirmation. No move performed.'
+            }
+            Move-Item -LiteralPath $stageFile.FullName -Destination $dstPath -Force -ErrorAction Stop
+            $dstCommitted = $true
+            $script:CurrentTurnWrites += @{
+                action = 'created'
+                root = $Root
+                full_path = $dstPath
+                rel_path = $dstRel
+                after_content = ''
+                after_hash = $srcBeforeHash
+                created_dirs = $createdDirs
+            }
+        }
+        if ((Read-AgentUndoContent -Path $dstPath -Hash) -cne $srcBeforeHash) {
+            $srcBackupRecorded = $true
+            throw ('Moved file verification failed (backup kept at ' + $srcBackup.FullName + ').')
+        }
+
+        Remove-Item -LiteralPath $srcPath -Force -ErrorAction Stop
+        $script:CurrentTurnWrites += @{
+            action = 'deleted'
+            root = $Root
+            full_path = $srcPath
+            rel_path = $srcRel
+            backup = $srcBackup.FullName
+            before_content = ''
+            after_content = $null
+            before_hash = $srcBeforeHash
+            after_hash = $null
+        }
+        $srcBackupRecorded = $true
+        if ($null -ne (Get-Item -LiteralPath $srcPath -Force -ErrorAction SilentlyContinue)) {
+            throw ('Source cleanup failed after move (backup kept at ' + $srcBackup.FullName + ').')
+        }
+    }
+    finally {
+        Clear-WorkspaceWalkCache
+        if ((-not $dstCommitted) -and $createdDirs.Count -gt 0) {
+            foreach ($cd in $createdDirs) {
+                if ($cd -and (Test-Path -LiteralPath $cd)) {
+                    try {
+                        $remaining = @(Get-ChildItem -LiteralPath $cd -Force -ErrorAction SilentlyContinue)
+                        if ($remaining.Count -eq 0) {
+                            Remove-Item -LiteralPath $cd -Force -ErrorAction SilentlyContinue
+                        }
+                    } catch {}
+                }
+            }
+        }
+        if (Test-Path -LiteralPath $stageFile.FullName) {
+            Remove-Item -LiteralPath $stageFile.FullName -Force -ErrorAction SilentlyContinue
+        }
+        if ($srcBackup -and (-not $srcBackupRecorded) -and (Test-Path -LiteralPath $srcBackup.FullName)) {
+            Remove-Item -LiteralPath $srcBackup.FullName -Force -ErrorAction SilentlyContinue
+        }
+        if ($dstBackup -and (-not $dstBackupRecorded) -and (Test-Path -LiteralPath $dstBackup.FullName)) {
+            Remove-Item -LiteralPath $dstBackup.FullName -Force -ErrorAction SilentlyContinue
+        }
+    }
+    $elapsedMs = [int](((Get-Date) - $toolStart).TotalMilliseconds)
+    Write-ToolCallCard -Name 'move_file' -Target "$srcRel -> $dstRel" -Status 'ok' -Summary 'moved' -ElapsedMs $elapsedMs
+    return (@{
+        status = 'moved'
+        source = $srcRel
+        destination = $dstRel
+        overwritten = $dstExisted
+        backup = $srcBackup.FullName
+        destination_backup = $(if ($dstBackup) { $dstBackup.FullName } else { $null })
+    } | ConvertTo-Json -Compress)
 }

@@ -166,6 +166,8 @@ function Invoke-AgentMemory {
             $createdDirs = @()
             try {
                 $after = $null
+                $beforeHash = if ($null -ne $before) { Read-AgentUndoContent -Path $targetPath -Hash } else { $null }
+                $afterHash = $null
                 $writeAction = 'deleted'
                 if ($action -ne 'clear') {
                     $after = $updatedText
@@ -175,6 +177,7 @@ function Invoke-AgentMemory {
                     if ((Read-AgentUndoContent -Path $stageFile.FullName) -cne $after) {
                         throw 'Staged memory verification failed. No write performed.'
                     }
+                    $afterHash = Read-AgentUndoContent -Path $stageFile.FullName -Hash
                     if (-not (Test-Path -LiteralPath $parentDir)) {
                         New-Item -ItemType Directory -Path $parentDir -ErrorAction Stop | Out-Null
                         $createdDirs = @($parentDir)
@@ -184,13 +187,23 @@ function Invoke-AgentMemory {
                     throw 'Reparse points are not allowed.'
                 }
                 if ($null -ne $before) {
-                    $backup = New-AgentUndoBackup -Path $targetPath -Before $before
+                    $backup = New-AgentUndoBackup -Path $targetPath -Before $before -BeforeHash $beforeHash
                 }
                 if (Test-PathHasReparsePoint -Path $targetPath -StopAt $stopRoot) {
                     throw 'Reparse points are not allowed.'
                 }
                 if ((Read-AgentUndoContent -Path $targetPath -MaxBytes $script:AgentMaxMemoryBytes) -cne $before) {
                     throw 'Memory file changed before the operation. No write performed.'
+                }
+                if ($null -ne $beforeHash -and (Read-AgentUndoContent -Path $targetPath -Hash) -cne $beforeHash) {
+                    throw 'Memory file changed before the operation. No write performed.'
+                }
+                $keepBackup = ($null -ne $backup)
+                if ($action -eq 'clear') {
+                    Remove-Item -LiteralPath $targetPath -Force -ErrorAction Stop
+                }
+                else {
+                    Move-Item -LiteralPath $stageFile.FullName -Destination $targetPath -Force -ErrorAction Stop
                 }
                 if ($trackWrite) {
                     $script:CurrentTurnWrites += @{
@@ -201,16 +214,11 @@ function Invoke-AgentMemory {
                         memory_scope = $scope
                         before_content = $before
                         after_content = $after
-                        backup = $backup.FullName
+                        before_hash = $beforeHash
+                        after_hash = $afterHash
+                        backup = $(if ($backup) { $backup.FullName } else { $null })
                         created_dirs = $createdDirs
                     }
-                }
-                $keepBackup = ($null -ne $backup)
-                if ($action -eq 'clear') {
-                    Remove-Item -LiteralPath $targetPath -Force -ErrorAction Stop
-                }
-                else {
-                    Move-Item -LiteralPath $stageFile.FullName -Destination $targetPath -Force -ErrorAction Stop
                 }
                 if ((Read-AgentUndoContent -Path $targetPath -MaxBytes $script:AgentMaxMemoryBytes) -cne $after) { throw 'Written memory verification failed.' }
                 $keepBackup = $trackWrite

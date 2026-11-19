@@ -413,6 +413,33 @@ function Format-MemoryArguments {
     return $out
 }
 
+function Format-MoveFileArguments {
+    param($Arguments, $ArgsObj = $null)
+    if ($null -eq $Arguments -and $null -ne $ArgsObj) { $Arguments = $ArgsObj }
+    if ($null -eq $Arguments -or $Arguments -is [string] -or $Arguments -is [ValueType] -or $Arguments -is [array]) {
+        return $Arguments
+    }
+    $props = @(Get-ObjectPropertyNames -InputObject $Arguments)
+    $srcAliases = @('from', 'src', 'source_path', 'sourcePath', 'old_path', 'oldPath')
+    $dstAliases = @('to', 'dst', 'dest', 'destination_path', 'destinationPath', 'new_path', 'newPath', 'target')
+    $out = @{}
+    foreach ($p in $props) {
+        if (($p -in $srcAliases) -and ($props -notcontains 'source') -and (-not $out.ContainsKey('source'))) {
+            $out['source'] = $Arguments.$p
+        }
+        elseif (($p -in $dstAliases) -and ($props -notcontains 'destination') -and (-not $out.ContainsKey('destination'))) {
+            $out['destination'] = $Arguments.$p
+        }
+        elseif (($p -in $srcAliases) -or ($p -in $dstAliases)) {
+            # Canonical name is already present. Drop the alias so validation does not see it.
+        }
+        else {
+            $out[$p] = $Arguments.$p
+        }
+    }
+    return $out
+}
+
 function Format-AgentToolArguments {
     param([string]$Name, $Arguments, $ArgsObj = $null)
     if ($null -eq $Arguments -and $null -ne $ArgsObj) { $Arguments = $ArgsObj }
@@ -421,6 +448,9 @@ function Format-AgentToolArguments {
     }
     if ($Name -eq 'edit_file') {
         return (Format-EditArguments -Arguments $Arguments)
+    }
+    if ($Name -eq 'move_file') {
+        return (Format-MoveFileArguments -Arguments $Arguments)
     }
     if ($Name -eq 'run_agent') {
         return (Format-RunAgentArguments -Arguments $Arguments)
@@ -434,7 +464,7 @@ function Format-AgentToolArguments {
     if ($Name -eq 'memory') {
         return (Format-MemoryArguments -Arguments $Arguments)
     }
-    if ($Name -in @('list_files', 'read_file', 'find_files', 'grep_files', 'write_file')) {
+    if ($Name -in @('list_files', 'read_file', 'find_files', 'grep_files', 'write_file', 'delete_file')) {
         $props = @(Get-ObjectPropertyNames -InputObject $Arguments)
         if ($props -contains 'file_path' -or $props -contains 'filepath' -or $props -contains 'filePath') {
             $out = @{}

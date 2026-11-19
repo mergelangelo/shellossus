@@ -548,37 +548,58 @@ function Invoke-AgentTurn {
                 continue
             }
             $output = $null
-            if ($canonToolName -in @('read_file', 'write_file', 'edit_file') -and ($canonToolName -eq 'read_file' -or $script:AgentPermission -ne 'ReadOnly') -and (Test-IsToolEnabled -Name $canonToolName) -and -not $script:NoContextFiles) {
+            if ($canonToolName -in @('read_file', 'write_file', 'edit_file', 'delete_file', 'move_file') -and ($canonToolName -eq 'read_file' -or $script:AgentPermission -ne 'ReadOnly') -and (Test-IsToolEnabled -Name $canonToolName) -and -not $script:NoContextFiles) {
                 $scopeArgs = $null
-                $scopeTargetValid = $false
+                $scopeTargets = @()
                 try {
                     $rawScopeArgs = $call.function.arguments | ConvertFrom-Json -ErrorAction Stop
                     $scopeArgs = Format-AgentToolArguments -Name $canonToolName -Arguments $rawScopeArgs
                     Test-AgentToolArguments -Name $canonToolName -Arguments $scopeArgs
-                    if ($scopeArgs.path -is [string] -and $scopeArgs.path) {
-                        $rootResolved = Resolve-AgentPath -Root $Root -RelativePath '.'
+                    $rootResolved = Resolve-AgentPath -Root $Root -RelativePath '.'
+                    if ($canonToolName -eq 'move_file') {
+                        if ($scopeArgs.source -is [string] -and $scopeArgs.source) {
+                            $null = Resolve-AgentPath -Root $rootResolved -RelativePath $scopeArgs.source
+                            $scopeTargets += [string]$scopeArgs.source
+                        }
+                        if ($scopeArgs.destination -is [string] -and $scopeArgs.destination) {
+                            $null = Resolve-AgentWriteTarget -Root $rootResolved -RelativePath $scopeArgs.destination
+                            $scopeTargets += [string]$scopeArgs.destination
+                        }
+                    }
+                    elseif ($scopeArgs.path -is [string] -and $scopeArgs.path) {
                         if ($canonToolName -eq 'read_file') {
                             $resolvedTarget = Resolve-AgentPath -Root $rootResolved -RelativePath $scopeArgs.path -AllowRegisteredSkill
                             if (Test-AgentPathWithinRoot -RootPath $rootResolved -TargetPath $resolvedTarget) {
-                                $scopeTargetValid = $true
+                                $scopeTargets += [string]$scopeArgs.path
                             }
                         }
-                        elseif ($canonToolName -eq 'edit_file') {
+                        elseif ($canonToolName -in @('edit_file', 'delete_file')) {
                             $null = Resolve-AgentPath -Root $rootResolved -RelativePath $scopeArgs.path
-                            $scopeTargetValid = $true
+                            $scopeTargets += [string]$scopeArgs.path
                         }
                         else {
                             $null = Resolve-AgentWriteTarget -Root $rootResolved -RelativePath $scopeArgs.path
-                            $scopeTargetValid = $true
+                            $scopeTargets += [string]$scopeArgs.path
                         }
                     }
                 }
                 catch {
-                    $scopeTargetValid = $false
+                    $scopeTargets = @()
                 }
-                if ($scopeTargetValid) {
+                if ($scopeTargets.Count -gt 0) {
                     try {
-                        $instructions = Get-ScopedAgentInstructions -Root $Root -TargetPath $scopeArgs.path -AllowRegisteredSkill:($canonToolName -eq 'read_file')
+                        $instrBlocks = @()
+                        foreach ($st in $scopeTargets) {
+                            $stInstr = Get-ScopedAgentInstructions -Root $Root -TargetPath $st -AllowRegisteredSkill:($canonToolName -eq 'read_file')
+                            if ($stInstr) {
+                                foreach ($sec in @($stInstr -split "`n`n(?=Instructions for files under )")) {
+                                    if ($sec -and ($instrBlocks -notcontains $sec)) {
+                                        $instrBlocks += $sec
+                                    }
+                                }
+                            }
+                        }
+                        $instructions = $instrBlocks -join "`n`n"
                         if ($instructions) {
                             $notice = (@{ status = 'instructions_required'; instructions = $instructions; message = 'Apply these scoped AGENTS.md instructions, then retry the file tool call.' } | ConvertTo-Json -Compress)
                             $seen = $false
@@ -615,7 +636,7 @@ function Invoke-AgentTurn {
                     }
                     catch {
                         $errMsg = 'Cannot verify scoped AGENTS.md instructions: ' + $_.Exception.Message
-                        Write-ToolCallCard -Name $canonToolName -Target ([string]$scopeArgs.path) -Status 'error' -Summary $errMsg
+                        Write-ToolCallCard -Name $canonToolName -Target ([string]$scopeTargets[0]) -Status 'error' -Summary $errMsg
                         $output = (@{ error = $errMsg } | ConvertTo-Json -Compress)
                     }
                 }
@@ -628,10 +649,10 @@ function Invoke-AgentTurn {
             Write-AgentJsonEvent -EventType 'tool_execution_end' -Payload @{ id = [string]$call.id; name = [string]$call.function.name; result = $output }
             $State.messages += @{ role = 'tool'; tool_call_id = $call.id; content = $output }
             Ensure-SessionTree -State $State
-            if ($canonToolName -in @('write_file', 'edit_file', 'run_command')) {
+            if ($canonToolName -in @('write_file', 'edit_file', 'delete_file', 'move_file', 'run_command')) {
                 try {
                     $parsedOut = $output | ConvertFrom-Json -ErrorAction Stop
-                    if ($parsedOut.status -in @('written', 'executed', 'timed_out')) {
+                    if ($parsedOut.status -in @('written', 'deleted', 'moved', 'executed', 'timed_out')) {
                         $mutationEpoch++
                         $scopedInstrCache.Clear()
                     }

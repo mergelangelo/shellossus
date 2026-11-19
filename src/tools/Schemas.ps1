@@ -179,6 +179,26 @@ function Get-AgentToolSpecifications {
             }
         },
         @{
+            name = 'delete_file'
+            description = 'Delete an existing regular file inside the workspace (up to 1 MiB; saves a verified backup for /undo).'
+            required = @('path')
+            extra = 'Test-AgentDeleteFileArguments'
+            properties = @{
+                path = @{ type = 'string'; description = 'Workspace-relative path to an existing regular file to delete.' }
+            }
+        },
+        @{
+            name = 'move_file'
+            description = 'Move or rename an existing regular file inside the workspace (creates missing destination parent directories; saves verified backups for /undo).'
+            required = @('source', 'destination')
+            extra = 'Test-AgentMoveFileArguments'
+            properties = @{
+                source = @{ type = 'string'; description = 'Workspace-relative path to an existing regular file.' }
+                destination = @{ type = 'string'; description = 'Workspace-relative destination file path. Missing parent directories inside the workspace are created automatically.' }
+                overwrite = @{ type = 'boolean'; description = 'Set true to overwrite an existing destination file (saves a backup).' }
+            }
+        },
+        @{
             name = 'run_command'
             description = 'Execute PowerShell with the user''s OS permissions, starting in the workspace directory.'
             required = @('command')
@@ -234,7 +254,7 @@ function Get-AgentCapabilities {
     $perm = if ($script:AgentPermission -in @('ReadOnly', 'Ask', 'AutoEdit', 'Auto')) { $script:AgentPermission } else { 'Ask' }
     $tools = @()
     $toolNames = @()
-    $readOnlyBlocked = @('write_file', 'edit_file', 'run_command')
+    $readOnlyBlocked = @('write_file', 'edit_file', 'delete_file', 'move_file', 'run_command')
     foreach ($spec in @(Get-AgentToolSpecifications)) {
         $name = [string]$spec.name
         if ($perm -eq 'ReadOnly' -and ($readOnlyBlocked -contains $name)) { continue }
@@ -258,7 +278,7 @@ function Get-AgentCapabilities {
         }
     }
     $canRead = [bool]($toolNames | Where-Object { $_ -in @('list_files', 'read_file', 'find_files', 'grep_files') })
-    $canWrite = [bool]($toolNames | Where-Object { $_ -in @('write_file', 'edit_file') })
+    $canWrite = [bool]($toolNames | Where-Object { $_ -in @('write_file', 'edit_file', 'delete_file', 'move_file') })
     $canExec = ($toolNames -contains 'run_command')
     return @{
         permission = $perm

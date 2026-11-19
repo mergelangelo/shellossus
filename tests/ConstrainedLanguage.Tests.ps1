@@ -287,7 +287,7 @@ try {
     Wait-AgentProcessWithSpinner -Process $clDoneProc -StatusLabel 'CL wait check' -TimeoutSec 5 -PollMs 10
 
     $clCap = Get-AgentCapabilities -Root $workspacePath
-    Assert-True ($clCap.permission -eq 'Ask' -and $clCap.tool_names.Count -eq 13 -and ($clCap.tool_names -contains 'memory') -and ($clCap.tool_names -contains 'ask_user') -and ($clCap.tool_names -contains 'todo') -and ($clCap.tool_names -contains 'fetch_url') -and ($clCap.tool_names -contains 'web_search') -and ($clCap.tool_names -contains 'run_agent') -and $clCap.environment.language_mode -eq 'ConstrainedLanguage') 'ConstrainedLanguage Get-AgentCapabilities or Get-AgentEnvironment failed.'
+    Assert-True ($clCap.permission -eq 'Ask' -and $clCap.tool_names.Count -eq 15 -and ($clCap.tool_names -contains 'delete_file') -and ($clCap.tool_names -contains 'move_file') -and ($clCap.tool_names -contains 'memory') -and ($clCap.tool_names -contains 'ask_user') -and ($clCap.tool_names -contains 'todo') -and ($clCap.tool_names -contains 'fetch_url') -and ($clCap.tool_names -contains 'web_search') -and ($clCap.tool_names -contains 'run_agent') -and $clCap.environment.language_mode -eq 'ConstrainedLanguage') 'ConstrainedLanguage Get-AgentCapabilities or Get-AgentEnvironment failed.'
     $clSyncState = @{ messages = @(@{ role = 'system'; content = 'sys' }, @{ role = 'user'; content = 'q' }, @{ role = 'assistant'; content = 'a' }) }
     $clSyncRes = Sync-AgentCapabilities -State $clSyncState -RecordTransition
     Assert-True ($clSyncRes.consistent -and $clSyncState.messages[0].content.Contains('<capabilities>')) 'ConstrainedLanguage Sync-AgentCapabilities failed.'
@@ -1108,6 +1108,28 @@ try {
         try { $null = Resolve-SafeWebRedirectUrl -BaseUrl 'https://example.com/a' -Location 'https://169.254.169.254/latest/meta-data/' -StatusCode 302 }
         catch { $clMetaBlocked = $true }
         Assert-True $clMetaBlocked 'Resolve-SafeWebRedirectUrl did not block metadata IP in ConstrainedLanguage.'
+
+        # Verify delete_file and move_file with /undo work under ConstrainedLanguage.
+        $savedClPerm10 = $script:AgentPermission
+        $savedClMode10 = $script:OutputMode
+        $savedClWrites10 = @($script:CurrentTurnWrites)
+        try {
+            $script:AgentPermission = 'AutoEdit'
+            $script:OutputMode = 'json'
+            $script:CurrentTurnWrites = @()
+            $null = Invoke-AgentTool -Root $workspacePath -Call @{ id = 'cl-10w'; function = @{ name = 'write_file'; arguments = '{"path":"cl-mv-src.txt","content":"cl-move-data"}' } } | ConvertFrom-Json
+            $clMvRes = Invoke-AgentTool -Root $workspacePath -Call @{ id = 'cl-10m'; function = @{ name = 'move_file'; arguments = '{"source":"cl-mv-src.txt","destination":"cl-mv-dir/dst.txt"}' } } | ConvertFrom-Json
+            Assert-True ($clMvRes.status -ceq 'moved' -and (Test-Path -LiteralPath (Join-Path $workspacePath 'cl-mv-dir/dst.txt'))) 'ConstrainedLanguage move_file failed.'
+            $clDelRes = Invoke-AgentTool -Root $workspacePath -Call @{ id = 'cl-10d'; function = @{ name = 'delete_file'; arguments = '{"path":"cl-mv-dir/dst.txt"}' } } | ConvertFrom-Json
+            Assert-True ($clDelRes.status -ceq 'deleted' -and (-not (Test-Path -LiteralPath (Join-Path $workspacePath 'cl-mv-dir/dst.txt')))) 'ConstrainedLanguage delete_file failed.'
+            Invoke-AgentUndo -State @{ messages = @() } -UndoEntry @{ messages = @(); writes = @($script:CurrentTurnWrites) }
+            Assert-True ((-not (Test-Path -LiteralPath (Join-Path $workspacePath 'cl-mv-src.txt'))) -and (-not (Test-Path -LiteralPath (Join-Path $workspacePath 'cl-mv-dir')))) 'ConstrainedLanguage write->move->delete /undo failed.'
+        }
+        finally {
+            $script:AgentPermission = $savedClPerm10
+            $script:OutputMode = $savedClMode10
+            $script:CurrentTurnWrites = @($savedClWrites10)
+        }
     }
     finally {
         $script:SearchUrl = $savedClSearchUrl

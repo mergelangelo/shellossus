@@ -12,7 +12,7 @@ Drop [`shellossus.ps1`](shellossus.ps1) onto any workstation, jump host, or Citr
 - **Runs Where Nothing Else Can:** Engineered natively for **Windows PowerShell 5.1**, PowerShell 7+, **`ConstrainedLanguage` mode**, AppLocker, and WDAC — with zero external binaries (`rg`, `fd`, `git`, `curl`) or PowerShell Gallery dependencies.
 - **Modular Engineering, Single-File Artifact:** Maintained across 36 focused modules in [`src/`](src/) and bundled by [`build.ps1`](build.ps1) into one pure 7-bit ASCII script ([`shellossus.ps1`](shellossus.ps1)) that parses identically regardless of BOM or system codepage and is trivial to audit or copy.
 - **Transactional & Fail-Closed by Design:** Starts in `Ask` mode by default, stages every edit, preserves file encodings/BOMs, verifies backups by byte hash, supports conflict-aware multi-step `/undo`, and rejects truncated responses or incomplete SSE streams before modifying state.
-- **Full Agent Depth, Zero Vendor Lock-In:** Combines 13 built-in tools, subagents (`single`, `parallel[]`, `pipeline[]`), DAG session branching (`/tree`, `/fork`), structured `/compact`, layered Markdown customization (`SOUL.md`, `AGENTS.md`, `MEMORY.md`, `SKILL.md`), a 24-bit TrueColor TUI, and headless JSONL streaming over standard `/v1/chat/completions`.
+- **Full Agent Depth, Zero Vendor Lock-In:** Combines 15 built-in tools, subagents (`single`, `parallel[]`, `pipeline[]`), DAG session branching (`/tree`, `/fork`), structured `/compact`, layered Markdown customization (`SOUL.md`, `AGENTS.md`, `MEMORY.md`, `SKILL.md`), a 24-bit TrueColor TUI, and headless JSONL streaming over standard `/v1/chat/completions`.
 
 ---
 
@@ -65,7 +65,7 @@ shellossus -Mode json -NoSession -Prompt "Audit @." # Machine-readable JSONL eve
 
 | Area | What Is Built In |
 | :--- | :--- |
-| **13 Native Tools** | `list_files`, `read_file` (line & char pagination), `find_files` (`.gitignore`-aware globs), `grep_files` (regex/literal + continuation), `write_file`, `edit_file` (fuzzy + batch `edits[]`), `run_command`, `run_agent`, `fetch_url`, `web_search`, `todo`, `ask_user`, and `memory` ([tool reference](docs/architecture.md#built-in-tool-reference)) |
+| **15 Native Tools** | `list_files`, `read_file` (line & char pagination), `find_files` (`.gitignore`-aware globs), `grep_files` (regex/literal + continuation), `write_file`, `edit_file` (fuzzy + batch `edits[]`), `delete_file`, `move_file`, `run_command`, `run_agent`, `fetch_url`, `web_search`, `todo`, `ask_user`, and `memory` ([tool reference](docs/architecture.md#built-in-tool-reference)) |
 | **Subagent Delegation** | Built-in roles (`recon`, `audit`, `craft`) + custom `agents/*.md` profiles, single/parallel/pipeline orchestration, `/agent:<role> <task>`, and unified parent `/undo` |
 | **4 Permission Modes** | `ReadOnly` (inspection only), `Ask` *(default: diff & command prompts)*, `AutoEdit` (auto-approves writes; gates shell), and `Auto` ([permission guide](docs/security.md#permission-modes)) |
 | **Safe Edits & `/undo`** | Atomic staged writes, UTF-8 / UTF-16 BOM & line-ending preservation, manual-edit conflict detection, automatic turn rollback, and task-board/memory restoration |
@@ -95,9 +95,9 @@ Call picker-enabled commands (`/permission`, `/model`, `/theme`, `/context`, `/r
 
 ## Security & Undo Boundaries
 
-- **Workspace File Boundary:** `list_files`, `read_file`, `find_files`, `grep_files`, `write_file`, `edit_file`, and `@file` attachments enforce the active workspace root (with a read-only exception for registered global `SKILL.md` files), reject symlinks/NTFS junctions, and block `.env` secrets and the active config file.
+- **Workspace File Boundary:** `list_files`, `read_file`, `find_files`, `grep_files`, `write_file`, `edit_file`, `delete_file`, `move_file`, and `@file` attachments enforce the active workspace root (with a read-only exception for registered global `SKILL.md` files), reject symlinks/NTFS junctions, and block `.env` secrets and the active config file.
 - **OS-Scoped Shell Execution:** `run_command`, `!cmd`, and `!!cmd` are **not** sandboxed — they start in the workspace directory and execute under your OS account and host policies (AppLocker/WDAC). Operator `!` / `!!` shortcuts run directly in every mode, including `ReadOnly`.
-- **Conflict-Aware `/undo`:** Reverts recorded `write_file`, `edit_file`, and `memory` tool changes (including in-process subagent edits) along with conversation and `todo` state, and refuses to overwrite files edited manually after the agent's write. Shell commands, manual `/memory` edits, configuration changes, exports, and network requests are outside undo coverage.
+- **Conflict-Aware `/undo`:** Reverts recorded `write_file`, `edit_file`, `delete_file`, `move_file`, and `memory` tool changes (including in-process subagent edits) along with conversation and `todo` state, and refuses to overwrite files edited manually after the agent's write. Shell commands, manual `/memory` edits, configuration changes, exports, and network requests are outside undo coverage.
 
 See [`docs/security.md`](docs/security.md) for the complete boundary matrix, worker architecture, and resource caps.
 
@@ -150,7 +150,7 @@ Edit modular files under [`src/`](src/), regenerate [`shellossus.ps1`](shellossu
 | **[CLI, Configuration & Automation](docs/cli.md)** | All launch flags, `SHELLOSSUS_*` `.env` settings, REPL commands & aliases, `-Doctor`, `-Stream`, and `-Mode json` events |
 | **[Customization & Extensibility](docs/customization.md)** | System prompt stack, `AGENTS.md`, `SOUL.md`, `MEMORY.md`, `SKILL.md`, subagent roles, prompt templates, `@file`, and `!cmd` |
 | **[Security, Boundaries & Enterprise](docs/security.md)** | Permission modes, workspace vs. OS scope, staged writes & `/undo`, internal workers, resource limits, SHA-256/Authenticode signing, and Citrix/VDI/CLM notes |
-| **[Architecture & Build Pipeline](docs/architecture.md)** | Dual-distribution design, 36-module map, turn lifecycle, 13-tool reference, `smoke.ps1`, and opt-in `live-e2e.ps1` |
+| **[Architecture & Build Pipeline](docs/architecture.md)** | Dual-distribution design, 36-module map, turn lifecycle, 15-tool reference, `smoke.ps1`, and opt-in `live-e2e.ps1` |
 | **[Changelog](CHANGELOG.md)** | Version history and notable changes |
 | **[Project Constitution](CONSTITUTION.md)** | Core engineering invariants and non-negotiable design guarantees |
 | **[Security Policy](SECURITY.md)** | Vulnerability disclosure process and response targets |

@@ -26,7 +26,7 @@ Passing **`-NoContextFiles`** skips layers 1 (`SYSTEM.md`), 3 (`APPEND_SYSTEM.md
 Use `AGENTS.md` for concrete repository facts: build/test commands, runtime constraints, coding style, and directory invariants.
 
 - **Startup Loading:** `~/.shellossus/AGENTS.md` (user-wide conventions) and `<workspace>/AGENTS.md` (repository rules).
-- **Hierarchical Directory Scoping:** When the model calls `read_file`, `write_file`, or `edit_file` on a path inside subdirectories, `shellossus` walks intermediate directories from the workspace root down to the target's parent. If any nested `AGENTS.md` files exist along that path and have not yet been shown in the active branch, `shellossus` returns `status = "instructions_required"` with those scoped rules first so the model applies them and retries the call.
+- **Hierarchical Directory Scoping:** When the model calls `read_file`, `write_file`, `edit_file`, `delete_file`, or `move_file` on a path inside subdirectories, `shellossus` walks intermediate directories from the workspace root down to the target's parent. If any nested `AGENTS.md` files exist along that path and have not yet been shown in the active branch, `shellossus` returns `status = "instructions_required"` with those scoped rules first so the model applies them and retries the call.
 
 ---
 

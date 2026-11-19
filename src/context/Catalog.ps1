@@ -189,7 +189,7 @@ function Get-AgentRolesCatalog {
                     $hasWriteOrExec = $false
                     foreach ($rt in $roleTools) {
                         $cRt = Resolve-ToolCanonicalName -Name $rt
-                        if ($cRt -in @('write_file', 'edit_file', 'run_command')) { $hasWriteOrExec = $true; break }
+                        if ($cRt -in @('write_file', 'edit_file', 'delete_file', 'move_file', 'run_command')) { $hasWriteOrExec = $true; break }
                     }
                     if (-not $hasWriteOrExec) { $rolePerm = 'ReadOnly' }
                 }

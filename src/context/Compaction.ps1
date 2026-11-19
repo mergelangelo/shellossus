@@ -242,6 +242,15 @@ function Get-CompactionFileOperations {
                                 $modSet[$p] = $true
                             }
                         }
+                        elseif ($fnName -in @('delete_file', 'delete', 'rm', 'remove_file', 'unlink')) {
+                            if ($parsedToolRes.status -eq 'deleted') {
+                                $modSet[$p] = $true
+                            }
+                        }
+                    }
+                    if ($fnName -in @('move_file', 'move', 'mv', 'rename', 'rename_file') -and $parsedToolRes.status -eq 'moved') {
+                        if ($parsedArgs.source) { $modSet[[string]$parsedArgs.source] = $true }
+                        if ($parsedArgs.destination) { $modSet[[string]$parsedArgs.destination] = $true }
                     }
                 }
                 catch {}

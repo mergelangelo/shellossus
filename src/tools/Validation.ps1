@@ -228,6 +228,23 @@ function Test-AgentMemoryArguments {
     }
 }
 
+function Test-AgentDeleteFileArguments {
+    param($Arguments, $PropNames)
+    if (-not $Arguments.path -or -not ([string]$Arguments.path).Trim()) {
+        throw 'path must be a nonempty string.'
+    }
+}
+
+function Test-AgentMoveFileArguments {
+    param($Arguments, $PropNames)
+    if (-not $Arguments.source -or -not ([string]$Arguments.source).Trim()) {
+        throw 'source must be a nonempty string.'
+    }
+    if (-not $Arguments.destination -or -not ([string]$Arguments.destination).Trim()) {
+        throw 'destination must be a nonempty string.'
+    }
+}
+
 function Test-AgentToolArguments {
     param([string]$Name, $Arguments)
     if ($null -eq $Arguments -or $Arguments -is [string] -or $Arguments -is [ValueType] -or $Arguments -is [array]) {
