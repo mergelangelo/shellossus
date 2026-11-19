@@ -361,14 +361,22 @@ function Invoke-AgentTurn {
         $statusLabel = "[step {0}/{1}] Waiting for {2}" -f ($step + 1), $Steps, $ModelId
         $tempResponse = New-AgentTempFile
         $reply = $null
+        $stepStreamedContent = $false
+        $stepStreamedReasoning = $false
         try {
             $maxRetries = 3
             $stepStart = Get-Date
             $attemptTimeoutSec = [int]$script:RequestTimeoutSec
             for ($attempt = 0; $attempt -le $maxRetries; $attempt++) {
                 try {
+                    $script:LastHttpStreamedContent = $false
+                    $script:LastHttpStreamedReasoning = $false
+                    $stepStreamedContent = $false
+                    $stepStreamedReasoning = $false
                     # Transient retries reuse the checked body. Context recovery rebuilds it.
-                    Invoke-AgentHttpRequest -Uri $Endpoint -ApiKey $ApiKey -Body $request.body -OutFile $tempResponse.FullName -TimeoutSec $attemptTimeoutSec -StatusLabel $statusLabel
+                    Invoke-AgentHttpRequest -Uri $Endpoint -ApiKey $ApiKey -Body $request.body -OutFile $tempResponse.FullName -TimeoutSec $attemptTimeoutSec -StatusLabel $statusLabel -LiveStream
+                    $stepStreamedContent = [bool]$script:LastHttpStreamedContent
+                    $stepStreamedReasoning = [bool]$script:LastHttpStreamedReasoning
                     $responseBytes = (Get-Item -LiteralPath $tempResponse.FullName -ErrorAction Stop).Length
                     if ($turnPayloadBytes + $responseBytes -gt $script:AgentMaxTurnPayloadBytes) {
                         throw "Turn exceeds the $($script:AgentMaxTurnPayloadBytes)-byte payload limit."
@@ -378,6 +386,13 @@ function Invoke-AgentTurn {
                     break
                 }
                 catch {
+                    if ($script:LastHttpStreamedContent -or $script:LastHttpStreamedReasoning -or $stepStreamedContent -or $stepStreamedReasoning) {
+                        Write-AgentLiveStreamRollbackNotice
+                        $script:LastHttpStreamedContent = $false
+                        $script:LastHttpStreamedReasoning = $false
+                        $stepStreamedContent = $false
+                        $stepStreamedReasoning = $false
+                    }
                     $retryAfterSec = $script:LastHttpRetryAfterSec
                     $script:LastHttpRetryAfterSec = $null
                     if ($null -eq $retryAfterSec) {
@@ -425,25 +440,33 @@ function Invoke-AgentTurn {
             Remove-Item -LiteralPath $tempResponse.FullName -Force -ErrorAction SilentlyContinue
         }
         if ($null -eq $reply) { continue }
-        if ($reply.choices -isnot [array] -or $reply.choices.Count -eq 0) {
-            throw 'API returned no assistant choice array.'
-        }
-        $choice = $reply.choices[0]
-        if (-not (Test-IsJsonObject $choice) -or -not $choice.message) { throw 'API returned no assistant message.' }
-        if ($null -ne $choice.finish_reason -and $choice.finish_reason -isnot [string]) {
-            throw 'API returned an invalid finish_reason.'
-        }
-        $finishReason = [string]$choice.finish_reason
-        if ($finishReason -and ($finishReason -notin @('stop', 'tool_calls'))) {
-            throw "Incomplete model response (finish_reason=$finishReason)."
-        }
-        $message = $choice.message
-        Assert-AgentToolCallBatch -Message $message -FinishReason $finishReason
-        if ($message.tool_calls) {
-            $turnToolCalls += $message.tool_calls.Count
-            if ($turnToolCalls -gt $script:AgentMaxTurnToolCalls) {
-                throw "Turn exceeds the $($script:AgentMaxTurnToolCalls)-tool-call limit."
+        try {
+            if ($reply.choices -isnot [array] -or $reply.choices.Count -eq 0) {
+                throw 'API returned no assistant choice array.'
             }
+            $choice = $reply.choices[0]
+            if (-not (Test-IsJsonObject $choice) -or -not $choice.message) { throw 'API returned no assistant message.' }
+            if ($null -ne $choice.finish_reason -and $choice.finish_reason -isnot [string]) {
+                throw 'API returned an invalid finish_reason.'
+            }
+            $finishReason = [string]$choice.finish_reason
+            if ($finishReason -and ($finishReason -notin @('stop', 'tool_calls'))) {
+                throw "Incomplete model response (finish_reason=$finishReason)."
+            }
+            $message = $choice.message
+            Assert-AgentToolCallBatch -Message $message -FinishReason $finishReason
+            if ($message.tool_calls) {
+                $turnToolCalls += $message.tool_calls.Count
+                if ($turnToolCalls -gt $script:AgentMaxTurnToolCalls) {
+                    throw "Turn exceeds the $($script:AgentMaxTurnToolCalls)-tool-call limit."
+                }
+            }
+        }
+        catch {
+            if ($stepStreamedContent -or $stepStreamedReasoning) {
+                Write-AgentLiveStreamRollbackNotice
+            }
+            throw
         }
         if ($reply.usage) {
             if ($reply.usage.prompt_tokens) { $State.usage_input_tokens = [int]$State.usage_input_tokens + [int]$reply.usage.prompt_tokens }
@@ -452,7 +475,7 @@ function Invoke-AgentTurn {
         $assistant = @{ role = 'assistant'; content = $message.content }
         if ($message.reasoning_content) {
             $assistant.reasoning_content = $message.reasoning_content
-            if ($script:OutputMode -ne 'json') {
+            if ($script:OutputMode -ne 'json' -and (-not $stepStreamedReasoning)) {
                 Write-AgentReasoning -Text ([string]$message.reasoning_content)
             }
         }
@@ -475,7 +498,7 @@ function Invoke-AgentTurn {
             content = $message.content
             tool_calls = @(if ($message.tool_calls) { @($message.tool_calls) })
         }
-        if ($message.content -and $script:OutputMode -ne 'json') { Write-AgentReply -Content $message.content }
+        if ($message.content -and $script:OutputMode -ne 'json' -and (-not $stepStreamedContent)) { Write-AgentReply -Content $message.content }
         if (-not $message.tool_calls) {
             Write-AgentJsonEvent -EventType 'turn_end' -Payload @{
                 step = $step

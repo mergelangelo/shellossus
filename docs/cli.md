@@ -62,7 +62,7 @@ The configuration file is parsed strictly as plain `KEY=VALUE` data (never evalu
 | `-Prompt <text>` | `''` | Run a single prompt non-interactively and exit. Required when `-Mode json` is used without `-Doctor` or `-Version`. |
 | `-LiteralPrompt` | off | Treat `-Prompt` as literal text without expanding `/template` commands or `@file` attachments. |
 | `-Mode <text\|json>` | `text` | Output format: `text` (24-bit TUI) or `json` (machine-readable JSONL event stream). |
-| `-Stream` | off | Assemble model responses over SSE (`stream = true`) across chat turns, compaction, and subagents. Responses are verified for terminal `[DONE]` and `finish_reason` before rendering or tool execution. |
+| `-Stream` | off | Stream model responses over SSE (`stream = true`) across chat turns, compaction, and subagents. In `text` mode, completed SSE chunks render incrementally in the terminal (falling back to the spinner if the host OS holds an exclusive file lock); full `[DONE]` and `finish_reason` verification still runs fail-closed before state updates or tool execution, while `-Mode json` stays pure JSONL. |
 | `-RequestTimeoutSec <n>` | `180` | Per-request model HTTP timeout (`10`..`1800`s). Transient retries within one step share a `3600`s wall-clock cap. |
 | `-MaxSteps <n>` | `50` | Maximum model-tool loop iterations per turn (`1`..`500`). |
 | `-MaxRepeatCalls <n>` | `3` | Loop-guard threshold (`1`..`50`) for identical tool calls without an intervening state change. For `N >= 2`, attempt `N` returns a warning (`N = 1` warns on the first repeat) and the next identical attempt stops the turn. |

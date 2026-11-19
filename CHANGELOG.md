@@ -7,6 +7,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 ## [Unreleased]
 
 ### Added
+- Live incremental TUI streaming for `-Stream` in `text` mode (with ANSI sanitization, graceful spinner fallback under exclusive file locks, fail-closed post-stream verification with explicit rollback notices, and untouched `-Mode json` JSONL output).
 - Corporate gateway & generation settings: `-AuthHeader` / `SHELLOSSUS_AUTH_HEADER` (e.g. `api-key` without `Bearer ` prefix), `-MaxTokens` / `SHELLOSSUS_MAX_TOKENS`, `-Temperature` / `SHELLOSSUS_TEMPERATURE`, and `SHELLOSSUS_EXTRA_HEADERS` (CRLF-safe JSON static headers with secret redaction and child-shell scrubbing); auth and extra headers propagate across chat turns, `-Doctor`, `/compact`, and `http`/`subagent` workers, while `max_tokens`/`temperature` apply to chat and subagent turns.
 - `delete_file` and `move_file` workspace file tools with reparse-point/secret guards, `ReadOnly` blocking, verified backups, and conflict-aware `/undo` support.
 - `Retry-After` header support (delta seconds and HTTP-date) with up to 3 transient HTTP retries and exponential backoff + jitter in `Invoke-AgentTurn` and the isolated `http` worker.

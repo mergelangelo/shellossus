@@ -1152,6 +1152,20 @@ try {
             $script:ModelTemperature = $savedClTemp11
             $script:ExtraHttpHeaders = $savedClExtra11
         }
+
+        # Verify Task 9 live incremental SSE TUI streaming helpers work under ConstrainedLanguage.
+        $clLsFile = New-AgentTempFile
+        try {
+            $clLsChunk = "data: {""choices"":[{""index"":0,""delta"":{""reasoning_content"":""CLM think""}}]}`n`ndata: {""choices"":[{""index"":0,""delta"":{""content"":""CLM live chunk""},""finish_reason"":""stop""}]}`n`ndata: [DONE]`n`n"
+            Set-Content -LiteralPath $clLsFile.FullName -Value $clLsChunk -Encoding UTF8 -NoNewline
+            $clLsState = New-AgentLiveStreamState
+            $clEmitted = Step-AgentLiveStreamFile -Path $clLsFile.FullName -State $clLsState -ShowReasoning 'full' -Final
+            Close-AgentLiveStream -State $clLsState
+            Assert-True ($clEmitted -and $clLsState.streamed_reasoning -and $clLsState.streamed_content -and $clLsState.active_section -eq 'none') 'ConstrainedLanguage live SSE TUI streaming helpers failed.'
+        }
+        finally {
+            Remove-Item -LiteralPath $clLsFile.FullName -Force -ErrorAction SilentlyContinue
+        }
     }
     finally {
         $script:SearchUrl = $savedClSearchUrl

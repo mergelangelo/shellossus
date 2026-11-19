@@ -3222,6 +3222,180 @@ $subRes = @(Invoke-ParallelSubagentProcesses -Root $WorkspacePath -Tasks @(@{ ro
         $script:OutputMode = $savedGwMode
         Remove-Variable -Name gwSeenHeaders, gwSeenPayload, gwWorkerAuthEnv, gwWorkerExtraEnv, gwSubClearMax, gwSubClearTemp, gwSubClearExtra -Scope Script -ErrorAction SilentlyContinue
     }
+
+    # Task 9 (Stage C): live incremental TUI streaming in -Stream mode with fail-closed rollback and untouched -Mode json.
+    & {
+        $savedLsStream = $script:StreamRequests
+        $savedLsMode = $script:OutputMode
+        $savedLsHideSpin = $script:HideSpinner
+        $savedLsShowReas = $script:ShowReasoning
+        $script:lsCaptured = @()
+        try {
+            $script:StreamRequests = $true
+            $script:OutputMode = 'text'
+            $script:HideSpinner = $false
+            $script:ShowReasoning = 'full'
+
+            & {
+                function Write-Host {
+                    param([Parameter(Position = 0, ValueFromRemainingArguments = $true)]$Object, [switch]$NoNewline, $Separator, $ForegroundColor, $BackgroundColor)
+                    $script:lsCaptured += (($Object | ForEach-Object { [string]$_ }) -join ' ')
+                }
+
+                # 1. Incremental SSE file stepping: reasoning (full) -> content -> reasoning -> content, ANSI sanitization, partial line wait, close.
+                $lsFile = New-AgentTempFile
+                try {
+                    $lsState = New-AgentLiveStreamState
+                    $chunk1 = "data: {""choices"":[{""index"":0,""delta"":{""reasoning_content"":""Think step 1""}}]}`n`n"
+                    Set-Content -LiteralPath $lsFile.FullName -Value $chunk1 -Encoding UTF8 -NoNewline
+                    $emitted1 = Step-AgentLiveStreamFile -Path $lsFile.FullName -State $lsState -ShowReasoning 'full'
+                    Assert-True ($emitted1 -and $lsState.streamed_reasoning -and (-not $lsState.streamed_content) -and $lsState.active_section -eq 'reasoning') 'Step 1 did not stream reasoning delta incrementally.'
+
+                    # Compact reasoning mode defers reasoning to Write-AgentReasoning instead of live-streaming it.
+                    $compactState = New-AgentLiveStreamState
+                    $compactEmitted = Step-AgentLiveStreamFile -Path $lsFile.FullName -State $compactState -ShowReasoning 'compact'
+                    Assert-True ((-not $compactEmitted) -and (-not $compactState.streamed_reasoning)) 'Compact reasoning mode should not live-stream reasoning.'
+
+                    # Append content delta 1 (with JSON-escaped ESC sequence) + incomplete trailing line (no newline yet).
+                    $escChar = [string][char]27
+                    $chunk2 = $chunk1 + "data: {""choices"":[{""index"":0,""delta"":{""content"":""Hello \u001b[31mworld""}}]}`n`ndata: {""choices"":[{""delta"":{""con"
+                    Set-Content -LiteralPath $lsFile.FullName -Value $chunk2 -Encoding UTF8 -NoNewline
+                    $emitted2 = Step-AgentLiveStreamFile -Path $lsFile.FullName -State $lsState -ShowReasoning 'full'
+                    Assert-True ($emitted2 -and $lsState.streamed_content -and $lsState.active_section -eq 'content') 'Step 2 did not switch from reasoning to content cleanly.'
+
+                    # Switch content -> reasoning -> content + [DONE].
+                    $chunk3 = $chunk2 + "tent"":""\nline2""}}]}`n`ndata: {""choices"":[{""index"":0,""delta"":{""reasoning_content"":""Think step 2""}}]}`n`ndata: {""choices"":[{""index"":0,""delta"":{""content"":""Final""},""finish_reason"":""stop""}]}`n`ndata: [DONE]`n`n"
+                    Set-Content -LiteralPath $lsFile.FullName -Value $chunk3 -Encoding UTF8 -NoNewline
+                    $emitted3 = Step-AgentLiveStreamFile -Path $lsFile.FullName -State $lsState -ShowReasoning 'full' -Final
+                    Close-AgentLiveStream -State $lsState
+                    $joinedOut = $script:lsCaptured -join ''
+                    $plainOut = Strip-AnsiCodes -Text $joinedOut
+                    Assert-True ($emitted3 -and $lsState.active_section -eq 'none' -and $plainOut.Contains('[reasoning]') -and $plainOut.Contains('Think step 1') -and $plainOut.Contains('Think step 2') -and $plainOut.Contains('Shellossus') -and $plainOut.Contains('Hello ?[31mworld') -and $plainOut.Contains('line2') -and $plainOut.Contains('Final')) "Live stream TUI output missing expected incremental chunks: $plainOut"
+                    Assert-True (-not $joinedOut.Contains("$escChar[31mworld")) 'Live stream did not sanitize injected ANSI escape sequence.'
+                }
+                finally {
+                    Remove-Item -LiteralPath $lsFile.FullName -Force -ErrorAction SilentlyContinue
+                }
+
+                # 2. Regression (I10): when worker exits without any mid-flight streamed output (e.g. PS 5.1 exclusive lock), skip -Final so Write-AgentReply renders rich Markdown.
+                $script:lsCaptured = @()
+                $lsLockedFile = New-AgentTempFile
+                try {
+                    Set-Content -LiteralPath $lsLockedFile.FullName -Value ("data: {""choices"":[{""index"":0,""delta"":{""content"":""LockedStreamReply""},""finish_reason"":""stop""}]}`n`ndata: [DONE]`n`n") -Encoding UTF8 -NoNewline
+                    $exitedProc = [pscustomobject]@{ HasExited = $true; Id = 0; ExitCode = 0 }
+                    $script:LastHttpStreamedContent = $false
+                    Wait-AgentProcessWithSpinner -Process $exitedProc -StatusLabel 'Waiting' -TimeoutSec 5 -PollMs 10 -ResponsePath $lsLockedFile.FullName -LiveStream
+                    Assert-True (-not $script:LastHttpStreamedContent) 'Post-exit -Final should be skipped when no mid-flight output was streamed.'
+                }
+                finally {
+                    Remove-Item -LiteralPath $lsLockedFile.FullName -Force -ErrorAction SilentlyContinue
+                }
+
+                # 3. Regression (C4 + C6): real Invoke-AgentTurn with incomplete live-streamed SSE fails closed with rollback notice, leaves State.messages untouched, and truncates stale OutFile before each request.
+                $script:lsCaptured = @()
+                $lsFixtureFile = New-AgentTempFile
+                try {
+                    $badSsePartial = "data: {""choices"":[{""index"":0,""delta"":{""content"":""Partial unverified answer""}}]}`n`n"
+                    Set-Content -LiteralPath $lsFixtureFile.FullName -Value $badSsePartial -Encoding UTF8 -NoNewline
+                    $script:lsMockSrcPath = $lsFixtureFile.FullName
+                    $script:lsTruncSeenEmpty = $false
+                    function Start-Process {
+                        param($FilePath, $ArgumentList, $RedirectStandardOutput, $RedirectStandardError, [switch]$NoNewWindow, [switch]$PassThru, $ErrorAction)
+                        $preLen = (Get-Item -LiteralPath $env:SHELLOSSUS_HTTP_OUT -Force).Length
+                        if ($preLen -eq 0) { $script:lsTruncSeenEmpty = $true }
+                        Copy-Item -LiteralPath $script:lsMockSrcPath -Destination $env:SHELLOSSUS_HTTP_OUT -Force
+                        # Simulate one live poll tick while running so Wait-AgentProcessWithSpinner streams the partial chunk before exit.
+                        $mockProc = [pscustomobject]@{ _polls = 0; Id = 0; ExitCode = 0 }
+                        $mockProc | Add-Member -MemberType ScriptProperty -Name HasExited -Value {
+                            $this._polls++
+                            return ($this._polls -gt 2)
+                        }
+                        return $mockProc
+                    }
+                    # Verify stale OutFile truncation before spawning worker (C4).
+                    $staleOut = New-AgentTempFile
+                    try {
+                        Set-Content -LiteralPath $staleOut.FullName -Value 'STALE_ATTEMPT_0_DATA' -Encoding UTF8 -NoNewline
+                        Invoke-AgentHttpRequest -Uri 'https://example.invalid/v1/chat/completions' -ApiKey 'k' -Body '{}' -OutFile $staleOut.FullName -ForceBackgroundWorker -LiveStream
+                        Assert-True $script:lsTruncSeenEmpty 'Invoke-AgentHttpRequest did not truncate stale OutFile before starting request.'
+                    }
+                    finally {
+                        Remove-Item -LiteralPath $staleOut.FullName -Force -ErrorAction SilentlyContinue
+                    }
+
+                    # Run real Invoke-AgentTurn (via ForceBackgroundWorker path: no Invoke-WebRequest function override active).
+                    $script:lsCaptured = @()
+                    $lsBadState = @{
+                        session_id = 't9-incomplete'
+                        workspace = $workspacePath
+                        model = 'test-model'
+                        messages = @(@{ role = 'system'; content = 'sys' }, @{ role = 'user'; content = 'hi' })
+                    }
+                    $lsBadThrew = $false
+                    try {
+                        Invoke-AgentTurn -State $lsBadState -Endpoint 'https://example.invalid/v1/chat/completions' -ModelId 'test-model' -ApiKey 'k' -Root $workspacePath -Steps 2
+                    }
+                    catch {
+                        $lsBadThrew = $true
+                    }
+                    $badOutPlain = Strip-AnsiCodes -Text ($script:lsCaptured -join "`n")
+                    Assert-True ($lsBadThrew -and $lsBadState.messages.Count -eq 2 -and $badOutPlain.Contains('Partial unverified answer') -and $badOutPlain.Contains('[stream rolled back]')) "Incomplete live stream turn did not fail closed with rollback notice and untouched state: $badOutPlain"
+                }
+                finally {
+                    Remove-Item -LiteralPath $lsFixtureFile.FullName -Force -ErrorAction SilentlyContinue
+                    Remove-Variable -Name lsMockSrcPath, lsTruncSeenEmpty -Scope Script -ErrorAction SilentlyContinue
+                }
+
+                # 4. Completed live stream in Invoke-AgentTurn does not print duplicate reply card, and -Mode json never prints TUI stream framing.
+                $script:lsCaptured = @()
+                $script:lsCompleteBody = "data: {""choices"":[{""index"":0,""delta"":{""content"":""UniqueStreamToken99""},""finish_reason"":""stop""}]}`n`ndata: [DONE]`n`n"
+                function Invoke-AgentHttpRequest {
+                    param([string]$Uri, [string]$ApiKey, [string]$Body, [string]$OutFile, [int]$TimeoutSec, [string]$StatusLabel, [switch]$ForceBackgroundWorker, [switch]$LiveStream)
+                    Set-Content -LiteralPath $OutFile -Value $script:lsCompleteBody -Encoding UTF8 -NoNewline
+                    $script:LastHttpStreamedContent = $false
+                    $script:LastHttpStreamedReasoning = $false
+                    if ($LiveStream -and $script:StreamRequests -and $script:OutputMode -ne 'json') {
+                        $st = New-AgentLiveStreamState
+                        $null = Step-AgentLiveStreamFile -Path $OutFile -State $st -ShowReasoning $script:ShowReasoning -Final
+                        Close-AgentLiveStream -State $st
+                        $script:LastHttpStreamedContent = [bool]$st.streamed_content
+                        $script:LastHttpStreamedReasoning = [bool]$st.streamed_reasoning
+                    }
+                }
+                $lsGoodState = @{
+                    session_id = 't9-good'
+                    workspace = $workspacePath
+                    model = 'test-model'
+                    messages = @(@{ role = 'system'; content = 'sys' }, @{ role = 'user'; content = 'hello' })
+                }
+                Invoke-AgentTurn -State $lsGoodState -Endpoint 'https://example.invalid/v1/chat/completions' -ModelId 'test-model' -ApiKey 'k' -Root $workspacePath -Steps 2
+                $goodJoined = Strip-AnsiCodes -Text ($script:lsCaptured -join '')
+                $tokenMatches = ([regex]::Matches($goodJoined, 'UniqueStreamToken99')).Count
+                Assert-True ($lsGoodState.messages[-1].content -ceq 'UniqueStreamToken99' -and $tokenMatches -eq 1) "Live-streamed turn duplicated or omitted reply (count=$tokenMatches): $goodJoined"
+
+                $script:lsCaptured = @()
+                $script:OutputMode = 'json'
+                $lsJsonState = @{
+                    session_id = 't9-json'
+                    workspace = $workspacePath
+                    model = 'test-model'
+                    messages = @(@{ role = 'system'; content = 'sys' }, @{ role = 'user'; content = 'hello json' })
+                }
+                Invoke-AgentTurn -State $lsJsonState -Endpoint 'https://example.invalid/v1/chat/completions' -ModelId 'test-model' -ApiKey 'k' -Root $workspacePath -Steps 2
+                foreach ($jLine in $script:lsCaptured) {
+                    $null = $jLine | ConvertFrom-Json -ErrorAction Stop
+                }
+                Assert-True ($script:lsCaptured.Count -ge 2 -and $lsJsonState.messages[-1].content -ceq 'UniqueStreamToken99') 'JSON mode emitted non-JSON live stream output.'
+            }
+        }
+        finally {
+            $script:StreamRequests = $savedLsStream
+            $script:OutputMode = $savedLsMode
+            $script:HideSpinner = $savedLsHideSpin
+            $script:ShowReasoning = $savedLsShowReas
+            Remove-Variable -Name lsCaptured, lsCompleteBody -Scope Script -ErrorAction SilentlyContinue
+        }
+    }
 }
 finally {
     Remove-TestEnvironment -Env $envData

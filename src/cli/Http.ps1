@@ -1,6 +1,8 @@
 # Pure-ASCII JSON payload escaping, JSONL event output, spinner wait loop, and async HTTP worker.
 
 $script:LastHttpRetryAfterSec = $null
+$script:LastHttpStreamedContent = $false
+$script:LastHttpStreamedReasoning = $false
 
 function ConvertFrom-AgentRetryAfterValue {
     param($Value)
@@ -535,25 +537,151 @@ function Read-AgentApiResponse {
     return ($probe | ConvertFrom-Json -ErrorAction Stop)
 }
 
+function New-AgentLiveStreamState {
+    return @{
+        processed_lines = 0
+        pending_data = @()
+        last_file_length = -1
+        active_section = 'none'
+        at_line_start = $true
+        streamed_reasoning = $false
+        streamed_content = $false
+        saw_any_output = $false
+    }
+}
+
+function Step-AgentLiveStreamFile {
+    param(
+        [string]$Path,
+        [hashtable]$State,
+        [string]$ShowReasoning = $script:ShowReasoning,
+        [switch]$Final,
+        [scriptblock]$OnBeforeFirstOutput = $null
+    )
+    if (-not $Path -or -not $State -or $script:OutputMode -eq 'json') { return $false }
+    $raw = $null
+    $fileLen = -1
+    try {
+        $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+        $fileLen = [long]$item.Length
+        if ($fileLen -le 0) { return $false }
+        if ((-not $Final) -and ($fileLen -eq $State.last_file_length)) { return $false }
+        $raw = Get-Content -LiteralPath $Path -Raw -Encoding UTF8 -ErrorAction Stop
+    }
+    catch {
+        # Graceful fallback when the worker holds an exclusive write lock (e.g. Windows PowerShell 5.1).
+        return $false
+    }
+    $State.last_file_length = $fileLen
+    if (-not $raw) { return $false }
+    $norm = ([string]$raw)
+    if ($norm.Length -gt 0 -and [int][char]$norm[0] -eq 0xFEFF) {
+        $norm = $norm.Substring(1)
+    }
+    $norm = $norm.Replace("`r`n", "`n").Replace("`r", "`n")
+    $completeText = ''
+    if ($Final) {
+        $completeText = $norm
+    }
+    else {
+        $lastNl = $norm.LastIndexOf("`n")
+        if ($lastNl -lt 0) { return $false }
+        $completeText = $norm.Substring(0, $lastNl)
+    }
+    $lines = @($completeText -split "`n")
+    if ($lines.Count -le $State.processed_lines -and (-not ($Final -and $State.pending_data.Count -gt 0))) {
+        return $false
+    }
+    $emitted = $false
+    $flushEvent = {
+        param([string]$Payload)
+        $trimmed = $Payload.Trim()
+        if (-not $trimmed -or $trimmed -ceq '[DONE]') { return }
+        if (-not $trimmed.StartsWith('{')) { return }
+        $ev = $null
+        try { $ev = $trimmed | ConvertFrom-Json -ErrorAction Stop } catch { return }
+        if (-not (Test-IsJsonObject -Value $ev)) { return }
+        if ($null -eq $ev.choices -or $ev.choices -isnot [array] -or $ev.choices.Count -eq 0) { return }
+        $ch = $ev.choices[0]
+        if (-not (Test-IsJsonObject -Value $ch) -or (-not (Test-IsJsonObject -Value $ch.delta))) { return }
+        $delta = $ch.delta
+        $dProps = @(Get-ObjectPropertyNames -InputObject $delta)
+        if ($ShowReasoning -eq 'full' -and ($dProps -contains 'reasoning_content') -and $delta.reasoning_content -is [string] -and $delta.reasoning_content.Length -gt 0) {
+            if ((-not $State.saw_any_output) -and ($null -ne $OnBeforeFirstOutput)) {
+                & $OnBeforeFirstOutput
+            }
+            Write-AgentLiveStreamDelta -State $State -Kind 'reasoning' -Delta $delta.reasoning_content
+            $emitted = $true
+        }
+        if (($dProps -contains 'content') -and $delta.content -is [string] -and $delta.content.Length -gt 0) {
+            if ((-not $State.saw_any_output) -and ($null -ne $OnBeforeFirstOutput)) {
+                & $OnBeforeFirstOutput
+            }
+            Write-AgentLiveStreamDelta -State $State -Kind 'content' -Delta $delta.content
+            $emitted = $true
+        }
+    }
+    for ($i = $State.processed_lines; $i -lt $lines.Count; $i++) {
+        $line = [string]$lines[$i]
+        if ($line.Length -eq 0) {
+            if ($State.pending_data.Count -gt 0) {
+                $payload = ($State.pending_data -join "`n")
+                $State.pending_data = @()
+                . $flushEvent -Payload $payload
+            }
+            continue
+        }
+        if ($line.StartsWith(':')) { continue }
+        if ($line.StartsWith('data:')) {
+            $dVal = $line.Substring(5)
+            if ($dVal.StartsWith(' ')) { $dVal = $dVal.Substring(1) }
+            $State.pending_data += $dVal
+        }
+    }
+    $State.processed_lines = $lines.Count
+    if ($Final -and $State.pending_data.Count -gt 0) {
+        $payload = ($State.pending_data -join "`n")
+        $State.pending_data = @()
+        . $flushEvent -Payload $payload
+    }
+    return $emitted
+}
+
 function Wait-AgentProcessWithSpinner {
-    param($Process, [string]$StatusLabel = 'Waiting for model', [int]$TimeoutSec = $script:RequestTimeoutSec, [int]$PollMs = 200, [string]$ResponsePath)
+    param($Process, [string]$StatusLabel = 'Waiting for model', [int]$TimeoutSec = $script:RequestTimeoutSec, [int]$PollMs = 200, [string]$ResponsePath, [switch]$LiveStream)
     $frames = @('|', '/', '-', '\')
-    $frameIdx = 0
     $startWait = Get-Date
-    $showSpinner = ($script:OutputMode -ne 'json') -and (-not $script:HideSpinner)
-    $lastSpinVisLen = 0
+    $spinState = @{
+        show = (($script:OutputMode -ne 'json') -and (-not $script:HideSpinner))
+        frame_idx = 0
+        last_vis_len = 0
+    }
+    $liveStreamActive = ($LiveStream -and $script:StreamRequests -and ($script:OutputMode -ne 'json') -and [bool]$ResponsePath)
+    $liveState = if ($liveStreamActive) { New-AgentLiveStreamState } else { $null }
+    $clearSpinnerLine = {
+        if ($spinState.show -and $spinState.frame_idx -gt 0) {
+            $clearWidth = if ($spinState.last_vis_len -gt 0) { $spinState.last_vis_len } else { $StatusLabel.Length + 28 }
+            $clearLine = "`r" + (' ' * $clearWidth) + "`r"
+            Write-Host $clearLine -NoNewline
+            $spinState.frame_idx = 0
+        }
+        $spinState.show = $false
+    }
     try {
         while (-not $Process.HasExited) {
             if ($ResponsePath) { Assert-AgentApiResponseSize -Path $ResponsePath }
+            if ($liveStreamActive) {
+                $null = Step-AgentLiveStreamFile -Path $ResponsePath -State $liveState -ShowReasoning $script:ShowReasoning -OnBeforeFirstOutput $clearSpinnerLine
+            }
             $elapsed = ((Get-Date) - $startWait).TotalSeconds
-            if ($showSpinner) {
-                $spinChar = $frames[$frameIdx % $frames.Count]
-                $frameIdx++
+            if ($spinState.show) {
+                $spinChar = $frames[$spinState.frame_idx % $frames.Count]
+                $spinState.frame_idx++
                 $maxSpinW = (Get-TerminalWidth) - 1
                 if ($maxSpinW -lt 20) { $maxSpinW = 20 }
                 $rawSpinLine = $script:Gm.Grey1 + ("  [{0}] {1} ({2:0.0}s)..." -f $spinChar, (Format-TuiText $StatusLabel), $elapsed) + $script:Gm.Reset
                 $clampedSpinLine = Limit-AnsiLineToWidth -Text $rawSpinLine -MaxWidth $maxSpinW
-                $lastSpinVisLen = (Strip-AnsiCodes -Text $clampedSpinLine).Length
+                $spinState.last_vis_len = (Strip-AnsiCodes -Text $clampedSpinLine).Length
                 $statusLine = "`r" + $clampedSpinLine
                 Write-Host $statusLine -NoNewline
             }
@@ -566,12 +694,20 @@ function Wait-AgentProcessWithSpinner {
             }
             Start-Sleep -Milliseconds $PollMs
         }
+        if ($liveStreamActive -and $liveState.saw_any_output -and ($null -eq $Process.ExitCode -or [int]$Process.ExitCode -eq 0)) {
+            $null = Step-AgentLiveStreamFile -Path $ResponsePath -State $liveState -ShowReasoning $script:ShowReasoning -Final -OnBeforeFirstOutput $clearSpinnerLine
+        }
     }
     finally {
-        if ($showSpinner -and $frameIdx -gt 0) {
-            $clearWidth = if ($lastSpinVisLen -gt 0) { $lastSpinVisLen } else { $StatusLabel.Length + 28 }
+        if ($spinState.show -and $spinState.frame_idx -gt 0) {
+            $clearWidth = if ($spinState.last_vis_len -gt 0) { $spinState.last_vis_len } else { $StatusLabel.Length + 28 }
             $clearLine = "`r" + (' ' * $clearWidth) + "`r"
             Write-Host $clearLine -NoNewline
+        }
+        if ($liveStreamActive -and $liveState) {
+            Close-AgentLiveStream -State $liveState
+            $script:LastHttpStreamedContent = [bool]$liveState.streamed_content
+            $script:LastHttpStreamedReasoning = [bool]$liveState.streamed_reasoning
         }
         if (-not $Process.HasExited) {
             Stop-Process -InputObject $Process -Force -ErrorAction SilentlyContinue
@@ -643,9 +779,15 @@ function Invoke-AgentHttpRequest {
         [string]$OutFile,
         [int]$TimeoutSec = $script:RequestTimeoutSec,
         [string]$StatusLabel = 'Waiting for model',
-        [switch]$ForceBackgroundWorker
+        [switch]$ForceBackgroundWorker,
+        [switch]$LiveStream
     )
     $script:LastHttpRetryAfterSec = $null
+    $script:LastHttpStreamedContent = $false
+    $script:LastHttpStreamedReasoning = $false
+    if ($LiveStream -and $OutFile -and (Test-Path -LiteralPath $OutFile -PathType Leaf)) {
+        Set-AgentUtf8Content -LiteralPath $OutFile -Value ''
+    }
     $asciiBody = ConvertTo-AsciiJson -Json $Body
     $iwrCmd = Get-Command -Name 'Invoke-WebRequest' -ErrorAction SilentlyContinue
     if ((-not $ForceBackgroundWorker) -and (($iwrCmd -and $iwrCmd.CommandType -eq 'Function') -or $script:DisableAsyncHttp)) {
@@ -701,7 +843,7 @@ function Invoke-AgentHttpRequest {
         } -Action {
             Start-Process -FilePath $shellExe -ArgumentList $argList -RedirectStandardOutput $stdoutTemp.FullName -RedirectStandardError $stderrTemp.FullName -NoNewWindow -PassThru -ErrorAction Stop
         }
-        Wait-AgentProcessWithSpinner -Process $proc -StatusLabel $StatusLabel -TimeoutSec $TimeoutSec -ResponsePath $OutFile
+        Wait-AgentProcessWithSpinner -Process $proc -StatusLabel $StatusLabel -TimeoutSec $TimeoutSec -ResponsePath $OutFile -LiveStream:$LiveStream
         $metaItem = Get-Item -LiteralPath $metaTemp.FullName -Force -ErrorAction SilentlyContinue
         if ($metaItem -and $metaItem.Length -gt 0 -and $metaItem.Length -le 1024) {
             try {

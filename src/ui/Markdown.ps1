@@ -239,6 +239,85 @@ function Write-AgentReasoning {
     }
 }
 
+function Write-AgentLiveStreamDelta {
+    param(
+        [hashtable]$State,
+        [string]$Kind,
+        [AllowEmptyString()][string]$Delta
+    )
+    if (-not $State -or -not $Delta -or $script:OutputMode -eq 'json') { return }
+    $clean = Format-TuiText -Text $Delta -Multiline
+    if (-not $clean) { return }
+    $norm = $clean.Replace("`r`n", "`n").Replace("`r", "`n")
+    if ($Kind -eq 'reasoning') {
+        if ($State.active_section -ne 'reasoning') {
+            if ($State.active_section -eq 'content') {
+                if (-not $State.at_line_start) { Write-Host '' }
+                Write-Host ('  ' + $script:Gm.Grey0 + $script:Box.BL + ($script:Box.H * 16) + $script:Gm.Reset)
+                $State.at_line_start = $true
+            }
+            Write-Host ("`n  " + $script:Gm.Grey0 + $script:Box.TL + $script:Box.H + ' [reasoning]' + $script:Gm.Reset)
+            $State.active_section = 'reasoning'
+            $State.at_line_start = $true
+        }
+        $colorPrefix = $script:Gm.Grey1
+        $State.streamed_reasoning = $true
+    }
+    else {
+        if ($State.active_section -ne 'content') {
+            if ($State.active_section -eq 'reasoning') {
+                if (-not $State.at_line_start) { Write-Host '' }
+                Write-Host ('  ' + $script:Gm.Grey0 + $script:Box.BL + ($script:Box.H * 12) + $script:Gm.Reset)
+                $State.at_line_start = $true
+            }
+            Write-Host ("`n  " + $script:Gm.Grey0 + $script:Box.TL + $script:Box.H + ' ' + $script:Gm.BoldGreen + $script:Box.Dot + ' Shellossus' + $script:Gm.Reset)
+            $State.active_section = 'content'
+            $State.at_line_start = $true
+        }
+        $colorPrefix = $script:Gm.Fg
+        $State.streamed_content = $true
+    }
+    $State.saw_any_output = $true
+    $segments = @($norm -split "`n")
+    for ($sIdx = 0; $sIdx -lt $segments.Count; $sIdx++) {
+        $seg = [string]$segments[$sIdx]
+        $hasNewlineAfter = ($sIdx -lt ($segments.Count - 1))
+        if ($State.at_line_start -and ($seg.Length -gt 0 -or $hasNewlineAfter)) {
+            Write-Host ('  ' + $script:Gm.Grey0 + $script:Box.V + ' ' + $script:Gm.Reset) -NoNewline
+            $State.at_line_start = $false
+        }
+        if ($seg.Length -gt 0) {
+            Write-Host ($colorPrefix + $seg + $script:Gm.Reset) -NoNewline
+        }
+        if ($hasNewlineAfter) {
+            Write-Host ''
+            $State.at_line_start = $true
+        }
+    }
+}
+
+function Close-AgentLiveStream {
+    param([hashtable]$State)
+    if (-not $State -or $script:OutputMode -eq 'json') { return }
+    if ($State.active_section -eq 'reasoning') {
+        if (-not $State.at_line_start) { Write-Host '' }
+        Write-Host ('  ' + $script:Gm.Grey0 + $script:Box.BL + ($script:Box.H * 12) + $script:Gm.Reset)
+        $State.active_section = 'none'
+        $State.at_line_start = $true
+    }
+    elseif ($State.active_section -eq 'content') {
+        if (-not $State.at_line_start) { Write-Host '' }
+        Write-Host ('  ' + $script:Gm.Grey0 + $script:Box.BL + ($script:Box.H * 16) + $script:Gm.Reset)
+        $State.active_section = 'none'
+        $State.at_line_start = $true
+    }
+}
+
+function Write-AgentLiveStreamRollbackNotice {
+    if ($script:OutputMode -eq 'json') { return }
+    Write-Host ($script:Gm.Yellow + '  [stream rolled back] Incomplete or invalid SSE stream; streamed preview was discarded and state was not modified.' + $script:Gm.Reset)
+}
+
 function Get-TuiMascotLines {
     param([string]$Mode = 'compact')
     $topChar = [string][char]0x2580
