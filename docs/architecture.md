@@ -109,3 +109,12 @@ All 13 canonical tools defined in [`src/tools/Schemas.ps1`](../src/tools/Schemas
    - Executes `ConstrainedLanguage.Tests.ps1`, including a cold-start child process that switches to `ConstrainedLanguage` on line 1 before dot-sourcing `shellossus.ps1`.
 
 CI ([`.github/workflows/check.yml`](../.github/workflows/check.yml)) runs `tests/smoke.ps1` on Windows PowerShell 5.1 (`windows-latest`) and PowerShell 7 (`pwsh`) across Windows, Linux, and macOS.
+
+### Opt-In Live Gateway Validation (`tests/live-e2e.ps1`)
+For manual pre-release validation against a real OpenAI-compatible API endpoint (excluded from `smoke.ps1` and CI), run [`tests/live-e2e.ps1`](../tests/live-e2e.ps1) with `-BaseUrl`, `-Model`, and `$env:SHELLOSSUS_API_KEY` (or `-ConfigPath`):
+
+```powershell
+.\tests\live-e2e.ps1 -BaseUrl https://api.example.com/v1 -Model your-model-id -IncludeConstrainedLanguage
+```
+
+It exercises `-Doctor -Mode json`, Cyrillic UTF-8 chat, tool-calling roundtrips (`write_file` -> `read_file` -> `edit_file` -> `grep_files`), `-Stream` SSE assembly, `Invoke-AgentCompact`, and optional cold-start `ConstrainedLanguage` execution inside an isolated temporary workspace.
