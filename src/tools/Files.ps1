@@ -435,17 +435,18 @@ function Get-SameFilesystemEntryInfo {
     $anyChecked = $false
     for ($i = 0; $i -lt $partsA.Count; $i++) {
         if ($partsA[$i] -ceq $partsB[$i]) { continue }
+        if ($i -eq 0 -and $partsA[$i] -match '^[a-zA-Z]:$') { continue }
         $parentParts = if ($i -gt 0) { @($partsA[0..($i - 1)]) } else { @() }
         $parentPath = ($parentParts -join '/')
         if (-not $parentPath) { $parentPath = '/' }
         elseif ($parentPath -match '^[a-zA-Z]:$') { $parentPath += '/' }
-        $matches = @(Get-ChildItem -LiteralPath $parentPath -Force -ErrorAction SilentlyContinue | Where-Object { $_.Name -ieq $partsA[$i] })
-        if ($matches.Count -gt 1) {
+        $dirMatches = @(Get-ChildItem -LiteralPath $parentPath -Force -ErrorAction SilentlyContinue | Where-Object { $_.Name -ieq $partsA[$i] })
+        if ($dirMatches.Count -gt 1) {
             return @{ is_same = $false; differs_from_disk_case = $false }
         }
-        if ($matches.Count -eq 1) {
+        if ($dirMatches.Count -eq 1) {
             $anyChecked = $true
-            if ($matches[0].Name -cne $partsB[$i]) {
+            if ($dirMatches[0].Name -cne $partsB[$i]) {
                 $differsFromDisk = $true
             }
         }

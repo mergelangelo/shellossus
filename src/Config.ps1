@@ -151,10 +151,10 @@ function Save-AgentConfig {
     }
     $hasSecrets = [bool]($Config.SHELLOSSUS_API_KEY -or $hasSecretExtraHeaders)
     $Path = Format-ConfigPath -Path $Path
-    $parent = Split-Path $Path -Parent
     if ($hasSecrets -and ($Path -match '^[\\/]{2}' -or (Test-PathHasReparsePoint -Path $Path))) {
         throw 'Choose a local config path without reparse points or use SHELLOSSUS_API_KEY from the environment.'
     }
+    $parent = Split-Path $Path -Parent
     if ($parent -and -not (Test-Path -LiteralPath $parent)) { New-Item -ItemType Directory -Path $parent -ErrorAction Stop | Out-Null }
     if (-not $hasSecrets) {
         Set-Content -LiteralPath $Path -Value $lines -Encoding UTF8 -ErrorAction Stop
@@ -254,6 +254,7 @@ function Update-AgentConfigOptionalKey {
 function Format-ConfigPath {
     param([string]$Path)
     if (-not $Path) { return '' }
+    if ($Path -match '^[\\/]{2}') { return $Path }
     if (Test-Path -LiteralPath $Path) { return (Get-Item -LiteralPath $Path -Force).FullName }
     $segments = @()
     $curr = $Path

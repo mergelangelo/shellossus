@@ -756,7 +756,9 @@ try {
         $gwLoaded = Read-AgentConfig -Path $gwCfgPath
         Assert-True ($gwLoaded.SHELLOSSUS_AUTH_HEADER -ceq 'api-key' -and $gwLoaded.SHELLOSSUS_MAX_TOKENS -ceq '2048' -and $gwLoaded.SHELLOSSUS_TEMPERATURE -ceq '0.3' -and $gwLoaded.SHELLOSSUS_EXTRA_HEADERS -ceq '{"X-Title":"O''Brien","HTTP-Referer":"https://example.com"}') "Save/Read-AgentConfig roundtrip failed for gateway/generation keys with apostrophe: $($gwLoaded | ConvertTo-Json -Compress)"
 
-        # Regression (I13): secret-bearing SHELLOSSUS_EXTRA_HEADERS enforces private config storage even when SHELLOSSUS_API_KEY is empty.
+        # Regression (I13): Format-ConfigPath preserves UNC paths so secret-bearing SHELLOSSUS_EXTRA_HEADERS is rejected on UNC paths across all platforms even when SHELLOSSUS_API_KEY is empty.
+        Assert-True ((Format-ConfigPath -Path '\\server\share\gw.env') -ceq '\\server\share\gw.env') 'Format-ConfigPath rewrote a UNC path into a local path.'
+        Assert-True (-not (Test-AgentConfigPrivacy -Path '\\server\share\gw.env')) 'Test-AgentConfigPrivacy accepted a UNC path.'
         $secretExtraUncBlocked = $false
         try {
             Save-AgentConfig -Path '\\server\share\gw.env' -Config @{

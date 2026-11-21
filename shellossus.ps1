@@ -219,10 +219,10 @@ function Save-AgentConfig {
     }
     $hasSecrets = [bool]($Config.SHELLOSSUS_API_KEY -or $hasSecretExtraHeaders)
     $Path = Format-ConfigPath -Path $Path
-    $parent = Split-Path $Path -Parent
     if ($hasSecrets -and ($Path -match '^[\\/]{2}' -or (Test-PathHasReparsePoint -Path $Path))) {
         throw 'Choose a local config path without reparse points or use SHELLOSSUS_API_KEY from the environment.'
     }
+    $parent = Split-Path $Path -Parent
     if ($parent -and -not (Test-Path -LiteralPath $parent)) { New-Item -ItemType Directory -Path $parent -ErrorAction Stop | Out-Null }
     if (-not $hasSecrets) {
         Set-Content -LiteralPath $Path -Value $lines -Encoding UTF8 -ErrorAction Stop
@@ -322,6 +322,7 @@ function Update-AgentConfigOptionalKey {
 function Format-ConfigPath {
     param([string]$Path)
     if (-not $Path) { return '' }
+    if ($Path -match '^[\\/]{2}') { return $Path }
     if (Test-Path -LiteralPath $Path) { return (Get-Item -LiteralPath $Path -Force).FullName }
     $segments = @()
     $curr = $Path
@@ -5312,17 +5313,18 @@ function Get-SameFilesystemEntryInfo {
     $anyChecked = $false
     for ($i = 0; $i -lt $partsA.Count; $i++) {
         if ($partsA[$i] -ceq $partsB[$i]) { continue }
+        if ($i -eq 0 -and $partsA[$i] -match '^[a-zA-Z]:$') { continue }
         $parentParts = if ($i -gt 0) { @($partsA[0..($i - 1)]) } else { @() }
         $parentPath = ($parentParts -join '/')
         if (-not $parentPath) { $parentPath = '/' }
         elseif ($parentPath -match '^[a-zA-Z]:$') { $parentPath += '/' }
-        $matches = @(Get-ChildItem -LiteralPath $parentPath -Force -ErrorAction SilentlyContinue | Where-Object { $_.Name -ieq $partsA[$i] })
-        if ($matches.Count -gt 1) {
+        $dirMatches = @(Get-ChildItem -LiteralPath $parentPath -Force -ErrorAction SilentlyContinue | Where-Object { $_.Name -ieq $partsA[$i] })
+        if ($dirMatches.Count -gt 1) {
             return @{ is_same = $false; differs_from_disk_case = $false }
         }
-        if ($matches.Count -eq 1) {
+        if ($dirMatches.Count -eq 1) {
             $anyChecked = $true
-            if ($matches[0].Name -cne $partsB[$i]) {
+            if ($dirMatches[0].Name -cne $partsB[$i]) {
                 $differsFromDisk = $true
             }
         }
