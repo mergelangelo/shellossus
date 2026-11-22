@@ -7,6 +7,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 ## [Unreleased]
 
 ### Added
+- PowerShell comment-based help (`Get-Help .\shellossus.ps1 [-Detailed|-Examples]`, `.\shellossus.ps1 -?`) and standalone `-Help` (`-h` / `--help`) launch switch (`text` and `-Mode json`) exiting immediately without reading configuration, workspace, or network state.
 - Live incremental TUI streaming for `-Stream` in `text` mode (with ANSI sanitization, graceful spinner fallback under exclusive file locks, fail-closed post-stream verification with explicit rollback notices, and untouched `-Mode json` JSONL output).
 - Corporate gateway & generation settings: `-AuthHeader` / `SHELLOSSUS_AUTH_HEADER` (e.g. `api-key` without `Bearer ` prefix), `-MaxTokens` / `SHELLOSSUS_MAX_TOKENS`, `-Temperature` / `SHELLOSSUS_TEMPERATURE`, and `SHELLOSSUS_EXTRA_HEADERS` (CRLF-safe JSON static headers with secret redaction and child-shell scrubbing); auth and extra headers propagate across chat turns, `-Doctor`, `/compact`, and `http`/`subagent` workers, while `max_tokens`/`temperature` apply to chat and subagent turns.
 - `delete_file` and `move_file` workspace file tools with reparse-point/secret guards, `ReadOnly` blocking, verified backups, and conflict-aware `/undo` support.

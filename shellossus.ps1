@@ -1,3 +1,182 @@
+<#
+.SYNOPSIS
+Zero-dependency pure PowerShell coding agent for Windows PowerShell 5.1, PowerShell 7+, and ConstrainedLanguage.
+
+.DESCRIPTION
+shellossus is a standalone, single-file coding agent written entirely in native PowerShell without external runtimes, third-party binaries, or PowerShell Gallery modules. It connects to any OpenAI-compatible /v1/chat/completions API (cloud providers, corporate gateways, or local Ollama/vLLM servers) and provides 15 built-in tools, transactional staged edits with conflict-aware /undo, subagents, DAG session branching, structured /compact, layered Markdown customization, TrueColor TUI output, and headless JSONL automation.
+
+Run .\shellossus.ps1 -Help (or -h / --help) for a compact categorized CLI reference, or Get-Help .\shellossus.ps1 -Detailed / -Examples for full parameter documentation.
+
+.PARAMETER BaseUrl
+OpenAI-compatible API base URL (normally ending in /v1). Must use https://, or http://localhost / 127.0.0.1 / [::1] for local servers. Defaults to $env:SHELLOSSUS_BASE_URL or the saved config file.
+
+.PARAMETER Model
+Provider model or deployment ID. Defaults to $env:SHELLOSSUS_MODEL or the saved config file.
+
+.PARAMETER Workspace
+Active workspace root directory for file tools and command execution. Defaults to the current directory ('.').
+
+.PARAMETER ConfigPath
+Path to the plain-data SHELLOSSUS_* key-value configuration file. Defaults to ~/.shellossus/.env (%USERPROFILE%\.shellossus\.env on Windows).
+
+.PARAMETER MaxSteps
+Maximum model-tool loop iterations per turn (1..500, default 50).
+
+.PARAMETER MaxRepeatCalls
+Loop-guard threshold (1..50, default 3) for identical tool calls without an intervening state change.
+
+.PARAMETER ContextWindow
+Model context window budget in tokens (accepts integers or 'k' suffix, e.g. 128k; default 128k).
+
+.PARAMETER CompactThreshold
+Auto-compaction threshold in tokens or percentage (e.g. 80k or 75%; default 96k).
+
+.PARAMETER RequestTimeoutSec
+Per-request model HTTP timeout in seconds (10..1800, default 180).
+
+.PARAMETER Stream
+Stream model responses over SSE (stream = true) with live incremental TUI rendering and fail-closed [DONE] / finish_reason verification. Pass -Stream:$false to override env/config.
+
+.PARAMETER AuthHeader
+Authentication header name (default Authorization, sending 'Bearer <key>'; custom headers such as api-key send the raw key without a Bearer prefix).
+
+.PARAMETER MaxTokens
+Optional max_tokens generation cap (1..1000000) sent on chat and subagent requests.
+
+.PARAMETER Temperature
+Optional sampling temperature (0..2, dot decimal) sent on chat and subagent requests.
+
+.PARAMETER Permission
+Tool permission mode: ReadOnly (inspection only), Ask (default: confirm writes, shell, and web), AutoEdit (auto-approve writes; confirm shell and web), or Auto (auto-approve all).
+
+.PARAMETER Theme
+Active 24-bit TrueColor theme ID: gruvbox-material (default), catppuccin-mocha, tokyo-night, dracula, nord, one-dark, rose-pine, kanagawa, or catppuccin-latte.
+
+.PARAMETER ReasoningEffort
+Optional reasoning_effort hint (low, medium, high) sent to reasoning-capable models.
+
+.PARAMETER Prompt
+Run a single prompt non-interactively and exit. Required when -Mode json is used without -Doctor, -Version, or -Help.
+
+.PARAMETER Mode
+Output mode: 'text' (default 24-bit TrueColor TUI) or 'json' (strictly valid JSONL event stream on stdout).
+
+.PARAMETER Session
+Resume an existing workspace .jsonl session file or create a named session file.
+
+.PARAMETER SessionDir
+Directory where workspace .jsonl session files are stored (defaults to <ConfigDir>/sessions).
+
+.PARAMETER NoSession
+Ephemeral mode: do not create or write session .jsonl files on disk.
+
+.PARAMETER SessionName
+Human-readable display name assigned to a new or forked session.
+
+.PARAMETER Fork
+Fork an existing workspace session into a new session file at startup.
+
+.PARAMETER Export
+Export the loaded session (or a .jsonl file path) to standalone themed .html or .jsonl and exit.
+
+.PARAMETER Tools
+Comma-separated allowlist of built-in tool names or wildcards (e.g. 'read_file,grep_files').
+
+.PARAMETER ExcludeTools
+Comma-separated denylist of built-in tool names to disable for the session.
+
+.PARAMETER NoTools
+Disable all model tools (pure chat completion mode).
+
+.PARAMETER NoSkills
+Disable discovery and /skill:<name> invocation of SKILL.md domain skills.
+
+.PARAMETER NoPromptTemplates
+Disable discovery and /<template> expansion of .shellossus/prompts/*.md templates.
+
+.PARAMETER NoContextFiles
+Skip automatic loading of SYSTEM.md, APPEND_SYSTEM.md, AGENTS.md, SOUL.md, and MEMORY.md context files.
+
+.PARAMETER HideReasoning
+Start with model reasoning blocks hidden (default view is compact).
+
+.PARAMETER Diagnostics
+Enable pre-request capability and tool-sync diagnostics.
+
+.PARAMETER Doctor
+Run non-mutating runtime, configuration, workspace, session-storage, and GET /models health checks and exit (0 on pass/warn, 1 on failure).
+
+.PARAMETER Version
+Print the shellossus version (text or -Mode json) and exit immediately without reading config or workspace state.
+
+.PARAMETER Help
+Print a concise categorized CLI usage reference (text or -Mode json) and exit immediately without reading config or workspace state. Supports -h and --help.
+
+.PARAMETER Mascot
+Render the pixel mascot card and exit.
+
+.PARAMETER Continue
+Resume the most recent session belonging to the current workspace.
+
+.PARAMETER Setup
+Run the interactive setup wizard to save endpoint, model ID, masked API key, and default workspace into -ConfigPath.
+
+.PARAMETER Install
+Register the shellossus launcher (and an optional conflict-checked shortcut) in your PowerShell $PROFILE.
+
+.PARAMETER ProfilePath
+Target PowerShell profile file path used by -Install (defaults to $PROFILE).
+
+.PARAMETER Shortcut
+Non-interactive shortcut name to register during -Install (e.g. s, sss, shos).
+
+.PARAMETER NoShortcut
+Skip registering a short alias during -Install.
+
+.PARAMETER LiteralPrompt
+Treat -Prompt as literal text without expanding /template commands or @file attachments.
+
+.PARAMETER LibraryOnly
+Internal switch reserved for test harnesses. Loads functions without running the CLI entrypoint.
+
+.PARAMETER InternalWorker
+Internal worker dispatch mode (http, web, subagent) reserved for isolated child worker subprocesses.
+
+.EXAMPLE
+.\shellossus.ps1 -Install
+.\shellossus.ps1 -Setup
+.\shellossus.ps1 -Doctor
+
+Register the shellossus launcher in $PROFILE, configure API settings interactively, and verify runtime and endpoint health.
+
+.EXAMPLE
+.\shellossus.ps1 -Workspace C:\src\app -Permission AutoEdit -Stream
+
+Start an interactive coding session in C:\src\app with auto-approved file edits (shell commands still require confirmation) and live SSE streaming.
+
+.EXAMPLE
+.\shellossus.ps1 -Prompt "Explain @README.md" -Permission ReadOnly
+
+Run a single read-only prompt non-interactively and exit.
+
+.EXAMPLE
+.\shellossus.ps1 -Mode json -NoSession -Permission ReadOnly -Prompt "Audit @."
+
+Emit strictly valid JSONL turn and tool events on stdout for scripts and CI pipelines.
+
+.EXAMPLE
+.\shellossus.ps1 -BaseUrl http://localhost:11434/v1 -Model qwen2.5-coder:14b -Continue
+
+Resume the latest workspace session against a local Ollama server.
+
+.NOTES
+Runtime: Windows PowerShell 5.1, PowerShell 7+, and ConstrainedLanguage mode (zero external dependencies).
+Configuration precedence: CLI arguments > SHELLOSSUS_* environment variables > -ConfigPath (.env).
+API keys are supplied via $env:SHELLOSSUS_API_KEY or saved via -Setup (never passed as CLI arguments).
+
+.LINK
+https://github.com/mergelangelo/shellossus
+#>
 param(
     [string]$BaseUrl = $env:SHELLOSSUS_BASE_URL,
     [string]$Model = $env:SHELLOSSUS_MODEL,
@@ -33,6 +212,7 @@ param(
     [switch]$Diagnostics,
     [switch]$Doctor,
     [switch]$Version,
+    [Alias('h')][switch]$Help,
     [switch]$Mascot,
     [switch]$Continue,
     [switch]$Setup,
@@ -14139,6 +14319,87 @@ function Write-TuiHelpCard {
     }
 }
 
+function Format-AgentCliHelp {
+    $ver = if ($script:AgentVersion) { [string]$script:AgentVersion } else { '0.0.0' }
+    $lines = @(
+        "shellossus v$ver - Zero-dependency pure PowerShell coding agent",
+        '',
+        'USAGE',
+        '  shellossus [options]',
+        '  .\shellossus.ps1 [options]',
+        '',
+        'QUICK START',
+        '  .\shellossus.ps1 -Install              Register shellossus in $PROFILE',
+        '  shellossus -Setup                      Configure API base URL, model & key',
+        '  shellossus -Doctor                     Validate runtime, config & endpoint',
+        '  shellossus                             Start interactive coding session',
+        '',
+        'SETUP & DIAGNOSTICS',
+        '  -Install [-Shortcut <name>|-NoShortcut] [-ProfilePath <path>]',
+        '  -Setup                                 Interactive configuration wizard',
+        '  -Doctor                                Run health & GET /models checks',
+        '  -Version                               Print version and exit',
+        '  -Help, -h, --help                      Show this help and exit',
+        '  -Mascot                                Render the pixel mascot and exit',
+        '',
+        'CONNECTION & EXECUTION',
+        '  -BaseUrl <url>                         OpenAI-compatible API URL (https or localhost)',
+        '  -Model <id>                            Model or deployment ID',
+        '  -Workspace <dir>                       Workspace root (default: .)',
+        '  -ConfigPath <path>                     Config .env path (default: ~/.shellossus/.env)',
+        '  -Permission <mode>                     ReadOnly | Ask (default) | AutoEdit | Auto',
+        '  -Prompt <text> [-LiteralPrompt]        Run a single prompt non-interactively',
+        '  -Mode <text|json>                      text (TrueColor TUI) or json (JSONL stream)',
+        '  -Stream                                Stream SSE responses live (-Stream:$false overrides)',
+        '  -RequestTimeoutSec <10..1800>          Per-request HTTP timeout (default: 180)',
+        '  -MaxSteps <1..500>                     Max tool-loop steps per turn (default: 50)',
+        '  -MaxRepeatCalls <1..50>                Loop-guard threshold (default: 3)',
+        '  -AuthHeader <name>                     Auth header (default: Authorization; e.g. api-key)',
+        '  -MaxTokens <n> | -Temperature <0..2>   Optional generation limits',
+        '  -ReasoningEffort <low|medium|high>     Reasoning effort hint for supported models',
+        '',
+        'SESSIONS, CONTEXT & TOOLS',
+        '  -Continue | -Session <name|path>       Resume latest or specific workspace session',
+        '  -Fork <name|path> [-SessionName <str>] Fork an existing session at startup',
+        '  -SessionDir <dir> | -NoSession         Custom session directory or ephemeral mode',
+        '  -Export <path>                         Export session to standalone .html or .jsonl',
+        '  -ContextWindow <spec>                  Context budget (e.g. 128k, default: 128k)',
+        '  -CompactThreshold <spec>               Auto-compact threshold (e.g. 96k or 75%)',
+        '  -Tools <csv> | -ExcludeTools <csv>     Allowlist or denylist of built-in tools',
+        '  -NoTools | -NoSkills | -NoContextFiles Disable tools, skills, or context markdown',
+        '  -NoPromptTemplates | -HideReasoning    Disable slash templates or hide reasoning',
+        '  -Theme <id> | -Diagnostics             Select TrueColor theme or enable diagnostics',
+        '',
+        'ENVIRONMENT (.env / $env:)',
+        '  SHELLOSSUS_BASE_URL, SHELLOSSUS_MODEL, SHELLOSSUS_API_KEY (env/.env only),',
+        '  SHELLOSSUS_WORKSPACE, SHELLOSSUS_STREAM, SHELLOSSUS_AUTH_HEADER,',
+        '  SHELLOSSUS_EXTRA_HEADERS, SHELLOSSUS_SEARCH_URL, SHELLOSSUS_THEME',
+        '',
+        'MORE HELP',
+        '  Get-Help .\shellossus.ps1 -Detailed    Full parameter descriptions',
+        '  Get-Help .\shellossus.ps1 -Examples    Copy-paste usage examples',
+        '  In interactive mode, type /help (or ?) for slash commands and shortcuts.'
+    )
+    return ($lines -join "`n")
+}
+
+function Write-AgentCliHelp {
+    param([string]$Mode = $script:OutputMode)
+    $helpText = Format-AgentCliHelp
+    if ($Mode -ieq 'json') {
+        $payload = @{
+            type = 'help'
+            version = [string]$script:AgentVersion
+            synopsis = 'Zero-dependency pure PowerShell coding agent for Windows PowerShell 5.1, PowerShell 7+, and ConstrainedLanguage.'
+            usage = @('shellossus [options]', '.\shellossus.ps1 [options]')
+            text = $helpText
+        }
+        Write-Output (ConvertTo-AsciiJson -Json ($payload | ConvertTo-Json -Depth 6 -Compress))
+        return
+    }
+    Write-Output $helpText
+}
+
 function Write-TuiStartupBanner {
     param([string]$RootPath, [string]$ConfigDir, [string]$Model)
     if ($script:OutputMode -eq 'json') { return }
@@ -15050,6 +15311,10 @@ if (-not $LibraryOnly) {
     }
     $script:OutputMode = if ($Mode) { $Mode.ToLower() } else { 'text' }
     if ($script:OutputMode -notin @('text', 'json')) { throw 'Mode must be text or json.' }
+    if ($Help -or (($PSBoundParameters.Keys -contains 'BaseUrl') -and ($BaseUrl -ceq '--help'))) {
+        Write-AgentCliHelp -Mode $script:OutputMode
+        return
+    }
     if ($Version) {
         if ($script:OutputMode -eq 'json') {
             Write-Output (ConvertTo-AsciiJson -Json (@{ type = 'version'; version = [string]$script:AgentVersion } | ConvertTo-Json -Compress))

@@ -1088,6 +1088,14 @@ try {
         Assert-True ($clJsonHits.Count -eq 1 -and $clJsonHits[0].title -ceq 'CLM Hit' -and $clJsonHits[0].snippet -ceq 'Safe JSON parsing.') 'ConvertFrom-AgentSearchResponse JSON parsing failed in ConstrainedLanguage.'
         $clVerObj = (& "$PSScriptRoot\..\shellossus.ps1" -Version -Mode json) | ConvertFrom-Json
         Assert-True ($clVerObj.type -ceq 'version' -and $clVerObj.version -ceq $script:AgentVersion) 'Standalone -Version -Mode json failed in ConstrainedLanguage.'
+        $clHelpText = (& "$PSScriptRoot\..\shellossus.ps1" -Help | Out-String).Trim()
+        $clHelpAlias = (& "$PSScriptRoot\..\shellossus.ps1" -h | Out-String).Trim()
+        $clHelpDouble = (& "$PSScriptRoot\..\shellossus.ps1" --help | Out-String).Trim()
+        Assert-True ($clHelpText.Contains("shellossus v$($script:AgentVersion)") -and $clHelpAlias -ceq $clHelpText -and $clHelpDouble -ceq $clHelpText) 'Standalone -Help / -h / --help failed in ConstrainedLanguage.'
+        $clHelpJson = (& "$PSScriptRoot\..\shellossus.ps1" -Help -Mode json) | ConvertFrom-Json
+        Assert-True ($clHelpJson.type -ceq 'help' -and $clHelpJson.version -ceq $script:AgentVersion -and $clHelpJson.text -ceq (Format-AgentCliHelp)) 'Standalone -Help -Mode json failed in ConstrainedLanguage.'
+        $clGetHelp = Get-Help -Name "$PSScriptRoot\..\shellossus.ps1"
+        Assert-True ($clGetHelp -and $clGetHelp.Synopsis -like '*pure PowerShell coding agent*') 'Get-Help on shellossus.ps1 failed in ConstrainedLanguage.'
 
         # Verify SSRF-checked fetch_url redirects and Retry-After header extraction work under ConstrainedLanguage with real .NET header collections.
         Assert-True ((Get-AgentRetryAfterSeconds -ErrorRecord @{ Exception = @{ Response = @{ Headers = $clWhc } } }) -eq 17) 'Get-AgentRetryAfterSeconds failed on real WebHeaderCollection in ConstrainedLanguage.'

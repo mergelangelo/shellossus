@@ -311,6 +311,44 @@ try {
         Assert-True ($verJsonObj.type -ceq 'version' -and $verJsonObj.version -ceq $script:AgentVersion) "Unexpected -Version JSON output: '$verJsonRaw'"
         Assert-True ($global:ShellossusDoctorFixture.requests -eq $reqBeforeVersion) '-Version triggered an unexpected network request.'
 
+        # Standalone -Help / -h / --help (text and JSON) and comment-based Get-Help work without requiring config, workspace, or network.
+        $reqBeforeHelp = $global:ShellossusDoctorFixture.requests
+        $helpTextOut = (& $entryPoint -Help -ConfigPath $cliConfig -Workspace $blockedPath | Out-String).Trim()
+        Assert-True ($helpTextOut.Contains("shellossus v$($script:AgentVersion)") -and $helpTextOut.Contains('QUICK START') -and $helpTextOut.Contains('Get-Help .\shellossus.ps1 -Detailed') -and (-not $helpTextOut.Contains('-LibraryOnly')) -and (-not $helpTextOut.Contains('-InternalWorker'))) "Unexpected -Help text output: '$helpTextOut'"
+        $helpAliasOut = (& $entryPoint -h -ConfigPath $cliConfig -Workspace $blockedPath | Out-String).Trim()
+        Assert-True ($helpAliasOut -ceq $helpTextOut) '-h alias output did not match -Help output.'
+        $helpDoubleDashOut = (& $entryPoint --help -ConfigPath $cliConfig -Workspace $blockedPath | Out-String).Trim()
+        Assert-True ($helpDoubleDashOut -ceq $helpTextOut) '--help output did not match -Help output.'
+        $helpJsonRaw = & $entryPoint -Help -Mode json -ConfigPath $cliConfig -Workspace $blockedPath
+        $helpJsonObj = $helpJsonRaw | ConvertFrom-Json
+        Assert-True ($helpJsonObj.type -ceq 'help' -and $helpJsonObj.version -ceq $script:AgentVersion -and $helpJsonObj.synopsis -and $helpJsonObj.usage.Count -ge 2 -and $helpJsonObj.text -ceq (Format-AgentCliHelp)) "Unexpected -Help JSON output: '$helpJsonRaw'"
+        Assert-True ($global:ShellossusDoctorFixture.requests -eq $reqBeforeHelp) '-Help triggered an unexpected network request.'
+
+        # An environment SHELLOSSUS_BASE_URL='--help' must not falsely trigger -Help when running -Doctor.
+        $savedHelpEnvBase = $env:SHELLOSSUS_BASE_URL
+        try {
+            $env:SHELLOSSUS_BASE_URL = '--help'
+            $envHelpDocRaw = & $entryPoint -Doctor -ConfigPath (Join-Path $envData.TestRoot 'missing-help-env.env') -Workspace $workspacePath -NoSession -Mode json
+            $envHelpDocObj = $envHelpDocRaw | ConvertFrom-Json
+            $envHelpEndpoint = Get-DoctorCheck $envHelpDocObj 'endpoint'
+            Assert-True ($envHelpDocObj.type -ceq 'doctor' -and $envHelpEndpoint.status -ceq 'fail') "SHELLOSSUS_BASE_URL='--help' unexpectedly bypassed -Doctor endpoint validation."
+        }
+        finally {
+            if ($null -eq $savedHelpEnvBase) { Remove-Item -LiteralPath 'Env:SHELLOSSUS_BASE_URL' -ErrorAction SilentlyContinue }
+            else { $env:SHELLOSSUS_BASE_URL = $savedHelpEnvBase }
+        }
+
+        # Comment-based Get-Help exposes synopsis, examples, and descriptions for every parameter in shellossus.ps1.
+        $scriptHelp = Get-Help -Name $entryPoint -Full
+        Assert-True ($scriptHelp -and $scriptHelp.Synopsis -like '*pure PowerShell coding agent*' -and @($scriptHelp.examples.example).Count -ge 4) 'Get-Help comment-based synopsis or examples are missing on shellossus.ps1.'
+        $helpParams = @($scriptHelp.parameters.parameter)
+        $undocumentedParams = @()
+        foreach ($hp in $helpParams) {
+            $hpDesc = (@($hp.description) | ForEach-Object { [string]$_.Text }) -join ' '
+            if (-not $hpDesc.Trim()) { $undocumentedParams += [string]$hp.name }
+        }
+        Assert-True ($helpParams.Count -ge 40 -and $undocumentedParams.Count -eq 0) ("Undocumented parameters in shellossus.ps1 Get-Help: " + ($undocumentedParams -join ', '))
+
         # Task 11 (Stage C): -Doctor respects -AuthHeader / SHELLOSSUS_EXTRA_HEADERS and fails closed on invalid gateway/generation settings without leaking secrets.
         $savedDocAuth = $script:AuthHeaderName
         $savedDocExtra = $script:ExtraHttpHeaders

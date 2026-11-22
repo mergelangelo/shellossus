@@ -139,6 +139,87 @@ function Write-TuiHelpCard {
     }
 }
 
+function Format-AgentCliHelp {
+    $ver = if ($script:AgentVersion) { [string]$script:AgentVersion } else { '0.0.0' }
+    $lines = @(
+        "shellossus v$ver - Zero-dependency pure PowerShell coding agent",
+        '',
+        'USAGE',
+        '  shellossus [options]',
+        '  .\shellossus.ps1 [options]',
+        '',
+        'QUICK START',
+        '  .\shellossus.ps1 -Install              Register shellossus in $PROFILE',
+        '  shellossus -Setup                      Configure API base URL, model & key',
+        '  shellossus -Doctor                     Validate runtime, config & endpoint',
+        '  shellossus                             Start interactive coding session',
+        '',
+        'SETUP & DIAGNOSTICS',
+        '  -Install [-Shortcut <name>|-NoShortcut] [-ProfilePath <path>]',
+        '  -Setup                                 Interactive configuration wizard',
+        '  -Doctor                                Run health & GET /models checks',
+        '  -Version                               Print version and exit',
+        '  -Help, -h, --help                      Show this help and exit',
+        '  -Mascot                                Render the pixel mascot and exit',
+        '',
+        'CONNECTION & EXECUTION',
+        '  -BaseUrl <url>                         OpenAI-compatible API URL (https or localhost)',
+        '  -Model <id>                            Model or deployment ID',
+        '  -Workspace <dir>                       Workspace root (default: .)',
+        '  -ConfigPath <path>                     Config .env path (default: ~/.shellossus/.env)',
+        '  -Permission <mode>                     ReadOnly | Ask (default) | AutoEdit | Auto',
+        '  -Prompt <text> [-LiteralPrompt]        Run a single prompt non-interactively',
+        '  -Mode <text|json>                      text (TrueColor TUI) or json (JSONL stream)',
+        '  -Stream                                Stream SSE responses live (-Stream:$false overrides)',
+        '  -RequestTimeoutSec <10..1800>          Per-request HTTP timeout (default: 180)',
+        '  -MaxSteps <1..500>                     Max tool-loop steps per turn (default: 50)',
+        '  -MaxRepeatCalls <1..50>                Loop-guard threshold (default: 3)',
+        '  -AuthHeader <name>                     Auth header (default: Authorization; e.g. api-key)',
+        '  -MaxTokens <n> | -Temperature <0..2>   Optional generation limits',
+        '  -ReasoningEffort <low|medium|high>     Reasoning effort hint for supported models',
+        '',
+        'SESSIONS, CONTEXT & TOOLS',
+        '  -Continue | -Session <name|path>       Resume latest or specific workspace session',
+        '  -Fork <name|path> [-SessionName <str>] Fork an existing session at startup',
+        '  -SessionDir <dir> | -NoSession         Custom session directory or ephemeral mode',
+        '  -Export <path>                         Export session to standalone .html or .jsonl',
+        '  -ContextWindow <spec>                  Context budget (e.g. 128k, default: 128k)',
+        '  -CompactThreshold <spec>               Auto-compact threshold (e.g. 96k or 75%)',
+        '  -Tools <csv> | -ExcludeTools <csv>     Allowlist or denylist of built-in tools',
+        '  -NoTools | -NoSkills | -NoContextFiles Disable tools, skills, or context markdown',
+        '  -NoPromptTemplates | -HideReasoning    Disable slash templates or hide reasoning',
+        '  -Theme <id> | -Diagnostics             Select TrueColor theme or enable diagnostics',
+        '',
+        'ENVIRONMENT (.env / $env:)',
+        '  SHELLOSSUS_BASE_URL, SHELLOSSUS_MODEL, SHELLOSSUS_API_KEY (env/.env only),',
+        '  SHELLOSSUS_WORKSPACE, SHELLOSSUS_STREAM, SHELLOSSUS_AUTH_HEADER,',
+        '  SHELLOSSUS_EXTRA_HEADERS, SHELLOSSUS_SEARCH_URL, SHELLOSSUS_THEME',
+        '',
+        'MORE HELP',
+        '  Get-Help .\shellossus.ps1 -Detailed    Full parameter descriptions',
+        '  Get-Help .\shellossus.ps1 -Examples    Copy-paste usage examples',
+        '  In interactive mode, type /help (or ?) for slash commands and shortcuts.'
+    )
+    return ($lines -join "`n")
+}
+
+function Write-AgentCliHelp {
+    param([string]$Mode = $script:OutputMode)
+    $helpText = Format-AgentCliHelp
+    if ($Mode -ieq 'json') {
+        $payload = @{
+            type = 'help'
+            version = [string]$script:AgentVersion
+            synopsis = 'Zero-dependency pure PowerShell coding agent for Windows PowerShell 5.1, PowerShell 7+, and ConstrainedLanguage.'
+            usage = @('shellossus [options]', '.\shellossus.ps1 [options]')
+            text = $helpText
+        }
+        Write-Output (ConvertTo-AsciiJson -Json ($payload | ConvertTo-Json -Depth 6 -Compress))
+        return
+    }
+    Write-Output $helpText
+}
+
 function Write-TuiStartupBanner {
     param([string]$RootPath, [string]$ConfigDir, [string]$Model)
     if ($script:OutputMode -eq 'json') { return }

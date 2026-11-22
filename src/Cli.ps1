@@ -16,6 +16,10 @@ if (-not $LibraryOnly) {
     }
     $script:OutputMode = if ($Mode) { $Mode.ToLower() } else { 'text' }
     if ($script:OutputMode -notin @('text', 'json')) { throw 'Mode must be text or json.' }
+    if ($Help -or (($PSBoundParameters.Keys -contains 'BaseUrl') -and ($BaseUrl -ceq '--help'))) {
+        Write-AgentCliHelp -Mode $script:OutputMode
+        return
+    }
     if ($Version) {
         if ($script:OutputMode -eq 'json') {
             Write-Output (ConvertTo-AsciiJson -Json (@{ type = 'version'; version = [string]$script:AgentVersion } | ConvertTo-Json -Compress))

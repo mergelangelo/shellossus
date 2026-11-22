@@ -49,6 +49,7 @@ The configuration file is parsed strictly as plain `KEY=VALUE` data (never evalu
 | `-ConfigPath <path>` | `~/.shellossus/.env` | Path to the `SHELLOSSUS_*` configuration file. |
 | `-Doctor` | off | Run runtime, config, workspace, session-storage, and `GET /models` checks, then exit (`0` if all checks pass/warn, `1` on any failed check). |
 | `-Version` | off | Print the `shellossus` version (`text` or `-Mode json`) and exit immediately without reading configuration or workspace state. |
+| `-Help` (`-h`, `--help`) | off | Print a concise categorized CLI reference (`text` or `-Mode json`) and exit immediately without reading configuration or workspace state. Native PowerShell `Get-Help .\shellossus.ps1 [-Detailed\|-Examples]` and `.\shellossus.ps1 -?` are also supported. |
 | `-Mascot` | off | Render the 20x16 half-block pixel mascot and exit. |
 
 ### Connection, Execution & Permissions
@@ -59,7 +60,7 @@ The configuration file is parsed strictly as plain `KEY=VALUE` data (never evalu
 | `-Model <id>` | `$env:SHELLOSSUS_MODEL` | Active model ID. |
 | `-Workspace <dir>` | `.` | Active workspace boundary for file tools and command working directory. |
 | `-Permission <mode>` | `Ask` | Tool permission mode: `ReadOnly`, `Ask`, `AutoEdit`, or `Auto` (see [`docs/security.md`](security.md)). |
-| `-Prompt <text>` | `''` | Run a single prompt non-interactively and exit. Required when `-Mode json` is used without `-Doctor` or `-Version`. |
+| `-Prompt <text>` | `''` | Run a single prompt non-interactively and exit. Required when `-Mode json` is used without `-Doctor`, `-Version`, or `-Help`. |
 | `-LiteralPrompt` | off | Treat `-Prompt` as literal text without expanding `/template` commands or `@file` attachments. |
 | `-Mode <text\|json>` | `text` | Output format: `text` (24-bit TUI) or `json` (machine-readable JSONL event stream). |
 | `-Stream` | off | Stream model responses over SSE (`stream = true`) across chat turns, compaction, and subagents. In `text` mode, completed SSE chunks render incrementally in the terminal (falling back to the spinner if the host OS holds an exclusive file lock); full `[DONE]` and `finish_reason` verification still runs fail-closed before state updates or tool execution, while `-Mode json` stays pure JSONL. |
@@ -192,3 +193,4 @@ In `json` mode, `stdout` emits strictly valid, ASCII-escaped JSONL objects (one 
 | `turn_end` | Turn finishes or aborts | `status` (`completed`, `error`, `loop_detected`, `step_limit_reached`), `step`, `usage_input_tokens`, `usage_output_tokens`, `error` / `rollback_error` / `recovery_manifest` |
 | `doctor` | `shellossus -Doctor -Mode json` | `version`, `checks`, `not_tested`, `failures`, `warnings`, `exit_code` |
 | `version` | `shellossus -Version -Mode json` | `version` |
+| `help` | `shellossus -Help -Mode json` | `version`, `synopsis`, `usage`, `text` |
