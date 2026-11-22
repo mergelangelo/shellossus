@@ -40,7 +40,7 @@ All `.ps1` files (`src/*.ps1`, `shellossus.ps1`, `build.ps1`, `tests/*.ps1`) mus
 ## Article III — Workspace Isolation and Credential Protection
 
 ### Section 1. Explicit Boundary Separation
-1. Workspace file tools (`list_files`, `read_file`, `find_files`, `grep_files`, `write_file`, `edit_file`) and `@file` attachments must enforce the active workspace root, with a narrow read-only exception for registered global `SKILL.md` files via `read_file`.
+1. Workspace file tools (`list_files`, `read_file`, `find_files`, `grep_files`, `write_file`, `edit_file`, `delete_file`, `move_file`) and `@file` attachments must enforce the active workspace root, with a narrow read-only exception for registered global `SKILL.md` files via `read_file`.
 2. Only explicit `@file` references in the user's original input may attach workspace files; model-generated subagent prompts, template bodies, and pipeline outputs are treated as literal text.
 3. This file-tool boundary is an application-level invariant, not an OS kernel sandbox. Shell execution (`run_command`, `!cmd`, `!!cmd`) retains the user's OS permissions; configuration/context loading, sessions, imports/exports, temporary files, recovery manifests, and the explicit global `memory` scope use separate documented paths.
 
@@ -50,7 +50,7 @@ Before any workspace file tool or `memory` operation accesses a path, `shellossu
 ### Section 3. Secret and Configuration Protection
 1. `.env`, `.env.*` (except `.env.example`), and the active user configuration file (`$ConfigPath`) must never be listed, searched, read, attached, or modified by agent tools.
 2. Configuration files must be parsed strictly as plain `SHELLOSSUS_*` key-value data without evaluating PowerShell expressions. Saving an API key to disk requires verified private directory and file permissions (Windows ACLs or Unix owner/mode bits).
-3. Child processes spawned by `run_command` must have `SHELLOSSUS_API_KEY` and `OPENAI_API_KEY` scrubbed from their environment.
+3. Child processes spawned by `run_command` must have `SHELLOSSUS_API_KEY`, `OPENAI_API_KEY`, and `SHELLOSSUS_EXTRA_HEADERS` scrubbed from their environment.
 
 ### Section 4. Hierarchical Ignore Rules
 `find_files` and `grep_files` must respect `.gitignore`, `.ignore`, and `.fdignore` rules — including wildcards (`*`, `**`, `?`), directory-only patterns, escaped characters, and negation (`!pattern`) — loaded top-down from the workspace root through all intermediate parent directories.
@@ -61,10 +61,10 @@ Before any workspace file tool or `memory` operation accesses a path, `shellossu
 
 ### Section 1. Permission Modes and Approvals
 1. Model tool availability and confirmations are governed by four modes:
-   - **`ReadOnly`**: Allows inspection tools and `ReadOnly`-clamped `run_agent`; blocks `write_file`, `edit_file`, `run_command`, and modifying `memory` actions (`append`, `set`, `clear`). Auxiliary `todo`, `ask_user`, and memory viewing remain available subject to tool filters.
-   - **`Ask`** *(default)*: Previews diffs or commands and requires explicit confirmation for file/memory writes and `run_command`.
-   - **`AutoEdit`**: Auto-approves file and memory writes (with verified backups) while still requiring confirmation for `run_command`.
-   - **`Auto`**: Auto-approves file/memory writes, `run_command`, and outbound web tools.
+   - **`ReadOnly`**: Allows inspection tools and `ReadOnly`-clamped `run_agent`; blocks `write_file`, `edit_file`, `delete_file`, `move_file`, `run_command`, and modifying `memory` actions (`append`, `set`, `clear`). Auxiliary `todo`, `ask_user`, and memory viewing remain available subject to tool filters.
+   - **`Ask`** *(default)*: Previews diffs or commands and requires explicit confirmation for file/memory mutations and `run_command`.
+   - **`AutoEdit`**: Auto-approves file and memory mutations (with verified backups) while still requiring confirmation for `run_command`.
+   - **`Auto`**: Auto-approves file/memory mutations, `run_command`, and outbound web tools.
 2. Outbound web tools (`fetch_url`, `web_search`) require separate confirmation unless `Auto` mode or session web `[a]ll` is active.
 3. Selecting a stricter mode or reselecting `ReadOnly`, `Ask`, or `AutoEdit` revokes session-scoped command and web `[a]ll` approvals. User-entered `!cmd` and `!!cmd` are direct operator actions outside model tool gating.
 
@@ -72,11 +72,11 @@ Before any workspace file tool or `memory` operation accesses a path, `shellossu
 Tool calls must be validated as a complete batch (unique IDs, supported types, turn tool-call budget, argument byte caps, and strict parameter schema/type validation) before any tool in the batch executes. Strings such as `"false"` must never be coerced into booleans.
 
 ### Section 3. Atomic Staged Writes, Encoding Preservation, and Backups
-1. Every `write_file`, `edit_file`, and modifying `memory` operation must stage new content to a temporary file, verify the staged content, confirm the target file did not change during confirmation, and create a hash-verified backup before replacing the target via `Move-Item -Force`.
+1. Every `write_file`, `edit_file`, and modifying `memory` operation must stage new content to a temporary file, verify the staged content, confirm the target file did not change during confirmation, and create a hash-verified backup before replacing the target via `Move-Item -Force`. `delete_file` and `move_file` must likewise enforce workspace/reparse/secret guards, verify target state after confirmation, and record hash-verified backups before mutating disk.
 2. Existing file encodings (UTF-8 with/without BOM, BOM-marked UTF-16 LE/BE) and line endings (`CRLF` or `LF`) must round-trip cleanly and be preserved. `edit_file` supports exact matches, CRLF-normalized matches, unambiguous line-by-line fuzzy matches, and non-overlapping bottom-to-top batch `edits[]`.
 
 ### Section 4. Conflict-Aware Multi-Step `/undo` and Turn Rollback
-1. Every turn journals `write_file`, `edit_file`, and `memory` tool changes (including in-process subagent edits) alongside conversation and `todo` task-board snapshots. Shell effects, manual `/memory` commands, configuration updates, exports, and network requests remain outside this journal.
+1. Every turn journals `write_file`, `edit_file`, `delete_file`, `move_file`, and `memory` tool changes (including in-process subagent edits) alongside conversation and `todo` task-board snapshots. Shell effects, manual `/memory` commands, configuration updates, exports, and network requests remain outside this journal.
 2. Before `/undo` or automatic turn-failure rollback modifies disk, a preflight check must validate the full reverse chain of operations and backups, including multiple edits to the same file within a single turn.
 3. If a file was modified externally after the agent's write, `/undo` must refuse to overwrite manual edits and keep backups intact. Conversation and task-board state are restored only after file restoration succeeds; failed rollbacks preserve backups and emit recovery metadata.
 

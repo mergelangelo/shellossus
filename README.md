@@ -10,7 +10,7 @@ Drop [`shellossus.ps1`](shellossus.ps1) onto any workstation, jump host, or Citr
 ## Why `shellossus`?
 
 - **Runs Where Nothing Else Can:** Engineered natively for **Windows PowerShell 5.1**, PowerShell 7+, **`ConstrainedLanguage` mode**, AppLocker, and WDAC — with zero external binaries (`rg`, `fd`, `git`, `curl`) or PowerShell Gallery dependencies.
-- **Modular Engineering, Single-File Artifact:** Maintained across 36 focused modules in [`src/`](src/) and bundled by [`build.ps1`](build.ps1) into one pure 7-bit ASCII script ([`shellossus.ps1`](shellossus.ps1)) that parses identically regardless of BOM or system codepage and is trivial to audit or copy.
+- **Modular Engineering, Single-File Artifact:** Maintained across 36 focused modules in [`src/`](src/) for straightforward code review and bundled by [`build.ps1`](build.ps1) into one pure 7-bit ASCII script ([`shellossus.ps1`](shellossus.ps1)) that parses identically regardless of BOM or system codepage — easy to deploy anywhere, with reproducible build verification (`build.ps1 -Check`) and release `SHA256SUMS.txt` checksums.
 - **Transactional & Fail-Closed by Design:** Starts in `Ask` mode by default, stages every edit, preserves file encodings/BOMs, verifies backups by byte hash, supports conflict-aware multi-step `/undo`, and rejects truncated responses or incomplete SSE streams before modifying state.
 - **Full Agent Depth, Zero Vendor Lock-In:** Combines 15 built-in tools, subagents (`single`, `parallel[]`, `pipeline[]`), DAG session branching (`/tree`, `/fork`), structured `/compact`, layered Markdown customization (`SOUL.md`, `AGENTS.md`, `MEMORY.md`, `SKILL.md`), a 24-bit TrueColor TUI, and headless JSONL streaming over standard `/v1/chat/completions`.
 
