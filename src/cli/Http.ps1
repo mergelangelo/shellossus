@@ -547,6 +547,9 @@ function New-AgentLiveStreamState {
         streamed_reasoning = $false
         streamed_content = $false
         saw_any_output = $false
+        content_line_buf = ''
+        md_state = (New-AgentMarkdownStreamState)
+        pending_reasoning_parts = @()
     }
 }
 
@@ -606,14 +609,36 @@ function Step-AgentLiveStreamFile {
         if (-not (Test-IsJsonObject -Value $ch) -or (-not (Test-IsJsonObject -Value $ch.delta))) { return }
         $delta = $ch.delta
         $dProps = @(Get-ObjectPropertyNames -InputObject $delta)
-        if ($ShowReasoning -eq 'full' -and ($dProps -contains 'reasoning_content') -and $delta.reasoning_content -is [string] -and $delta.reasoning_content.Length -gt 0) {
-            if ((-not $State.saw_any_output) -and ($null -ne $OnBeforeFirstOutput)) {
-                & $OnBeforeFirstOutput
+        if (($dProps -contains 'reasoning_content') -and $delta.reasoning_content -is [string] -and $delta.reasoning_content.Length -gt 0) {
+            if ($ShowReasoning -eq 'full') {
+                if ((-not $State.saw_any_output) -and ($null -ne $OnBeforeFirstOutput)) {
+                    & $OnBeforeFirstOutput
+                }
+                Write-AgentLiveStreamDelta -State $State -Kind 'reasoning' -Delta $delta.reasoning_content
+                $emitted = $true
             }
-            Write-AgentLiveStreamDelta -State $State -Kind 'reasoning' -Delta $delta.reasoning_content
-            $emitted = $true
+            elseif ($ShowReasoning -eq 'compact') {
+                if ($null -eq $State.pending_reasoning_parts) { $State.pending_reasoning_parts = @() }
+                $State.pending_reasoning_parts += $delta.reasoning_content
+            }
         }
         if (($dProps -contains 'content') -and $delta.content -is [string] -and $delta.content.Length -gt 0) {
+            if ($ShowReasoning -eq 'compact' -and $State.pending_reasoning_parts -and $State.pending_reasoning_parts.Count -gt 0) {
+                $compactReas = ($State.pending_reasoning_parts -join '')
+                $State.pending_reasoning_parts = @()
+                if ($compactReas.Trim()) {
+                    if ((-not $State.saw_any_output) -and ($null -ne $OnBeforeFirstOutput)) {
+                        & $OnBeforeFirstOutput
+                    }
+                    if ($State.active_section -eq 'content') {
+                        Flush-AgentLiveContentSection -State $State
+                    }
+                    Write-AgentReasoning -Text $compactReas -ViewMode 'compact'
+                    $State.streamed_reasoning = $true
+                    $State.saw_any_output = $true
+                    $emitted = $true
+                }
+            }
             if ((-not $State.saw_any_output) -and ($null -ne $OnBeforeFirstOutput)) {
                 & $OnBeforeFirstOutput
             }
@@ -705,7 +730,7 @@ function Wait-AgentProcessWithSpinner {
             Write-Host $clearLine -NoNewline
         }
         if ($liveStreamActive -and $liveState) {
-            Close-AgentLiveStream -State $liveState
+            Close-AgentLiveStream -State $liveState -ShowReasoning $script:ShowReasoning
             $script:LastHttpStreamedContent = [bool]$liveState.streamed_content
             $script:LastHttpStreamedReasoning = [bool]$liveState.streamed_reasoning
         }

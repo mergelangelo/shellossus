@@ -2339,89 +2339,113 @@ function Format-MarkdownTable {
     return $result
 }
 
+function New-AgentMarkdownStreamState {
+    return @{
+        in_code = $false
+        code_fence_char = ''
+        code_fence_len = 0
+        table_buf = @()
+    }
+}
+
+function Write-AgentMarkdownStreamLine {
+    param(
+        [hashtable]$State,
+        [AllowEmptyString()][string]$RawLine
+    )
+    $barV = $script:Gm.Grey0 + '  ' + $script:Box.V + ' ' + $script:Gm.Reset
+    $line = Format-TuiText -Text $RawLine -Multiline
+    $isTableLine = (-not $State.in_code) -and ($line -match '^\s*\|.*\|\s*$')
+    if ($isTableLine) {
+        $State.table_buf += $line
+        return
+    }
+    if ($State.table_buf.Count -gt 0) {
+        foreach ($tLine in @(Format-MarkdownTable -Lines $State.table_buf -Indent '')) {
+            Write-Host ($barV + $tLine)
+        }
+        $State.table_buf = @()
+    }
+    $trimmedStart = $line.TrimStart()
+    if (-not $State.in_code -and $trimmedStart -match '^(`{3,}|~{3,})(.*)$') {
+        $fenceSeq = $Matches[1]
+        $State.code_fence_char = [string]$fenceSeq[0]
+        $State.code_fence_len = $fenceSeq.Length
+        $lang = $Matches[2].Trim()
+        $label = if ($lang) { " $lang " } else { ' code ' }
+        $topHCount = if ((29 - $label.Length) -ge 4) { 29 - $label.Length } else { 4 }
+        Write-Host ($barV + $script:Gm.Grey0 + $script:Box.TL + $script:Box.H + $script:Gm.Aqua + $label + $script:Gm.Grey0 + ($script:Box.H * $topHCount) + $script:Gm.Reset)
+        $State.in_code = $true
+    }
+    elseif ($State.in_code -and $trimmedStart -match ('^' + ($State.code_fence_char * $State.code_fence_len) + $State.code_fence_char + '*\s*$')) {
+        Write-Host ($barV + $script:Gm.Grey0 + $script:Box.BL + ($script:Box.H * 30) + $script:Gm.Reset)
+        $State.in_code = $false
+        $State.code_fence_char = ''
+        $State.code_fence_len = 0
+    }
+    elseif ($State.in_code) {
+        Write-Host ($barV + $script:Gm.Grey0 + $script:Box.V + $script:Gm.Bg1 + $script:Gm.Yellow + '  ' + $line + '  ' + $script:Gm.Reset)
+    }
+    elseif ($line -match '^\s*(#{1,6})\s+(.*)$') {
+        $level = $Matches[1].Length
+        $hColor = switch ($level) {
+            1 { $script:Gm.BoldRed }
+            2 { $script:Gm.BoldOrange }
+            3 { $script:Gm.BoldYellow }
+            default { $script:Gm.BoldGreen }
+        }
+        Write-Host ($barV + (Format-MarkdownInline -Text $Matches[2] -BaseColor $hColor))
+    }
+    elseif ($line -match '^\s*([-*_]){3,}\s*$') {
+        Write-Host ($barV + $script:Gm.Grey0 + ($script:Box.H * 40) + $script:Gm.Reset)
+    }
+    elseif ($line -match '^(\s*)>\s?(.*)$') {
+        Write-Host ($barV + $Matches[1] + $script:Gm.Grey0 + $script:Box.V + ' ' + (Format-MarkdownInline -Text $Matches[2] -BaseColor $script:Gm.Grey2))
+    }
+    elseif ($line -match '^(\s*)([-*+]|\d+\.)\s+(.*)$') {
+        Write-Host ($barV + $Matches[1] + $script:Gm.Green + $Matches[2] + ' ' + $script:Gm.Reset + (Format-MarkdownInline -Text $Matches[3] -BaseColor $script:Gm.Fg))
+    }
+    else {
+        Write-Host ($barV + (Format-MarkdownInline -Text $line -BaseColor $script:Gm.Fg))
+    }
+}
+
+function Flush-AgentMarkdownStream {
+    param([hashtable]$State)
+    if (-not $State) { return }
+    $barV = $script:Gm.Grey0 + '  ' + $script:Box.V + ' ' + $script:Gm.Reset
+    if ($State.table_buf.Count -gt 0) {
+        foreach ($tLine in @(Format-MarkdownTable -Lines $State.table_buf -Indent '')) {
+            Write-Host ($barV + $tLine)
+        }
+        $State.table_buf = @()
+    }
+    if ($State.in_code) {
+        Write-Host ($barV + $script:Gm.Grey0 + $script:Box.BL + ($script:Box.H * 30) + $script:Gm.Reset)
+        $State.in_code = $false
+        $State.code_fence_char = ''
+        $State.code_fence_len = 0
+    }
+}
+
 function Write-AgentReply {
     param([string]$Content)
     if ($script:OutputMode -eq 'json') { return }
-    $barV = $script:Gm.Grey0 + '  ' + $script:Box.V + ' ' + $script:Gm.Reset
     Write-Host ("`n  " + $script:Gm.Grey0 + $script:Box.TL + $script:Box.H + ' ' + $script:Gm.BoldGreen + $script:Box.Dot + ' Shellossus' + $script:Gm.Reset)
-    $inCode = $false
-    $codeFenceChar = ''
-    $codeFenceLen = 0
-    $tableBuf = @()
+    $mdState = New-AgentMarkdownStreamState
     $lines = @($Content -split "`r?`n")
     for ($idx = 0; $idx -lt $lines.Count; $idx++) {
-        $rawLine = $lines[$idx]
-        $line = Format-TuiText -Text $rawLine -Multiline
-        $isTableLine = (-not $inCode) -and ($line -match '^\s*\|.*\|\s*$')
-        if ($isTableLine) {
-            $tableBuf += $line
-            continue
-        }
-        if ($tableBuf.Count -gt 0) {
-            foreach ($tLine in @(Format-MarkdownTable -Lines $tableBuf -Indent '')) {
-                Write-Host ($barV + $tLine)
-            }
-            $tableBuf = @()
-        }
-        $trimmedStart = $line.TrimStart()
-        if (-not $inCode -and $trimmedStart -match '^(`{3,}|~{3,})(.*)$') {
-            $fenceSeq = $Matches[1]
-            $codeFenceChar = [string]$fenceSeq[0]
-            $codeFenceLen = $fenceSeq.Length
-            $lang = $Matches[2].Trim()
-            $label = if ($lang) { " $lang " } else { ' code ' }
-            $topHCount = if ((29 - $label.Length) -ge 4) { 29 - $label.Length } else { 4 }
-            Write-Host ($barV + $script:Gm.Grey0 + $script:Box.TL + $script:Box.H + $script:Gm.Aqua + $label + $script:Gm.Grey0 + ($script:Box.H * $topHCount) + $script:Gm.Reset)
-            $inCode = $true
-        }
-        elseif ($inCode -and $trimmedStart -match ('^' + ($codeFenceChar * $codeFenceLen) + $codeFenceChar + '*\s*$')) {
-            Write-Host ($barV + $script:Gm.Grey0 + $script:Box.BL + ($script:Box.H * 30) + $script:Gm.Reset)
-            $inCode = $false
-            $codeFenceChar = ''
-            $codeFenceLen = 0
-        }
-        elseif ($inCode) {
-            Write-Host ($barV + $script:Gm.Grey0 + $script:Box.V + $script:Gm.Bg1 + $script:Gm.Yellow + '  ' + $line + '  ' + $script:Gm.Reset)
-        }
-        elseif ($line -match '^\s*(#{1,6})\s+(.*)$') {
-            $level = $Matches[1].Length
-            $hColor = switch ($level) {
-                1 { $script:Gm.BoldRed }
-                2 { $script:Gm.BoldOrange }
-                3 { $script:Gm.BoldYellow }
-                default { $script:Gm.BoldGreen }
-            }
-            Write-Host ($barV + (Format-MarkdownInline -Text $Matches[2] -BaseColor $hColor))
-        }
-        elseif ($line -match '^\s*([-*_]){3,}\s*$') {
-            Write-Host ($barV + $script:Gm.Grey0 + ($script:Box.H * 40) + $script:Gm.Reset)
-        }
-        elseif ($line -match '^(\s*)>\s?(.*)$') {
-            Write-Host ($barV + $Matches[1] + $script:Gm.Grey0 + $script:Box.V + ' ' + (Format-MarkdownInline -Text $Matches[2] -BaseColor $script:Gm.Grey2))
-        }
-        elseif ($line -match '^(\s*)([-*+]|\d+\.)\s+(.*)$') {
-            Write-Host ($barV + $Matches[1] + $script:Gm.Green + $Matches[2] + ' ' + $script:Gm.Reset + (Format-MarkdownInline -Text $Matches[3] -BaseColor $script:Gm.Fg))
-        }
-        else {
-            Write-Host ($barV + (Format-MarkdownInline -Text $line -BaseColor $script:Gm.Fg))
-        }
+        Write-AgentMarkdownStreamLine -State $mdState -RawLine $lines[$idx]
     }
-    if ($tableBuf.Count -gt 0) {
-        foreach ($tLine in @(Format-MarkdownTable -Lines $tableBuf -Indent '')) {
-            Write-Host ($barV + $tLine)
-        }
-    }
-    if ($inCode) {
-        Write-Host ($barV + $script:Gm.Grey0 + $script:Box.BL + ($script:Box.H * 30) + $script:Gm.Reset)
-    }
+    Flush-AgentMarkdownStream -State $mdState
     Write-Host ('  ' + $script:Gm.Grey0 + $script:Box.BL + ($script:Box.H * 16) + $script:Gm.Reset)
 }
 
 function Write-AgentReasoning {
-    param([string]$Text)
-    if (-not $Text -or $script:ShowReasoning -eq 'hide' -or $script:OutputMode -eq 'json') { return }
+    param([string]$Text, [string]$ViewMode = $script:ShowReasoning)
+    if (-not $Text -or $ViewMode -eq 'hide' -or $script:OutputMode -eq 'json') { return }
     $lines = @($Text.Trim() -split "`r?`n")
-    if ($script:ShowReasoning -eq 'full' -or $lines.Count -le 3) {
+    if ($ViewMode -eq 'full' -or $lines.Count -le 3) {
         Write-Host ("`n  " + $script:Gm.Grey0 + $script:Box.TL + $script:Box.H + ' [reasoning]' + $script:Gm.Reset)
         foreach ($l in $lines) {
             Write-Host ('  ' + $script:Gm.Grey0 + $script:Box.V + ' ' + $script:Gm.Grey1 + (Format-TuiText -Text $l -Multiline) + $script:Gm.Reset)
@@ -2437,6 +2461,23 @@ function Write-AgentReasoning {
     }
 }
 
+function Flush-AgentLiveContentSection {
+    param([hashtable]$State)
+    if (-not $State -or $State.active_section -ne 'content') { return }
+    if ($null -eq $State.md_state) { $State.md_state = New-AgentMarkdownStreamState }
+    if ($State.content_line_buf -and $State.content_line_buf.Length -gt 0) {
+        $tailLine = $State.content_line_buf
+        if ($tailLine.EndsWith("`r")) { $tailLine = $tailLine.Substring(0, $tailLine.Length - 1) }
+        $State.content_line_buf = ''
+        Write-AgentMarkdownStreamLine -State $State.md_state -RawLine $tailLine
+    }
+    Flush-AgentMarkdownStream -State $State.md_state
+    Write-Host ('  ' + $script:Gm.Grey0 + $script:Box.BL + ($script:Box.H * 16) + $script:Gm.Reset)
+    $State.md_state = New-AgentMarkdownStreamState
+    $State.active_section = 'none'
+    $State.at_line_start = $true
+}
+
 function Write-AgentLiveStreamDelta {
     param(
         [hashtable]$State,
@@ -2444,58 +2485,65 @@ function Write-AgentLiveStreamDelta {
         [AllowEmptyString()][string]$Delta
     )
     if (-not $State -or -not $Delta -or $script:OutputMode -eq 'json') { return }
-    $clean = Format-TuiText -Text $Delta -Multiline
-    if (-not $clean) { return }
-    $norm = $clean.Replace("`r`n", "`n").Replace("`r", "`n")
     if ($Kind -eq 'reasoning') {
+        $clean = Format-TuiText -Text $Delta -Multiline
+        if (-not $clean) { return }
+        $norm = $clean.Replace("`r`n", "`n").Replace("`r", "`n")
         if ($State.active_section -ne 'reasoning') {
             if ($State.active_section -eq 'content') {
-                if (-not $State.at_line_start) { Write-Host '' }
-                Write-Host ('  ' + $script:Gm.Grey0 + $script:Box.BL + ($script:Box.H * 16) + $script:Gm.Reset)
-                $State.at_line_start = $true
+                Flush-AgentLiveContentSection -State $State
             }
             Write-Host ("`n  " + $script:Gm.Grey0 + $script:Box.TL + $script:Box.H + ' [reasoning]' + $script:Gm.Reset)
             $State.active_section = 'reasoning'
             $State.at_line_start = $true
         }
-        $colorPrefix = $script:Gm.Grey1
         $State.streamed_reasoning = $true
-    }
-    else {
-        if ($State.active_section -ne 'content') {
-            if ($State.active_section -eq 'reasoning') {
-                if (-not $State.at_line_start) { Write-Host '' }
-                Write-Host ('  ' + $script:Gm.Grey0 + $script:Box.BL + ($script:Box.H * 12) + $script:Gm.Reset)
+        $State.saw_any_output = $true
+        $segments = @($norm -split "`n")
+        for ($sIdx = 0; $sIdx -lt $segments.Count; $sIdx++) {
+            $seg = [string]$segments[$sIdx]
+            $hasNewlineAfter = ($sIdx -lt ($segments.Count - 1))
+            if ($State.at_line_start -and ($seg.Length -gt 0 -or $hasNewlineAfter)) {
+                Write-Host ('  ' + $script:Gm.Grey0 + $script:Box.V + ' ' + $script:Gm.Reset) -NoNewline
+                $State.at_line_start = $false
+            }
+            if ($seg.Length -gt 0) {
+                Write-Host ($script:Gm.Grey1 + $seg + $script:Gm.Reset) -NoNewline
+            }
+            if ($hasNewlineAfter) {
+                Write-Host ''
                 $State.at_line_start = $true
             }
-            Write-Host ("`n  " + $script:Gm.Grey0 + $script:Box.TL + $script:Box.H + ' ' + $script:Gm.BoldGreen + $script:Box.Dot + ' Shellossus' + $script:Gm.Reset)
-            $State.active_section = 'content'
-            $State.at_line_start = $true
         }
-        $colorPrefix = $script:Gm.Fg
-        $State.streamed_content = $true
+        return
     }
-    $State.saw_any_output = $true
-    $segments = @($norm -split "`n")
-    for ($sIdx = 0; $sIdx -lt $segments.Count; $sIdx++) {
-        $seg = [string]$segments[$sIdx]
-        $hasNewlineAfter = ($sIdx -lt ($segments.Count - 1))
-        if ($State.at_line_start -and ($seg.Length -gt 0 -or $hasNewlineAfter)) {
-            Write-Host ('  ' + $script:Gm.Grey0 + $script:Box.V + ' ' + $script:Gm.Reset) -NoNewline
-            $State.at_line_start = $false
-        }
-        if ($seg.Length -gt 0) {
-            Write-Host ($colorPrefix + $seg + $script:Gm.Reset) -NoNewline
-        }
-        if ($hasNewlineAfter) {
-            Write-Host ''
+    if ($State.active_section -ne 'content') {
+        if ($State.active_section -eq 'reasoning') {
+            if (-not $State.at_line_start) { Write-Host '' }
+            Write-Host ('  ' + $script:Gm.Grey0 + $script:Box.BL + ($script:Box.H * 12) + $script:Gm.Reset)
             $State.at_line_start = $true
         }
+        Write-Host ("`n  " + $script:Gm.Grey0 + $script:Box.TL + $script:Box.H + ' ' + $script:Gm.BoldGreen + $script:Box.Dot + ' Shellossus' + $script:Gm.Reset)
+        $State.active_section = 'content'
+        $State.at_line_start = $true
+        if ($null -eq $State.md_state) { $State.md_state = New-AgentMarkdownStreamState }
+        if ($null -eq $State.content_line_buf) { $State.content_line_buf = '' }
+    }
+    $State.streamed_content = $true
+    $State.saw_any_output = $true
+    $State.content_line_buf += $Delta
+    while ($true) {
+        $nlIdx = $State.content_line_buf.IndexOf("`n")
+        if ($nlIdx -lt 0) { break }
+        $rawLn = $State.content_line_buf.Substring(0, $nlIdx)
+        if ($rawLn.EndsWith("`r")) { $rawLn = $rawLn.Substring(0, $rawLn.Length - 1) }
+        $State.content_line_buf = $State.content_line_buf.Substring($nlIdx + 1)
+        Write-AgentMarkdownStreamLine -State $State.md_state -RawLine $rawLn
     }
 }
 
 function Close-AgentLiveStream {
-    param([hashtable]$State)
+    param([hashtable]$State, [string]$ShowReasoning = $script:ShowReasoning)
     if (-not $State -or $script:OutputMode -eq 'json') { return }
     if ($State.active_section -eq 'reasoning') {
         if (-not $State.at_line_start) { Write-Host '' }
@@ -2504,10 +2552,15 @@ function Close-AgentLiveStream {
         $State.at_line_start = $true
     }
     elseif ($State.active_section -eq 'content') {
-        if (-not $State.at_line_start) { Write-Host '' }
-        Write-Host ('  ' + $script:Gm.Grey0 + $script:Box.BL + ($script:Box.H * 16) + $script:Gm.Reset)
-        $State.active_section = 'none'
-        $State.at_line_start = $true
+        Flush-AgentLiveContentSection -State $State
+    }
+    if ($State.saw_any_output -and $ShowReasoning -eq 'compact' -and $State.pending_reasoning_parts -and $State.pending_reasoning_parts.Count -gt 0) {
+        $tailReasoning = ($State.pending_reasoning_parts -join '')
+        $State.pending_reasoning_parts = @()
+        if ($tailReasoning.Trim()) {
+            Write-AgentReasoning -Text $tailReasoning -ViewMode 'compact'
+            $State.streamed_reasoning = $true
+        }
     }
 }
 
@@ -13108,6 +13161,9 @@ function New-AgentLiveStreamState {
         streamed_reasoning = $false
         streamed_content = $false
         saw_any_output = $false
+        content_line_buf = ''
+        md_state = (New-AgentMarkdownStreamState)
+        pending_reasoning_parts = @()
     }
 }
 
@@ -13167,14 +13223,36 @@ function Step-AgentLiveStreamFile {
         if (-not (Test-IsJsonObject -Value $ch) -or (-not (Test-IsJsonObject -Value $ch.delta))) { return }
         $delta = $ch.delta
         $dProps = @(Get-ObjectPropertyNames -InputObject $delta)
-        if ($ShowReasoning -eq 'full' -and ($dProps -contains 'reasoning_content') -and $delta.reasoning_content -is [string] -and $delta.reasoning_content.Length -gt 0) {
-            if ((-not $State.saw_any_output) -and ($null -ne $OnBeforeFirstOutput)) {
-                & $OnBeforeFirstOutput
+        if (($dProps -contains 'reasoning_content') -and $delta.reasoning_content -is [string] -and $delta.reasoning_content.Length -gt 0) {
+            if ($ShowReasoning -eq 'full') {
+                if ((-not $State.saw_any_output) -and ($null -ne $OnBeforeFirstOutput)) {
+                    & $OnBeforeFirstOutput
+                }
+                Write-AgentLiveStreamDelta -State $State -Kind 'reasoning' -Delta $delta.reasoning_content
+                $emitted = $true
             }
-            Write-AgentLiveStreamDelta -State $State -Kind 'reasoning' -Delta $delta.reasoning_content
-            $emitted = $true
+            elseif ($ShowReasoning -eq 'compact') {
+                if ($null -eq $State.pending_reasoning_parts) { $State.pending_reasoning_parts = @() }
+                $State.pending_reasoning_parts += $delta.reasoning_content
+            }
         }
         if (($dProps -contains 'content') -and $delta.content -is [string] -and $delta.content.Length -gt 0) {
+            if ($ShowReasoning -eq 'compact' -and $State.pending_reasoning_parts -and $State.pending_reasoning_parts.Count -gt 0) {
+                $compactReas = ($State.pending_reasoning_parts -join '')
+                $State.pending_reasoning_parts = @()
+                if ($compactReas.Trim()) {
+                    if ((-not $State.saw_any_output) -and ($null -ne $OnBeforeFirstOutput)) {
+                        & $OnBeforeFirstOutput
+                    }
+                    if ($State.active_section -eq 'content') {
+                        Flush-AgentLiveContentSection -State $State
+                    }
+                    Write-AgentReasoning -Text $compactReas -ViewMode 'compact'
+                    $State.streamed_reasoning = $true
+                    $State.saw_any_output = $true
+                    $emitted = $true
+                }
+            }
             if ((-not $State.saw_any_output) -and ($null -ne $OnBeforeFirstOutput)) {
                 & $OnBeforeFirstOutput
             }
@@ -13266,7 +13344,7 @@ function Wait-AgentProcessWithSpinner {
             Write-Host $clearLine -NoNewline
         }
         if ($liveStreamActive -and $liveState) {
-            Close-AgentLiveStream -State $liveState
+            Close-AgentLiveStream -State $liveState -ShowReasoning $script:ShowReasoning
             $script:LastHttpStreamedContent = [bool]$liveState.streamed_content
             $script:LastHttpStreamedReasoning = [bool]$liveState.streamed_reasoning
         }

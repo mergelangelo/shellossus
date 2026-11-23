@@ -3386,6 +3386,67 @@ $subRes = @(Invoke-ParallelSubagentProcesses -Root $WorkspacePath -Tasks @(@{ ro
                     $null = $jLine | ConvertFrom-Json -ErrorAction Stop
                 }
                 Assert-True ($script:lsCaptured.Count -ge 2 -and $lsJsonState.messages[-1].content -ceq 'UniqueStreamToken99') 'JSON mode emitted non-JSON live stream output.'
+
+                # 5. Compact reasoning mode flushes compact [reasoning] BEFORE streamed content (never after) without duplicates.
+                $script:lsCaptured = @()
+                $script:OutputMode = 'text'
+                $script:ShowReasoning = 'compact'
+                $script:lsCompleteBody = @(
+                    'data: {"choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":"Step 1\nStep 2\n"}}]}',
+                    '',
+                    'data: {"choices":[{"index":0,"delta":{"reasoning_content":"Step 3\nStep 4"}}]}',
+                    '',
+                    'data: {"choices":[{"index":0,"delta":{"content":"CompactOrderAnswer"}}]}',
+                    '',
+                    'data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}',
+                    '',
+                    'data: [DONE]',
+                    ''
+                ) -join "`n"
+                $lsCompactOrderState = @{
+                    session_id = 't9-compact-order'
+                    workspace = $workspacePath
+                    model = 'test-model'
+                    messages = @(@{ role = 'system'; content = 'sys' }, @{ role = 'user'; content = 'think then answer' })
+                }
+                Invoke-AgentTurn -State $lsCompactOrderState -Endpoint 'https://example.invalid/v1/chat/completions' -ModelId 'test-model' -ApiKey 'k' -Root $workspacePath -Steps 2
+                $compactOrderPlain = Strip-AnsiCodes -Text ($script:lsCaptured -join "`n")
+                $reasIdx = $compactOrderPlain.IndexOf('[reasoning: last 3 of 4 lines')
+                $ansIdx = $compactOrderPlain.IndexOf('CompactOrderAnswer')
+                $reasCount = ([regex]::Matches($compactOrderPlain, '\[reasoning:')).Count
+                Assert-True ($reasIdx -ge 0 -and $ansIdx -gt $reasIdx -and $reasCount -eq 1 -and (-not $compactOrderPlain.Contains('Step 1')) -and $compactOrderPlain.Contains('Step 4')) "Compact live stream printed reasoning out of order or duplicated (reasIdx=$reasIdx, ansIdx=$ansIdx, count=$reasCount): $compactOrderPlain"
+
+                # 6. Live stream renders Markdown incrementally (headings, bold/code inline, aligned tables, fenced code blocks).
+                $script:lsCaptured = @()
+                $script:OutputMode = 'text'
+                $script:ShowReasoning = 'hide'
+                $mdFile = New-AgentTempFile
+                try {
+                    $mdStream = @(
+                        'data: {"choices":[{"index":0,"delta":{"content":"# Title\nHello **bo"}}]}',
+                        '',
+                        'data: {"choices":[{"index":0,"delta":{"content":"ld** and `code`\n| A | B |\n|---|---|\n| 1 | **2** |\n"}}]}',
+                        '',
+                        'data: {"choices":[{"index":0,"delta":{"content":"```sql\nSELECT 1;\n```\n"}}]}',
+                        '',
+                        'data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}',
+                        '',
+                        'data: [DONE]',
+                        ''
+                    ) -join "`n"
+                    Set-Content -LiteralPath $mdFile.FullName -Value $mdStream -Encoding UTF8 -NoNewline
+                    $mdState = New-AgentLiveStreamState
+                    $null = Step-AgentLiveStreamFile -Path $mdFile.FullName -State $mdState -ShowReasoning 'hide' -Final
+                    Close-AgentLiveStream -State $mdState
+                    $mdRawOut = $script:lsCaptured -join "`n"
+                    $mdPlainOut = Strip-AnsiCodes -Text $mdRawOut
+                    Assert-True ($mdRawOut.Contains($script:Gm.BoldRed) -and $mdRawOut.Contains($script:Gm.BoldOrange) -and (-not $mdPlainOut.Contains('# Title')) -and (-not $mdPlainOut.Contains('**bold**')) -and (-not $mdPlainOut.Contains('`code`'))) "Live stream did not render Markdown headings or inline styles: $mdPlainOut"
+                    Assert-True ($mdPlainOut.Contains('| A   | B   |') -and $mdPlainOut.Contains('|-----+-----|') -and $mdPlainOut.Contains('| 1   | 2   |')) "Live stream did not align Markdown table: $mdPlainOut"
+                    Assert-True ($mdPlainOut.Contains(' sql ') -and $mdPlainOut.Contains('SELECT 1;') -and (-not $mdPlainOut.Contains('```sql'))) "Live stream did not render fenced code block: $mdPlainOut"
+                }
+                finally {
+                    Remove-Item -LiteralPath $mdFile.FullName -Force -ErrorAction SilentlyContinue
+                }
             }
         }
         finally {
