@@ -1528,6 +1528,7 @@ if ($resolved -cne (Get-Item -LiteralPath $AgentPath -Force).FullName) {
 }
 $env:OPENAI_API_KEY = 'keep-openai-parent'
 Invoke-AgentHttpRequest -Uri "http://127.0.0.1:$Port/v1/chat/completions" -ApiKey 'secret-key-xyz' -Body '{"ping":1}' -OutFile $HttpOut -TimeoutSec 10 -ForceBackgroundWorker
+$pid1 = if ($script:PersistentHttpWorker) { [int]$script:PersistentHttpWorker.proc_id } else { 0 }
 if ($env:OPENAI_API_KEY -cne 'keep-openai-parent') {
     throw 'OPENAI_API_KEY was not restored after background HTTP worker.'
 }
@@ -1538,6 +1539,7 @@ try {
 catch {
     $err401 = [string]$_.Exception.Message
 }
+$pid2 = if ($script:PersistentHttpWorker) { [int]$script:PersistentHttpWorker.proc_id } else { 0 }
 $err429 = ''
 $retryAfter429 = $null
 try {
@@ -1547,6 +1549,7 @@ catch {
     $err429 = [string]$_.Exception.Message
     $retryAfter429 = $script:LastHttpRetryAfterSec
 }
+$pid3 = if ($script:PersistentHttpWorker) { [int]$script:PersistentHttpWorker.proc_id } else { 0 }
 $errScheme = ''
 try {
     Invoke-AgentHttpRequest -Uri 'badkeyscheme://example.invalid/v1' -ApiKey 'badkeyscheme' -Body '{}' -OutFile $HttpOut -TimeoutSec 5 -ForceBackgroundWorker
@@ -1554,6 +1557,10 @@ try {
 catch {
     $errScheme = [string]$_.Exception.Message
 }
+$pid4 = if ($script:PersistentHttpWorker) { [int]$script:PersistentHttpWorker.proc_id } else { 0 }
+$qDirBeforeStop = if ($script:PersistentHttpWorker) { [string]$script:PersistentHttpWorker.queue_dir } else { '' }
+Stop-AgentPersistentHttpWorker
+$qDirRemoved = [bool]($qDirBeforeStop -and (-not (Test-Path -LiteralPath $qDirBeforeStop)))
 $webErr = ''
 try {
     Invoke-AgentWebDownload -Uri "http://127.0.0.1:$Port/private" -OutFile $WebOut
@@ -1572,6 +1579,11 @@ $subRes = @(Invoke-ParallelSubagentProcesses -Root $WorkspacePath -Tasks @(@{ ro
     err_429 = $err429
     retry_after_429 = $retryAfter429
     err_scheme = $errScheme
+    pid1 = $pid1
+    pid2 = $pid2
+    pid3 = $pid3
+    pid4 = $pid4
+    queue_dir_removed = $qDirRemoved
     web_err = $webErr
     sub_status = [string]$subRes[0].status
     sub_output = [string]$subRes[0].output
@@ -1590,6 +1602,9 @@ $subRes = @(Invoke-ParallelSubagentProcesses -Root $WorkspacePath -Tasks @(@{ ro
             Assert-True ($driverRes.err_401 -like '*401*' -and $driverRes.err_401.Contains('[redacted]') -and $driverRes.err_401 -notlike '*secret-key-xyz*') "Background HTTP 401 error failed to redact ApiKey: $($driverRes.err_401)"
             Assert-True ($driverRes.err_429 -like '*429*' -and $driverRes.err_429 -notlike '*secret-key-xyz*' -and [int]$driverRes.retry_after_429 -eq 9) "Background HTTP 429 worker did not propagate Retry-After=9 or leaked ApiKey: err='$($driverRes.err_429)' ra='$($driverRes.retry_after_429)'"
             Assert-True ([bool]$driverRes.err_scheme -and (-not $driverRes.err_scheme.Contains('badkeyscheme'))) "Unsupported URI did not fail or leaked ApiKey: $($driverRes.err_scheme)"
+            Assert-True ([int]$driverRes.pid1 -gt 0 -and [int]$driverRes.pid1 -eq [int]$driverRes.pid2 -and [int]$driverRes.pid2 -eq [int]$driverRes.pid3) "Persistent HTTP worker was not reused across same-credential requests: pid1=$($driverRes.pid1) pid2=$($driverRes.pid2) pid3=$($driverRes.pid3)"
+            Assert-True ([int]$driverRes.pid4 -gt 0 -and [int]$driverRes.pid4 -ne [int]$driverRes.pid3) "Persistent HTTP worker did not recycle on credential change: pid3=$($driverRes.pid3) pid4=$($driverRes.pid4)"
+            Assert-True ([bool]$driverRes.queue_dir_removed) 'Stop-AgentPersistentHttpWorker did not clean up worker queue directory.'
             Assert-True ($driverRes.web_err -like '*Blocked request*') "Renamed script -InternalWorker web did not block loopback SSRF: $($driverRes.web_err)"
             Assert-True ($driverRes.sub_status -ceq 'completed' -and $driverRes.sub_output -ceq 'renamed subagent ok') "Renamed script -InternalWorker subagent failed: status=$($driverRes.sub_status) output=$($driverRes.sub_output)"
 
@@ -3551,5 +3566,6 @@ $subRes = @(Invoke-ParallelSubagentProcesses -Root $WorkspacePath -Tasks @(@{ ro
     }
 }
 finally {
+    Stop-AgentPersistentHttpWorker
     Remove-TestEnvironment -Env $envData
 }

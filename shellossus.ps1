@@ -12642,6 +12642,8 @@ function Invoke-AgentProfileInstall {
 $script:LastHttpRetryAfterSec = $null
 $script:LastHttpStreamedContent = $false
 $script:LastHttpStreamedReasoning = $false
+$script:PersistentHttpWorker = $null
+$script:DisablePersistentHttpWorker = $false
 
 function ConvertFrom-AgentRetryAfterValue {
     param($Value)
@@ -13419,7 +13421,15 @@ function Step-AgentLiveStreamFile {
 }
 
 function Wait-AgentProcessWithSpinner {
-    param($Process, [string]$StatusLabel = 'Waiting for model', [int]$TimeoutSec = $script:RequestTimeoutSec, [int]$PollMs = 200, [string]$ResponsePath, [switch]$LiveStream)
+    param(
+        $Process,
+        [string]$StatusLabel = 'Waiting for model',
+        [int]$TimeoutSec = $script:RequestTimeoutSec,
+        [int]$PollMs = 200,
+        [string]$ResponsePath,
+        [switch]$LiveStream,
+        [string]$DoneMarkerPath = ''
+    )
     $frames = @('|', '/', '-', '\')
     $startWait = Get-Date
     $spinState = @{
@@ -13429,6 +13439,8 @@ function Wait-AgentProcessWithSpinner {
     }
     $liveStreamActive = ($LiveStream -and $script:StreamRequests -and ($script:OutputMode -ne 'json') -and [bool]$ResponsePath)
     $liveState = if ($liveStreamActive) { New-AgentLiveStreamState } else { $null }
+    $jobCompleted = $false
+    $pollIter = 0
     $clearSpinnerLine = {
         if ($spinState.show -and $spinState.frame_idx -gt 0) {
             $clearWidth = if ($spinState.last_vis_len -gt 0) { $spinState.last_vis_len } else { $StatusLabel.Length + 28 }
@@ -13439,7 +13451,7 @@ function Wait-AgentProcessWithSpinner {
         $spinState.show = $false
     }
     try {
-        while (-not $Process.HasExited) {
+        while ((-not $Process.HasExited) -and (-not ($DoneMarkerPath -and (Test-Path -LiteralPath $DoneMarkerPath -PathType Leaf)))) {
             if ($ResponsePath) { Assert-AgentApiResponseSize -Path $ResponsePath }
             if ($liveStreamActive) {
                 $null = Step-AgentLiveStreamFile -Path $ResponsePath -State $liveState -ShowReasoning $script:ShowReasoning -OnBeforeFirstOutput $clearSpinnerLine
@@ -13463,9 +13475,33 @@ function Wait-AgentProcessWithSpinner {
                 }
                 throw "Request timed out after ${TimeoutSec}s."
             }
-            Start-Sleep -Milliseconds $PollMs
+            $sleepMs = $PollMs
+            if ($DoneMarkerPath -and $pollIter -lt 4 -and $sleepMs -gt 25) {
+                $sleepMs = 25
+            }
+            $pollIter++
+            Start-Sleep -Milliseconds $sleepMs
         }
-        if ($liveStreamActive -and $liveState.saw_any_output -and ($null -eq $Process.ExitCode -or [int]$Process.ExitCode -eq 0)) {
+        $completedOk = $false
+        if ($DoneMarkerPath) {
+            if (Test-Path -LiteralPath $DoneMarkerPath -PathType Leaf) {
+                $jobCompleted = $true
+                try {
+                    $doneRaw = Get-Content -LiteralPath $DoneMarkerPath -Raw -Encoding UTF8 -ErrorAction Stop
+                    $doneObj = $doneRaw | ConvertFrom-Json -ErrorAction Stop
+                    if ((Test-IsJsonObject -Value $doneObj) -and $doneObj.ok -eq $true) {
+                        $completedOk = $true
+                    }
+                }
+                catch {
+                    $completedOk = $false
+                }
+            }
+        }
+        else {
+            $completedOk = ($null -eq $Process.ExitCode -or [int]$Process.ExitCode -eq 0)
+        }
+        if ($liveStreamActive -and $liveState.saw_any_output -and $completedOk) {
             $null = Step-AgentLiveStreamFile -Path $ResponsePath -State $liveState -ShowReasoning $script:ShowReasoning -Final -OnBeforeFirstOutput $clearSpinnerLine
         }
     }
@@ -13480,7 +13516,7 @@ function Wait-AgentProcessWithSpinner {
             $script:LastHttpStreamedContent = [bool]$liveState.streamed_content
             $script:LastHttpStreamedReasoning = [bool]$liveState.streamed_reasoning
         }
-        if (-not $Process.HasExited) {
+        if ((-not ($DoneMarkerPath -and $jobCompleted)) -and (-not $Process.HasExited)) {
             Stop-Process -InputObject $Process -Force -ErrorAction SilentlyContinue
             Stop-Process -Id $Process.Id -Force -ErrorAction SilentlyContinue
             Wait-Process -InputObject $Process -Timeout 2 -ErrorAction SilentlyContinue
@@ -13488,23 +13524,167 @@ function Wait-AgentProcessWithSpinner {
     }
 }
 
-function Invoke-InternalHttpWorker {
-    $script:InternalWorkerFailed = $false
-    $workerAuthHdr = 'Authorization'
-    $workerExtraHdrs = @{}
+function New-AgentPrivateWorkerDir {
+    $baseTmp = if ($env:TEMP) { $env:TEMP } elseif ($env:TMPDIR) { $env:TMPDIR } elseif ($env:TMP) { $env:TMP } else { '/tmp' }
+    if ($env:OS -ne 'Windows_NT' -and (Test-PathHasReparsePoint -Path $baseTmp)) {
+        $physicalCand = '/private' + $baseTmp
+        if ((Test-Path -LiteralPath $physicalCand) -and (-not (Test-PathHasReparsePoint -Path $physicalCand))) {
+            $baseTmp = $physicalCand
+        }
+    }
+    if (-not (Test-Path -LiteralPath $baseTmp)) {
+        try { New-Item -ItemType Directory -Path $baseTmp -Force -ErrorAction Stop | Out-Null }
+        catch { return '' }
+    }
+    for ($attempt = 0; $attempt -lt 20; $attempt++) {
+        $r1 = Get-Random -Minimum 100000 -Maximum 999999
+        $r2 = Get-Random -Minimum 100000 -Maximum 999999
+        $cand = Join-Path $baseTmp ("shellossus-httpw-$PID-$r1-$r2")
+        if (-not (Test-Path -LiteralPath $cand)) {
+            $dir = $null
+            try {
+                $dir = New-Item -ItemType Directory -Path $cand -ErrorAction Stop
+                if ($env:OS -ne 'Windows_NT') {
+                    Set-ItemProperty -LiteralPath $dir.FullName -Name UnixFileMode -Value 448 -ErrorAction Stop
+                    $dirCheck = Get-Item -LiteralPath $dir.FullName -Force -ErrorAction Stop
+                    if ($null -eq $dirCheck.UnixFileMode -or (([int]$dirCheck.UnixFileMode -band 63) -ne 0)) {
+                        throw 'Private worker directory mode check failed.'
+                    }
+                }
+                if (-not (Test-AgentConfigPrivacy -Path (Join-Path $dir.FullName 'probe') -ParentOnly)) {
+                    throw 'Private worker directory privacy check failed.'
+                }
+                return [string]$dir.FullName
+            }
+            catch {
+                if ($dir -and $dir.FullName) {
+                    Remove-Item -LiteralPath $dir.FullName -Recurse -Force -ErrorAction SilentlyContinue
+                }
+                return ''
+            }
+        }
+    }
+    return ''
+}
+
+function Stop-AgentPersistentHttpWorker {
+    $w = $script:PersistentHttpWorker
+    $script:PersistentHttpWorker = $null
+    if ($null -eq $w) { return }
     try {
-        if (-not $env:SHELLOSSUS_HTTP_URI) { throw 'HTTP worker URI is required.' }
-        if (-not $env:SHELLOSSUS_HTTP_IN) { throw 'HTTP worker input file is required.' }
-        if (-not $env:SHELLOSSUS_HTTP_OUT) { throw 'HTTP worker output file is required.' }
-        $timeoutVal = if ($env:SHELLOSSUS_HTTP_TIMEOUT) { [int]$env:SHELLOSSUS_HTTP_TIMEOUT } else { 180 }
-        if ($env:SHELLOSSUS_HTTP_AUTH_HEADER) {
-            $workerAuthHdr = ConvertTo-AgentAuthHeaderName -HeaderSpec $env:SHELLOSSUS_HTTP_AUTH_HEADER
+        if ($w.queue_dir -and (Test-Path -LiteralPath $w.queue_dir -PathType Container)) {
+            $stopTmp = Join-Path $w.queue_dir 'stop.tmp'
+            $stopFlag = Join-Path $w.queue_dir 'stop.flag'
+            try {
+                Set-AgentUtf8Content -LiteralPath $stopTmp -Value 'stop'
+                Move-Item -LiteralPath $stopTmp -Destination $stopFlag -Force -ErrorAction SilentlyContinue
+            }
+            catch {}
         }
-        if ($env:SHELLOSSUS_HTTP_EXTRA_HEADERS) {
-            $workerExtraHdrs = ConvertFrom-AgentExtraHeaders -HeadersSpec $env:SHELLOSSUS_HTTP_EXTRA_HEADERS -AuthHeaderName $workerAuthHdr
+        if ($w.proc) {
+            for ($wi = 0; $wi -lt 8; $wi++) {
+                if ($w.proc.HasExited) { break }
+                Start-Sleep -Milliseconds 50
+            }
+            if (-not $w.proc.HasExited) {
+                Stop-Process -InputObject $w.proc -Force -ErrorAction SilentlyContinue
+                if ($w.proc_id -gt 0) {
+                    Stop-Process -Id $w.proc_id -Force -ErrorAction SilentlyContinue
+                }
+                Wait-Process -InputObject $w.proc -Timeout 2 -ErrorAction SilentlyContinue
+            }
         }
-        $workerHeaders = New-AgentApiHeaders -ApiKey $env:SHELLOSSUS_API_KEY -AuthHeaderName $workerAuthHdr -ExtraHeaders $workerExtraHdrs -AcceptSse:($env:SHELLOSSUS_HTTP_STREAM -eq '1')
-        $null = Microsoft.PowerShell.Utility\Invoke-WebRequest -Uri $env:SHELLOSSUS_HTTP_URI -Method 'Post' -Headers $workerHeaders -ContentType 'application/json; charset=utf-8' -InFile $env:SHELLOSSUS_HTTP_IN -OutFile $env:SHELLOSSUS_HTTP_OUT -MaximumRedirection 0 -TimeoutSec $timeoutVal -UseBasicParsing -ErrorAction Stop
+    }
+    catch {}
+    finally {
+        if ($w.queue_dir -and (Test-Path -LiteralPath $w.queue_dir)) {
+            Remove-Item -LiteralPath $w.queue_dir -Recurse -Force -ErrorAction SilentlyContinue
+        }
+        if ($w.stdout_file) { Remove-Item -LiteralPath $w.stdout_file -Force -ErrorAction SilentlyContinue }
+        if ($w.stderr_file) { Remove-Item -LiteralPath $w.stderr_file -Force -ErrorAction SilentlyContinue }
+    }
+}
+
+function Get-AgentPersistentHttpWorker {
+    param(
+        [string]$ShellExe,
+        [string]$WorkerScript,
+        [string]$ApiKey,
+        [string]$AuthHeaderName,
+        [AllowEmptyString()][string]$ExtraHeadersJson = ''
+    )
+    $effAuth = if ($AuthHeaderName) { $AuthHeaderName } else { 'Authorization' }
+    $fingerprint = "$WorkerScript|$effAuth|$ApiKey|$ExtraHeadersJson"
+    $existing = $script:PersistentHttpWorker
+    if ($null -ne $existing) {
+        $alive = $false
+        try { $alive = ($null -ne $existing.proc) -and (-not $existing.proc.HasExited) } catch { $alive = $false }
+        if ($alive -and ($existing.auth_fingerprint -ceq $fingerprint) -and $existing.queue_dir -and (Test-Path -LiteralPath $existing.queue_dir -PathType Container) -and (-not (Test-PathHasReparsePoint -Path $existing.queue_dir))) {
+            return $existing
+        }
+        Stop-AgentPersistentHttpWorker
+    }
+    $queueDir = New-AgentPrivateWorkerDir
+    if (-not $queueDir) { return $null }
+    $stdoutTemp = New-AgentTempFile
+    $stderrTemp = New-AgentTempFile
+    try {
+        $argList = Get-AgentWorkerArguments -ScriptPath $WorkerScript -WorkerMode 'http'
+        $parentTicks = Get-AgentProcessStartTicks -ProcessId $PID
+        $proc = Invoke-WithProcessEnvironment -Values @{
+            SHELLOSSUS_HTTP_QUEUE_DIR = $queueDir
+            SHELLOSSUS_HTTP_PARENT_PID = [string]$PID
+            SHELLOSSUS_HTTP_PARENT_TICKS = [string]$parentTicks
+            SHELLOSSUS_HTTP_IDLE_SEC = '900'
+            SHELLOSSUS_API_KEY = $ApiKey
+            OPENAI_API_KEY = $null
+            SHELLOSSUS_HTTP_AUTH_HEADER = $effAuth
+            SHELLOSSUS_HTTP_EXTRA_HEADERS = $(if ($ExtraHeadersJson) { $ExtraHeadersJson } else { $null })
+        } -Action {
+            Start-Process -FilePath $ShellExe -ArgumentList $argList -RedirectStandardOutput $stdoutTemp.FullName -RedirectStandardError $stderrTemp.FullName -NoNewWindow -PassThru -ErrorAction Stop
+        }
+        $procId = 0
+        try { $procId = [int]$proc.Id } catch { $procId = 0 }
+        $worker = @{
+            proc = $proc
+            proc_id = $procId
+            queue_dir = $queueDir
+            stdout_file = $stdoutTemp.FullName
+            stderr_file = $stderrTemp.FullName
+            auth_fingerprint = $fingerprint
+            worker_script = $WorkerScript
+            seq = 0
+        }
+        $script:PersistentHttpWorker = $worker
+        return $worker
+    }
+    catch {
+        Remove-Item -LiteralPath $queueDir -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $stdoutTemp.FullName, $stderrTemp.FullName -Force -ErrorAction SilentlyContinue
+        return $null
+    }
+}
+
+function Invoke-InternalHttpSingleRequest {
+    param(
+        [string]$Uri,
+        [string]$InFile,
+        [string]$OutFile,
+        [string]$ErrFile,
+        [string]$MetaFile,
+        [int]$TimeoutSec = 180,
+        [bool]$AcceptSse = $false,
+        [string]$ApiKey = '',
+        [string]$AuthHeaderName = 'Authorization',
+        [hashtable]$ExtraHeaders = @{}
+    )
+    try {
+        if (-not $Uri) { throw 'HTTP worker URI is required.' }
+        if (-not $InFile) { throw 'HTTP worker input file is required.' }
+        if (-not $OutFile) { throw 'HTTP worker output file is required.' }
+        $workerHeaders = New-AgentApiHeaders -ApiKey $ApiKey -AuthHeaderName $AuthHeaderName -ExtraHeaders $ExtraHeaders -AcceptSse:$AcceptSse
+        $null = Microsoft.PowerShell.Utility\Invoke-WebRequest -Uri $Uri -Method 'Post' -Headers $workerHeaders -ContentType 'application/json; charset=utf-8' -InFile $InFile -OutFile $OutFile -MaximumRedirection 0 -TimeoutSec $TimeoutSec -UseBasicParsing -ErrorAction Stop
+        return $true
     }
     catch {
         $errRec = $_
@@ -13525,17 +13705,129 @@ function Invoke-InternalHttpWorker {
             if ($details.Length -gt 300) { $details = $details.Substring(0, 300) + '...' }
             $msg = $msg + ' (' + $details + ')'
         }
-        if ($env:SHELLOSSUS_HTTP_META) {
+        if ($MetaFile) {
             try {
                 $retryAfterSec = Get-AgentRetryAfterSeconds -ErrorRecord $errRec
                 if ($null -ne $retryAfterSec) {
-                    Set-AgentUtf8Content -LiteralPath $env:SHELLOSSUS_HTTP_META -Value (@{ retry_after_sec = [int]$retryAfterSec } | ConvertTo-Json -Compress)
+                    Set-AgentUtf8Content -LiteralPath $MetaFile -Value (@{ retry_after_sec = [int]$retryAfterSec } | ConvertTo-Json -Compress)
                 }
             }
             catch {}
         }
+        if ($ErrFile) {
+            $msg = Protect-AgentHeaderSecrets -Text $msg -ApiKey $ApiKey -ExtraHeaders $ExtraHeaders
+            Set-AgentUtf8Content -LiteralPath $ErrFile -Value $msg
+        }
+        return $false
+    }
+}
+
+function Invoke-InternalHttpWorkerLoop {
+    param(
+        [string]$QueueDir,
+        [string]$ApiKey,
+        [string]$AuthHeaderName,
+        [hashtable]$ExtraHeaders
+    )
+    if (-not $QueueDir -or (-not (Test-Path -LiteralPath $QueueDir -PathType Container)) -or (Test-PathHasReparsePoint -Path $QueueDir)) {
+        throw 'Invalid HTTP worker queue directory.'
+    }
+    $parentPid = 0
+    if ($env:SHELLOSSUS_HTTP_PARENT_PID -and $env:SHELLOSSUS_HTTP_PARENT_PID -match '^\d+$') {
+        $parentPid = [int]$env:SHELLOSSUS_HTTP_PARENT_PID
+    }
+    $parentTicks = [long]0
+    if ($env:SHELLOSSUS_HTTP_PARENT_TICKS -and $env:SHELLOSSUS_HTTP_PARENT_TICKS -match '^\d+$') {
+        $parentTicks = [long]$env:SHELLOSSUS_HTTP_PARENT_TICKS
+    }
+    $idleSec = 900
+    if ($env:SHELLOSSUS_HTTP_IDLE_SEC -and $env:SHELLOSSUS_HTTP_IDLE_SEC -match '^\d+$') {
+        $idleSec = [int]$env:SHELLOSSUS_HTTP_IDLE_SEC
+        if ($idleSec -lt 1) { $idleSec = 1 }
+    }
+    $nextSeq = 1
+    $lastActivity = Get-Date
+    $lastParentCheck = Get-Date
+    $stopFlagPath = Join-Path $QueueDir 'stop.flag'
+    while ($true) {
+        $jobPath = Join-Path $QueueDir ("job-$nextSeq.json")
+        if (Test-Path -LiteralPath $jobPath -PathType Leaf) {
+            $jobItem = Get-Item -LiteralPath $jobPath -Force -ErrorAction SilentlyContinue
+            if ($null -eq $jobItem -or $jobItem.PSIsContainer -or (($jobItem.Attributes -band 1024) -ne 0)) {
+                throw 'Unsafe HTTP worker job file.'
+            }
+            $jobRaw = Get-Content -LiteralPath $jobPath -Raw -Encoding UTF8 -ErrorAction Stop
+            Remove-Item -LiteralPath $jobPath -Force -ErrorAction SilentlyContinue
+            $job = $jobRaw | ConvertFrom-Json -ErrorAction Stop
+            $jobTimeout = if ($null -ne $job.timeout_sec) { [int]$job.timeout_sec } else { 180 }
+            $jobStream = [bool]($job.stream -eq $true)
+            $jobOk = Invoke-InternalHttpSingleRequest `
+                -Uri ([string]$job.uri) `
+                -InFile ([string]$job.in_file) `
+                -OutFile ([string]$job.out_file) `
+                -ErrFile ([string]$job.err_file) `
+                -MetaFile ([string]$job.meta_file) `
+                -TimeoutSec $jobTimeout `
+                -AcceptSse $jobStream `
+                -ApiKey $ApiKey `
+                -AuthHeaderName $AuthHeaderName `
+                -ExtraHeaders $ExtraHeaders
+            $doneTmp = Join-Path $QueueDir ("done-$nextSeq.tmp")
+            $donePath = Join-Path $QueueDir ("done-$nextSeq.json")
+            Set-AgentUtf8Content -LiteralPath $doneTmp -Value (@{ seq = $nextSeq; ok = [bool]$jobOk } | ConvertTo-Json -Compress)
+            Move-Item -LiteralPath $doneTmp -Destination $donePath -Force -ErrorAction Stop
+            $nextSeq++
+            $lastActivity = Get-Date
+            continue
+        }
+        if (Test-Path -LiteralPath $stopFlagPath) { break }
+        $now = Get-Date
+        if ($parentPid -gt 0 -and ($now - $lastParentCheck).TotalSeconds -ge 1) {
+            $pLive = Get-Process -Id $parentPid -ErrorAction SilentlyContinue
+            if ($null -eq $pLive) { break }
+            if ($parentTicks -gt 0) {
+                $liveTicks = Get-AgentProcessStartTicks -ProcessId $parentPid
+                if ($liveTicks -gt 0 -and $liveTicks -ne $parentTicks) { break }
+            }
+            $lastParentCheck = $now
+        }
+        if (($now - $lastActivity).TotalSeconds -ge $idleSec) { break }
+        Start-Sleep -Milliseconds 15
+    }
+}
+
+function Invoke-InternalHttpWorker {
+    $script:InternalWorkerFailed = $false
+    $workerAuthHdr = 'Authorization'
+    $workerExtraHdrs = @{}
+    try {
+        if ($env:SHELLOSSUS_HTTP_AUTH_HEADER) {
+            $workerAuthHdr = ConvertTo-AgentAuthHeaderName -HeaderSpec $env:SHELLOSSUS_HTTP_AUTH_HEADER
+        }
+        if ($env:SHELLOSSUS_HTTP_EXTRA_HEADERS) {
+            $workerExtraHdrs = ConvertFrom-AgentExtraHeaders -HeadersSpec $env:SHELLOSSUS_HTTP_EXTRA_HEADERS -AuthHeaderName $workerAuthHdr
+        }
+        if ($env:SHELLOSSUS_HTTP_QUEUE_DIR) {
+            Invoke-InternalHttpWorkerLoop -QueueDir $env:SHELLOSSUS_HTTP_QUEUE_DIR -ApiKey ([string]$env:SHELLOSSUS_API_KEY) -AuthHeaderName $workerAuthHdr -ExtraHeaders $workerExtraHdrs
+            return
+        }
+        $timeoutVal = if ($env:SHELLOSSUS_HTTP_TIMEOUT) { [int]$env:SHELLOSSUS_HTTP_TIMEOUT } else { 180 }
+        $ok = Invoke-InternalHttpSingleRequest `
+            -Uri ([string]$env:SHELLOSSUS_HTTP_URI) `
+            -InFile ([string]$env:SHELLOSSUS_HTTP_IN) `
+            -OutFile ([string]$env:SHELLOSSUS_HTTP_OUT) `
+            -ErrFile ([string]$env:SHELLOSSUS_HTTP_ERR) `
+            -MetaFile ([string]$env:SHELLOSSUS_HTTP_META) `
+            -TimeoutSec $timeoutVal `
+            -AcceptSse ($env:SHELLOSSUS_HTTP_STREAM -eq '1') `
+            -ApiKey ([string]$env:SHELLOSSUS_API_KEY) `
+            -AuthHeaderName $workerAuthHdr `
+            -ExtraHeaders $workerExtraHdrs
+        if (-not $ok) { $script:InternalWorkerFailed = $true }
+    }
+    catch {
+        $msg = Protect-AgentHeaderSecrets -Text ([string]$_.Exception.Message) -ApiKey ([string]$env:SHELLOSSUS_API_KEY) -ExtraHeaders $workerExtraHdrs
         if ($env:SHELLOSSUS_HTTP_ERR) {
-            $msg = Protect-AgentHeaderSecrets -Text $msg -ApiKey $env:SHELLOSSUS_API_KEY -ExtraHeaders $workerExtraHdrs
             Set-AgentUtf8Content -LiteralPath $env:SHELLOSSUS_HTTP_ERR -Value $msg
         }
         $script:InternalWorkerFailed = $true
@@ -13590,15 +13882,100 @@ function Invoke-AgentHttpRequest {
     $reqTemp = New-AgentTempFile
     $errTemp = New-AgentTempFile
     $metaTemp = New-AgentTempFile
-    $stdoutTemp = New-AgentTempFile
-    $stderrTemp = New-AgentTempFile
+    $stdoutTemp = $null
+    $stderrTemp = $null
     try {
         Set-Content -LiteralPath $reqTemp.FullName -Value $asciiBody -Encoding Ascii -NoNewline -ErrorAction Stop
-        $argList = Get-AgentWorkerArguments -ScriptPath $workerScript -WorkerMode 'http'
+        $authHdrVal = if ($script:AuthHeaderName) { [string]$script:AuthHeaderName } else { 'Authorization' }
         $extraHdrJson = if ($script:ExtraHttpHeaders -and $script:ExtraHttpHeaders.Count -gt 0) {
             ConvertTo-AsciiJson -Json ($script:ExtraHttpHeaders | ConvertTo-Json -Compress)
         }
         else { $null }
+        $spCmd = Get-Command -Name 'Start-Process' -ErrorAction SilentlyContinue
+        $canUsePersistent = (-not $script:DisablePersistentHttpWorker) -and (-not ($spCmd -and $spCmd.CommandType -eq 'Function'))
+        $persistentWorker = $null
+        if ($canUsePersistent) {
+            $persistentWorker = Get-AgentPersistentHttpWorker -ShellExe $shellExe -WorkerScript $workerScript -ApiKey $ApiKey -AuthHeaderName $authHdrVal -ExtraHeadersJson $(if ($extraHdrJson) { $extraHdrJson } else { '' })
+        }
+        if ($null -ne $persistentWorker) {
+            $persistentWorker.seq = [int]$persistentWorker.seq + 1
+            $seq = [int]$persistentWorker.seq
+            $jobTmp = Join-Path $persistentWorker.queue_dir ("job-$seq.tmp")
+            $jobPath = Join-Path $persistentWorker.queue_dir ("job-$seq.json")
+            $donePath = Join-Path $persistentWorker.queue_dir ("done-$seq.json")
+            $jobObj = @{
+                seq = $seq
+                uri = $Uri
+                in_file = $reqTemp.FullName
+                out_file = $OutFile
+                err_file = $errTemp.FullName
+                meta_file = $metaTemp.FullName
+                timeout_sec = [int]$TimeoutSec
+                stream = [bool]$script:StreamRequests
+            }
+            $jobOk = $false
+            try {
+                Set-AgentUtf8Content -LiteralPath $jobTmp -Value (ConvertTo-AsciiJson -Json ($jobObj | ConvertTo-Json -Compress))
+                Move-Item -LiteralPath $jobTmp -Destination $jobPath -Force -ErrorAction Stop
+                Wait-AgentProcessWithSpinner -Process $persistentWorker.proc -StatusLabel $StatusLabel -TimeoutSec $TimeoutSec -ResponsePath $OutFile -LiveStream:$LiveStream -DoneMarkerPath $donePath
+                if (Test-Path -LiteralPath $donePath -PathType Leaf) {
+                    $doneRaw = Get-Content -LiteralPath $donePath -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
+                    Remove-Item -LiteralPath $donePath -Force -ErrorAction SilentlyContinue
+                    try {
+                        $doneObj = $doneRaw | ConvertFrom-Json -ErrorAction Stop
+                        $jobOk = [bool]($doneObj.ok -eq $true)
+                    }
+                    catch { $jobOk = $false }
+                }
+                else {
+                    $wStderr = ''
+                    if ($persistentWorker.stderr_file -and (Test-Path -LiteralPath $persistentWorker.stderr_file)) {
+                        $wStderr = Get-Content -LiteralPath $persistentWorker.stderr_file -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
+                    }
+                    $wExitCode = $persistentWorker.proc.ExitCode
+                    Stop-AgentPersistentHttpWorker
+                    if ($wStderr -and $wStderr.Trim()) {
+                        $wStderr = Protect-AgentHeaderSecrets -Text $wStderr -ApiKey $ApiKey -ExtraHeaders $script:ExtraHttpHeaders
+                        throw (Format-TuiText $wStderr.Trim())
+                    }
+                    throw "HTTP worker exited unexpectedly (code $wExitCode)."
+                }
+            }
+            catch {
+                Remove-Item -LiteralPath $jobTmp, $jobPath, $donePath -Force -ErrorAction SilentlyContinue
+                if ($null -ne $script:PersistentHttpWorker) {
+                    Stop-AgentPersistentHttpWorker
+                }
+                throw
+            }
+            $metaItem = Get-Item -LiteralPath $metaTemp.FullName -Force -ErrorAction SilentlyContinue
+            if ($metaItem -and $metaItem.Length -gt 0 -and $metaItem.Length -le 1024) {
+                try {
+                    $metaRaw = Get-Content -LiteralPath $metaTemp.FullName -Raw -Encoding UTF8 -ErrorAction Stop
+                    $metaObj = $metaRaw | ConvertFrom-Json -ErrorAction Stop
+                    if ((Test-IsJsonObject -Value $metaObj) -and $null -ne $metaObj.retry_after_sec) {
+                        $script:LastHttpRetryAfterSec = ConvertFrom-AgentRetryAfterValue -Value $metaObj.retry_after_sec
+                    }
+                }
+                catch {}
+            }
+            Assert-AgentApiResponseSize -Path $OutFile
+            $errItem = Get-Item -LiteralPath $errTemp.FullName -Force -ErrorAction SilentlyContinue
+            if ($errItem -and $errItem.Length -gt 0) {
+                $errText = Get-Content -LiteralPath $errTemp.FullName -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
+                if ($errText) {
+                    $errText = Protect-AgentHeaderSecrets -Text $errText -ApiKey $ApiKey -ExtraHeaders $script:ExtraHttpHeaders
+                    throw (Format-TuiText $errText.Trim())
+                }
+            }
+            if (-not $jobOk) {
+                throw 'HTTP worker request failed.'
+            }
+            return
+        }
+        $stdoutTemp = New-AgentTempFile
+        $stderrTemp = New-AgentTempFile
+        $argList = Get-AgentWorkerArguments -ScriptPath $workerScript -WorkerMode 'http'
         $proc = Invoke-WithProcessEnvironment -Values @{
             SHELLOSSUS_HTTP_URI = $Uri
             SHELLOSSUS_API_KEY = $ApiKey
@@ -13609,7 +13986,7 @@ function Invoke-AgentHttpRequest {
             SHELLOSSUS_HTTP_META = $metaTemp.FullName
             SHELLOSSUS_HTTP_TIMEOUT = [string]$TimeoutSec
             SHELLOSSUS_HTTP_STREAM = $(if ($script:StreamRequests) { '1' } else { '0' })
-            SHELLOSSUS_HTTP_AUTH_HEADER = $(if ($script:AuthHeaderName) { $script:AuthHeaderName } else { 'Authorization' })
+            SHELLOSSUS_HTTP_AUTH_HEADER = $authHdrVal
             SHELLOSSUS_HTTP_EXTRA_HEADERS = $extraHdrJson
         } -Action {
             Start-Process -FilePath $shellExe -ArgumentList $argList -RedirectStandardOutput $stdoutTemp.FullName -RedirectStandardError $stderrTemp.FullName -NoNewWindow -PassThru -ErrorAction Stop
@@ -13648,8 +14025,8 @@ function Invoke-AgentHttpRequest {
         Remove-Item -LiteralPath $reqTemp.FullName -Force -ErrorAction SilentlyContinue
         Remove-Item -LiteralPath $errTemp.FullName -Force -ErrorAction SilentlyContinue
         Remove-Item -LiteralPath $metaTemp.FullName -Force -ErrorAction SilentlyContinue
-        Remove-Item -LiteralPath $stdoutTemp.FullName -Force -ErrorAction SilentlyContinue
-        Remove-Item -LiteralPath $stderrTemp.FullName -Force -ErrorAction SilentlyContinue
+        if ($stdoutTemp) { Remove-Item -LiteralPath $stdoutTemp.FullName -Force -ErrorAction SilentlyContinue }
+        if ($stderrTemp) { Remove-Item -LiteralPath $stderrTemp.FullName -Force -ErrorAction SilentlyContinue }
     }
 }
 
@@ -16143,6 +16520,7 @@ if (-not $LibraryOnly) {
         }
     }
     finally {
+        Stop-AgentPersistentHttpWorker
         Clear-AgentUndoBackups -UndoEntries $undoBox.undo_stack -Writes $script:CurrentTurnWrites
         $script:CurrentTurnWrites = @()
         Remove-Variable agentKey -ErrorAction SilentlyContinue

@@ -1182,6 +1182,49 @@ try {
         finally {
             Remove-Item -LiteralPath $clLsFile.FullName -Force -ErrorAction SilentlyContinue
         }
+
+        # Verify persistent HTTP worker queue mode executes a queued job and exits cleanly on stop.flag under ConstrainedLanguage.
+        $clQueueDir = New-AgentPrivateWorkerDir
+        Assert-True ([bool]$clQueueDir -and (Test-Path -LiteralPath $clQueueDir -PathType Container)) 'New-AgentPrivateWorkerDir failed under ConstrainedLanguage.'
+        $clJobIn = New-AgentTempFile
+        $clJobOut = New-AgentTempFile
+        $clJobErr = New-AgentTempFile
+        $clJobMeta = New-AgentTempFile
+        try {
+            Set-AgentUtf8Content -LiteralPath $clJobIn.FullName -Value '{}'
+            $clJobObj = @{
+                seq = 1
+                uri = 'badclmscheme://example.invalid/v1'
+                in_file = $clJobIn.FullName
+                out_file = $clJobOut.FullName
+                err_file = $clJobErr.FullName
+                meta_file = $clJobMeta.FullName
+                timeout_sec = 5
+                stream = $false
+            }
+            Set-AgentUtf8Content -LiteralPath (Join-Path $clQueueDir 'job-1.json') -Value ($clJobObj | ConvertTo-Json -Compress)
+            Set-AgentUtf8Content -LiteralPath (Join-Path $clQueueDir 'stop.flag') -Value 'stop'
+            Invoke-WithProcessEnvironment -Values @{
+                SHELLOSSUS_HTTP_QUEUE_DIR = $clQueueDir
+                SHELLOSSUS_API_KEY = 'badclmscheme'
+                SHELLOSSUS_HTTP_AUTH_HEADER = 'Authorization'
+                SHELLOSSUS_HTTP_EXTRA_HEADERS = $null
+                SHELLOSSUS_HTTP_PARENT_PID = $null
+                SHELLOSSUS_HTTP_PARENT_TICKS = $null
+                SHELLOSSUS_HTTP_IDLE_SEC = '5'
+            } -Action {
+                Invoke-InternalHttpWorker
+            }
+            $clDonePath = Join-Path $clQueueDir 'done-1.json'
+            Assert-True ((Test-Path -LiteralPath $clDonePath -PathType Leaf) -and (-not (Test-Path -LiteralPath (Join-Path $clQueueDir 'job-1.json')))) 'ConstrainedLanguage persistent HTTP worker did not process job-1.json and write done-1.json.'
+            $clDoneObj = Get-Content -LiteralPath $clDonePath -Raw -Encoding UTF8 | ConvertFrom-Json
+            $clJobErrTxt = Get-Content -LiteralPath $clJobErr.FullName -Raw -Encoding UTF8
+            Assert-True ($clDoneObj.seq -eq 1 -and $clDoneObj.ok -eq $false -and [bool]$clJobErrTxt -and (-not $clJobErrTxt.Contains('badclmscheme'))) "ConstrainedLanguage persistent HTTP worker failed error redaction or done payload: err='$clJobErrTxt'"
+        }
+        finally {
+            Remove-Item -LiteralPath $clQueueDir -Recurse -Force -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $clJobIn.FullName, $clJobOut.FullName, $clJobErr.FullName, $clJobMeta.FullName -Force -ErrorAction SilentlyContinue
+        }
     }
     finally {
         $script:SearchUrl = $savedClSearchUrl

@@ -606,6 +606,7 @@ if (-not $LibraryOnly) {
         }
     }
     finally {
+        Stop-AgentPersistentHttpWorker
         Clear-AgentUndoBackups -UndoEntries $undoBox.undo_stack -Writes $script:CurrentTurnWrites
         $script:CurrentTurnWrites = @()
         Remove-Variable agentKey -ErrorAction SilentlyContinue
