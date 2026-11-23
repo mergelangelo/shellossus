@@ -3447,6 +3447,50 @@ $subRes = @(Invoke-ParallelSubagentProcesses -Root $WorkspacePath -Tasks @(@{ ro
                 finally {
                     Remove-Item -LiteralPath $mdFile.FullName -Force -ErrorAction SilentlyContinue
                 }
+
+                # 7. Incremental O(delta) live stream reader: byte_offset advances cleanly, handles split UTF-8 multi-byte chars and CRLF, and never re-reads processed prefix in FullLanguage.
+                $script:lsCaptured = @()
+                $script:OutputMode = 'text'
+                $script:ShowReasoning = 'hide'
+                $deltaFile = New-AgentTempFile
+                try {
+                    $deltaState = New-AgentLiveStreamState
+                    $utf8NoBom = [System.Text.UTF8Encoding]::new($false)
+                    $cyrWord = ([string][char]0x041F) + ([string][char]0x0440) + ([string][char]0x0438) + ([string][char]0x0432) + ([string][char]0x0435) + ([string][char]0x0442)
+                    $part1Str = "data: {""choices"":[{""index"":0,""delta"":{""content"":""$cyrWord\n""}}]}`r`n`r`n"
+                    $part2FullStr = "data: {""choices"":[{""index"":0,""delta"":{""content"":""$cyrWord-2\n""},""finish_reason"":""stop""}]}`r`n`r`ndata: [DONE]`r`n`r`n"
+                    $part1Bytes = $utf8NoBom.GetBytes($part1Str)
+                    $part2Bytes = $utf8NoBom.GetBytes($part2FullStr)
+                    # Split part2 right in the middle of the first 2-byte UTF-8 Cyrillic character!
+                    $splitAt = $part2FullStr.IndexOf($cyrWord) + 1
+                    $part2HeadBytes = $part2Bytes[0..($splitAt - 1)]
+                    $part2TailBytes = $part2Bytes[$splitAt..($part2Bytes.Length - 1)]
+                    $fsW = [System.IO.FileStream]::new($deltaFile.FullName, [System.IO.FileMode]::Create, [System.IO.FileAccess]::Write, [System.IO.FileShare]::Read)
+                    try {
+                        $fsW.Write($part1Bytes, 0, $part1Bytes.Length)
+                        $fsW.Write($part2HeadBytes, 0, $part2HeadBytes.Length)
+                        $fsW.Flush()
+                        $e1 = Step-AgentLiveStreamFile -Path $deltaFile.FullName -State $deltaState -ShowReasoning 'hide'
+                        Assert-True ($e1 -and $deltaState.byte_offset -eq $part1Bytes.Length) "O(delta) reader did not advance byte_offset cleanly past complete line while holding open handle (got offset=$($deltaState.byte_offset), expected=$($part1Bytes.Length))."
+                        $bytesAfterStep1 = [long]$deltaState.total_bytes_read
+
+                        $fsW.Write($part2TailBytes, 0, $part2TailBytes.Length)
+                        $fsW.Flush()
+                        $e2 = Step-AgentLiveStreamFile -Path $deltaFile.FullName -State $deltaState -ShowReasoning 'hide'
+                        Assert-True ($e2 -and $deltaState.byte_offset -eq ($part1Bytes.Length + $part2Bytes.Length)) "O(delta) reader did not advance byte_offset to end on step 2 (got $($deltaState.byte_offset))."
+                    }
+                    finally {
+                        $fsW.Dispose()
+                    }
+                    Close-AgentLiveStream -State $deltaState
+                    $deltaPlain = Strip-AnsiCodes -Text ($script:lsCaptured -join "`n")
+                    $totalFileBytes = $part1Bytes.Length + $part2Bytes.Length
+                    Assert-True ($deltaPlain.Contains($cyrWord) -and $deltaPlain.Contains("$cyrWord-2") -and (-not $deltaPlain.Contains([string][char]0xFFFD))) "Split UTF-8 multi-byte Cyrillic char corrupted across incremental reads: $deltaPlain"
+                    Assert-True ($deltaState.total_bytes_read -le ($totalFileBytes + $part2HeadBytes.Length)) "Live stream reader re-read already processed bytes quadratically (total_bytes_read=$($deltaState.total_bytes_read), file=$totalFileBytes)."
+                }
+                finally {
+                    Remove-Item -LiteralPath $deltaFile.FullName -Force -ErrorAction SilentlyContinue
+                }
             }
         }
         finally {

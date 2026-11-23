@@ -539,9 +539,11 @@ function Read-AgentApiResponse {
 
 function New-AgentLiveStreamState {
     return @{
-        processed_lines = 0
+        byte_offset = [long]0
+        processed_char_offset = 0
+        total_bytes_read = [long]0
         pending_data = @()
-        last_file_length = -1
+        last_file_length = [long]-1
         active_section = 'none'
         at_line_start = $true
         streamed_reasoning = $false
@@ -553,6 +555,134 @@ function New-AgentLiveStreamState {
     }
 }
 
+function Read-AgentLiveStreamDeltaText {
+    param(
+        [string]$Path,
+        [hashtable]$State,
+        [switch]$Final
+    )
+    $fileLen = [long]-1
+    try {
+        $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+        $fileLen = [long]$item.Length
+    }
+    catch {
+        return @{ ok = $false; has_lines = $false; delta = '' }
+    }
+    if ($fileLen -le 0) {
+        return @{ ok = $true; has_lines = $false; delta = '' }
+    }
+    if ($script:AgentMaxApiResponseBytes -gt 0 -and $fileLen -gt $script:AgentMaxApiResponseBytes) {
+        return @{ ok = $false; has_lines = $false; delta = '' }
+    }
+    if ($fileLen -lt [long]$State.byte_offset) {
+        $State.byte_offset = [long]0
+        $State.processed_char_offset = 0
+        $State.pending_data = @()
+    }
+    if ((-not $Final) -and ($fileLen -eq $State.last_file_length)) {
+        return @{ ok = $true; has_lines = $false; delta = '' }
+    }
+    if ($ExecutionContext.SessionState.LanguageMode -eq 'FullLanguage') {
+        $offset = [long]$State.byte_offset
+        if ($fileLen -le $offset) {
+            $State.last_file_length = $fileLen
+            return @{ ok = $true; has_lines = $false; delta = '' }
+        }
+        $toRead = [int]($fileLen - $offset)
+        $fs = $null
+        $totalRead = 0
+        $buf = [byte[]]::new($toRead)
+        try {
+            $share = [System.IO.FileShare]::ReadWrite -bor [System.IO.FileShare]::Delete
+            $fs = [System.IO.FileStream]::new($Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, $share)
+            if ($offset -gt 0) {
+                $null = $fs.Seek($offset, [System.IO.SeekOrigin]::Begin)
+            }
+            while ($totalRead -lt $toRead) {
+                $n = $fs.Read($buf, $totalRead, $toRead - $totalRead)
+                if ($n -le 0) { break }
+                $totalRead += $n
+            }
+        }
+        catch {
+            # Graceful fallback when the worker holds an exclusive write lock (e.g. Windows PowerShell 5.1).
+            return @{ ok = $false; has_lines = $false; delta = '' }
+        }
+        finally {
+            if ($null -ne $fs) { $fs.Dispose() }
+        }
+        $State.last_file_length = $fileLen
+        $State.total_bytes_read = [long]$State.total_bytes_read + $totalRead
+        if ($totalRead -le 0) {
+            return @{ ok = $true; has_lines = $false; delta = '' }
+        }
+        $decodeStart = 0
+        if ($offset -eq 0 -and $totalRead -ge 3 -and $buf[0] -eq 239 -and $buf[1] -eq 187 -and $buf[2] -eq 191) {
+            $decodeStart = 3
+        }
+        if ($Final) {
+            $decodeLen = $totalRead - $decodeStart
+            $State.byte_offset = $offset + $totalRead
+            if ($decodeLen -le 0) {
+                return @{ ok = $true; has_lines = $false; delta = '' }
+            }
+            $text = [System.Text.Encoding]::UTF8.GetString($buf, $decodeStart, $decodeLen)
+            return @{ ok = $true; has_lines = $true; delta = $text }
+        }
+        $lastLfIdx = -1
+        for ($bi = $totalRead - 1; $bi -ge $decodeStart; $bi--) {
+            if ($buf[$bi] -eq 10) {
+                $lastLfIdx = $bi
+                break
+            }
+        }
+        if ($lastLfIdx -lt 0) {
+            return @{ ok = $true; has_lines = $false; delta = '' }
+        }
+        $decodeLen = $lastLfIdx - $decodeStart
+        $State.byte_offset = $offset + $lastLfIdx + 1
+        $text = if ($decodeLen -gt 0) { [System.Text.Encoding]::UTF8.GetString($buf, $decodeStart, $decodeLen) } else { '' }
+        return @{ ok = $true; has_lines = $true; delta = $text }
+    }
+    $raw = $null
+    try {
+        $raw = Get-Content -LiteralPath $Path -Raw -Encoding UTF8 -ErrorAction Stop
+    }
+    catch {
+        return @{ ok = $false; has_lines = $false; delta = '' }
+    }
+    $State.last_file_length = $fileLen
+    if (-not $raw) {
+        return @{ ok = $true; has_lines = $false; delta = '' }
+    }
+    $rawStr = [string]$raw
+    $charOff = [int]$State.processed_char_offset
+    if ($charOff -gt $rawStr.Length) {
+        $charOff = 0
+        $State.pending_data = @()
+    }
+    if ($charOff -eq 0 -and $rawStr.Length -gt 0 -and [int][char]$rawStr[0] -eq 0xFEFF) {
+        $charOff = 1
+    }
+    if ($charOff -ge $rawStr.Length) {
+        $State.processed_char_offset = $rawStr.Length
+        return @{ ok = $true; has_lines = $false; delta = '' }
+    }
+    $slice = $rawStr.Substring($charOff)
+    if ($Final) {
+        $State.processed_char_offset = $rawStr.Length
+        return @{ ok = $true; has_lines = $true; delta = $slice }
+    }
+    $lastNl = $slice.LastIndexOf("`n")
+    if ($lastNl -lt 0) {
+        return @{ ok = $true; has_lines = $false; delta = '' }
+    }
+    $State.processed_char_offset = $charOff + $lastNl + 1
+    $delta = $slice.Substring(0, $lastNl)
+    return @{ ok = $true; has_lines = $true; delta = $delta }
+}
+
 function Step-AgentLiveStreamFile {
     param(
         [string]$Path,
@@ -562,38 +692,15 @@ function Step-AgentLiveStreamFile {
         [scriptblock]$OnBeforeFirstOutput = $null
     )
     if (-not $Path -or -not $State -or $script:OutputMode -eq 'json') { return $false }
-    $raw = $null
-    $fileLen = -1
-    try {
-        $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
-        $fileLen = [long]$item.Length
-        if ($fileLen -le 0) { return $false }
-        if ((-not $Final) -and ($fileLen -eq $State.last_file_length)) { return $false }
-        $raw = Get-Content -LiteralPath $Path -Raw -Encoding UTF8 -ErrorAction Stop
-    }
-    catch {
-        # Graceful fallback when the worker holds an exclusive write lock (e.g. Windows PowerShell 5.1).
+    $readRes = Read-AgentLiveStreamDeltaText -Path $Path -State $State -Final:$Final
+    if (-not $readRes.ok) { return $false }
+    if ((-not $readRes.has_lines) -and (-not ($Final -and $State.pending_data.Count -gt 0))) {
         return $false
     }
-    $State.last_file_length = $fileLen
-    if (-not $raw) { return $false }
-    $norm = ([string]$raw)
-    if ($norm.Length -gt 0 -and [int][char]$norm[0] -eq 0xFEFF) {
-        $norm = $norm.Substring(1)
-    }
-    $norm = $norm.Replace("`r`n", "`n").Replace("`r", "`n")
-    $completeText = ''
-    if ($Final) {
-        $completeText = $norm
-    }
-    else {
-        $lastNl = $norm.LastIndexOf("`n")
-        if ($lastNl -lt 0) { return $false }
-        $completeText = $norm.Substring(0, $lastNl)
-    }
-    $lines = @($completeText -split "`n")
-    if ($lines.Count -le $State.processed_lines -and (-not ($Final -and $State.pending_data.Count -gt 0))) {
-        return $false
+    $lines = @()
+    if ($readRes.has_lines) {
+        $normDelta = ([string]$readRes.delta).Replace("`r`n", "`n")
+        $lines = @($normDelta -split "`n")
     }
     $emitted = $false
     $flushEvent = {
@@ -646,8 +753,9 @@ function Step-AgentLiveStreamFile {
             $emitted = $true
         }
     }
-    for ($i = $State.processed_lines; $i -lt $lines.Count; $i++) {
+    for ($i = 0; $i -lt $lines.Count; $i++) {
         $line = [string]$lines[$i]
+        if ($line.EndsWith("`r")) { $line = $line.Substring(0, $line.Length - 1) }
         if ($line.Length -eq 0) {
             if ($State.pending_data.Count -gt 0) {
                 $payload = ($State.pending_data -join "`n")
@@ -663,7 +771,6 @@ function Step-AgentLiveStreamFile {
             $State.pending_data += $dVal
         }
     }
-    $State.processed_lines = $lines.Count
     if ($Final -and $State.pending_data.Count -gt 0) {
         $payload = ($State.pending_data -join "`n")
         $State.pending_data = @()

@@ -1162,15 +1162,20 @@ try {
             $script:ExtraHttpHeaders = $savedClExtra11
         }
 
-        # Verify Task 9 live incremental SSE TUI streaming helpers work under ConstrainedLanguage.
+        # Verify Task 9 live incremental SSE TUI streaming helpers work under ConstrainedLanguage (including incremental processed_char_offset advancement).
         $clLsFile = New-AgentTempFile
         try {
-            $clLsChunk = "data: {""choices"":[{""index"":0,""delta"":{""reasoning_content"":""CLM think""}}]}`n`ndata: {""choices"":[{""index"":0,""delta"":{""content"":""# CLM\n**bold** ``code``\n| K | V |\n|---|---|\n| a | b |\n""},""finish_reason"":""stop""}]}`n`ndata: [DONE]`n`n"
-            Set-Content -LiteralPath $clLsFile.FullName -Value $clLsChunk -Encoding UTF8 -NoNewline
+            $clLsChunk1 = "data: {""choices"":[{""index"":0,""delta"":{""reasoning_content"":""CLM think""}}]}`n`ndata: {""choices"":[{""index"":0,""delta"":{""content"":""# CLM\n**bold** ``code``\n""}}]}`n`n"
+            $clLsChunk2 = "data: {""choices"":[{""index"":0,""delta"":{""content"":""| K | V |\n|---|---|\n| a | b |\n""},""finish_reason"":""stop""}]}`n`ndata: [DONE]`n`n"
+            Set-Content -LiteralPath $clLsFile.FullName -Value $clLsChunk1 -Encoding UTF8 -NoNewline
             $clLsState = New-AgentLiveStreamState
-            $clEmitted = Step-AgentLiveStreamFile -Path $clLsFile.FullName -State $clLsState -ShowReasoning 'compact' -Final
+            $clEmitted1 = Step-AgentLiveStreamFile -Path $clLsFile.FullName -State $clLsState -ShowReasoning 'compact'
+            Assert-True ($clEmitted1 -and $clLsState.processed_char_offset -gt 0) 'ConstrainedLanguage live SSE did not advance processed_char_offset on chunk 1.'
+            $offsetAfter1 = [int]$clLsState.processed_char_offset
+            Set-Content -LiteralPath $clLsFile.FullName -Value ($clLsChunk1 + $clLsChunk2) -Encoding UTF8 -NoNewline
+            $clEmitted2 = Step-AgentLiveStreamFile -Path $clLsFile.FullName -State $clLsState -ShowReasoning 'compact' -Final
             Close-AgentLiveStream -State $clLsState
-            Assert-True ($clEmitted -and $clLsState.streamed_reasoning -and $clLsState.streamed_content -and $clLsState.active_section -eq 'none') 'ConstrainedLanguage live SSE TUI streaming helpers failed.'
+            Assert-True ($clEmitted2 -and $clLsState.processed_char_offset -gt $offsetAfter1 -and $clLsState.streamed_reasoning -and $clLsState.streamed_content -and $clLsState.active_section -eq 'none') 'ConstrainedLanguage live SSE TUI streaming helpers failed.'
         }
         finally {
             Remove-Item -LiteralPath $clLsFile.FullName -Force -ErrorAction SilentlyContinue
