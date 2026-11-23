@@ -16,6 +16,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 - Opt-in live OpenAI-compatible E2E validation script (`tests/live-e2e.ps1`) covering `-Doctor`, Cyrillic UTF-8 chat, tool calling, `-Stream`, compaction, and optional cold-start `ConstrainedLanguage`.
 - Automated tag-triggered release workflow (`.github/workflows/release.yml`) publishing `shellossus.ps1` and `SHA256SUMS.txt`, plus enterprise SHA-256 verification and Authenticode signing guidance in `docs/security.md`.
 
+### Changed
+- Persistent reusable `-InternalWorker http` worker queue across requests within a session (using a private permission-verified temp queue directory, automatic recycling on credential/header changes, parent-PID watchdog, idle exit, immediate kill on timeout or 8 MiB cap, and automatic one-shot fallback) to eliminate per-step PowerShell cold starts and repeated AMSI/EDR rescans.
+- SSE streaming (`-Stream`) now sends `stream_options.include_usage = true` across chat turns and compaction for accurate `/status` and context-budget token accounting, automatically disabling and retrying once on HTTP `400` gateways that reject `stream_options`.
+- Incremental O(delta) live SSE file polling (`FileStream` with `FileShare.ReadWrite` in `FullLanguage` and offset slicing in `ConstrainedLanguage`) instead of quadratic full-file re-reads.
+
+### Fixed
+- Live `-Stream` TUI output now flushes compact `[reasoning]` ahead of streamed assistant content (without duplicates) and renders Markdown incrementally (headings, inline styles, lists, quotes, fenced code blocks, and aligned tables).
+- `-Doctor` and REPL `/doctor` now report configured `auth_header`, `max_tokens`, `temperature`, and `extra_headers` (header names only, never values) as passing checks instead of only surfacing validation failures.
+- Default `-ConfigPath` in `build.ps1` now uses native `Join-Path` on Linux/macOS and Windows, and elapsed seconds formatting in shell/spinner output is now locale-independent (dot decimal on comma-decimal locales such as `ru_RU`).
+
 ## [0.9.0] - 2026-11-19
 
 ### Added
