@@ -1163,6 +1163,8 @@ try {
         }
 
         # Verify Task 9 live incremental SSE TUI streaming helpers work under ConstrainedLanguage (including incremental processed_char_offset advancement).
+        Assert-True (Test-IsStreamOptionsUnsupportedError -Message "400 Bad Request: Unknown parameter 'stream_options'") 'CLM Test-IsStreamOptionsUnsupportedError missed valid 400 stream_options error.'
+        Assert-True (-not (Test-IsStreamOptionsUnsupportedError -Message '429 Too Many Requests')) 'CLM Test-IsStreamOptionsUnsupportedError falsely matched unrelated 429 error.'
         $clLsFile = New-AgentTempFile
         try {
             $clLsChunk1 = "data: {""choices"":[{""index"":0,""delta"":{""reasoning_content"":""CLM think""}}]}`n`ndata: {""choices"":[{""index"":0,""delta"":{""content"":""# CLM\n**bold** ``code``\n""}}]}`n`n"

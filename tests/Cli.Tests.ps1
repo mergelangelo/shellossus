@@ -2747,7 +2747,7 @@ $subRes = @(Invoke-ParallelSubagentProcesses -Root $WorkspacePath -Tasks @(@{ ro
         $env:SHELLOSSUS_API_KEY = 'stream-test-key'
 
         # 7a. Precedence: CLI -Stream / -Stream:$false > $env:SHELLOSSUS_STREAM > $config.SHELLOSSUS_STREAM > $false,
-        # no stream_options sent, and Accept header set when streaming.
+        # stream_options.include_usage sent only when streaming, and Accept header set when streaming.
         $streamEmptyCfg = Join-Path $testRoot 'stream-prec-empty.env'
         Save-AgentConfig -Path $streamEmptyCfg -Config @{
             SHELLOSSUS_BASE_URL = 'https://example.invalid/v1'
@@ -2762,12 +2762,13 @@ $subRes = @(Invoke-ParallelSubagentProcesses -Root $WorkspacePath -Tasks @(@{ ro
 
         $global:capturedStreamFlags = @()
         $global:capturedAcceptHeaders = @()
-        $global:sawStreamOptions = $false
+        $global:capturedStreamOptions = @()
         function Invoke-WebRequest {
             param($Uri, $Method, $Headers, $ContentType, $Body, $TimeoutSec, $ErrorAction, [switch]$UseBasicParsing, $OutFile)
             $parsedReq = $Body | ConvertFrom-Json
             $global:capturedStreamFlags += [bool]$parsedReq.stream
-            if ($null -ne $parsedReq.stream_options) { $global:sawStreamOptions = $true }
+            $hasIncUsage = ($null -ne $parsedReq.stream_options -and $parsedReq.stream_options.include_usage -eq $true)
+            $global:capturedStreamOptions += $hasIncUsage
             $global:capturedAcceptHeaders += ([string]$Headers['Accept'])
             $resp = @{ choices = @(@{ finish_reason = 'stop'; message = @{ content = 'ok' } }) } | ConvertTo-Json -Depth 8 -Compress
             Set-Content -LiteralPath $OutFile -Value $resp -Encoding UTF8 -NoNewline
@@ -2782,12 +2783,12 @@ $subRes = @(Invoke-ParallelSubagentProcesses -Root $WorkspacePath -Tasks @(@{ ro
             $null = & "$PSScriptRoot\..\shellossus.ps1" -Workspace $workspacePath -ConfigPath $streamTrueCfg -Stream:$false -Prompt 'ping' -Mode json -NoSession
             Remove-Item Env:SHELLOSSUS_STREAM -ErrorAction SilentlyContinue
             Assert-True (($global:capturedStreamFlags -join ',') -eq 'False,True,False,True,False') "Unexpected Stream precedence order: $($global:capturedStreamFlags -join ',')"
-            Assert-True (-not $global:sawStreamOptions) 'New-AgentTurnRequest must not send stream_options.'
+            Assert-True (($global:capturedStreamOptions -join ',') -eq 'False,True,False,True,False') "Unexpected stream_options.include_usage flags: $($global:capturedStreamOptions -join ',')"
             Assert-True ($global:capturedAcceptHeaders[0] -eq '' -and $global:capturedAcceptHeaders[1] -eq 'text/event-stream, application/json' -and $global:capturedAcceptHeaders[2] -eq '' -and $global:capturedAcceptHeaders[3] -eq 'text/event-stream, application/json' -and $global:capturedAcceptHeaders[4] -eq '') "Unexpected Accept headers for stream toggle: $($global:capturedAcceptHeaders -join '|')"
         }
         finally {
             Remove-Item Function:\Invoke-WebRequest -ErrorAction SilentlyContinue
-            Remove-Variable -Name capturedStreamFlags, capturedAcceptHeaders, sawStreamOptions -Scope Global -ErrorAction SilentlyContinue
+            Remove-Variable -Name capturedStreamFlags, capturedAcceptHeaders, capturedStreamOptions -Scope Global -ErrorAction SilentlyContinue
             Remove-Item Env:SHELLOSSUS_STREAM -ErrorAction SilentlyContinue
         }
 
@@ -2868,7 +2869,7 @@ $subRes = @(Invoke-ParallelSubagentProcesses -Root $WorkspacePath -Tasks @(@{ ro
             param($Uri, $Method, $Headers, $ContentType, $Body, $TimeoutSec, $ErrorAction, [switch]$UseBasicParsing, $OutFile)
             $script:sseTurnStep++
             $reqObj = $Body | ConvertFrom-Json
-            Assert-True ([bool]$reqObj.stream -and $null -eq $reqObj.stream_options -and $Headers['Accept'] -eq 'text/event-stream, application/json') 'SSE turn request missing stream=true or Accept header, or sent stream_options.'
+            Assert-True ([bool]$reqObj.stream -and $reqObj.stream_options.include_usage -eq $true -and $Headers['Accept'] -eq 'text/event-stream, application/json') 'SSE turn request missing stream=true, stream_options.include_usage, or Accept header.'
             if ($script:sseTurnStep -eq 1) {
                 $sseStep1 = @(
                     ': keepalive comment 1',
@@ -2937,6 +2938,53 @@ $subRes = @(Invoke-ParallelSubagentProcesses -Root $WorkspacePath -Tasks @(@{ ro
         finally {
             Remove-Item Function:\Invoke-WebRequest -ErrorAction SilentlyContinue
             Remove-Variable -Name sseTurnStep, sseCapturedToolCallsReplay -Scope Script -ErrorAction SilentlyContinue
+        }
+
+        # 7d2. Automatic fallback when a strict gateway rejects stream_options with HTTP 400 (retries immediately without duplicate turn_start and remembers for the session).
+        $savedIncUsageFlag = $script:StreamIncludeUsageSupported
+        $script:fbStreamPayloads = @()
+        $script:fbJsonLines = @()
+        function Invoke-WebRequest {
+            param($Uri, $Method, $Headers, $ContentType, $Body, $TimeoutSec, $ErrorAction, [switch]$UseBasicParsing, $OutFile)
+            $pObj = $Body | ConvertFrom-Json
+            $script:fbStreamPayloads += $pObj
+            if ($null -ne $pObj.stream_options) {
+                throw "Response status code does not indicate success: 400 (Bad Request). (Unknown parameter: 'stream_options')"
+            }
+            $sseOk = @(
+                'data: {"choices":[{"index":0,"delta":{"content":"Strict gateway ok"},"finish_reason":"stop"}]}',
+                '',
+                'data: [DONE]'
+            ) -join "`n"
+            Set-Content -LiteralPath $OutFile -Value $sseOk -Encoding UTF8 -NoNewline
+        }
+        try {
+            $script:StreamIncludeUsageSupported = $true
+            $script:OutputMode = 'json'
+            $script:StreamRequests = $true
+            $fbTurnState = @{
+                session_id = 'sse-stream-opts-fb'
+                workspace = $workspacePath
+                model = 'test-model'
+                messages = @(@{ role = 'system'; content = 'sys' }, @{ role = 'user'; content = 'turn 1' })
+            }
+            & {
+                function Write-Host {
+                    param([Parameter(Position = 0, ValueFromRemainingArguments = $true)]$Object, [switch]$NoNewline, $Separator, $ForegroundColor, $BackgroundColor)
+                    $script:fbJsonLines += (($Object | ForEach-Object { [string]$_ }) -join ' ')
+                }
+                Invoke-AgentTurn -State $fbTurnState -Endpoint 'https://example.invalid/v1/chat/completions' -ModelId 'test-model' -ApiKey 'k' -Root $workspacePath -Steps 2
+                $fbTurnState.messages += @{ role = 'user'; content = 'turn 2' }
+                Invoke-AgentTurn -State $fbTurnState -Endpoint 'https://example.invalid/v1/chat/completions' -ModelId 'test-model' -ApiKey 'k' -Root $workspacePath -Steps 2
+            }
+            $turnStartCount = @($script:fbJsonLines | Where-Object { $_ -like '*"turn_start"*' }).Count
+            Assert-True ($script:fbStreamPayloads.Count -eq 3 -and ($null -ne $script:fbStreamPayloads[0].stream_options) -and ($null -eq $script:fbStreamPayloads[1].stream_options) -and ($null -eq $script:fbStreamPayloads[2].stream_options) -and (-not $script:StreamIncludeUsageSupported)) "SSE stream_options 400 fallback did not retry cleanly or remember disablement (payloads=$($script:fbStreamPayloads.Count))."
+            Assert-True ($turnStartCount -eq 2 -and $fbTurnState.messages[-1].content -ceq 'Strict gateway ok') "SSE stream_options fallback emitted duplicate turn_start ($turnStartCount) or wrong reply."
+        }
+        finally {
+            $script:StreamIncludeUsageSupported = $savedIncUsageFlag
+            Remove-Item Function:\Invoke-WebRequest -ErrorAction SilentlyContinue
+            Remove-Variable -Name fbStreamPayloads, fbJsonLines -Scope Script -ErrorAction SilentlyContinue
         }
 
         # 7e. O(N) high-chunk SSE stream assembly (600 content chunks) and plain-JSON + BOM fallback + auto-detected SSE.

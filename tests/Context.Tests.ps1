@@ -1230,8 +1230,50 @@ tools: list_files
         $script:compactStreamAccepts = @()
         $didSseCompact = Invoke-AgentCompact -State $sseCompState -Endpoint 'https://example.invalid/v1/chat/completions' -ModelId 'test-model' -ApiKey 'test-key' -KeepRecent 2
         Assert-True ([bool]$didSseCompact -and ([string]$sseCompState.messages[1].content).Contains('SSE compacted summary')) 'Invoke-AgentCompact over SSE did not assemble compacted summary.'
-        Assert-True ($script:compactStreamPayloads.Count -eq 1 -and [bool]$script:compactStreamPayloads[0].stream -and $null -eq $script:compactStreamPayloads[0].stream_options -and $script:compactStreamAccepts[0] -eq 'text/event-stream, application/json') 'Invoke-CompactionBatch did not send stream=true and Accept header without stream_options.'
+        Assert-True ($script:compactStreamPayloads.Count -eq 1 -and [bool]$script:compactStreamPayloads[0].stream -and $script:compactStreamPayloads[0].stream_options.include_usage -eq $true -and $script:compactStreamAccepts[0] -eq 'text/event-stream, application/json') 'Invoke-CompactionBatch did not send stream=true with stream_options.include_usage and Accept header.'
         Assert-True ($sseCompState.usage_input_tokens -eq 22 -and $sseCompState.usage_output_tokens -eq 14) "SSE compaction did not record usage tokens: in=$($sseCompState.usage_input_tokens), out=$($sseCompState.usage_output_tokens)"
+
+        # Verify automatic 400 fallback when a strict gateway rejects stream_options during SSE compaction.
+        $savedCompInclUsage = $script:StreamIncludeUsageSupported
+        $script:compactStreamRejectOpts = $true
+        $script:compactStreamPayloads = @()
+        function Invoke-WebRequest {
+            param($Uri, $Method, $Headers, $ContentType, $Body, $TimeoutSec, $ErrorAction, [switch]$UseBasicParsing, $OutFile)
+            $pObj = $Body | ConvertFrom-Json
+            $script:compactStreamPayloads += $pObj
+            if ($script:compactStreamRejectOpts -and $null -ne $pObj.stream_options) {
+                throw "Response status code does not indicate success: 400 (Bad Request). (Unknown parameter: 'stream_options')"
+            }
+            $sseFallback = @(
+                'data: {"choices":[{"index":0,"delta":{"content":"## Goal\nFallback summary"},"finish_reason":"stop"}]}',
+                '',
+                'data: [DONE]'
+            ) -join "`n"
+            Set-Content -LiteralPath $OutFile -Value $sseFallback -Encoding UTF8 -NoNewline
+        }
+        try {
+            $script:StreamIncludeUsageSupported = $true
+            $fbState = @{
+                session_id = 'sse-compact-fb'
+                workspace = $workspacePath
+                model = 'test-model'
+                usage_input_tokens = 0
+                usage_output_tokens = 0
+                messages = @(
+                    @{ role = 'system'; content = 'sys' },
+                    @{ role = 'user'; content = 'u1' },
+                    @{ role = 'assistant'; content = 'a1' },
+                    @{ role = 'user'; content = 'u2' },
+                    @{ role = 'assistant'; content = 'a2' }
+                )
+            }
+            $didFbCompact = Invoke-AgentCompact -State $fbState -Endpoint 'https://example.invalid/v1/chat/completions' -ModelId 'test-model' -ApiKey 'test-key' -KeepRecent 2
+            Assert-True ([bool]$didFbCompact -and $script:compactStreamPayloads.Count -eq 2 -and ($null -ne $script:compactStreamPayloads[0].stream_options) -and ($null -eq $script:compactStreamPayloads[1].stream_options) -and (-not $script:StreamIncludeUsageSupported)) 'Invoke-CompactionBatch did not auto-fallback when gateway rejected stream_options.'
+        }
+        finally {
+            $script:StreamIncludeUsageSupported = $savedCompInclUsage
+            Remove-Variable -Name compactStreamRejectOpts -Scope Script -ErrorAction SilentlyContinue
+        }
     }
     finally {
         Remove-Item Function:\Invoke-WebRequest -ErrorAction SilentlyContinue

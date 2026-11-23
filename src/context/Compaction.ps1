@@ -381,17 +381,34 @@ function Get-CompactionBatches {
 
 function Invoke-CompactionBatch {
     param($State, [string]$Endpoint, [string]$ModelId, [string]$ApiKey, [string]$SystemPrompt, [string]$UserBody, [int]$SummaryLimit)
-    $summaryReq = @{
+    $useStreamOptions = [bool]($script:StreamRequests -and $script:StreamIncludeUsageSupported)
+    $summaryReqObj = @{
         model = $ModelId
         messages = @(
             @{ role = 'system'; content = $SystemPrompt },
             @{ role = 'user'; content = $UserBody }
         )
         stream = [bool]$script:StreamRequests
-    } | ConvertTo-Json -Depth 20 -Compress
+    }
+    if ($useStreamOptions) { $summaryReqObj.stream_options = @{ include_usage = $true } }
+    $summaryReq = $summaryReqObj | ConvertTo-Json -Depth 20 -Compress
     $tempFile = New-AgentTempFile
     try {
-        Invoke-AgentHttpRequest -Uri $Endpoint -ApiKey $ApiKey -Body $summaryReq -OutFile $tempFile.FullName -TimeoutSec $script:RequestTimeoutSec -StatusLabel "Compacting context ($ModelId)"
+        try {
+            Invoke-AgentHttpRequest -Uri $Endpoint -ApiKey $ApiKey -Body $summaryReq -OutFile $tempFile.FullName -TimeoutSec $script:RequestTimeoutSec -StatusLabel "Compacting context ($ModelId)"
+        }
+        catch {
+            $compErr = Format-AgentError -ErrorRecord $_
+            if ($useStreamOptions -and (Test-IsStreamOptionsUnsupportedError -Message $compErr)) {
+                $script:StreamIncludeUsageSupported = $false
+                $null = $summaryReqObj.Remove('stream_options')
+                $summaryReq = $summaryReqObj | ConvertTo-Json -Depth 20 -Compress
+                Invoke-AgentHttpRequest -Uri $Endpoint -ApiKey $ApiKey -Body $summaryReq -OutFile $tempFile.FullName -TimeoutSec $script:RequestTimeoutSec -StatusLabel "Compacting context ($ModelId)"
+            }
+            else {
+                throw
+            }
+        }
         $reply = Read-AgentApiResponse -Path $tempFile.FullName
     }
     finally {

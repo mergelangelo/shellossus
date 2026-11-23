@@ -2700,6 +2700,7 @@ $script:MinRequestTimeoutSec = 10
 $script:MaxRequestTimeoutSec = 1800
 $script:MaxStepRetryBudgetSec = 3600
 $script:StreamRequests = $false
+$script:StreamIncludeUsageSupported = $true
 $script:SearchUrl = ''
 $script:AuthHeaderName = 'Authorization'
 $script:MaxOutputTokens = 0
@@ -2741,6 +2742,13 @@ function Set-AgentStreamSetting {
     $val = ConvertTo-AgentStreamSetting -StreamSpec $StreamSpec
     $script:StreamRequests = [bool]$val
     return $script:StreamRequests
+}
+
+function Test-IsStreamOptionsUnsupportedError {
+    param([AllowEmptyString()][string]$Message)
+    if (-not $Message) { return $false }
+    return (($Message -match '(?i)\b(stream_options|include_usage)\b') -and
+        ($Message -match '(?i)(\b400\b|\b422\b|unknown|unrecognized|unsupported|not supported|extra|not permitted|additional|invalid|unexpected|bad request)'))
 }
 
 function ConvertTo-AgentAuthHeaderName {
@@ -11914,17 +11922,34 @@ function Get-CompactionBatches {
 
 function Invoke-CompactionBatch {
     param($State, [string]$Endpoint, [string]$ModelId, [string]$ApiKey, [string]$SystemPrompt, [string]$UserBody, [int]$SummaryLimit)
-    $summaryReq = @{
+    $useStreamOptions = [bool]($script:StreamRequests -and $script:StreamIncludeUsageSupported)
+    $summaryReqObj = @{
         model = $ModelId
         messages = @(
             @{ role = 'system'; content = $SystemPrompt },
             @{ role = 'user'; content = $UserBody }
         )
         stream = [bool]$script:StreamRequests
-    } | ConvertTo-Json -Depth 20 -Compress
+    }
+    if ($useStreamOptions) { $summaryReqObj.stream_options = @{ include_usage = $true } }
+    $summaryReq = $summaryReqObj | ConvertTo-Json -Depth 20 -Compress
     $tempFile = New-AgentTempFile
     try {
-        Invoke-AgentHttpRequest -Uri $Endpoint -ApiKey $ApiKey -Body $summaryReq -OutFile $tempFile.FullName -TimeoutSec $script:RequestTimeoutSec -StatusLabel "Compacting context ($ModelId)"
+        try {
+            Invoke-AgentHttpRequest -Uri $Endpoint -ApiKey $ApiKey -Body $summaryReq -OutFile $tempFile.FullName -TimeoutSec $script:RequestTimeoutSec -StatusLabel "Compacting context ($ModelId)"
+        }
+        catch {
+            $compErr = Format-AgentError -ErrorRecord $_
+            if ($useStreamOptions -and (Test-IsStreamOptionsUnsupportedError -Message $compErr)) {
+                $script:StreamIncludeUsageSupported = $false
+                $null = $summaryReqObj.Remove('stream_options')
+                $summaryReq = $summaryReqObj | ConvertTo-Json -Depth 20 -Compress
+                Invoke-AgentHttpRequest -Uri $Endpoint -ApiKey $ApiKey -Body $summaryReq -OutFile $tempFile.FullName -TimeoutSec $script:RequestTimeoutSec -StatusLabel "Compacting context ($ModelId)"
+            }
+            else {
+                throw
+            }
+        }
         $reply = Read-AgentApiResponse -Path $tempFile.FullName
     }
     finally {
@@ -13833,12 +13858,14 @@ function Get-AgentRequestEstimatedTokens {
 
 function New-AgentTurnRequest {
     param($State, [string]$Endpoint, [string]$ModelId, [string]$ApiKey, [array]$Tools, [switch]$RecoverOverflow)
+    $useStreamOptions = [bool]($script:StreamRequests -and $script:StreamIncludeUsageSupported)
     $request = @{
         model = $ModelId
         messages = @(ConvertTo-AgentApiMessages -Messages $State.messages)
         tools = $Tools
         stream = [bool]$script:StreamRequests
     }
+    if ($useStreamOptions) { $request.stream_options = @{ include_usage = $true } }
     if ($script:ReasoningEffort) { $request.reasoning_effort = $script:ReasoningEffort }
     if ($script:MaxOutputTokens -gt 0) { $request.max_tokens = [int]$script:MaxOutputTokens }
     if ($null -ne $script:ModelTemperature) { $request.temperature = [double]$script:ModelTemperature }
@@ -13896,7 +13923,7 @@ function New-AgentTurnRequest {
                 $compactedEstimate = Get-AgentRequestEstimatedTokens -Body $compactedBody -MessageCount $request.messages.Count
                 if ($compactedEstimate -le $inputLimit) {
                     foreach ($key in $candidate.Keys) { $State[$key] = $candidate[$key] }
-                    return @{ body = $compactedBody; compacted = $true }
+                    return @{ body = $compactedBody; compacted = $true; used_stream_options = $useStreamOptions }
                 }
                 if ($needCompaction) {
                     throw "Context after compaction exceeds the $window-token window ($compactedEstimate estimated input tokens plus $reserve reserved for the reply). $advice"
@@ -13910,7 +13937,7 @@ function New-AgentTurnRequest {
     if ($RecoverOverflow) {
         throw "The model rejected the request for context length and no older history could be compacted. $advice"
     }
-    return @{ body = $body; compacted = $false }
+    return @{ body = $body; compacted = $false; used_stream_options = $useStreamOptions }
 }
 
 $script:MaxHttpRetryDelaySec = 60
@@ -13996,6 +14023,7 @@ function Invoke-AgentTurn {
         $stepStreamedReasoning = $false
         try {
             $maxRetries = 3
+            $streamOptionsRetried = $false
             $stepStart = Get-Date
             $attemptTimeoutSec = [int]$script:RequestTimeoutSec
             for ($attempt = 0; $attempt -le $maxRetries; $attempt++) {
@@ -14030,6 +14058,13 @@ function Invoke-AgentTurn {
                         $retryAfterSec = Get-AgentRetryAfterSeconds -ErrorRecord $_
                     }
                     $errFormatted = Format-AgentError -ErrorRecord $_
+                    if ((-not $streamOptionsRetried) -and $request.used_stream_options -and (Test-IsStreamOptionsUnsupportedError -Message $errFormatted)) {
+                        $streamOptionsRetried = $true
+                        $script:StreamIncludeUsageSupported = $false
+                        $request = New-AgentTurnRequest -State $State -Endpoint $Endpoint -ModelId $ModelId -ApiKey $ApiKey -Tools $activeTools
+                        $attempt--
+                        continue
+                    }
                     $contextError = $errFormatted -match '(?i)(context_length|maximum context|context window)'
                     if (-not $contextError -and ($attempt -lt $maxRetries) -and ($errFormatted -match '(?i)\b(408|429|500|502|503|504|timeout|timed out)\b')) {
                         $delay = Get-AgentHttpRetryDelay -Attempt $attempt -RetryAfterSec $retryAfterSec

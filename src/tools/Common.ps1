@@ -46,6 +46,7 @@ $script:MinRequestTimeoutSec = 10
 $script:MaxRequestTimeoutSec = 1800
 $script:MaxStepRetryBudgetSec = 3600
 $script:StreamRequests = $false
+$script:StreamIncludeUsageSupported = $true
 $script:SearchUrl = ''
 $script:AuthHeaderName = 'Authorization'
 $script:MaxOutputTokens = 0
@@ -87,6 +88,13 @@ function Set-AgentStreamSetting {
     $val = ConvertTo-AgentStreamSetting -StreamSpec $StreamSpec
     $script:StreamRequests = [bool]$val
     return $script:StreamRequests
+}
+
+function Test-IsStreamOptionsUnsupportedError {
+    param([AllowEmptyString()][string]$Message)
+    if (-not $Message) { return $false }
+    return (($Message -match '(?i)\b(stream_options|include_usage)\b') -and
+        ($Message -match '(?i)(\b400\b|\b422\b|unknown|unrecognized|unsupported|not supported|extra|not permitted|additional|invalid|unexpected|bad request)'))
 }
 
 function ConvertTo-AgentAuthHeaderName {
