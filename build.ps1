@@ -258,7 +258,7 @@ param(
     [string]$BaseUrl = $env:SHELLOSSUS_BASE_URL,
     [string]$Model = $env:SHELLOSSUS_MODEL,
     [string]$Workspace = '.',
-    [string]$ConfigPath = "$(if ($env:USERPROFILE) { $env:USERPROFILE } else { $HOME })\.shellossus\.env",
+    [string]$ConfigPath = (Join-Path (Join-Path $(if ($env:USERPROFILE) { $env:USERPROFILE } else { $HOME }) '.shellossus') '.env'),
     [int]$MaxSteps = 50,
     [int]$MaxRepeatCalls = 3,
     [string]$ContextWindow = $env:SHELLOSSUS_CONTEXT_WINDOW,

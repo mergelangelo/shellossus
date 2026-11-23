@@ -340,6 +340,7 @@ try {
     # ConstrainedLanguage Inline TUI verification
     Assert-True ((Get-GitBranchLabel -Root $workspacePath) -eq 'cl-tui') 'ConstrainedLanguage Get-GitBranchLabel failed.'
     Assert-True ((Format-TokenCount -Tokens 15400) -eq '15.4k') 'ConstrainedLanguage Format-TokenCount failed.'
+    Assert-True ((Format-AgentSeconds -Seconds 0.3) -ceq '0.3s') 'ConstrainedLanguage Format-AgentSeconds failed.'
     $clGauge = Strip-AnsiCodes -Text (Format-ContextGauge -Chars 15000 -MaxChars 60000 -Width 8)
     Assert-True ($clGauge.Contains('25%')) 'ConstrainedLanguage Format-ContextGauge failed.'
     $clBar = @(Format-TuiStatusBar -State $reloadedTreeState -Root $workspacePath -Model 'test-model' -UndoCount 1 -Width 85)

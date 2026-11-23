@@ -17,6 +17,19 @@ Write-AgentReply -Content "# Title`n## Subtitle`n> quote`n- **item** with ``code
 Assert-True ((Format-TokenCount -Tokens 850) -eq '850') 'Format-TokenCount <1000 failed.'
 Assert-True ((Format-TokenCount -Tokens 14250) -eq '14.3k') 'Format-TokenCount thousands failed.'
 
+# Locale-independent seconds formatting (dot decimal even under comma-decimal locales like ru-RU).
+$savedCulture = [System.Threading.Thread]::CurrentThread.CurrentCulture
+try {
+    try { [System.Threading.Thread]::CurrentThread.CurrentCulture = [System.Globalization.CultureInfo]::GetCultureInfo('ru-RU') } catch {}
+    Assert-True ((Format-AgentSeconds -Seconds 0.3) -ceq '0.3s') "Format-AgentSeconds failed for 0.3: $(Format-AgentSeconds -Seconds 0.3)"
+    Assert-True ((Format-AgentSeconds -Seconds 1.26) -ceq '1.3s') "Format-AgentSeconds failed for 1.26: $(Format-AgentSeconds -Seconds 1.26)"
+    Assert-True ((Format-AgentSeconds -Seconds 0) -ceq '0.0s') "Format-AgentSeconds failed for 0: $(Format-AgentSeconds -Seconds 0)"
+    Assert-True ((Format-AgentSeconds -Seconds -2.5) -ceq '0.0s') "Format-AgentSeconds failed for negative input: $(Format-AgentSeconds -Seconds -2.5)"
+}
+finally {
+    [System.Threading.Thread]::CurrentThread.CurrentCulture = $savedCulture
+}
+
 $gauge = Format-ContextGauge -Chars 30000 -MaxChars 60000 -Width 10
 $plainGauge = Strip-AnsiCodes -Text $gauge
 Assert-True ($plainGauge.Contains('50%') -and $plainGauge.Contains('7.5k/15.0k')) "Format-ContextGauge output unexpected: $plainGauge"

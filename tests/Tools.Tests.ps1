@@ -3989,6 +3989,44 @@ description: Optional subagent role: recon (ReadOnly search), audit (ReadOnly re
             else { $env:SHELLOSSUS_EXTRA_HEADERS = $savedExtraEnv11 }
         }
     }
+
+    # Regression: run_command TUI footer formats elapsed seconds with dot decimal regardless of OS locale.
+    & {
+        $savedPermLoc = $script:AgentPermission
+        $savedModeLoc = $script:OutputMode
+        $savedCultureLoc = [System.Threading.Thread]::CurrentThread.CurrentCulture
+        $script:locHostLines = @()
+        try {
+            $script:AgentPermission = 'Auto'
+            $script:OutputMode = 'text'
+            try { [System.Threading.Thread]::CurrentThread.CurrentCulture = [System.Globalization.CultureInfo]::GetCultureInfo('ru-RU') } catch {}
+            function Invoke-ShellCommand {
+                param([string]$Root, [string]$Command, [int]$TimeoutSec)
+                return @{
+                    exit_code = 0
+                    output = 'ok'
+                    truncated = $false
+                    full_output_path = $null
+                    timed_out = $false
+                    termination_errors = @()
+                    wall_time_seconds = 0.3
+                }
+            }
+            function Write-Host {
+                param([Parameter(Position = 0, ValueFromRemainingArguments = $true)]$Object, [switch]$NoNewline, $Separator, $ForegroundColor, $BackgroundColor)
+                $script:locHostLines += (($Object | ForEach-Object { [string]$_ }) -join ' ')
+            }
+            $null = Invoke-AgentCommand -Root $workspacePath -Arguments ([pscustomobject]@{ command = 'Write-Output ok' })
+            $joinedFooter = Strip-AnsiCodes -Text ($script:locHostLines -join "`n")
+            Assert-True ($joinedFooter.Contains('0.3s') -and (-not $joinedFooter.Contains('0,3s'))) "Invoke-AgentCommand footer used locale comma decimal: $joinedFooter"
+        }
+        finally {
+            [System.Threading.Thread]::CurrentThread.CurrentCulture = $savedCultureLoc
+            $script:AgentPermission = $savedPermLoc
+            $script:OutputMode = $savedModeLoc
+            Remove-Variable -Name locHostLines -Scope Script -ErrorAction SilentlyContinue
+        }
+    }
 }
 finally {
     Remove-TestEnvironment -Env $envData

@@ -297,7 +297,7 @@ function Invoke-AgentCommand {
         }
         $cmdIcon = if ($res.timed_out -or $res.exit_code -ne 0) { $script:Gm.Red + $script:Box.Cross + $script:Gm.Reset } else { $script:Gm.Green + $script:Box.Check + $script:Gm.Reset }
         $cmdColor = if ($res.timed_out -or $res.exit_code -ne 0) { $script:Gm.Red } else { $script:Gm.Grey2 }
-        Write-Host ('  ' + $script:Gm.Grey0 + $script:Box.BL + $script:Box.H + ' ' + $cmdIcon + ' ' + $cmdColor + ("exit {0}" -f $res.exit_code) + $script:Gm.Grey0 + ' | ' + $script:Gm.Grey1 + ("{0}s" -f $res.wall_time_seconds) + $script:Gm.Reset)
+        Write-Host ('  ' + $script:Gm.Grey0 + $script:Box.BL + $script:Box.H + ' ' + $cmdIcon + ' ' + $cmdColor + ("exit {0}" -f $res.exit_code) + $script:Gm.Grey0 + ' | ' + $script:Gm.Grey1 + (Format-AgentSeconds -Seconds $res.wall_time_seconds) + $script:Gm.Reset)
     }
     $status = if ($res.timed_out) { 'timed_out' } else { 'executed' }
     return (@{

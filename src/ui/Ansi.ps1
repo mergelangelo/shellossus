@@ -192,6 +192,12 @@ function Format-TokenCount {
     return (("{0:0.0}k" -f ($Tokens / 1000.0)).Replace(',', '.'))
 }
 
+function Format-AgentSeconds {
+    param([double]$Seconds)
+    if ($Seconds -lt 0) { $Seconds = 0 }
+    return (('{0:0.0}s' -f $Seconds).Replace(',', '.'))
+}
+
 function Format-ContextGauge {
     param(
         [int]$Chars = -1,

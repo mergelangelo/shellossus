@@ -181,7 +181,7 @@ param(
     [string]$BaseUrl = $env:SHELLOSSUS_BASE_URL,
     [string]$Model = $env:SHELLOSSUS_MODEL,
     [string]$Workspace = '.',
-    [string]$ConfigPath = "$(if ($env:USERPROFILE) { $env:USERPROFILE } else { $HOME })\.shellossus\.env",
+    [string]$ConfigPath = (Join-Path (Join-Path $(if ($env:USERPROFILE) { $env:USERPROFILE } else { $HOME }) '.shellossus') '.env'),
     [int]$MaxSteps = 50,
     [int]$MaxRepeatCalls = 3,
     [string]$ContextWindow = $env:SHELLOSSUS_CONTEXT_WINDOW,
@@ -1351,6 +1351,12 @@ function Format-TokenCount {
     param([int]$Tokens)
     if ($Tokens -lt 1000) { return [string]$Tokens }
     return (("{0:0.0}k" -f ($Tokens / 1000.0)).Replace(',', '.'))
+}
+
+function Format-AgentSeconds {
+    param([double]$Seconds)
+    if ($Seconds -lt 0) { $Seconds = 0 }
+    return (('{0:0.0}s' -f $Seconds).Replace(',', '.'))
 }
 
 function Format-ContextGauge {
@@ -6713,7 +6719,7 @@ function Invoke-AgentCommand {
         }
         $cmdIcon = if ($res.timed_out -or $res.exit_code -ne 0) { $script:Gm.Red + $script:Box.Cross + $script:Gm.Reset } else { $script:Gm.Green + $script:Box.Check + $script:Gm.Reset }
         $cmdColor = if ($res.timed_out -or $res.exit_code -ne 0) { $script:Gm.Red } else { $script:Gm.Grey2 }
-        Write-Host ('  ' + $script:Gm.Grey0 + $script:Box.BL + $script:Box.H + ' ' + $cmdIcon + ' ' + $cmdColor + ("exit {0}" -f $res.exit_code) + $script:Gm.Grey0 + ' | ' + $script:Gm.Grey1 + ("{0}s" -f $res.wall_time_seconds) + $script:Gm.Reset)
+        Write-Host ('  ' + $script:Gm.Grey0 + $script:Box.BL + $script:Box.H + ' ' + $cmdIcon + ' ' + $cmdColor + ("exit {0}" -f $res.exit_code) + $script:Gm.Grey0 + ' | ' + $script:Gm.Grey1 + (Format-AgentSeconds -Seconds $res.wall_time_seconds) + $script:Gm.Reset)
     }
     $status = if ($res.timed_out) { 'timed_out' } else { 'executed' }
     return (@{
@@ -13218,7 +13224,7 @@ function Wait-AgentProcessWithSpinner {
                 $spinState.frame_idx++
                 $maxSpinW = (Get-TerminalWidth) - 1
                 if ($maxSpinW -lt 20) { $maxSpinW = 20 }
-                $rawSpinLine = $script:Gm.Grey1 + ("  [{0}] {1} ({2:0.0}s)..." -f $spinChar, (Format-TuiText $StatusLabel), $elapsed) + $script:Gm.Reset
+                $rawSpinLine = $script:Gm.Grey1 + ("  [{0}] {1} ({2})..." -f $spinChar, (Format-TuiText $StatusLabel), (Format-AgentSeconds -Seconds $elapsed)) + $script:Gm.Reset
                 $clampedSpinLine = Limit-AnsiLineToWidth -Text $rawSpinLine -MaxWidth $maxSpinW
                 $spinState.last_vis_len = (Strip-AnsiCodes -Text $clampedSpinLine).Length
                 $statusLine = "`r" + $clampedSpinLine

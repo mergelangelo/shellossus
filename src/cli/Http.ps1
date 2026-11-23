@@ -679,7 +679,7 @@ function Wait-AgentProcessWithSpinner {
                 $spinState.frame_idx++
                 $maxSpinW = (Get-TerminalWidth) - 1
                 if ($maxSpinW -lt 20) { $maxSpinW = 20 }
-                $rawSpinLine = $script:Gm.Grey1 + ("  [{0}] {1} ({2:0.0}s)..." -f $spinChar, (Format-TuiText $StatusLabel), $elapsed) + $script:Gm.Reset
+                $rawSpinLine = $script:Gm.Grey1 + ("  [{0}] {1} ({2})..." -f $spinChar, (Format-TuiText $StatusLabel), (Format-AgentSeconds -Seconds $elapsed)) + $script:Gm.Reset
                 $clampedSpinLine = Limit-AnsiLineToWidth -Text $rawSpinLine -MaxWidth $maxSpinW
                 $spinState.last_vis_len = (Strip-AnsiCodes -Text $clampedSpinLine).Length
                 $statusLine = "`r" + $clampedSpinLine

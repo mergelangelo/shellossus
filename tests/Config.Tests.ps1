@@ -772,6 +772,15 @@ try {
             if ($_.Exception.Message -like '*local config path*') { $secretExtraUncBlocked = $true }
         }
         Assert-True $secretExtraUncBlocked 'Save-AgentConfig allowed UNC path for secret-bearing SHELLOSSUS_EXTRA_HEADERS without API key.'
+
+        # Default ConfigPath parameter uses platform-native Join-Path separators (no Windows backslashes on POSIX).
+        $defaultCfgCaptured = & {
+            . "$PSScriptRoot\..\shellossus.ps1" -LibraryOnly
+            $ConfigPath
+        }
+        $expectedUserRoot = if ($env:USERPROFILE) { $env:USERPROFILE } else { $HOME }
+        $expectedDefaultCfg = Join-Path (Join-Path $expectedUserRoot '.shellossus') '.env'
+        Assert-True ($defaultCfgCaptured -ceq $expectedDefaultCfg) "Default ConfigPath did not use native Join-Path: got '$defaultCfgCaptured', expected '$expectedDefaultCfg'."
     }
     finally {
         $script:AuthHeaderName = $savedAuthHdr11
