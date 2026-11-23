@@ -363,8 +363,35 @@ try {
             $customDocRep = Get-AgentDoctorReport -BaseUrl 'https://example.invalid/v1' -ModelId 'test-model' -ApiKey 'doctor-secret-key' -Workspace $workspacePath -NoSession -AuthHeaderSpec 'api-key' -MaxTokensSpec '2048' -TemperatureSpec '0.4' -ExtraHeadersSpec '{"X-Title":"shellossus","X-Proxy-Token":"proxy-secret-777"}'
             Assert-True ($customDocRep.failures -eq 0 -and $customDocRep.exit_code -eq 0) ("Doctor failed with valid custom gateway settings: " + ($customDocRep | ConvertTo-Json -Depth 6 -Compress))
             Assert-True (($global:ShellossusDoctorFixture.seenCustomHeaders['api-key'] -ceq 'doctor-secret-key') -and (-not $global:ShellossusDoctorFixture.seenCustomHeaders.ContainsKey('Authorization')) -and ($global:ShellossusDoctorFixture.seenCustomHeaders['X-Title'] -ceq 'shellossus')) 'Doctor GET /models did not forward custom AuthHeader and ExtraHeaders.'
+            $ahCheck = Get-DoctorCheck $customDocRep 'auth_header'
+            $mtCheck = Get-DoctorCheck $customDocRep 'max_tokens'
+            $tpCheck = Get-DoctorCheck $customDocRep 'temperature'
+            $ehCheck = Get-DoctorCheck $customDocRep 'extra_headers'
+            Assert-True ($null -ne $ahCheck -and $ahCheck.status -eq 'pass' -and ([string]$ahCheck.message -like '*api-key*')) 'Doctor did not report configured auth_header as pass.'
+            Assert-True ($null -ne $mtCheck -and $mtCheck.status -eq 'pass' -and ([string]$mtCheck.message -like '*2048*')) 'Doctor did not report configured max_tokens as pass.'
+            Assert-True ($null -ne $tpCheck -and $tpCheck.status -eq 'pass' -and ([string]$tpCheck.message -like '*0.4*')) 'Doctor did not report configured temperature as pass.'
+            Assert-True ($null -ne $ehCheck -and $ehCheck.status -eq 'pass' -and ([string]$ehCheck.message -like '*X-Title*') -and ([string]$ehCheck.message -like '*X-Proxy-Token*') -and ([string]$ehCheck.message -notlike '*proxy-secret-777*') -and ([string]$ehCheck.message -notlike '*shellossus*')) "Doctor extra_headers check missing header names or leaked values: $($ehCheck.message)"
             $customDocJson = Write-AgentDoctorReport -Report $customDocRep -Mode json
             Assert-True (($customDocJson -notlike '*doctor-secret-key*') -and ($customDocJson -notlike '*proxy-secret-777*')) 'Doctor JSON leaked API key or extra header secret.'
+
+            # REPL /doctor also forwards and displays configured gateway/generation settings without leaking secret values.
+            $replGwCfg = Join-Path $envData.TestRoot 'doctor-repl-gw.env'
+            Save-AgentConfig -Path $replGwCfg -Config @{
+                SHELLOSSUS_BASE_URL = 'https://example.invalid/v1'
+                SHELLOSSUS_MODEL = 'test-model'
+                SHELLOSSUS_API_KEY = 'doctor-secret-key'
+                SHELLOSSUS_AUTH_HEADER = 'api-key'
+                SHELLOSSUS_MAX_TOKENS = '4096'
+                SHELLOSSUS_TEMPERATURE = '0.2'
+                SHELLOSSUS_EXTRA_HEADERS = '{"X-App":"internal","X-Secret-Token":"repl-secret-999"}'
+                SHELLOSSUS_STREAM = 'true'
+            }
+            $global:ShellossusDoctorFixture.inputs = @('/doctor', '/exit')
+            $global:ShellossusDoctorFixture.inputIndex = 0
+            $replGwOut = (& $entryPoint -ConfigPath $replGwCfg -Workspace $workspacePath -NoSession -NoContextFiles -NoSkills -NoPromptTemplates 6>&1 | Out-String)
+            Assert-True (($replGwOut -like '*auth_header:*api-key*') -and ($replGwOut -like '*max_tokens:*4096*') -and ($replGwOut -like '*temperature:*0.2*') -and ($replGwOut -like '*extra_headers:*X-App*') -and ($replGwOut -like '*extra_headers:*X-Secret-Token*') -and ($replGwOut -like '*stream:*enabled*')) "REPL /doctor omitted configured gateway/generation/stream settings: $replGwOut"
+            Assert-True (($replGwOut -notlike '*repl-secret-999*') -and ($replGwOut -notlike '*doctor-secret-key*')) 'REPL /doctor leaked API key or extra header secret.'
+            $global:ShellossusDoctorFixture.inputs = @()
 
             $badGwRep = Get-AgentDoctorReport -BaseUrl 'https://example.invalid/v1' -ModelId 'test-model' -ApiKey 'doctor-secret-key' -Workspace $workspacePath -NoSession -AuthHeaderSpec 'Bad Header' -MaxTokensSpec '-5' -TemperatureSpec '9.9' -ExtraHeadersSpec '{"X-Token":"leaked-secret-888\r\nBad: 1"}'
             $badGwJson = Write-AgentDoctorReport -Report $badGwRep -Mode json

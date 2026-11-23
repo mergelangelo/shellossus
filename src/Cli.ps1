@@ -474,7 +474,15 @@ if (-not $LibraryOnly) {
             if ($trimmedQ -eq '/help' -or $trimmedQ -eq '/hotkeys') { Write-TuiHelpCard; continue }
             if ($trimmedQ -eq '/doctor') {
                 $doctorSessionDir = if ($sessionFile) { Split-Path $sessionFile -Parent } else { $sessionDir }
-                $report = Get-AgentDoctorReport -BaseUrl $BaseUrl -ModelId $Model -ApiKey $agentKey -Workspace $rootPath -SessionDir $doctorSessionDir -NoSession:(-not $sessionFile) -ConfigState $doctorConfigState -KeyStorageWarning $keyStorageWarning -RequestTimeoutSpec ([string]$script:RequestTimeoutSec)
+                $docStreamSpec = if ($script:StreamRequests) { 'true' } else { 'false' }
+                $docAuthSpec = if ($script:AuthHeaderName) { [string]$script:AuthHeaderName } else { '' }
+                $docMaxTokSpec = if ($script:MaxOutputTokens -gt 0) { [string]$script:MaxOutputTokens } else { '' }
+                $docTempSpec = if ($null -ne $script:ModelTemperature) { ([string]$script:ModelTemperature).Replace(',', '.') } else { '' }
+                $docExtraSpec = if ($script:ExtraHttpHeaders -and $script:ExtraHttpHeaders.Count -gt 0) {
+                    ConvertTo-AsciiJson -Json ($script:ExtraHttpHeaders | ConvertTo-Json -Compress)
+                }
+                else { '' }
+                $report = Get-AgentDoctorReport -BaseUrl $BaseUrl -ModelId $Model -ApiKey $agentKey -Workspace $rootPath -SessionDir $doctorSessionDir -NoSession:(-not $sessionFile) -ConfigState $doctorConfigState -KeyStorageWarning $keyStorageWarning -RequestTimeoutSpec ([string]$script:RequestTimeoutSec) -StreamSpec $docStreamSpec -AuthHeaderSpec $docAuthSpec -MaxTokensSpec $docMaxTokSpec -TemperatureSpec $docTempSpec -ExtraHeadersSpec $docExtraSpec
                 Write-AgentDoctorReport -Report $report -Mode $script:OutputMode
                 continue
             }

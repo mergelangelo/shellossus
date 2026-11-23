@@ -156,21 +156,33 @@ function Get-AgentDoctorReport {
     if (-not $authHeaderValid) {
         $checks += @{ name = 'auth_header'; status = 'fail'; message = 'AuthHeader must be a valid non-reserved HTTP header name (letters, digits, hyphens).' }
     }
+    elseif ($resolvedAuthHeader -ine 'Authorization') {
+        $checks += @{ name = 'auth_header'; status = 'pass'; message = "Authentication header: $resolvedAuthHeader (raw key, no Bearer prefix)." }
+    }
+    $resolvedMaxTokens = if ($script:MaxOutputTokens -gt 0) { [int]$script:MaxOutputTokens } else { 0 }
     $maxTokensValid = $true
     if ($null -ne $MaxTokensSpec -and $MaxTokensSpec.Trim().Length -gt 0) {
-        try { $null = ConvertTo-AgentMaxTokens -MaxTokensSpec $MaxTokensSpec }
+        try { $resolvedMaxTokens = ConvertTo-AgentMaxTokens -MaxTokensSpec $MaxTokensSpec }
         catch { $maxTokensValid = $false }
     }
     if (-not $maxTokensValid) {
         $checks += @{ name = 'max_tokens'; status = 'fail'; message = 'MaxTokens must be an integer between 1 and 1000000.' }
     }
+    elseif ($resolvedMaxTokens -gt 0) {
+        $checks += @{ name = 'max_tokens'; status = 'pass'; message = "Max output tokens: $resolvedMaxTokens." }
+    }
+    $resolvedTemp = $script:ModelTemperature
     $tempValid = $true
     if ($null -ne $TemperatureSpec -and $TemperatureSpec.Trim().Length -gt 0) {
-        try { $null = ConvertTo-AgentTemperature -TemperatureSpec $TemperatureSpec }
+        try { $resolvedTemp = ConvertTo-AgentTemperature -TemperatureSpec $TemperatureSpec }
         catch { $tempValid = $false }
     }
     if (-not $tempValid) {
         $checks += @{ name = 'temperature'; status = 'fail'; message = 'Temperature must be a decimal number between 0 and 2 (using dot decimal).' }
+    }
+    elseif ($null -ne $resolvedTemp) {
+        $tempDisplay = ([string]$resolvedTemp).Replace(',', '.')
+        $checks += @{ name = 'temperature'; status = 'pass'; message = "Sampling temperature: $tempDisplay." }
     }
     $resolvedExtraHeaders = if ($script:ExtraHttpHeaders) { $script:ExtraHttpHeaders } else { @{} }
     $extraHeadersValid = $true
@@ -180,6 +192,10 @@ function Get-AgentDoctorReport {
     }
     if (-not $extraHeadersValid) {
         $checks += @{ name = 'extra_headers'; status = 'fail'; message = 'SHELLOSSUS_EXTRA_HEADERS must be a valid JSON object of safe HTTP header names and single-line string values.' }
+    }
+    elseif ($resolvedExtraHeaders -and $resolvedExtraHeaders.Count -gt 0) {
+        $hdrNames = @($resolvedExtraHeaders.Keys | Sort-Object)
+        $checks += @{ name = 'extra_headers'; status = 'pass'; message = ("Extra HTTP headers configured ({0}): {1} (values hidden)." -f $hdrNames.Count, ($hdrNames -join ', ')) }
     }
     try {
         $root = Get-Item -LiteralPath $Workspace -Force -ErrorAction Stop
